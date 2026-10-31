@@ -3,6 +3,7 @@ import { isToken, type Token } from "./lexer.ts";
 import type { Cursor, Modifier, Param, Pattern, PropertyName, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { decoratorList } from "./declarations.ts";
 import { bindingPattern } from "./patterns.ts";
+import { nextId } from "./nodes.ts";
 
 // The type grammar, and the parameter lists that functions and function types share.
 
@@ -20,7 +21,7 @@ function typeParameter(c: Cursor): TypeParam {
   const name = c.ident().text;
   const constraint = c.eat("extends") ? type(c) : undefined;
   const fallback = c.eat("=") ? type(c) : undefined;
-  return { name, constraint, default: fallback, modifiers, start, end: c.end() };
+  return { id: nextId(c.ids), name, constraint, default: fallback, modifiers, start, end: c.end() };
 }
 
 // Parameters in parentheses, or after an index signature's `[`, up to `close`.
@@ -43,11 +44,11 @@ function parameter(c: Cursor): Param {
   const comptime = c.at("comptime") && !c.peek(1).newlineBefore && startsBinding(c.peek(1)) && c.eat("comptime");
   const rest = c.eat("...");
   const t = c.peek();
-  const pattern: Pattern = c.eat("this") ? { kind: "ident", name: "this", start: t.start, end: t.end } : bindingPattern(c);
+  const pattern: Pattern = c.eat("this") ? { id: nextId(c.ids), kind: "ident", name: "this", start: t.start, end: t.end } : bindingPattern(c);
   const optional = c.eat("?");
   const type = c.at(":") ? annotation(c) : undefined;
   const fallback = c.eat("=") ? expression(c) : undefined;
-  return { pattern, type, optional, rest, default: fallback, modifiers, decorators, comptime, start, end: c.end() };
+  return { id: nextId(c.ids), pattern, type, optional, rest, default: fallback, modifiers, decorators, comptime, start, end: c.end() };
 }
 
 const startsBinding = (t: Token) => t.kind === "ident" || isToken(t, "{") || isToken(t, "[");
@@ -84,7 +85,7 @@ function returnType(c: Cursor): TypeNode {
   if (!asserts && !narrows) return type(c);
   c.next();
   const narrowed = narrows && c.eat("is") ? type(c) : undefined;
-  return { kind: "predicate", asserts, name: subject.text, type: narrowed, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "predicate", asserts, name: subject.text, type: narrowed, start, end: c.end() };
 }
 
 export function type(c: Cursor, allowConditional = true): TypeNode {
@@ -106,7 +107,7 @@ function conditionalType(c: Cursor): TypeNode {
   const then = type(c);
   c.expect(":");
   const otherwise = type(c);
-  return { kind: "conditional", check, extends: extendsType, then, else: otherwise, start: check.start, end: otherwise.end };
+  return { id: nextId(c.ids), kind: "conditional", check, extends: extendsType, then, else: otherwise, start: check.start, end: otherwise.end };
 }
 
 // `(` starts a function type only when what follows can't be a parenthesised type.
@@ -139,7 +140,8 @@ function functionType(c: Cursor): TypeNode {
   const params = parameters(c);
   c.expect("=>");
   const returns = returnType(c);
-  return { kind: "function", typeParams, params, returns, construct, abstract, start, end: returns.end };
+  const throws = throwsClause(c);
+  return { id: nextId(c.ids), kind: "function", typeParams, params, returns, ...(throws && { throws }), construct, abstract, start, end: (throws ?? returns).end };
 }
 
 // A union or intersection; a leading separator is allowed, as in a multi-line union.
@@ -149,7 +151,7 @@ function composite(c: Cursor, kind: "union" | "intersection", separator: string,
   const types = [member()];
   while (c.eat(separator)) types.push(member());
   if (types.length === 1) return types[0]!;
-  return { kind, types, start, end: types.at(-1)!.end };
+  return { id: nextId(c.ids), kind, types, start, end: types.at(-1)!.end };
 }
 
 function typeOperator(c: Cursor): TypeNode {
@@ -157,7 +159,7 @@ function typeOperator(c: Cursor): TypeNode {
   if (c.at("keyof") || c.at("readonly") || c.at("unique")) {
     c.next();
     const operand = typeOperator(c);
-    return { kind: "operator", op: t.text as "keyof" | "readonly" | "unique", type: operand, start: t.start, end: operand.end };
+    return { id: nextId(c.ids), kind: "operator", op: t.text as "keyof" | "readonly" | "unique", type: operand, start: t.start, end: operand.end };
   }
   if (c.at("infer") && c.peek(1).kind === "ident") return inferType(c);
   return postfixType(c);
@@ -174,7 +176,7 @@ function inferType(c: Cursor): TypeNode {
     c.pos = before;
     constraint = undefined;
   }
-  return { kind: "infer", name, constraint, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "infer", name, constraint, start, end: c.end() };
 }
 
 // `T[]` and `T[K]`. A `[` on a new line starts the next statement instead, as in TypeScript.
@@ -183,10 +185,10 @@ function postfixType(c: Cursor): TypeNode {
   while (c.at("[") && !c.peek().newlineBefore) {
     c.next();
     if (c.at("]")) {
-      t = { kind: "array", element: t, start: t.start, end: c.next().end };
+      t = { id: nextId(c.ids), kind: "array", element: t, start: t.start, end: c.next().end };
     } else {
       const index = type(c);
-      t = { kind: "indexed", object: t, index, start: t.start, end: c.expect("]").end };
+      t = { id: nextId(c.ids), kind: "indexed", object: t, index, start: t.start, end: c.expect("]").end };
     }
   }
   return t;
@@ -201,22 +203,22 @@ function primaryType(c: Cursor): TypeNode {
   }
   const isNumber = (t: Token) => t.kind === "int" || t.kind === "float" || t.kind === "bigint";
   if (t.kind === "string" || isNumber(t) || c.at("true") || c.at("false")) {
-    return { kind: "literal", value: primary(c), start: t.start, end: t.end };
+    return { id: nextId(c.ids), kind: "literal", value: primary(c), start: t.start, end: t.end };
   }
   if (c.at("-") && isNumber(c.peek(1))) {
     const value = unary(c);
-    return { kind: "literal", value, start: value.start, end: value.end };
+    return { id: nextId(c.ids), kind: "literal", value, start: value.start, end: value.end };
   }
   if (t.kind === "template" || t.kind === "templateHead") {
     const { quasis, parts, start, end } = templateParts(c, (c) => type(c));
-    return { kind: "template", quasis, types: parts, start, end };
+    return { id: nextId(c.ids), kind: "template", quasis, types: parts, start, end };
   }
   if (c.at("[")) return tuple(c);
   if (c.at("{")) return atMappedType(c) ? mappedType(c) : objectType(c);
   if (c.at("import")) return importType(c);
   if (c.eat("typeof")) {
     const target = c.at("import") ? importType(c) : typeReference(c);
-    return { kind: "query", target, start: t.start, end: target.end };
+    return { id: nextId(c.ids), kind: "query", target, start: t.start, end: target.end };
   }
   return typeReference(c);
 }
@@ -233,9 +235,9 @@ function tuple(c: Cursor): TypeNode {
     if (named) c.expect(":");
     const element = type(c);
     if (!named) optional = c.eat("?");
-    return { name, optional, rest, type: element, start, end: c.end() };
+    return { id: nextId(c.ids), name, optional, rest, type: element, start, end: c.end() };
   }, "]");
-  return { kind: "tuple", elements, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "tuple", elements, start, end: c.end() };
 }
 
 function atMappedType(c: Cursor): boolean {
@@ -259,7 +261,7 @@ function mappedType(c: Cursor): TypeNode {
   const valueType = c.at(":") ? annotation(c) : undefined;
   if (!c.eat(";")) c.eat(",");
   c.expect("}");
-  return { kind: "mapped", name, constraint, as, type: valueType, readonly, optional, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "mapped", name, constraint, as, type: valueType, readonly, optional, start, end: c.end() };
 }
 
 function modifier(c: Cursor, text: string): "+" | "-" | undefined {
@@ -282,13 +284,13 @@ function importType(c: Cursor): TypeNode {
     name = name === undefined ? c.next().text : `${name}.${c.next().text}`;
   }
   const args = c.eat("<") ? c.list(() => type(c), ">") : [];
-  return { kind: "import", module, name, args, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "import", module, name, args, start, end: c.end() };
 }
 
 function objectType(c: Cursor): TypeNode {
   const start = c.expect("{").start;
   const members = typeMembers(c);
-  return { kind: "object", members, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "object", members, start, end: c.end() };
 }
 
 // Members up to and including `}`, separated by `;`, `,` or a newline.
@@ -307,17 +309,17 @@ export function typeMembers(c: Cursor): TypeMember[] {
 function typeMember(c: Cursor): TypeMember {
   const start = c.peek().start;
   const startsName = (t: Token) => isPropertyName(t) || isToken(t, "[");
-  if (c.at("(") || c.at("<")) return { kind: "call", ...signature(c), start, end: c.end() };
+  if (c.at("(") || c.at("<")) return { id: nextId(c.ids), kind: "call", ...signature(c), start, end: c.end() };
   const after = c.peek(1);
   if (c.at("new") && (isToken(after, "(") || isToken(after, "<"))) {
     c.next();
-    return { kind: "construct", ...signature(c), start, end: c.end() };
+    return { id: nextId(c.ids), kind: "construct", ...signature(c), start, end: c.end() };
   }
   if ((c.at("get") || c.at("set")) && startsName(after)) {
     const kind = c.next().text as "get" | "set";
     const name = propertyName(c);
     const { params, returns } = signature(c);
-    return { kind, name, params, returns, start, end: c.end() };
+    return { id: nextId(c.ids), kind, name, params, returns, start, end: c.end() };
   }
   const readonly = c.at("readonly") && startsName(after) && c.eat("readonly");
   if (c.at("[") && c.peek(1).kind === "ident" && isToken(c.peek(2), ":")) {
@@ -325,13 +327,13 @@ function typeMember(c: Cursor): TypeMember {
     const params = [parameter(c)];
     c.expect("]");
     const type = annotation(c);
-    return { kind: "index", readonly, params, type, start, end: c.end() };
+    return { id: nextId(c.ids), kind: "index", readonly, params, type, start, end: c.end() };
   }
   const name = propertyName(c);
   const optional = c.eat("?");
-  if (c.at("(") || c.at("<")) return { kind: "method", name, optional, ...signature(c), start, end: c.end() };
+  if (c.at("(") || c.at("<")) return { id: nextId(c.ids), kind: "method", name, optional, ...signature(c), start, end: c.end() };
   const type = c.at(":") ? annotation(c) : undefined;
-  return { kind: "property", name, optional, readonly, type, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "property", name, optional, readonly, type, start, end: c.end() };
 }
 
 // Property names may be reserved words, so any identifier is accepted.
@@ -366,5 +368,5 @@ export function typeReference(c: Cursor): TypeNode {
     name += "." + c.next().text;
   }
   const args = c.eat("<") ? c.list(() => type(c), ">") : [];
-  return { kind: "ref", name, args, start: first.start, end: c.end() };
+  return { id: nextId(c.ids), kind: "ref", name, args, start: first.start, end: c.end() };
 }

@@ -1,15 +1,16 @@
-import { defaulted, prologues } from "./defaults.ts";
+import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
-import { rustNames, type RustName } from "./rust.ts";
-import type { ClassMember, ClassNode, Expr, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { classType, type Access, type ClassType, type FunctionType, type Type } from "./typing.ts";
+import type { RustName, RustTables } from "./rust.ts";
+import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { Access, ClassType, FunctionType, Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
+import { nextId, NodeSet, type Ids } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
 // and a method declared with `this: Mut<this>` may change it.
-export type Body = Span & {
+export type Body = Span & Id & {
   name: string;
   params: Param[];
   body: Stmt[];
@@ -89,7 +90,7 @@ export type ClassInfo = {
   // only appear as the target of such an assignment.
   required: Set<string>;
   // The prelude's field initializers, which can't see the constructor's parameters.
-  initializers: Set<Stmt>;
+  initializers: NodeSet<Stmt>;
   methods: Map<string, Body>;
   // Static methods by name, and static accessors as `get x` and `set x`, none with a `this`.
   statics: Map<string, Body>;
@@ -113,13 +114,14 @@ export type ClassInfo = {
 // Collects a class declaration's fields and builds the constructor it compiles to. A generic
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
-export function declareClass(node: ClassNode & { name: string }, name = node.name, scope = new Map<string, Type>()): ClassInfo {
+export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
+  const { genericStatics, ids, rust, typing: { classType } } = tables;
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
-  if (node.typeParams.length > 0 && node.extends) throw unsupported("generic classes that use 'extends'", node.extends);
-  // No class can extend a generic one yet, so a generic abstract class would have no subclasses.
+  // A template is copied into each concrete class by the abstract class's one declaration, which a
+  // generic class doesn't have.
   if (node.abstract && node.typeParams.length > 0) throw unsupported("generic abstract classes", node);
-  if (node.extends && node.extends.kind !== "ident") {
-    throw unsupported(node.extends.kind === "instantiation" ? "generic base classes" : "base class expressions", node.extends);
+  if (node.extends && node.extends.kind !== "ident" && !(node.extends.kind === "instantiation" && node.extends.expr.kind === "ident")) {
+    throw unsupported("base class expressions", node.extends);
   }
   const fields: FieldDecl[] = [];
   const constructors = node.members.filter((m) => m.kind === "constructor");
@@ -132,7 +134,10 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   if (node.abstract) type.abstract = true;
   const abstracts: AbstractMember[] = [];
   const methods = new Map<string, Body>();
-  const statics = new Map<string, Body>();
+  // A generic class's statics can't use its type parameters, so every instance shares one set.
+  const shared = node.typeParams.length > 0 ? genericStatics.get(node) : undefined;
+  const statics = shared ?? new Map<string, Body>();
+  if (node.typeParams.length > 0 && !shared) genericStatics.set(node, statics);
   const staticFields = new Map<string, FieldDecl>();
   const getters = new Map<string, Body>();
   const setters = new Map<string, Body>();
@@ -161,17 +166,17 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (!m.type && !m.init) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An optional field is an Option, empty until assigned.
     const at = { start: m.start, end: m.end };
-    const type: TypeNode | undefined = m.optional && m.type ? { kind: "union", types: [m.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
-    const init: Expr | undefined = m.optional ? (m.init ?? { kind: "null", ...at }) : m.init;
-    add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end, ...(m.optional && m.type && { written: m.type }), ...(!m.optional && m.type && withoutUndefined(m.type) && { undefinedSpelled: true as const }) });
+    const type: TypeNode | undefined = m.optional && m.type ? { id: nextId(ids), kind: "union", types: [m.type, { id: nextId(ids), kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
+    const init: Expr | undefined = m.optional ? (m.init ?? { id: nextId(ids), kind: "null", ...at }) : m.init;
+    add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end, ...(m.optional && m.type && { written: m.type }), ...(!m.optional && m.type && withoutUndefined(ids, m.type) && { undefinedSpelled: true as const }) });
   }
   const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
     if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
     const access = modifiers(p.modifiers, p, p.pattern.name);
     // An optional parameter property is an Option, as the parameter is.
     const at = { start: p.start, end: p.end };
-    const type: TypeNode | undefined = p.optional && p.type ? { kind: "union", types: [p.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : p.type;
-    return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end, ...(p.optional && p.type && { written: p.type }), ...(!p.optional && p.type && withoutUndefined(p.type) && { undefinedSpelled: true as const }) });
+    const type: TypeNode | undefined = p.optional && p.type ? { id: nextId(ids), kind: "union", types: [p.type, { id: nextId(ids), kind: "ref", name: "null", args: [], ...at }], ...at } : p.type;
+    return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end, ...(p.optional && p.type && { written: p.type }), ...(!p.optional && p.type && withoutUndefined(ids, p.type) && { undefinedSpelled: true as const }) });
   });
 
   for (const [name, f] of staticFields) {
@@ -198,12 +203,13 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (pair && !pair.abstract) throw new CompileError(`a getter and a setter for '${a.name}' must both be abstract or neither`, a.start, a.end);
   }
   // As in TypeScript, parameter properties are assigned before field initializers run.
-  const initializers = fields.filter((f) => f.init).map((f) => assignField(f.name, f.init!, f));
+  const initializers = fields.filter((f) => f.init).map((f) => assignField(ids, f.name, f.init!, f));
   const prelude = [
-    ...properties.map((f) => assignField(f.name, { kind: "ident", name: f.name, start: f.start, end: f.end }, f)),
+    ...properties.map((f) => assignField(ids, f.name, { id: nextId(ids), kind: "ident", name: f.name, start: f.start, end: f.end }, f)),
     ...initializers,
   ];
   const constructor: Body = {
+    id: nextId(ids),
     name: `${name}.constructor`,
     scope,
     params: ctor?.params ?? [],
@@ -213,12 +219,13 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     owner: type,
     start: (ctor ?? node).start,
     end: (ctor ?? node).end,
-    ...(ctor && rustOf(ctor)),
+    ...(ctor && rustOf(rust, ctor)),
     ...(ctor?.throws && { throws: ctor.throws }),
   };
   const required = new Set(fields.map((f) => f.name));
-  const baseName = node.extends?.kind === "ident" ? node.extends.name : undefined;
-  return { type, abstracts, copies: new Map(), fields, constructor, required, initializers: new Set(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] };
+  const named = node.extends?.kind === "instantiation" ? node.extends.expr : node.extends;
+  const baseName = named?.kind === "ident" ? named.name : undefined;
+  return { type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] };
 
   // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
   function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
@@ -261,6 +268,8 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
     if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of an accessor", m.start, m.end);
     if (!m.body) throw unsupported("accessors without a body", m);
+    // Only a JSDoc `@throws` gives an accessor an error type: reading a property can't fail yet.
+    if (m.throws) throw unsupported("accessors that throw", m.throws);
     const table = isStatic ? statics : m.kind === "get" ? getters : setters;
     const key = isStatic ? `${m.kind} ${m.name}` : m.name;
     if (table.has(key)) throw new CompileError(`duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
@@ -268,6 +277,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (m.kind === "set" && m.returnType) throw new CompileError("a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
     if (isStatic && m.params[0]?.pattern.kind === "ident" && m.params[0].pattern.name === "this") throw new CompileError("a static accessor has no 'this'", m.params[0].start, m.params[0].end);
     table.set(key, {
+      id: nextId(ids),
       name: `${name}.${isStatic ? "static " : ""}${m.kind} ${m.name}`,
       scope,
       params: m.params,
@@ -284,7 +294,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
 
   function method(m: Extract<ClassMember, { kind: "method" }>) {
     const isStatic = m.modifiers.includes("static");
-    if (isStatic && node.typeParams.length > 0) throw unsupported("static methods in generic classes", m);
+    if (isStatic && shared) return;
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
@@ -297,10 +307,12 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const receiver = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
     if (receiver && isStatic) throw new CompileError("a static method has no 'this'", receiver.start, receiver.end);
     if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) namesClass(p.type);
+    if (isStatic) classParamIn(m);
     table.set(m.name, {
+      id: nextId(ids),
       // A static method has its own symbol, since an instance method may share its name.
-      name: `${name}.${isStatic ? "static " : ""}${m.name}`,
-      scope,
+      name: `${isStatic ? node.name : name}.${isStatic ? "static " : ""}${m.name}`,
+      scope: isStatic ? new Map() : scope,
       params: receiver ? rest : m.params,
       body: m.body,
       returnType: m.returnType,
@@ -313,12 +325,28 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       access,
       start: m.start,
       end: m.end,
-      ...rustOf(m),
+      ...rustOf(rust, m),
       ...((m as { signature?: true }).signature && { signature: true as const }),
     });
     // The implementation comes right after its signatures.
     const overloads = (m as { overloads?: ClassMember[] }).overloads;
     if (overloads) table.get(m.name)!.overloads = overloads.map((w) => table.get((w as typeof m).name as string)!);
+  }
+
+  // As in TypeScript, a static member can't name the class's type parameters, only its own.
+  function classParamIn(m: Extract<ClassMember, { kind: "method" }>) {
+    const outer = new Set(node.typeParams.map((p) => p.name));
+    // A function inside declaring its own type parameter of that name hides the class's.
+    const find = (t: unknown, hidden: Set<string>): Span | undefined => {
+      if (!t || typeof t !== "object") return undefined;
+      if (Array.isArray(t)) return t.map((x) => find(x, hidden)).find((x) => x);
+      const n = t as { kind?: string; name?: string; args?: unknown[]; typeParams?: TypeParam[] } & Span;
+      if (n.kind === "ref" && n.args?.length === 0 && outer.has(n.name!) && !hidden.has(n.name!)) return n;
+      const inner = n.typeParams?.length ? new Set([...hidden, ...n.typeParams.map((p) => p.name)]) : hidden;
+      return Object.values(n).map((x) => find(x, inner)).find((x) => x);
+    };
+    const used = find(m, new Set()) as (Span & { name: string }) | undefined;
+    if (used) throw new CompileError(`a static method can't use the class's type parameter '${used.name}'; give the method its own, as in 'static ${m.name as string}<${used.name}>(...)'`, used.start, used.end);
   }
 
   // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
@@ -327,7 +355,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (Array.isArray(t)) return t.forEach(namesClass);
     const n = t as { kind?: string; name?: string; args?: unknown[] };
     if (n.kind === "ref" && n.name === "this" && n.args?.length === 0) {
-      Object.assign(n, { name: node.name, args: node.typeParams.map((p) => ({ kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
+      Object.assign(n, { name: node.name, args: node.typeParams.map((p) => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
       return;
     }
     Object.values(n).forEach(namesClass);
@@ -345,11 +373,15 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
 // and the base's code, its copies included, keeps reaching the base's own.
 export function separatePrivateNames(nodes: (ClassNode & { name: string })[]) {
   const byName = new Map(nodes.map((n) => [n.name, n]));
+  const baseOf = (n: ClassNode) => {
+    const named = n.extends?.kind === "instantiation" ? n.extends.expr : n.extends;
+    return named?.kind === "ident" ? byName.get(named.name) : undefined;
+  };
   const declared = (n: ClassNode) => n.members.flatMap((m) => ("name" in m && typeof m.name === "string" && m.name.startsWith("#") ? [m.name] : []));
   for (const node of nodes) {
     const inherited = new Set<string>();
-    const seen = new Set<ClassNode>();
-    for (let b = node.extends?.kind === "ident" ? byName.get(node.extends.name) : undefined; b && !seen.has(b); b = b.extends?.kind === "ident" ? byName.get(b.extends.name) : undefined) {
+    const seen = new NodeSet<ClassNode>();
+    for (let b = baseOf(node); b && !seen.has(b); b = baseOf(b)) {
       seen.add(b);
       declared(b).forEach((n) => inherited.add(n));
     }
@@ -369,21 +401,16 @@ function renamePrivate(node: unknown, from: string, to: string) {
 export const shownName = (name: string) => (name.startsWith("#") ? name.replace(/@.*$/, "") : name);
 
 // A Rust type's member is a foreign function, called through the shim.
-function rustOf(m: ClassMember): { foreign?: true; rust?: RustName } {
-  const rust = rustNames.get(m);
-  return rust ? { foreign: true, rust } : {};
+function rustOf(rust: RustTables, m: ClassMember): { foreign?: true; rust?: RustName } {
+  const named = rust.names.get(m);
+  return named ? { foreign: true, rust: named } : {};
 }
-
-// The spans of `equals` methods `@derive(Eq)` wrote over a base class. Their `super.equals(other)`
-// lends `other` to the base's `equals`, which reads the embedded base a reference to the class
-// points at, though Fish code can't upcast it itself. A span outlives the copies macros make;
-// the set holds one program's spans, cleared as its macros expand.
-export const upcasts = new Set<string>();
 
 // Links a derived class to the base it embeds. Its constructor must start with
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
 // a constructor of its own it passes its arguments on to the base's.
-export function extend(c: ClassInfo, base: ClassInfo) {
+export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (name: string) => Type) {
+  const { defaulted, prologues, ids } = tables;
   c.base = base;
   c.type.base = base.type;
   for (let b: ClassInfo | undefined = base; b; b = b.base) {
@@ -405,21 +432,45 @@ export function extend(c: ClassInfo, base: ClassInfo) {
     c.constructor.body = [...defaults, first, ...c.prelude, ...rest];
     return;
   }
+  // The base's parameters are typed in its scope, where a name may mean something other than it
+  // does here: one of its own type parameters, or a type this class's type parameter hides. Each
+  // such name is renamed apart into this constructor's own scope, standing for what it means there.
+  const outer = base.constructor.scope ?? new Map<string, Type>();
+  const names = new Map([...new Set(base.constructor.params.flatMap((p) => refNames(p.type)))]
+    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, `${n} of ${base.type.name}`]));
+  if (names.size > 0) c.constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
   // Copies, so each constructor has its own parameters, and none of them is a property here.
   const params = base.constructor.params.map((p) => {
-    const copy = { ...p, modifiers: [] };
+    const copy = { ...p, id: nextId(ids), modifiers: [], ...(p.type && names.size > 0 && { type: renamed(p.type, names) }) };
     const declared = defaulted.get(p);
     if (declared) defaulted.set(copy, declared);
     return copy;
   });
   // A rest parameter is passed on spread, to be packed into the base's again.
   const args: Expr[] = params.map((p) => {
-    const name: Expr = { kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end };
-    return p.rest ? { kind: "spread", value: name, start: p.start, end: p.end } : name;
+    const name: Expr = { id: nextId(ids), kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end };
+    return p.rest ? { id: nextId(ids), kind: "spread", value: name, start: p.start, end: p.end } : name;
   });
-  const call: Expr = { kind: "call", callee: { kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
+  const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
   c.constructor.params = params;
-  c.constructor.body = [{ kind: "expr", expr: call, ...at }, ...c.prelude];
+  c.constructor.body = [{ id: nextId(ids), kind: "expr", expr: call, ...at }, ...c.prelude];
+}
+
+// The names a type refers to without type arguments.
+function refNames(t: unknown): string[] {
+  if (Array.isArray(t)) return t.flatMap(refNames);
+  if (!t || typeof t !== "object") return [];
+  const n = t as { kind?: string; name?: string; args?: unknown[] };
+  return [...(n.kind === "ref" && n.args?.length === 0 ? [n.name!] : []), ...Object.values(t).flatMap(refNames)];
+}
+
+// A copy of a type with the type parameters `names` maps renamed.
+function renamed<T>(t: T, names: Map<string, string>): T {
+  if (Array.isArray(t)) return t.map((x) => renamed(x, names)) as T;
+  if (!t || typeof t !== "object") return t;
+  const copy = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, renamed(v, names)])) as { kind?: string; name?: string };
+  if (copy.kind === "ref" && names.has(copy.name!)) copy.name = names.get(copy.name!);
+  return copy as T;
 }
 
 // A member of a class or of the bases it embeds, nearest first.
@@ -478,7 +529,7 @@ const MEMBER_KINDS = { methods: "method", getters: "getter", setters: "setter" }
 // through another such member, become templates. A concrete class must implement every abstract
 // member, and gets its own copy of each template, which sees `this` as the concrete class, so
 // `this.area()` there runs the concrete class's `area`.
-export function implementAbstracts(c: ClassInfo) {
+export function implementAbstracts(ids: Ids, c: ClassInfo) {
   const bases: ClassInfo[] = [];
   for (let b = c.base; b; b = b.base) bases.push(b);
   for (const b of [c, ...bases].filter((b) => b.node.abstract).reverse()) markTemplates(b);
@@ -499,7 +550,7 @@ export function implementAbstracts(c: ClassInfo) {
     for (const table of TABLES) {
       for (const [name, f] of b[table]) {
         const nearest = inherited(c, table, name)!;
-        if (f.template && (nearest.copyOf ?? nearest) === f) c[table].set(name, copyFor(c, f));
+        if (f.template && (nearest.copyOf ?? nearest) === f) c[table].set(name, copyFor(ids, c, f));
       }
     }
   }
@@ -507,9 +558,9 @@ export function implementAbstracts(c: ClassInfo) {
 
 // A concrete class's copy of a template, made once: its own member when nothing overrides it,
 // and what `super.name()` runs in the class either way.
-export function copyFor(c: ClassInfo, f: Body): Body {
+export function copyFor(ids: Ids, c: ClassInfo, f: Body): Body {
   let copy = c.copies.get(f);
-  if (!copy) c.copies.set(f, copy = { ...f, name: `${c.type.name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, template: undefined, copyOf: f, declared: f.owner! });
+  if (!copy) c.copies.set(f, copy = { ...f, id: nextId(ids), name: `${c.type.name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, scope: c.scope, template: undefined, copyOf: f, declared: f.owner! });
   return copy;
 }
 
@@ -588,10 +639,10 @@ function wraps(p: Param, name: string): boolean {
 }
 
 // `this.name = value`, as a constructor statement at the span of what it came from.
-function assignField(name: string, value: Expr, at: Span): Stmt {
+function assignField(ids: Ids, name: string, value: Expr, at: Span): Stmt {
   const s = { start: at.start, end: at.end };
-  const target: Expr = { kind: "member", object: { kind: "this", ...s }, name, optional: false, ...s };
-  return { kind: "expr", expr: { kind: "assign", op: "=", target, value, ...s }, ...s };
+  const target: Expr = { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "this", ...s }, name, optional: false, ...s };
+  return { id: nextId(ids), kind: "expr", expr: { id: nextId(ids), kind: "assign", op: "=", target, value, ...s }, ...s };
 }
 
 // A member's access, from its modifiers or a `#` name. `readonly` is read by the caller.
@@ -617,9 +668,9 @@ const MEMBER_FORMS: Record<Exclude<ClassMember["kind"], "field" | "constructor" 
 };
 
 // A type written `T | undefined` without its `undefined`, or nothing when it has none.
-export function withoutUndefined(t: TypeNode): TypeNode | undefined {
+export function withoutUndefined(ids: Ids, t: TypeNode): TypeNode | undefined {
   if (t.kind !== "union") return undefined;
   const rest = t.types.filter((u) => !(u.kind === "ref" && u.name === "undefined" && u.args.length === 0));
   if (rest.length === t.types.length || rest.length === 0) return undefined;
-  return rest.length === 1 ? rest[0]! : { ...t, types: rest };
+  return rest.length === 1 ? rest[0]! : { ...t, id: nextId(ids), types: rest };
 }

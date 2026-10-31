@@ -27,7 +27,7 @@ export function hostTriple(platform: string = process.platform, arch: string = p
 // needs that OS's libraries from a sysroot and lld to link them, as does any other target on a
 // Linux host, whose system linker knows one architecture; Apple's linker knows both of its own.
 // Throws an Error whose message is the user-facing reason.
-export function resolveTarget(triple: string | undefined, sysroot: string | undefined, host = hostTriple(), which: (tool: string) => string | null = Bun.which): Target {
+export function resolveTarget(triple: string | undefined, sysroot: string | undefined, host: string | undefined = hostTriple(), which: (tool: string) => string | null = Bun.which): Target {
   // Cached objects compile in an empty directory of their own, where a relative path means nothing.
   sysroot = sysroot ? resolve(sysroot) : undefined;
   if (triple === undefined || triple === host) return sysroot ? { ...HOST_TARGET, triple: host ?? "", compile: ["--sysroot", sysroot] } : HOST_TARGET;

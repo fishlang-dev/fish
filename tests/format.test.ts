@@ -23,19 +23,19 @@ async function differ(cases: [string, string, string][], parser = "typescript") 
   }
 }
 
-// The tree without its spans, to compare a program with its formatted text.
+// The tree without its spans and ids, to compare a program with its formatted text.
 function shape(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(shape);
   if (typeof v === "bigint") return `${v}n`;
   if (!v || typeof v !== "object") return v;
-  return Object.fromEntries(Object.entries(v).filter(([k]) => k !== "start" && k !== "end").map(([k, x]) => [k, shape(x)]));
+  return Object.fromEntries(Object.entries(v).filter(([k]) => k !== "start" && k !== "end" && k !== "id").map(([k, x]) => [k, shape(x)]));
 }
 
 // Each snippet formats to text that parses back to the same tree, and formats again unchanged.
 function roundTrip(cases: string[]) {
   for (const code of cases) {
     const out = format(code);
-    expect([code, shape(parse(out))]).toEqual([code, shape(parse(code))]);
+    expect([code, shape(parse(out, { last: 0 }))]).toEqual([code, shape(parse(code, { last: 0 }))]);
     expect([code, format(out)]).toEqual([code, out]);
   }
 }
@@ -43,11 +43,11 @@ function roundTrip(cases: string[]) {
 // Each snippet formats keeping its comments, in order and with the same text, to a program that
 // parses back to the same tree and formats again unchanged.
 function keepsComments(cases: string[]) {
-  const texts = (src: string) => parseWithComments(src).comments.map((c) => c.text.trim());
+  const texts = (src: string) => parseWithComments(src, { last: 0 }).comments.map((c) => c.text.trim());
   for (const code of cases) {
     const out = format(code);
     expect([code, texts(out)]).toEqual([code, texts(code)]);
-    expect([code, shape(parse(out))]).toEqual([code, shape(parse(code))]);
+    expect([code, shape(parse(out, { last: 0 }))]).toEqual([code, shape(parse(code, { last: 0 }))]);
     expect([code, format(out)]).toEqual([code, out]);
   }
 }
@@ -965,6 +965,11 @@ test("Fish's own syntax prints in the layout of its nearest TypeScript form", ()
     ["function f(): i64 throws ParseError { return 1; }", "function f(): i64 throws ParseError {\n  return 1;\n}\n"],
     ["function someVeryLongFunctionName(argumentNumberOne: string): SomeVeryLongReturnType throws SomeError {}", "function someVeryLongFunctionName(\n  argumentNumberOne: string,\n): SomeVeryLongReturnType throws SomeError {}\n"],
     ["class A { m(): void throws E {} }", "class A {\n  m(): void throws E {}\n}\n"],
+    ["const f = (s: string): i64 throws E => 1;", "const f = (s: string): i64 throws E => 1;\n"],
+    ["let g: (x: string) => i64 throws E | F;", "let g: (x: string) => i64 throws E | F;\n"],
+    ["function a(): (() => i64) throws A { return f; }", "function a(): (() => i64) throws A {\n  return f;\n}\n"],
+    ["type H = () => (() => i64) throws A;", "type H = () => (() => i64) throws A;\n"],
+    ["type K = () => (() => i64 throws A);", "type K = () => () => i64 throws A;\n"],
     ["const f = move (x) => x + 1;", "const f = move (x) => x + 1;\n"],
     ["const f = move async () => { await g(); };", "const f = move async () => {\n  await g();\n};\n"],
     ["const x = a ?? throw new Error(\"missing\");", "const x = a ?? (throw new Error(\"missing\"));\n"],
@@ -1272,19 +1277,19 @@ test("a one-line comment before such a token stays in place without flushing a p
   await agree(["type R = A /* c */[];", "x = a /* c */!;", "x = a /* c */++;", "x = a /* c */ as T;", "type R = A /* c */ extends B ? C : D;"]);
   // Prettier flushes the line comment here, putting a line break before `[]` and splitting the
   // declaration; the tree is kept at the cost of the comments' order.
-  const texts = (src: string) => parseWithComments(src).comments.map((c) => c.text).sort();
+  const texts = (src: string) => parseWithComments(src, { last: 0 }).comments.map((c) => c.text).sort();
   for (const code of ["type R = A[ // c2\n] /* c3 */ [];", "const os: (string | null // c1\n)/** c2 */[] = [null];"]) {
     const out = format(code);
-    expect([code, shape(parse(out)), texts(out)]).toEqual([code, shape(parse(code)), texts(code)]);
+    expect([code, shape(parse(out, { last: 0 })), texts(out)]).toEqual([code, shape(parse(code, { last: 0 })), texts(code)]);
     expect(format(out)).toBe(out);
   }
 });
 
 test("output whose tree differs from the source's is refused as a change of meaning", () => {
-  const meaning = programShape(parse("x = a - (b - c);"));
-  expect(() => assertSameProgram(meaning, parse("x = a - b - c;"))).toThrow("the formatter changed the program's meaning");
-  expect(() => assertSameProgram(meaning, parse("x = (a - (b - c));"))).not.toThrow();
-  expect(() => assertSameProgram(programShape(parse("x = a && (b && c);")), parse("x = a && b && c;"))).not.toThrow();
+  const meaning = programShape(parse("x = a - (b - c);", { last: 0 }));
+  expect(() => assertSameProgram(meaning, parse("x = a - b - c;", { last: 0 }))).toThrow("the formatter changed the program's meaning");
+  expect(() => assertSameProgram(meaning, parse("x = (a - (b - c));", { last: 0 }))).not.toThrow();
+  expect(() => assertSameProgram(programShape(parse("x = a && (b && c);", { last: 0 })), parse("x = a && b && c;", { last: 0 }))).not.toThrow();
 });
 
 test("comments that fall back to an enclosing node are moved in time linear in their number", () => {
@@ -1353,7 +1358,7 @@ test("comments anywhere are kept, in order, with the tree the same and formattin
 });
 
 test("a template's CR and CRLF line endings read as LF, as JavaScript reads them", () => {
-  const template = (src: string) => (parse(src)[0] as Extract<Stmt, { kind: "expr" }>).expr;
+  const template = (src: string) => (parse(src, { last: 0 })[0] as Extract<Stmt, { kind: "expr" }>).expr;
   expect(shape(template("x = `a\rb\r\nc`;"))).toEqual(shape(template("x = `a\nb\nc`;")));
   expect(format("x = `a\r\nb${c}\rd`;\r\n")).toBe("x = `a\nb${c}\nd`;\n");
 });

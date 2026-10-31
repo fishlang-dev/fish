@@ -1,0 +1,12 @@
+# Holds the compiler's own source to the self-hosting baseline. Run by hand while CI is off; add
+# push and pull_request triggers when it comes back.
+name: self-hosting
+on: workflow_dispatch
+jobs:
+  selfhost:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun test tests/selfhost.test.ts

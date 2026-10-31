@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildTests } from "../src/main.ts";
 import { runTests, type Test } from "../src/tests.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // Each test builds a package's tests and runs them.
 setDefaultTimeout(30_000);
@@ -109,7 +112,7 @@ test("a filter runs only the tests whose name holds it, and one matching none ex
 
 test("the test program lists its tests and runs one by its index", () => {
   const out = join(mkdtempSync(join(root, "bin-")), "tests");
-  const tests = buildTests(pkg("listed", { "src/main.fsh": PASSING }), out);
+  const tests = buildTests(session, pkg("listed", { "src/main.fsh": PASSING }), out);
   expect(tests.map((t) => t.name)).toEqual(["adds", "adds again", "subtracts"]);
   expect(Bun.spawnSync([out, "--list"]).stdout.toString()).toBe("adds\nadds again\nsubtracts\n");
   expect(Bun.spawnSync([out, "1"]).exitCode).toBe(0);
@@ -224,7 +227,7 @@ test("a test that can't be started fails rather than stalling the report", async
   process.stdout.write = ((s: string) => written.push(s) > 0) as typeof process.stdout.write;
   console.log = (s: string) => void written.push(`${s}\n`);
   try {
-    expect(await runTests(join(root, "no-such-binary"), tests, root)).toBe(1);
+    expect(await runTests(new Set(), join(root, "no-such-binary"), tests, root)).toBe(1);
   } finally {
     [process.stdout.write, console.log] = [write, log];
   }

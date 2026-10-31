@@ -239,6 +239,37 @@ abstract class Source<T> {
 
 function main() {}
 // error: 1:1: error: generic abstract classes are not supported yet
+// case: abstract_generic_subclass
+// expect: area 9 x
+// expect: area 4 2
+// A generic class's instances each get their own copy of the abstract base's template.
+abstract class Shape {
+  abstract area(): i64
+  describe(): string { return `area ${this.area()}` }
+}
+
+class Square<T> extends Shape {
+  constructor(public side: i64, public tag: T) { super() }
+  area(): i64 { return this.side * this.side }
+}
+
+function main() {
+  const a = new Square<string>(3, "x")
+  const b = new Square<i64>(2, 2)
+  print(`${a.describe()} ${a.tag}`)
+  print(`${b.describe()} ${b.tag}`)
+}
+// case: abstract_generic_subclass_missing
+abstract class Shape {
+  abstract area(): i64
+}
+
+class Square<T> extends Shape {
+  constructor(public tag: T) { super() }
+}
+
+function main() {}
+// error: 5:1: error: class 'Square<T>' must implement the abstract method 'area' of 'Shape'
 // case: abstract_implements_interface
 // expect: 2
 // expect: area 2

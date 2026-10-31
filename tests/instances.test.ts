@@ -2,16 +2,19 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compile } from "../src/main.ts";
+import { newSession } from "../src/compilation.ts";
 import { unreached, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
-import { classType, objectType, type Type } from "../src/typing.ts";
-import { equalities } from "../src/values.ts";
+import { NodeMap } from "../src/nodes.ts";
+import { newTyping, type ClassType, type Type } from "../src/typing.ts";
+
+const session = newSession();
 
 // Monomorphization compiles each generic function once per distinct set of type arguments,
 // however many calls share it, and never compiles a definition check.
 test("one function per instance", () => {
   const file = join(import.meta.dir, "programs", "generics.fsh");
-  const ir = compile(readFileSync(file, "utf8"), file);
+  const ir = compile(session, readFileSync(file, "utf8"), file);
   const defined = (name: string) => ir.match(new RegExp(`^define .*@"fsh\\.${name}#[0-9a-z.]+"`, "gm"))?.length ?? 0;
   // identity runs on i64 (three calls, one explicit), boolean, and two object shapes.
   expect(defined("identity")).toBe(4);
@@ -27,7 +30,7 @@ test("abstract classes compile no call to what isn't compiled", () => {
   const cases = readFileSync(file, "utf8").split(/^\/\/ case: .*$/m).slice(1).filter((c) => !/^\/\/ error:/m.test(c));
   expect(cases.length).toBeGreaterThan(5);
   for (const src of cases) {
-    const ir = compile(src, file);
+    const ir = compile(session, src, file);
     const defined = new Set([...ir.matchAll(/^(?:define [^@]*)?@("fsh\.[^"]+")(?: =|\()/gm)].map((m) => m[1]));
     const named = [...ir.matchAll(/@("fsh\.[^"]+")/g)].map((m) => m[1]!);
     expect(named.filter((n) => !defined.has(n))).toEqual([]);
@@ -38,16 +41,17 @@ test("abstract classes compile no call to what isn't compiled", () => {
 // to compare, so the net under them is tested directly: a comparison reaching an `equals`
 // that isn't compiled, through an object holding the class, is refused at its span.
 test("a comparison can't reach an equals that isn't compiled", () => {
+  const { classType, objectType } = newTyping();
   const shape = classType("Shape");
   shape.abstract = true;
   const equals = { body: { name: "Shape.equals", owner: shape }, bindings: new Map() } as unknown as Instance;
-  equalities.set(shape, equals);
+  const equalities = new WeakMap<ClassType, Instance>([[shape, equals]]);
   const at = { start: 10, end: 20 };
-  const [left, right] = [{ kind: "ident", name: "a", ...at }, { kind: "ident", name: "b", ...at }] as Expr[];
-  const compare = { kind: "binary", op: "===", left, right, ...at } as Expr;
+  const [left, right] = [{ id: 1, kind: "ident", name: "a", ...at }, { id: 2, kind: "ident", name: "b", ...at }] as Expr[];
+  const compare = { id: 3, kind: "binary", op: "===", left, right, ...at } as Expr;
   const held = objectType([{ name: "s", type: shape }]);
-  const types = new Map<Expr, Type>([[left!, held], [right!, held], [compare, "boolean"]]);
-  const caller = { body: { name: "check" }, bindings: new Map(), calls: new Map(), setters: new Map(), types } as unknown as Instance;
-  expect(() => unreached([caller], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));
-  expect(() => unreached([caller], () => false)).not.toThrow();
+  const types = new NodeMap<Expr, Type>([[left!, held], [right!, held], [compare, "boolean"]]);
+  const caller = { body: { name: "check" }, bindings: new Map(), calls: new NodeMap(), setters: new NodeMap(), types } as unknown as Instance;
+  expect(() => unreached(equalities, [caller], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));
+  expect(() => unreached(equalities, [caller], () => false)).not.toThrow();
 });

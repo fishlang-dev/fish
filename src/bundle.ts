@@ -356,7 +356,7 @@ async function main(request: Request): Promise<Result> {
 // the package that uses it when that is another.
 function builtInUsed(request: Request, used: { importer: string; name: string }, inputs: Record<string, { imports: { path: string; external?: boolean }[] }>, virtual: (r: Request[number]) => string): Result {
   const graph = new Map(Object.entries(inputs).map(([file, input]) => [resolve(file), input.imports.filter((i) => !i.external).map((i) => resolve(i.path))]));
-  const reaches = (from: string, seen = new Set<string>()): boolean => {
+  const reaches = (from: string, seen: Set<string> = new Set<string>()): boolean => {
     if (from === used.importer) return true;
     if (seen.has(from)) return false;
     seen.add(from);

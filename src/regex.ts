@@ -75,12 +75,16 @@ function intersect(a: Ranges, b: Ranges): Ranges {
 // The properties of strings `v` allows, which match emoji sequences rather than characters.
 const STRING_PROPERTIES = new Set(["Basic_Emoji", "Emoji_Keycap_Sequence", "RGI_Emoji", "RGI_Emoji_Flag_Sequence", "RGI_Emoji_Modifier_Sequence", "RGI_Emoji_Tag_Sequence", "RGI_Emoji_ZWJ_Sequence"]);
 
+// What property escapes match and which characters fold together, worked out from the engine
+// running the compiler, each by a scan of every character, so the caller keeps them between
+// patterns. `folds` is keyed by 'u' for Unicode's case folding and '' for the other.
+export type RegexTables = { properties: Map<string, Ranges>; folds: Map<string, number[][]> };
+
 // What a property escape matches, worked out from the engine running the compiler, which knows
 // Unicode's tables.
-const properties = new Map<string, Ranges>();
-function property(body: string, sets: boolean): Ranges {
+function property(tables: RegexTables, body: string, sets: boolean): Ranges {
   if (sets && STRING_PROPERTIES.has(body)) return fail("properties of strings are not supported yet");
-  let found = properties.get(body);
+  let found = tables.properties.get(body);
   if (!found) {
     let test: RegExp;
     try {
@@ -99,12 +103,12 @@ function property(body: string, sets: boolean): Ranges {
       }
     }
     found = ranges;
-    properties.set(body, found);
+    tables.properties.set(body, found);
   }
   return found;
 }
 
-export function parsePattern(source: string, flags: string): Pattern {
+export function parsePattern(source: string, flags: string, tables: RegexTables): Pattern {
   for (const [i, f] of [...flags].entries()) {
     if (!"dgimsuvy".includes(f) || flags.indexOf(f) !== i) fail(`invalid flags supplied to RegExp constructor '${flags}'`);
   }
@@ -447,7 +451,7 @@ export function parsePattern(source: string, flags: string): Pattern {
       let body = "";
       while (pos < text.length && peek() !== at("}")) body += String.fromCodePoint(text[pos++]!);
       if (!eat("}")) fail("invalid property expression");
-      return { kind: "set", ranges: property(body, sets), negated: upper, strings: [], fold };
+      return { kind: "set", ranges: property(tables, body, sets), negated: upper, strings: [], fold };
     }
     return undefined;
   }
@@ -709,7 +713,7 @@ export const BACKWARD = 32;
 export const HEADER = 4;
 export const PROGRAM_LIMIT = 1 << 20;
 
-export function compile(p: Pattern): number[] {
+export function compile(p: Pattern, tables: RegexTables): number[] {
   const code: number[] = [];
   const emit = (...words: number[]) => {
     code.push(...words);
@@ -727,7 +731,7 @@ export function compile(p: Pattern): number[] {
       case "empty":
         return;
       case "char": {
-        const ranges = n.fold ? foldRanges([[n.c, n.c]], p.unicode) : [[n.c, n.c] as [number, number]];
+        const ranges = n.fold ? foldRanges(tables, [[n.c, n.c]], p.unicode) : [[n.c, n.c] as [number, number]];
         if (ranges.length === 1 && ranges[0]![0] === ranges[0]![1]) emit(OP.char | dir, n.c);
         else set(ranges, false, dir);
         return;
@@ -736,7 +740,7 @@ export function compile(p: Pattern): number[] {
         emit((n.dotAll ? OP.anyAll : OP.any) | dir);
         return;
       case "set": {
-        let ranges = n.fold ? foldRanges(n.ranges, p.unicode) : n.ranges;
+        let ranges = n.fold ? foldRanges(tables, n.ranges, p.unicode) : n.ranges;
         if (n.negated) ranges = complement(ranges, top);
         // A class under `v` holding strings tries the longest string first, as JavaScript does.
         if (n.strings.length > 0) {
@@ -847,7 +851,7 @@ export function compile(p: Pattern): number[] {
   // A backreference that ignores case compares characters by what they fold to, from a table
   // after the instructions.
   if (folds) {
-    const table = foldTable(p.unicode);
+    const table = foldTable(tables, p.unicode);
     code.push(table.length / 2, ...table);
     code[2] = code[2]! | 8;
   }
@@ -872,9 +876,8 @@ function flagsOf(p: Pattern): number {
 // smallest of its class. Without `u` or `v` a character folds to its upper case when that is
 // one code unit and doesn't take a non-ASCII character to ASCII; with them, by Unicode's
 // simple case folding, checked here against the engine running the compiler.
-const foldClasses = new Map<boolean, number[][]>();
-function classesOf(unicode: boolean): number[][] {
-  let found = foldClasses.get(unicode);
+function classesOf(tables: RegexTables, unicode: boolean): number[][] {
+  let found = tables.folds.get(unicode ? "u" : "");
   if (found) return found;
   const top = unicode ? 0x10ffff : 0xffff;
   const parent = new Int32Array(top + 1).map((_, i) => i);
@@ -938,12 +941,12 @@ function classesOf(unicode: boolean): number[][] {
       if (same.length > 1) found.push(same);
     }
   }
-  foldClasses.set(unicode, found);
+  tables.folds.set(unicode ? "u" : "", found);
   return found;
 }
 
 // A set closed under case folding: with every character that folds like one in it.
-export function foldRanges(ranges: Ranges, unicode: boolean): Ranges {
+export function foldRanges(tables: RegexTables, ranges: Ranges, unicode: boolean): Ranges {
   const has = (c: number) => {
     let [lo, hi] = [0, ranges.length - 1];
     while (lo <= hi) {
@@ -956,15 +959,15 @@ export function foldRanges(ranges: Ranges, unicode: boolean): Ranges {
     return false;
   };
   const extra: Ranges = [];
-  for (const members of classesOf(unicode)) if (members.some(has)) for (const m of members) extra.push([m, m]);
+  for (const members of classesOf(tables, unicode)) if (members.some(has)) for (const m of members) extra.push([m, m]);
   return extra.length === 0 ? ranges : normalize([...ranges, ...extra]);
 }
 
 // The pairs of characters and the key each folds to, for backreferences that ignore case, which
 // compare at run time.
-export function foldTable(unicode: boolean): number[] {
+export function foldTable(tables: RegexTables, unicode: boolean): number[] {
   const pairs: [number, number][] = [];
-  for (const members of classesOf(unicode)) {
+  for (const members of classesOf(tables, unicode)) {
     const key = Math.min(...members);
     for (const m of members) if (m !== key) pairs.push([m, key]);
   }

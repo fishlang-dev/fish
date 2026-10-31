@@ -1,6 +1,14 @@
 import { expect, test } from "bun:test";
 import { check } from "../src/check.ts";
+import { newCompilation, newSession } from "../src/compilation.ts";
 import { parse } from "../src/parser.ts";
+
+const session = newSession();
+// `src` checked as a program of its own, its nodes numbered by its compilation.
+const checkSource = (src: string, library = false) => {
+  const compilation = newCompilation(session);
+  return check(compilation, parse(src, compilation.ids), library);
+};
 
 // Each type form that parses but has no meaning yet, and the rejection it gets.
 const TYPES: [string, string][] = [
@@ -16,7 +24,7 @@ for (const [type, what] of TYPES) {
   test(type, () => {
     const src = `function main() {\n  let x: ${type} = 1\n}`;
     const start = src.indexOf(type);
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + type.length,
     }));
   });
@@ -43,7 +51,7 @@ for (const [type, what, part] of INTERSECTIONS) {
   test(type, () => {
     const src = `class A {}\nfunction f(p: ${type}) {}\nfunction main() {}`;
     const start = src.indexOf(part, src.indexOf("p:"));
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + part.length,
     }));
   });
@@ -53,7 +61,7 @@ for (const [type, what, part] of MEMBERS) {
   test(type, () => {
     const src = `function f(p: ${type}) {}\nfunction main() {}`;
     const start = src.indexOf(part, src.indexOf("{"));
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + part.length,
     }));
   });
@@ -77,7 +85,7 @@ for (const [decl, what, part] of CLASSES) {
   test(decl, () => {
     const src = `${decl}\nfunction main() {}`;
     const start = src.indexOf(part, decl.startsWith("class A") ? 7 : 0);
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + part.length,
     }));
   });
@@ -85,7 +93,7 @@ for (const [decl, what, part] of CLASSES) {
 
 // Function signatures: the rejected part is the second column's text.
 const SIGNATURES: [string, string, string][] = [
-  ["(x: i64): x is i64", "type predicates", "x is i64"],
+  ["(x: i64): asserts x is i64", "assertion signatures", "asserts x is i64"],
   ["(this: i64)", "'this' parameters", "this: i64"],
   ["(private x: i64)", "parameter properties", "private x: i64"],
   ["(@inject x: i64)", "decorators", "@inject x: i64"],
@@ -95,7 +103,7 @@ for (const [signature, what, part] of SIGNATURES) {
   test(signature, () => {
     const src = `function f${signature} {}\nfunction main() {}`;
     const start = src.indexOf(part);
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + part.length,
     }));
   });
@@ -103,7 +111,6 @@ for (const [signature, what, part] of SIGNATURES) {
 
 // Each expression form that parses but has no meaning yet, as a `let` initializer.
 const EXPRESSIONS: [string, string][] = [
-  ["1n", "bigint literals"],
   ["super", "'super' expressions"],
   ["[1, , 2]", "holes in array literals"],
   ["function () {}", "function expressions"],
@@ -113,8 +120,6 @@ const EXPRESSIONS: [string, string][] = [
   ["import.meta", "meta properties"],
   ["import('m')", "dynamic imports"],
   ["f?.()", "optional calls"],
-  ["true as boolean", "'as' conversions other than between numbers"],
-  ["1 satisfies i64", "'satisfies' expressions"],
   ["<i64>1", "type assertions"],
 ];
 
@@ -122,7 +127,7 @@ for (const [expr, what] of EXPRESSIONS) {
   test(expr, () => {
     const src = `function main() {\n  let x = ${expr}\n}`;
     const start = src.indexOf(expr, src.indexOf("="));
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + expr.length,
     }));
   });
@@ -140,7 +145,7 @@ for (const [expr, what, part] of PROPERTIES) {
   test(expr, () => {
     const src = `function main() {\n  let x = ${expr}\n}`;
     const start = src.indexOf(part, src.indexOf("{", src.indexOf("=")));
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + part.length,
     }));
   });
@@ -152,7 +157,7 @@ for (const expr of ["a in b", "typeof 1"]) {
     const src = `function main() {\n  let x = ${expr}\n}`;
     const op = expr.match(/\bin\b|typeof/)![0];
     const start = src.indexOf(expr);
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `operator '${op}' is not supported yet`, start, end: start + expr.length,
     }));
   });
@@ -162,7 +167,7 @@ for (const expr of ["a in b", "typeof 1"]) {
 test("(1, 2)", () => {
   const src = "function main() {\n  let x = (1, 2)\n}";
   const start = src.indexOf("1, 2");
-  expect(() => check(parse(src))).toThrow(expect.objectContaining({
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
     message: "comma expressions are not supported yet", start, end: start + 4,
   }));
 });
@@ -180,7 +185,7 @@ for (const [stmt, what] of STATEMENTS) {
   test(stmt, () => {
     const src = `function main() {\n  ${stmt}\n}`;
     const start = src.indexOf(stmt);
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: `${what} are not supported yet`, start, end: start + stmt.length,
     }));
   });
@@ -189,7 +194,7 @@ for (const [stmt, what] of STATEMENTS) {
 for (const decl of ["import x from 'm'", "import fs = require('fs')"]) {
   test(decl, () => {
     const src = `${decl}\nfunction main() {}`;
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: "imports are not supported yet", start: 0, end: decl.length,
     }));
   });
@@ -198,7 +203,7 @@ for (const decl of ["import x from 'm'", "import fs = require('fs')"]) {
 for (const decl of ["export const x = 1", "export default 1", "export * from 'm'", "export { a }"]) {
   test(decl, () => {
     const src = `${decl}\nfunction main() {}`;
-    expect(() => check(parse(src))).toThrow(expect.objectContaining({
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({
       message: "exports are not supported yet", start: 0, end: decl.length,
     }));
   });
@@ -209,7 +214,7 @@ test("a moved Promise's note offers no clone", () => {
   const src = "async function main(): Promise<void> throws Error {\n  const r = Promise.withResolvers<i64>();\n  const p = r.promise;\n  const s = r;\n}";
   let thrown: unknown;
   try {
-    check(parse(src));
+    checkSource(src);
   } catch (e) {
     thrown = e;
   }
@@ -219,5 +224,5 @@ test("a moved Promise's note offers no clone", () => {
 // A library has no main to start the runtime, so a timer outside an async function is refused.
 test("a timer in a library's sync function is refused", () => {
   const src = "export function later(): void {\n  setTimeout(() => { console.log(\"x\"); }, 1);\n}";
-  expect(() => check(parse(src), true)).toThrow("'setTimeout' can only be used inside an 'async' function here, where the runtime is running");
+  expect(() => checkSource(src, true)).toThrow("'setTimeout' can only be used inside an 'async' function here, where the runtime is running");
 });

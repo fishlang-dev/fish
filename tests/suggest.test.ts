@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CompileError } from "../src/diag.ts";
 import { analyze } from "../src/main.ts";
+import { newSession } from "../src/compilation.ts";
 import { didYouMean, suggestion } from "../src/suggest.ts";
 
 test("the closest candidate within tsc's limits", () => {
@@ -42,7 +43,7 @@ function analyzed(main: string): string {
   writeFileSync(join(dir, "lib.fsh"), "export function greeting(): i64 { return 1; }\nexport function farewell(): i64 { return 2; }\n");
   writeFileSync(join(dir, "main.fsh"), main);
   try {
-    analyze(main, join(dir, "main.fsh"));
+    analyze(newSession(), main, join(dir, "main.fsh"));
     return "";
   } catch (e) {
     return (e as CompileError).message;

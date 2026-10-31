@@ -39,6 +39,9 @@ export const NATIVE = String.raw`
 #include <dirent.h>
 #include <ftw.h>
 #include <signal.h>
+#include <spawn.h>
+#include <poll.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -1822,6 +1825,399 @@ void fsh_rt_json_raw(fsh_json_out *w, const char *p, int64_t n) {
   w->length += n;
 }
 
+// A 128-bit integer's decimal digits, which printf can't write: its length in out, which holds 41.
+static int fsh_digits128(unsigned __int128 magnitude, int negative, char *out) {
+  char reversed[40];
+  int n = 0;
+  do {
+    reversed[n++] = (char)('0' + (int)(magnitude % 10));
+    magnitude /= 10;
+  } while (magnitude);
+  int length = 0;
+  if (negative) out[length++] = '-';
+  while (n) out[length++] = reversed[--n];
+  out[length] = 0;
+  return length;
+}
+
+static int fsh_i128_digits(__int128 v, char *out) {
+  return fsh_digits128(v < 0 ? -(unsigned __int128)v : (unsigned __int128)v, v < 0, out);
+}
+
+char *fsh_rt_format_i128(__int128 v, char *out) { fsh_i128_digits(v, out); return out; }
+char *fsh_rt_format_u128(unsigned __int128 v, char *out) { fsh_digits128(v, 0, out); return out; }
+
+fsh_str *fsh_rt_str_from_i128(__int128 v) {
+  char text[41];
+  fsh_i128_digits(v, text);
+  return fsh_rt_str_from_cstring(text);
+}
+
+fsh_str *fsh_rt_str_from_u128(unsigned __int128 v) {
+  char text[41];
+  fsh_digits128(v, 0, text);
+  return fsh_rt_str_from_cstring(text);
+}
+
+// A bigint: immutable once made and shared by count. Its magnitude is 'length' 32-bit limbs,
+// least significant first, with no zero limb on top; zero has none and is never negative.
+typedef struct fsh_big {
+  int64_t count;
+  int32_t negative;
+  int64_t length;
+  uint32_t limbs[];
+} fsh_big;
+
+static fsh_big *fsh_big_new(int64_t length) {
+  fsh_big *b = fsh_rt_alloc(sizeof(fsh_big) + (length ? length : 1) * sizeof(uint32_t));
+  b->count = 1;
+  b->negative = 0;
+  b->length = length;
+  memset(b->limbs, 0, (length ? length : 1) * sizeof(uint32_t));
+  return b;
+}
+
+static fsh_big *fsh_big_trim(fsh_big *b, int negative) {
+  while (b->length && !b->limbs[b->length - 1]) b->length--;
+  b->negative = b->length ? negative : 0;
+  return b;
+}
+
+// A count below zero marks a constant the compiler made, never counted or freed.
+void fsh_rt_big_retain(fsh_big *b) {
+  if (__atomic_load_n(&b->count, __ATOMIC_RELAXED) >= 0) __atomic_fetch_add(&b->count, 1, __ATOMIC_RELAXED);
+}
+
+void fsh_rt_big_release(fsh_big *b) {
+  if (b && __atomic_load_n(&b->count, __ATOMIC_RELAXED) >= 0 && __atomic_sub_fetch(&b->count, 1, __ATOMIC_ACQ_REL) == 0) fsh_rt_free(b);
+}
+
+static _Noreturn void fsh_big_panic(const char *where, const char *reason) {
+  fflush(NULL);
+  fputs(where, stderr);
+  fsh_rt_panic(reason);
+}
+
+fsh_big *fsh_rt_big_from_u128(unsigned __int128 magnitude, int32_t negative) {
+  fsh_big *b = fsh_big_new(4);
+  for (int i = 0; i < 4; i++) b->limbs[i] = (uint32_t)(magnitude >> (32 * i));
+  return fsh_big_trim(b, negative);
+}
+
+fsh_big *fsh_rt_big_from_i128(__int128 v) {
+  return fsh_rt_big_from_u128(v < 0 ? -(unsigned __int128)v : (unsigned __int128)v, v < 0);
+}
+
+static int fsh_mag_cmp(const fsh_big *a, const fsh_big *b) {
+  if (a->length != b->length) return a->length < b->length ? -1 : 1;
+  for (int64_t i = a->length; i-- > 0;) if (a->limbs[i] != b->limbs[i]) return a->limbs[i] < b->limbs[i] ? -1 : 1;
+  return 0;
+}
+
+int32_t fsh_rt_big_compare(const fsh_big *a, const fsh_big *b) {
+  if (a->negative != b->negative) return a->negative ? -1 : 1;
+  int c = fsh_mag_cmp(a, b);
+  return a->negative ? -c : c;
+}
+
+_Bool fsh_rt_big_equal(const fsh_big *a, const fsh_big *b) { return fsh_rt_big_compare(a, b) == 0; }
+
+static fsh_big *fsh_mag_add(const fsh_big *a, const fsh_big *b, int negative) {
+  if (a->length < b->length) return fsh_mag_add(b, a, negative);
+  fsh_big *r = fsh_big_new(a->length + 1);
+  uint64_t carry = 0;
+  for (int64_t i = 0; i < a->length; i++) {
+    uint64_t t = (uint64_t)a->limbs[i] + (i < b->length ? b->limbs[i] : 0) + carry;
+    r->limbs[i] = (uint32_t)t;
+    carry = t >> 32;
+  }
+  r->limbs[a->length] = (uint32_t)carry;
+  return fsh_big_trim(r, negative);
+}
+
+// |a| - |b|, where |a| >= |b|.
+static fsh_big *fsh_mag_sub(const fsh_big *a, const fsh_big *b, int negative) {
+  fsh_big *r = fsh_big_new(a->length);
+  int64_t borrow = 0;
+  for (int64_t i = 0; i < a->length; i++) {
+    int64_t t = (int64_t)a->limbs[i] - (i < b->length ? b->limbs[i] : 0) - borrow;
+    borrow = t < 0;
+    r->limbs[i] = (uint32_t)(t + (borrow ? ((int64_t)1 << 32) : 0));
+  }
+  return fsh_big_trim(r, negative);
+}
+
+// a + b, with b's sign flipped when flip is set.
+static fsh_big *fsh_big_add(const fsh_big *a, const fsh_big *b, int flip) {
+  int bn = b->length ? b->negative ^ flip : 0;
+  if (a->negative == bn) return fsh_mag_add(a, b, a->negative);
+  return fsh_mag_cmp(a, b) >= 0 ? fsh_mag_sub(a, b, a->negative) : fsh_mag_sub(b, a, bn);
+}
+
+fsh_big *fsh_rt_big_add(const fsh_big *a, const fsh_big *b) { return fsh_big_add(a, b, 0); }
+fsh_big *fsh_rt_big_sub(const fsh_big *a, const fsh_big *b) { return fsh_big_add(a, b, 1); }
+
+fsh_big *fsh_rt_big_mul(const fsh_big *a, const fsh_big *b) {
+  fsh_big *r = fsh_big_new(a->length + b->length);
+  for (int64_t i = 0; i < a->length; i++) {
+    uint64_t carry = 0;
+    for (int64_t j = 0; j < b->length; j++) {
+      uint64_t t = (uint64_t)a->limbs[i] * b->limbs[j] + r->limbs[i + j] + carry;
+      r->limbs[i + j] = (uint32_t)t;
+      carry = t >> 32;
+    }
+    r->limbs[i + b->length] = (uint32_t)carry;
+  }
+  return fsh_big_trim(r, a->negative ^ b->negative);
+}
+
+// |a| divided by |b|, which isn't zero: the quotient and remainder magnitudes.
+// ponytail: shift-and-subtract, O(n^2) per bit of the dividend; Knuth's algorithm D if bigint
+// division ever shows up in a profile.
+static void fsh_mag_divmod(const fsh_big *a, const fsh_big *b, fsh_big **quotient, fsh_big **remainder) {
+  fsh_big *q = fsh_big_new(a->length), *r = fsh_big_new(b->length + 1);
+  r->length = 0;
+  if (b->length == 1) {
+    uint64_t rest = 0;
+    for (int64_t i = a->length; i-- > 0;) {
+      uint64_t t = (rest << 32) | a->limbs[i];
+      q->limbs[i] = (uint32_t)(t / b->limbs[0]);
+      rest = t % b->limbs[0];
+    }
+    r->limbs[0] = (uint32_t)rest;
+    r->length = 1;
+  } else {
+    for (int64_t bit = a->length * 32; bit-- > 0;) {
+      // r = r * 2 + the dividend's next bit.
+      uint32_t carry = (a->limbs[bit / 32] >> (bit % 32)) & 1;
+      for (int64_t i = 0; i < r->length; i++) {
+        uint32_t top = r->limbs[i] >> 31;
+        r->limbs[i] = (r->limbs[i] << 1) | carry;
+        carry = top;
+      }
+      if (carry) r->limbs[r->length++] = carry;
+      if (fsh_mag_cmp(r, b) >= 0) {
+        int64_t borrow = 0;
+        for (int64_t i = 0; i < r->length; i++) {
+          int64_t t = (int64_t)r->limbs[i] - (i < b->length ? b->limbs[i] : 0) - borrow;
+          borrow = t < 0;
+          r->limbs[i] = (uint32_t)(t + (borrow ? ((int64_t)1 << 32) : 0));
+        }
+        while (r->length && !r->limbs[r->length - 1]) r->length--;
+        q->limbs[bit / 32] |= (uint32_t)1 << (bit % 32);
+      }
+    }
+  }
+  *quotient = q;
+  *remainder = r;
+}
+
+// Division truncates and a remainder takes the dividend's sign, as JavaScript's do.
+fsh_big *fsh_rt_big_div(const fsh_big *a, const fsh_big *b, int32_t remainder, const char *where) {
+  if (!b->length) fsh_big_panic(where, "Division by zero\n");
+  fsh_big *q, *r;
+  fsh_mag_divmod(a, b, &q, &r);
+  if (remainder) {
+    fsh_rt_free(q);
+    return fsh_big_trim(r, a->negative);
+  }
+  fsh_rt_free(r);
+  return fsh_big_trim(q, a->negative ^ b->negative);
+}
+
+fsh_big *fsh_rt_big_neg(const fsh_big *a) {
+  fsh_big *r = fsh_big_new(a->length);
+  memcpy(r->limbs, a->limbs, a->length * sizeof(uint32_t));
+  return fsh_big_trim(r, !a->negative);
+}
+
+// The most bits a bigint may hold, as V8 allows.
+#define FSH_BIG_MOST_BITS ((uint64_t)1 << 30)
+
+static _Noreturn void fsh_big_too_big(const char *where) { fsh_big_panic(where, "Maximum BigInt size exceeded\n"); }
+
+// A count of bits from a bigint, past which no result could be held.
+static uint64_t fsh_big_small(const fsh_big *n, const char *where) {
+  if (n->length > 1 || (n->length && n->limbs[0] > FSH_BIG_MOST_BITS)) fsh_big_too_big(where);
+  return n->length ? n->limbs[0] : 0;
+}
+
+// The bits a magnitude takes.
+static uint64_t fsh_big_bits(const fsh_big *a) {
+  if (!a->length) return 0;
+  return (uint64_t)(a->length - 1) * 32 + (32 - __builtin_clz(a->limbs[a->length - 1]));
+}
+
+fsh_big *fsh_rt_big_pow(const fsh_big *a, const fsh_big *e, const char *where) {
+  if (e->negative) fsh_big_panic(where, "Exponent must be non-negative\n");
+  // Checked before anything is made, so a panic leaves nothing behind.
+  uint64_t n = a->length > 1 || (a->length == 1 && a->limbs[0] > 1) ? fsh_big_small(e, where) : 0;
+  // At least (bits - 1) * n + 1 bits, and about n * log2|a|, which a power past the limit is
+  // refused on before any multiplying.
+  if (n) {
+    uint64_t bits = fsh_big_bits(a);
+    double lead = a->limbs[a->length - 1] + (a->length > 1 ? a->limbs[a->length - 2] / 4294967296.0 : 0);
+    double log2a = (a->length - 1) * 32.0 + log2(lead);
+    if ((bits - 1) * n + 1 > FSH_BIG_MOST_BITS || (double)n * log2a > (double)FSH_BIG_MOST_BITS) fsh_big_too_big(where);
+  }
+  fsh_big *result = fsh_rt_big_from_u128(1, 0), *base = fsh_rt_big_neg(a);
+  base->negative = a->negative;
+  if (!(a->length == 1 && a->limbs[0] == 1) && a->length) {
+    for (; n; n >>= 1) {
+      if (n & 1) {
+        fsh_big *next = fsh_rt_big_mul(result, base);
+        fsh_rt_free(result);
+        result = next;
+      }
+      if (n > 1) {
+        fsh_big *squared = fsh_rt_big_mul(base, base);
+        fsh_rt_free(base);
+        base = squared;
+      }
+    }
+  } else if (!a->length) {
+    // 0n ** 0n is 1n; any other power of zero is zero.
+    if (e->length) result->length = 0;
+  } else if (a->negative && e->length && (e->limbs[0] & 1)) {
+    result->negative = 1;
+  }
+  fsh_rt_free(base);
+  return result;
+}
+
+// |a| shifted right by n bits; 'rounded' is set when any one bit shifted out was set.
+static fsh_big *fsh_mag_shr(const fsh_big *a, uint64_t n, int *rounded) {
+  int64_t whole = (int64_t)(n / 32), bits = (int64_t)(n % 32);
+  *rounded = 0;
+  for (int64_t i = 0; i < whole && i < a->length; i++) if (a->limbs[i]) *rounded = 1;
+  if (bits && whole < a->length && (a->limbs[whole] & (((uint32_t)1 << bits) - 1))) *rounded = 1;
+  int64_t length = a->length > whole ? a->length - whole : 0;
+  fsh_big *r = fsh_big_new(length);
+  for (int64_t i = 0; i < length; i++) {
+    uint64_t pair = a->limbs[i + whole] | (i + whole + 1 < a->length ? (uint64_t)a->limbs[i + whole + 1] << 32 : 0);
+    r->limbs[i] = (uint32_t)(pair >> bits);
+  }
+  return r;
+}
+
+// a << n, or a >> -n; a right shift floors, as JavaScript's does.
+fsh_big *fsh_rt_big_shift(const fsh_big *a, const fsh_big *count, int32_t right, const char *where) {
+  if (count->negative) right = !right;
+  if (!a->length) return fsh_big_new(0);
+  if (right) {
+    uint64_t n = count->length > 1 ? UINT64_MAX : count->length ? count->limbs[0] : 0;
+    int rounded;
+    fsh_big *r = fsh_big_trim(fsh_mag_shr(a, n, &rounded), a->negative);
+    if (!(a->negative && rounded)) return r;
+    // A negative value that lost set bits floors one further down.
+    fsh_big *one = fsh_rt_big_from_u128(1, 1), *floored = fsh_rt_big_add(r, one);
+    fsh_rt_free(r);
+    fsh_rt_free(one);
+    return floored;
+  }
+  uint64_t n = fsh_big_small(count, where);
+  if (fsh_big_bits(a) + n > FSH_BIG_MOST_BITS) fsh_big_too_big(where);
+  int64_t whole = (int64_t)(n / 32), bits = (int64_t)(n % 32);
+  fsh_big *r = fsh_big_new(a->length + whole + 1);
+  for (int64_t i = 0; i < a->length; i++) {
+    uint64_t moved = (uint64_t)a->limbs[i] << bits;
+    r->limbs[i + whole] |= (uint32_t)moved;
+    r->limbs[i + whole + 1] |= (uint32_t)(moved >> 32);
+  }
+  return fsh_big_trim(r, a->negative);
+}
+
+// A value's two's complement in 'width' limbs, wide enough for any value in play.
+static void fsh_big_twos(const fsh_big *a, uint32_t *out, int64_t width) {
+  for (int64_t i = 0; i < width; i++) out[i] = i < a->length ? a->limbs[i] : 0;
+  if (!a->negative) return;
+  // -x is ~(x - 1).
+  for (int64_t i = 0; i < width; i++) if (out[i]--) break;
+  for (int64_t i = 0; i < width; i++) out[i] = ~out[i];
+}
+
+// &, | and ^ as op 0, 1 and 2, on two's complement of unbounded width.
+fsh_big *fsh_rt_big_bitwise(const fsh_big *a, const fsh_big *b, int32_t op) {
+  int64_t width = (a->length > b->length ? a->length : b->length) + 1;
+  uint32_t *x = fsh_rt_alloc(width * sizeof(uint32_t)), *y = fsh_rt_alloc(width * sizeof(uint32_t));
+  fsh_big_twos(a, x, width);
+  fsh_big_twos(b, y, width);
+  fsh_big *r = fsh_big_new(width);
+  for (int64_t i = 0; i < width; i++) r->limbs[i] = op == 0 ? x[i] & y[i] : op == 1 ? x[i] | y[i] : x[i] ^ y[i];
+  fsh_rt_free(x);
+  fsh_rt_free(y);
+  int negative = r->limbs[width - 1] >> 31;
+  if (negative) {
+    for (int64_t i = 0; i < width; i++) r->limbs[i] = ~r->limbs[i];
+    for (int64_t i = 0; i < width; i++) if (++r->limbs[i]) break;
+  }
+  return fsh_big_trim(r, negative);
+}
+
+// ~a is -a - 1.
+fsh_big *fsh_rt_big_not(const fsh_big *a) {
+  fsh_big *one = fsh_rt_big_from_u128(1, 0), *r = fsh_big_add(one, a, 0);
+  fsh_rt_free(one);
+  r->negative = r->length ? !r->negative : 0;
+  return r;
+}
+
+// The value's digits in a radix from 2 to 36, a '-' first when it is negative.
+fsh_str *fsh_rt_big_text(const fsh_big *a, int64_t radix) {
+  int64_t room = a->length * 32 + 2;
+  char *digits = fsh_rt_alloc(room + 1);
+  int64_t at = room;
+  digits[at] = 0;
+  fsh_big *rest = fsh_big_new(a->length);
+  memcpy(rest->limbs, a->limbs, a->length * sizeof(uint32_t));
+  do {
+    uint64_t r = 0;
+    for (int64_t i = rest->length; i-- > 0;) {
+      uint64_t t = (r << 32) | rest->limbs[i];
+      rest->limbs[i] = (uint32_t)(t / radix);
+      r = t % radix;
+    }
+    while (rest->length && !rest->limbs[rest->length - 1]) rest->length--;
+    digits[--at] = "0123456789abcdefghijklmnopqrstuvwxyz"[r];
+  } while (rest->length);
+  if (a->negative) digits[--at] = '-';
+  fsh_rt_free(rest);
+  fsh_str *s = fsh_rt_str_from_cstring(digits + at);
+  fsh_rt_free(digits);
+  return s;
+}
+
+// toString(radix), with JavaScript's RangeError for a radix it has no digits for.
+fsh_str *fsh_rt_big_to_string(const fsh_big *a, int64_t radix, const char *where) {
+  if (radix < 2 || radix > 36) fsh_big_panic(where, "toString() radix must be between 2 and 36\n");
+  return fsh_rt_big_text(a, radix);
+}
+
+// The low 128 bits of the value's two's complement, which 'as' truncates to its type.
+unsigned __int128 fsh_rt_big_low(const fsh_big *a) {
+  unsigned __int128 v = 0;
+  for (int64_t i = 0; i < 4 && i < a->length; i++) v |= (unsigned __int128)a->limbs[i] << (32 * i);
+  return a->negative ? 0 - v : v;
+}
+
+// The nearest double, as Number(x) gives.
+double fsh_rt_big_f64(const fsh_big *a) {
+  fsh_str *text = fsh_rt_big_text(a, 10);
+  double x = fsh_js_strtod((const unsigned char *)text->bytes, text->length);
+  fsh_rt_str_release(text);
+  return x;
+}
+
+void fsh_rt_json_i128(fsh_json_out *w, __int128 v) {
+  char text[41];
+  fsh_rt_json_raw(w, text, fsh_i128_digits(v, text));
+}
+
+void fsh_rt_json_u128(fsh_json_out *w, unsigned __int128 v) {
+  char text[41];
+  fsh_rt_json_raw(w, text, fsh_digits128(v, 0, text));
+}
+
 void fsh_rt_json_i64(fsh_json_out *w, int64_t v) {
   char text[24];
   fsh_rt_json_raw(w, text, snprintf(text, sizeof text, "%lld", (long long)v));
@@ -2118,7 +2514,7 @@ static int64_t fsh_json_number(fsh_json_in *r, int *whole, int64_t *bad) {
 
 // An integer of the given width: written whole, or as a whole number a double holds exactly,
 // as JavaScript would read it.
-int32_t fsh_rt_json_int(fsh_json_in *r, int64_t *out, int32_t bits, int32_t is_signed, const char *what) {
+int32_t fsh_rt_json_int(fsh_json_in *r, __int128 *out, int32_t bits, int32_t is_signed, const char *what) {
   int32_t c = fsh_rt_json_peek(r);
   if (c != '-' && !(c >= '0' && c <= '9')) return fsh_json_wrong(r, what);
   int whole;
@@ -2129,27 +2525,27 @@ int32_t fsh_rt_json_int(fsh_json_in *r, int64_t *out, int32_t bits, int32_t is_s
   }
   const unsigned char *p = r->p + r->at;
   int negative = p[0] == '-', over = 0;
-  uint64_t magnitude = 0;
+  unsigned __int128 magnitude = 0, all = ~(unsigned __int128)0;
   if (whole) {
     for (int64_t i = negative; i < length; i++) {
-      uint64_t d = p[i] - '0';
-      if (magnitude > (UINT64_MAX - d) / 10) over = 1;
+      unsigned d = p[i] - '0';
+      if (magnitude > (all - d) / 10) over = 1;
       else magnitude = magnitude * 10 + d;
     }
   } else {
     double x = fsh_js_strtod(p, length);
     if (x != floor(x) || fabs(x) > 9007199254740992.0) over = 1;
-    else magnitude = (uint64_t)fabs(x);
+    else magnitude = (unsigned __int128)fabs(x);
   }
-  uint64_t top = bits == 64 ? UINT64_MAX : (1ull << bits) - 1;
-  uint64_t limit = is_signed ? (negative ? 1ull << (bits - 1) : (1ull << (bits - 1)) - 1) : negative ? 0 : top;
+  unsigned __int128 one = 1, top = bits == 128 ? all : (one << bits) - 1;
+  unsigned __int128 limit = is_signed ? (negative ? one << (bits - 1) : (one << (bits - 1)) - 1) : negative ? 0 : top;
   if (over || magnitude > limit) {
     int64_t size = strlen(what) + r->path_length + length + 32;
     char *message = fsh_rt_alloc(size);
     snprintf(message, size, "%.*s doesn't fit %s at %.*s", (int)length, (const char *)p, what, (int)r->path_length, r->path);
     return fsh_json_error(r, message);
   }
-  *out = negative ? (int64_t)(0 - magnitude) : (int64_t)magnitude;
+  *out = negative ? (__int128)(0 - magnitude) : (__int128)magnitude;
   r->at += length;
   return 1;
 }
@@ -2571,6 +2967,33 @@ static void fsh_insp_free(fsh_insp *v) {
 
 fsh_insp *fsh_rt_insp_text(const char *text) {
   return fsh_insp_new(FSH_INSP_TEXT, text, strlen(text));
+}
+
+// A bigint as console.log shows one, its digits then 'n'.
+fsh_insp *fsh_rt_insp_bigint(const struct fsh_big *n) {
+  fsh_str *digits = fsh_rt_big_text(n, 10);
+  char *text = fsh_rt_alloc(digits->length + 2);
+  memcpy(text, digits->bytes, digits->length);
+  text[digits->length] = 'n';
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, digits->length + 1);
+  v->numeric = 1;
+  fsh_rt_free(text);
+  fsh_rt_str_release(digits);
+  return v;
+}
+
+fsh_insp *fsh_rt_insp_i128(__int128 n) {
+  char text[41];
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, fsh_i128_digits(n, text));
+  v->numeric = 1;
+  return v;
+}
+
+fsh_insp *fsh_rt_insp_u128(unsigned __int128 n) {
+  char text[41];
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, fsh_digits128(n, 0, text));
+  v->numeric = 1;
+  return v;
 }
 
 fsh_insp *fsh_rt_insp_i64(int64_t n) {
@@ -3140,6 +3563,18 @@ void fsh_rt_text_add(fsh_sb *b, fsh_str *s) { fsh_sb_put(b, s->bytes, s->length)
 
 void fsh_rt_text_raw(fsh_sb *b, const char *s) { fsh_sb_str(b, s); }
 
+void fsh_rt_text_i128(fsh_sb *b, __int128 x) {
+  char t[41];
+  fsh_i128_digits(x, t);
+  fsh_sb_str(b, t);
+}
+
+void fsh_rt_text_u128(fsh_sb *b, unsigned __int128 x) {
+  char t[41];
+  fsh_digits128(x, 0, t);
+  fsh_sb_str(b, t);
+}
+
 void fsh_rt_text_i64(fsh_sb *b, int64_t x) {
   char t[32];
   snprintf(t, sizeof t, "%lld", (long long)x);
@@ -3173,7 +3608,8 @@ fsh_str *fsh_rt_text_done(fsh_sb *b) {
 // with parts its String(x), as JavaScript writes it, and its inspect tree, each built only when a
 // specifier may ask for it. A float's whole is 1 when it is an f32, written as one. A string is
 // lent; the text and tree of a value with parts are the routine's to free.
-enum { FSH_FARG_STRING, FSH_FARG_INT, FSH_FARG_UINT, FSH_FARG_FLOAT, FSH_FARG_BOOL, FSH_FARG_NULL, FSH_FARG_PARTS };
+// An integer too wide for 'whole', a 128-bit one or a bigint, is its exact digits in 'text'.
+enum { FSH_FARG_STRING, FSH_FARG_INT, FSH_FARG_UINT, FSH_FARG_FLOAT, FSH_FARG_BOOL, FSH_FARG_NULL, FSH_FARG_PARTS, FSH_FARG_DIGITS, FSH_FARG_BIGINT };
 
 typedef struct {
   int32_t kind;
@@ -3200,6 +3636,8 @@ static void fsh_farg_plain(fsh_sb *b, fsh_farg *a) {
       else fsh_farg_number(b, a->number);
       break;
     case FSH_FARG_BOOL: fsh_sb_str(b, a->whole ? "true" : "false"); break;
+    case FSH_FARG_DIGITS: fsh_sb_put(b, a->text->bytes, a->text->length); break;
+    case FSH_FARG_BIGINT: fsh_sb_put(b, a->text->bytes, a->text->length); fsh_sb_str(b, "n"); break;
     default: fsh_sb_str(b, "null"); break;
   }
 }
@@ -3257,7 +3695,8 @@ static double fsh_js_parse_int(fsh_str *s) {
 // What %d, %i and %f write: Number(x), parseInt(String(x)) and parseFloat(String(x)), an
 // integer written as Fish writes it.
 static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
-  if (a->kind == FSH_FARG_INT || a->kind == FSH_FARG_UINT) {
+  // Node writes a bigint's %d and %i with its 'n', and %f as the number it reads.
+  if (a->kind == FSH_FARG_INT || a->kind == FSH_FARG_UINT || a->kind == FSH_FARG_DIGITS || (a->kind == FSH_FARG_BIGINT && spec != 'f')) {
     fsh_farg_plain(b, a);
     return;
   }
@@ -3269,7 +3708,7 @@ static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
   if (spec == 'd' && a->kind != FSH_FARG_STRING && a->kind != FSH_FARG_PARTS) {
     x = a->kind == FSH_FARG_BOOL ? (double)a->whole : 0;
   } else {
-    fsh_str *text = fsh_farg_string(a);
+    fsh_str *text = a->kind == FSH_FARG_BIGINT ? (fsh_rt_str_retain(a->text), a->text) : fsh_farg_string(a);
     double read;
     if (spec == 'd') x = fsh_rt_parse_number(text, &read) ? read : NAN;
     else if (spec == 'f') x = fsh_rt_parse_float(text, &read) ? read : NAN;
@@ -3282,7 +3721,7 @@ static void fsh_farg_numeric(fsh_sb *b, fsh_farg *a, char spec) {
 // The texts and trees described arguments hold.
 static void fsh_fargs_free(fsh_farg *args, int64_t n) {
   for (int64_t i = 0; i < n; i++) {
-    if (args[i].kind != FSH_FARG_PARTS) continue;
+    if (args[i].kind != FSH_FARG_PARTS && args[i].kind != FSH_FARG_DIGITS && args[i].kind != FSH_FARG_BIGINT) continue;
     if (args[i].text) fsh_rt_str_release(args[i].text);
     if (args[i].tree) fsh_insp_free(args[i].tree);
   }
@@ -4779,6 +5218,16 @@ void fsh_rt_file_job_release(struct fsh_file_job *job);
 // time after which that attempt gives way to the next address, or 0.
 typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; } fsh_socket;
 
+// Linux marks a new socket close-on-exec as it makes it, so a child spawned on another thread
+// meanwhile can't inherit it; macOS can't, and its spawns close what they don't name instead.
+#ifdef __APPLE__
+#define FSH_SOCK_CLOEXEC 0
+#define FSH_ACCEPT(fd) accept(fd, NULL, NULL)
+#else
+#define FSH_SOCK_CLOEXEC SOCK_CLOEXEC
+#define FSH_ACCEPT(fd) accept4(fd, NULL, NULL, SOCK_CLOEXEC)
+#endif
+
 static fsh_socket *fsh_socket_new(int fd) {
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
   // A program the Fish program starts doesn't inherit its sockets.
@@ -4825,7 +5274,7 @@ static const struct { int number; const char *code, *text; } fsh_errnos[] = {
   {EINVAL, "EINVAL", "invalid argument"}, {EIO, "EIO", "i/o error"}, {EBUSY, "EBUSY", "resource busy or locked"},
   {EAGAIN, "EAGAIN", "resource temporarily unavailable"}, {ENOTEMPTY, "ENOTEMPTY", "directory not empty"},
   {EXDEV, "EXDEV", "cross-device link not permitted"}, {EFBIG, "EFBIG", "file too large"},
-  {EBADF, "EBADF", "bad file descriptor"}, {ECONNREFUSED, "ECONNREFUSED", "connection refused"},
+  {EBADF, "EBADF", "bad file descriptor"}, {ECHILD, "ECHILD", "no child processes"}, {ECONNREFUSED, "ECONNREFUSED", "connection refused"},
   {ECONNRESET, "ECONNRESET", "connection reset by peer"}, {EPIPE, "EPIPE", "broken pipe"},
   {ETIMEDOUT, "ETIMEDOUT", "connection timed out"}, {EADDRINUSE, "EADDRINUSE", "address already in use"},
   {EADDRNOTAVAIL, "EADDRNOTAVAIL", "address not available"}, {ENOTCONN, "ENOTCONN", "socket is not connected"},
@@ -5236,6 +5685,181 @@ int32_t fsh_rt_fs_rm(fsh_str *path, int32_t recursive, int32_t force, fsh_str **
   return result;
 }
 
+// A signal's name, as Node gives a child's: "SIGTERM", or NULL for one it doesn't name.
+const char *fsh_rt_signal_name(int64_t number) {
+  static const struct { int number; const char *name; } names[] = {
+    { SIGHUP, "SIGHUP" }, { SIGINT, "SIGINT" }, { SIGQUIT, "SIGQUIT" }, { SIGILL, "SIGILL" }, { SIGTRAP, "SIGTRAP" },
+    { SIGABRT, "SIGABRT" }, { SIGBUS, "SIGBUS" }, { SIGFPE, "SIGFPE" }, { SIGKILL, "SIGKILL" }, { SIGUSR1, "SIGUSR1" },
+    { SIGSEGV, "SIGSEGV" }, { SIGUSR2, "SIGUSR2" }, { SIGPIPE, "SIGPIPE" }, { SIGALRM, "SIGALRM" }, { SIGTERM, "SIGTERM" },
+    { SIGCHLD, "SIGCHLD" }, { SIGCONT, "SIGCONT" }, { SIGSTOP, "SIGSTOP" }, { SIGTSTP, "SIGTSTP" }, { SIGTTIN, "SIGTTIN" },
+    { SIGTTOU, "SIGTTOU" }, { SIGURG, "SIGURG" }, { SIGXCPU, "SIGXCPU" }, { SIGXFSZ, "SIGXFSZ" }, { SIGVTALRM, "SIGVTALRM" },
+    { SIGPROF, "SIGPROF" }, { SIGWINCH, "SIGWINCH" }, { SIGIO, "SIGIO" }, { SIGSYS, "SIGSYS" },
+  };
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) if (names[i].number == number) return names[i].name;
+  return NULL;
+}
+
+// A close-on-exec pipe whose ends are above 2: were this process's stdin, stdout or stderr closed,
+// an end landing on 0, 1 or 2 would be dup2'd onto itself, which keeps it close-on-exec.
+static int fsh_pipe(int fds[2]) {
+#ifdef __APPLE__
+  if (pipe(fds) != 0) return -1;
+#else
+  if (pipe2(fds, O_CLOEXEC) != 0) return -1;
+#endif
+  for (int i = 0; i < 2; i++) {
+    int moved = fcntl(fds[i], F_DUPFD_CLOEXEC, 3);
+    if (moved < 0) {
+      int failure = errno;
+      close(fds[0]);
+      close(fds[1]);
+      fds[0] = fds[1] = -1;
+      errno = failure;
+      return -1;
+    }
+    close(fds[i]);
+    fds[i] = moved;
+  }
+  return 0;
+}
+
+// Reads what a pipe has into a byte array, giving 0 at its end.
+static ssize_t fsh_drain(int fd, fsh_array *into) {
+  fsh_array_room(into, into->length + 65536, 1);
+  ssize_t n = read(fd, into->data + into->length, into->capacity - into->length);
+  if (n > 0) into->length += n;
+  return n;
+}
+
+// spawnSync: runs a command found on PATH with its arguments, in cwd unless that is empty,
+// writing input to its stdin and reading its stdout and stderr until both close, then waiting for
+// it. Gives 1 with numbers its pid, exit status (-1 when a signal ended it) and signal (0 for
+// none), or 5 with the IoError's parts, in Node's words, when it couldn't start.
+int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd, const fsh_array *input, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
+  out->data = err->data = NULL;
+  out->length = out->capacity = err->length = err->capacity = 0;
+  char *file = fsh_rt_str_cstring(command);
+  char *dir = fsh_rt_str_units(cwd) > 0 ? fsh_rt_str_cstring(cwd) : NULL;
+  char **argv = fsh_rt_alloc((args->length + 2) * sizeof(char *));
+  int bad = !file || (fsh_rt_str_units(cwd) > 0 && !dir);
+  argv[0] = file;
+  for (int64_t i = 0; i < args->length; i++) {
+    argv[i + 1] = fsh_rt_str_cstring(((fsh_str **)args->data)[i]);
+    bad |= !argv[i + 1];
+  }
+  argv[args->length + 1] = NULL;
+  int in[2] = { -1, -1 }, outp[2] = { -1, -1 }, errp[2] = { -1, -1 };
+  int failure = bad ? EINVAL : 0;
+  if (!failure && (fsh_pipe(in) != 0 || fsh_pipe(outp) != 0 || fsh_pipe(errp) != 0)) failure = errno;
+  pid_t pid = 0;
+  if (!failure) {
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, in[0], 0);
+    posix_spawn_file_actions_adddup2(&actions, outp[1], 1);
+    posix_spawn_file_actions_adddup2(&actions, errp[1], 2);
+    if (dir) posix_spawn_file_actions_addchdir_np(&actions, dir);
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+#ifdef __APPLE__
+    // Only the three pipes reach the child, whatever other threads have open.
+    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+    extern char **environ;
+    failure = posix_spawnp(&pid, file, &actions, &attributes, argv, environ);
+    posix_spawnattr_destroy(&attributes);
+    posix_spawn_file_actions_destroy(&actions);
+  }
+  for (int i = 0; i < 2; i++) {
+    if (failure && in[1 - i] >= 0) close(in[1 - i]);
+    if (failure && outp[i] >= 0) close(outp[i]);
+    if (failure && errp[i] >= 0) close(errp[i]);
+  }
+  if (!failure) {
+    close(in[0]);
+    close(outp[1]);
+    close(errp[1]);
+    // A child that exits before reading all its input mustn't end this process with SIGPIPE: the
+    // signal is held back on this thread while writing and a pending one taken.
+    sigset_t pipe_only, before;
+    sigemptyset(&pipe_only);
+    sigaddset(&pipe_only, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_only, &before);
+    fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
+    int64_t written = 0;
+    if (input->length == 0) {
+      close(in[1]);
+      in[1] = -1;
+    }
+    while (in[1] >= 0 || outp[0] >= 0 || errp[0] >= 0) {
+      struct pollfd fds[3] = { { in[1], POLLOUT, 0 }, { outp[0], POLLIN, 0 }, { errp[0], POLLIN, 0 } };
+      if (poll(fds, 3, -1) < 0) {
+        if (errno == EINTR) continue;
+        // Closed, a child blocked writing ends with SIGPIPE rather than waiting forever.
+        failure = errno;
+        for (int i = 0; i < 3; i++) if (fds[i].fd >= 0) close(fds[i].fd);
+        break;
+      }
+      if (in[1] >= 0 && fds[0].revents) {
+        ssize_t n = write(in[1], input->data + written, input->length - written);
+        if (n > 0) written += n;
+        if ((n < 0 && errno != EAGAIN && errno != EINTR) || written == input->length) {
+          close(in[1]);
+          in[1] = -1;
+        }
+      }
+      if (outp[0] >= 0 && fds[1].revents) {
+        ssize_t n = fsh_drain(outp[0], out);
+        if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
+          close(outp[0]);
+          outp[0] = -1;
+        }
+      }
+      if (errp[0] >= 0 && fds[2].revents) {
+        ssize_t n = fsh_drain(errp[0], err);
+        if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
+          close(errp[0]);
+          errp[0] = -1;
+        }
+      }
+    }
+    sigset_t pending;
+    sigpending(&pending);
+    if (sigismember(&pending, SIGPIPE)) {
+      int taken;
+      sigwait(&pipe_only, &taken);
+    }
+    pthread_sigmask(SIG_SETMASK, &before, NULL);
+    int status = 0, waited;
+    while ((waited = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {}
+    // ECHILD, when the program has set SIGCHLD to be ignored: how it ended is lost.
+    if (waited < 0) failure = errno;
+    numbers[0] = pid;
+    numbers[1] = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    numbers[2] = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+  }
+  if (failure) {
+    const char *name = file ? file : "";
+    char code[32], text[200];
+    fsh_errno_words(failure, code, sizeof code, text, sizeof text);
+    size_t size = 2 * strlen(name) + 64;
+    char *syscall = fsh_rt_alloc(size), *message = fsh_rt_alloc(size);
+    snprintf(syscall, size, "spawnSync %s", name);
+    snprintf(message, size, "spawnSync %s %s", name, code);
+    fsh_io_parts(error, message, code, syscall, name);
+    fsh_rt_free(syscall);
+    fsh_rt_free(message);
+    fsh_rt_free(out->data);
+    fsh_rt_free(err->data);
+    out->data = err->data = NULL;
+    out->length = out->capacity = err->length = err->capacity = 0;
+  }
+  for (int64_t i = 0; i <= args->length; i++) fsh_rt_free(argv[i]);
+  fsh_rt_free(argv);
+  fsh_rt_free(dir);
+  return failure ? 5 : 1;
+}
+
 static void *fsh_pool_work(void *arg) {
   (void)arg;
   for (;;) {
@@ -5371,7 +5995,7 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_storage *at,
 int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
   struct sockaddr_storage at;
   if (!fsh_address(host, port, &at, message)) return 5;
-  int fd = socket(at.ss_family, SOCK_STREAM, 0);
+  int fd = socket(at.ss_family, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
   if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
   int on = 1, off = 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
@@ -5397,7 +6021,7 @@ int64_t fsh_rt_tcp_port(fsh_socket *s) {
 // A client that gave up before it was accepted is skipped, as servers expect.
 int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out, fsh_str **message) {
   int fd;
-  while ((fd = accept(listener->fd, NULL, NULL)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
+  while ((fd = FSH_ACCEPT(listener->fd)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
   if (fd >= 0) {
     *out = fsh_socket_new(fd);
     return 1;
@@ -5479,7 +6103,7 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
 
 // Starts connecting a new socket to an address, into *socket_at, or 5 with the reason.
 static int32_t fsh_connect_start(fsh_socket **socket_at, struct sockaddr_storage *at, fsh_str **message) {
-  int fd = socket(at->ss_family, SOCK_STREAM, 0);
+  int fd = socket(at->ss_family, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
   if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
   *socket_at = fsh_socket_new(fd);
   // Interrupted, it goes on connecting all the same.

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import type { Session } from "./compilation.ts";
 
 // The runtime's `Math` functions: src/runtime/math.cpp over LLVM libc's correctly rounded ones,
 // and CORE-MATH's hyperbolic ones, both vendored. Compiling them takes seconds, so each clang
@@ -44,20 +45,16 @@ export function files(dir: string): string[] {
 // when the input is `-`, and `inputs` the other files its text depends on, such as headers.
 export type Unit = { name: string; args: string[]; stdin?: string; inputs: string[] };
 
-let version: string | undefined;
-
-// `clang --version`, which names the target as well as the compiler.
-function clangVersion(): string {
-  if (version !== undefined) return version;
+// `clang --version`, which names the target as well as the compiler, run once a session.
+function clangVersion(session: Session): string {
+  if (session.clang !== undefined) return session.clang;
   const clang = Bun.spawnSync(["clang", "--version"]);
   if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
-  return (version = clang.stdout.toString());
+  return (session.clang = clang.stdout.toString());
 }
 
-const digests = new Map<string, string>();
-
-// Remembered by size and modification time too, so an edit in a long-lived process is seen.
-function digestOf(path: string): string {
+// Remembered by size and modification time too, so an edit in a long-lived session is seen.
+function digestOf({ digests }: Session, path: string): string {
   const { size, mtimeMs } = statSync(path);
   const key = `${path}:${size}:${mtimeMs}`;
   let digest = digests.get(key);
@@ -67,9 +64,9 @@ function digestOf(path: string): string {
 
 // Where a unit's object lives, named by a hash of clang, the target, the flags and every source
 // text, so a change to any of them is a new object rather than a stale one.
-function objectPath(u: Unit): string {
-  const hash = createHash("sha256").update(clangVersion()).update(u.args.join("\0")).update("\0").update(u.stdin ?? "").update("\0");
-  for (const f of u.inputs) hash.update(f).update(digestOf(f));
+function objectPath(session: Session, u: Unit): string {
+  const hash = createHash("sha256").update(clangVersion(session)).update(u.args.join("\0")).update("\0").update(u.stdin ?? "").update("\0");
+  for (const f of u.inputs) hash.update(f).update(digestOf(session, f));
   return join(cacheDir(), "objects", `${u.name}-${hash.digest("hex").slice(0, 16)}.o`);
 }
 
@@ -96,8 +93,8 @@ const input = (u: Unit) => (u.stdin === undefined ? undefined : new TextEncoder(
 const emptyDir = () => mkdtempSync(join(tmpdir(), "fish-cc-"));
 
 // The unit's object, compiled first if the cache has none.
-export function cachedObject(u: Unit): string {
-  const out = objectPath(u);
+export function cachedObject(session: Session, u: Unit): string {
+  const out = objectPath(session, u);
   if (existsSync(out)) return out;
   const temp = partial(out);
   const cwd = emptyDir();
@@ -110,11 +107,11 @@ export function cachedObject(u: Unit): string {
   return out;
 }
 
-const compiling = new Map<string, Promise<string>>();
-
-// `cachedObject`, without blocking, each object compiled only once however many builds ask.
-export function cachedObjectAsync(u: Unit): Promise<string> {
-  const out = objectPath(u);
+// `cachedObject`, without blocking, each object compiled only once however many of a session's
+// builds ask.
+export function cachedObjectAsync(session: Session, u: Unit): Promise<string> {
+  const { compiling } = session;
+  const out = objectPath(session, u);
   if (existsSync(out)) return Promise.resolve(out);
   let done = compiling.get(out);
   if (!done) {
@@ -135,24 +132,22 @@ export function cachedObjectAsync(u: Unit): Promise<string> {
   return done;
 }
 
-let mathUnits: Unit[] | undefined;
-
-function units(): Unit[] {
-  if (mathUnits) return mathUnits;
+function units(session: Session): Unit[] {
+  if (session.mathUnits) return session.mathUnits;
   const inputs = [...files(LLVM_LIBC), ...files(join(CORE_MATH, "src"))];
   // A quoted include is looked for beside its source first, so the source's whole directory is
   // hashed.
-  mathUnits = UNITS.map(({ source, flags }) => ({ name: basename(source).replace(/\.\w+$/, ""), args: [...flags, source], inputs: [...files(dirname(source)), ...inputs] }));
-  return mathUnits;
+  session.mathUnits = UNITS.map(({ source, flags }) => ({ name: basename(source).replace(/\.\w+$/, ""), args: [...flags, source], inputs: [...files(dirname(source)), ...inputs] }));
+  return session.mathUnits;
 }
 
 // The objects to link, built first if this clang and target have none yet. `target` is the
 // clang flags of a target other than the host's.
-export function mathObjects(target: string[] = []): string[] {
-  return units().map((u) => cachedObject(target.length === 0 ? u : { ...u, args: [...target, ...u.args] }));
+export function mathObjects(session: Session, target: string[] = []): string[] {
+  return units(session).map((u) => cachedObject(session, target.length === 0 ? u : { ...u, args: [...target, ...u.args] }));
 }
 
 // `mathObjects`, without blocking.
-export function mathObjectsAsync(): Promise<string[]> {
-  return Promise.all(units().map(cachedObjectAsync));
+export function mathObjectsAsync(session: Session): Promise<string[]> {
+  return Promise.all(units(session).map((u) => cachedObjectAsync(session, u)));
 }

@@ -5,6 +5,9 @@ import { delimiter, join } from "node:path";
 import { CompileError, formatError } from "../src/diag.ts";
 import { compile } from "../src/main.ts";
 import { rustSymbol, trusted } from "../src/rust.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // Building a shim runs cargo, which compiles the fixture crate and the shim from nothing in each
 // test's own cache.
@@ -57,7 +60,7 @@ function refused(dir: string): string {
   const file = join(dir, "src", "main.fsh");
   const src = readFileSync(file, "utf8");
   try {
-    compile(src, file);
+    compile(session, src, file);
   } catch (e) {
     if (e instanceof CompileError) return formatError(e, "src/main.fsh", src).split("\n")[0]!;
     throw e;
@@ -85,7 +88,7 @@ function built(dir: string) {
 test("a call of a Rust function is a call of its shim's symbol, with no unsafe", () => {
   const dir = pkg({ "src/main.fsh": MAIN_FSH });
   const file = join(dir, "src", "main.fsh");
-  const ir = compile(readFileSync(file, "utf8"), file);
+  const ir = compile(session, readFileSync(file, "utf8"), file);
   for (const call of [
     `call i64 @"fsh_rust_4demo3add"(i64 40, i64 2, ptr `,
     `call double @"fsh_rust_4demo4half"(double 0x4014000000000000, ptr `,
@@ -108,7 +111,7 @@ test("a crate's name with '-' is spelled with '_' in its shim's symbols", () => 
     "src/main.fsh": `import { f } from "rust:my-crate";\nfunction main() {\n  console.log(f());\n}\n`,
   }, `my-crate = { path = "rust/demo" }`);
   const file = join(dir, "src", "main.fsh");
-  expect(compile(readFileSync(file, "utf8"), file)).toContain(`call i64 @"fsh_rust_8my_crate1f"(ptr `);
+  expect(compile(session, readFileSync(file, "utf8"), file)).toContain(`call i64 @"fsh_rust_8my_crate1f"(ptr `);
 });
 
 test("Rust declarations and imports are refused where they go wrong", () => {
@@ -362,7 +365,7 @@ test("a Rust type's constructor, statics and methods of each receiver are calls 
 }
 `);
   const file = join(dir, "src", "main.fsh");
-  const ir = compile(readFileSync(file, "utf8"), file);
+  const ir = compile(session, readFileSync(file, "utf8"), file);
   for (const call of [
     `call ptr @"fsh_rust_4demo7Counter3new"(i64 1, ptr `,
     `call ptr @"fsh_rust_4demo7Counter4zero"(ptr `,
@@ -384,7 +387,7 @@ test("Rust handles move and borrow as Fish values do, and cross threads", () => 
   expect(refused(handles(`function look(c: Ref<Counter>) {\n  c.add(1);\n}\nfunction main() {}\n`))).toBe("src/main.fsh:3:3: error: cannot call 'add' on 'c' because it is a shared reference ('Ref'), which only reads");
   const sent = handles(`async function run(c: Counter): Promise<i64> {\n  return c.get();\n}\nasync function main() {\n  const n = await spawn(run(new Counter(1)));\n  console.log(n);\n}\n`);
   const file = join(sent, "src", "main.fsh");
-  expect(() => compile(readFileSync(file, "utf8"), file)).not.toThrow();
+  expect(() => compile(session, readFileSync(file, "utf8"), file)).not.toThrow();
 });
 
 test("what a Rust handle can't do is refused where it is written", () => {

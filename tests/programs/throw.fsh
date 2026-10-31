@@ -32,11 +32,12 @@ function main() throws i64 | boolean {
 // expect: local 9
 // fails: Error: false
 // case: throw_expression_closure
-// Closures can't throw yet.
+// A throw expression in an arrow makes the arrow throw.
 function main() throws i64 {
   const g = (x: i64) => x > 0 ? x : throw 1
+  print(g(2))
 }
-// error: closures that throw are not supported yet
+// expect: 2
 // case: throw_expression_unhandled
 // A throw expression needs a 'throws' clause too.
 function f(x: i64 | null): i64 {

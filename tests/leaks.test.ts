@@ -3,11 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build, compile, runtimeUnits } from "../src/main.ts";
+import { newSession } from "../src/compilation.ts";
 
 // `fishc build --leaks`: what a program never freed, reported at exit by where it was allocated.
 setDefaultTimeout(60_000);
 
 const MAIN = join(import.meta.dir, "..", "src", "main.ts");
+const session = newSession();
 const root = mkdtempSync(join(tmpdir(), "fish-leaks-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -36,7 +38,7 @@ function run(name: string, src: string, { release = false, leaks = true, env = {
   mkdirSync(dir);
   const file = join(dir, "main.fsh");
   writeFileSync(file, src);
-  build(file, join(dir, "main"), release, "unwind", [], undefined, leaks);
+  build(session, file, join(dir, "main"), release, "unwind", [], undefined, leaks);
   const done = Bun.spawnSync([join(dir, "main")], { cwd: dir, env: { ...process.env, FISH_LEAKS: "0", ...env } });
   return { code: done.exitCode, out: done.stdout.toString(), err: done.stderr.toString().replaceAll(`${dir}/`, "") };
 }
@@ -100,9 +102,9 @@ test("--leaks leaves an ordinary build's IR and runtime alone", () => {
   const file = join(root, "ir.fsh");
   writeFileSync(file, LEAKY);
   // A debug build keeps its frames either way; a release build keeps them only for --leaks.
-  expect(compile(LEAKY, file, false, "unwind", false, true)).toBe(compile(LEAKY, file));
-  expect(compile(LEAKY, file, true)).not.toContain("@fsh_rt_frames");
-  expect(compile(LEAKY, file, true, "unwind", false, true)).toContain("@fsh_rt_frames");
+  expect(compile(session, LEAKY, file, false, "unwind", false, true)).toBe(compile(session, LEAKY, file));
+  expect(compile(session, LEAKY, file, true)).not.toContain("@fsh_rt_frames");
+  expect(compile(session, LEAKY, file, true, "unwind", false, true)).toContain("@fsh_rt_frames");
   for (const release of [false, true]) {
     const [plain] = runtimeUnits("", release);
     const [leaks] = runtimeUnits("", release, false, undefined, true);

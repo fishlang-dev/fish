@@ -6,6 +6,9 @@ import { CompileError } from "../src/diag.ts";
 import { analyze } from "../src/main.ts";
 import { frames } from "../src/lsp.ts";
 import { load } from "../src/modules.ts";
+import { newCompilation, newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 const dir = mkdtempSync(join(tmpdir(), "fishc-lsp-"));
 
@@ -18,7 +21,7 @@ function file(name: string, src: string): string {
 
 test("a file without main is checked as a module", () => {
   const src = "export class Oops { code: i64 = 1 }\nexport function f(n: i64): i64 throws Oops {\n  if (n < 0) throw new Oops();\n  return n;\n}\n";
-  const { checked } = analyze(src, file("module.fsh", src));
+  const { checked } = analyze(session, src, file("module.fsh", src));
   expect(checked.instances.some((i) => i.symbol === "f")).toBe(true);
 });
 
@@ -26,7 +29,7 @@ test("a type error is thrown at its span", () => {
   const src = "function main() {\n  const n: i64 = true;\n}\n";
   let error: unknown;
   try {
-    analyze(src, file("bad.fsh", src));
+    analyze(session, src, file("bad.fsh", src));
   } catch (e) {
     error = e;
   }
@@ -38,22 +41,22 @@ test("a type error inside a test block is reported, though a build leaves the bl
   const src = 'function main() {}\ntest("adds", () => {\n  const n: i64 = "two";\n});\n';
   let error: unknown;
   try {
-    analyze(src, file("tested.fsh", src));
+    analyze(session, src, file("tested.fsh", src));
   } catch (e) {
     error = e;
   }
   expect(error).toBeInstanceOf(CompileError);
   expect(src.slice((error as CompileError).start, (error as CompileError).end)).toBe('"two"');
-  expect(() => analyze('function main() {}\ntest("adds", () => {\n  assert(1 + 1 === 2);\n});\n', file("passing.fsh", ""))).not.toThrow();
+  expect(() => analyze(session, 'function main() {}\ntest("adds", () => {\n  assert(1 + 1 === 2);\n});\n', file("passing.fsh", ""))).not.toThrow();
 });
 
 test("imported files are read through the reader given", () => {
   file("lib.fsh", "export function two(): i64 { return 2; }\n");
   const src = 'import { three } from "./lib.fsh";\nfunction main() { print(three()); }\n';
   const read = (path: string) => (path.endsWith("lib.fsh") ? "export function three(): i64 { return 3; }\n" : "");
-  const loaded = load(file("reader.fsh", src), src, read);
+  const loaded = load(newCompilation(session), file("reader.fsh", src), src, read);
   expect(loaded.sources.map((s) => s.src)).toContain("export function three(): i64 { return 3; }\n");
-  expect(() => analyze(src, join(dir, "reader.fsh"), read)).not.toThrow();
+  expect(() => analyze(session, src, join(dir, "reader.fsh"), read)).not.toThrow();
 });
 
 const frame = (body: string) => `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;

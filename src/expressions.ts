@@ -6,7 +6,8 @@ import {
 } from "./parser.ts";
 import { classNode, decoratorList } from "./declarations.ts";
 import { matchPattern, toPattern } from "./patterns.ts";
-import { isPropertyName, parameters, propertyName, returnAnnotation, type, typeParameters } from "./types.ts";
+import { isPropertyName, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters } from "./types.ts";
+import { nextId } from "./nodes.ts";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
 
@@ -36,7 +37,7 @@ export function sequence(c: Cursor): Expr {
   if (!c.at(",")) return first;
   const exprs = [first];
   while (c.eat(",")) exprs.push(expression(c));
-  return { kind: "sequence", exprs, start: first.start, end: c.end() };
+  return { id: nextId(c.ids), kind: "sequence", exprs, start: first.start, end: c.end() };
 }
 
 // One expression without a top-level comma: an argument, an element, an initializer.
@@ -51,9 +52,9 @@ export function expression(c: Cursor): Expr {
   // Right-associative: `a = b = c` is `a = (b = c)`.
   const value = expression(c);
   if (op === "=" && (target.kind === "object" || target.kind === "array")) {
-    return { kind: "destructure", pattern: toPattern(target), value, start: target.start, end: value.end };
+    return { id: nextId(c.ids), kind: "destructure", pattern: toPattern(c, target), value, start: target.start, end: value.end };
   }
-  return { kind: "assign", op, target, value, start: target.start, end: value.end };
+  return { id: nextId(c.ids), kind: "assign", op, target, value, start: target.start, end: value.end };
 }
 
 // What can start an arrow function; the head is then tried in full before committing.
@@ -68,7 +69,7 @@ function arrowFunction(c: Cursor): Expr | undefined {
   const head = c.attempt(() => arrowHead(c));
   if (!head) return undefined;
   const body = c.at("{") ? block(c) : expression(c);
-  return { kind: "arrow", ...head, body, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "arrow", ...head, body, start, end: c.end() };
 }
 
 function arrowHead(c: Cursor) {
@@ -80,19 +81,21 @@ function arrowHead(c: Cursor) {
   let typeParams: TypeParam[] = [];
   let params: Param[];
   let returnType: TypeNode | undefined;
+  let throws: TypeNode | undefined;
   if (c.peek().kind === "ident" && isToken(c.peek(1), "=>")) {
     const name = c.ident();
-    const pattern: Pattern = { kind: "ident", name: name.text, start: name.start, end: name.end };
-    params = [{ pattern, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false, start: name.start, end: name.end }];
+    const pattern: Pattern = { id: nextId(c.ids), kind: "ident", name: name.text, start: name.start, end: name.end };
+    params = [{ id: nextId(c.ids), pattern, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false, start: name.start, end: name.end }];
   } else {
     typeParams = typeParameters(c);
     params = parameters(c);
     returnType = returnAnnotation(c);
+    throws = throwsClause(c);
   }
   // No line break may come before `=>`, as in JavaScript.
   if (c.peek().newlineBefore) throw c.error("expected '=>'");
   c.expect("=>");
-  return { move, async, typeParams, params, returnType };
+  return { move, async, typeParams, params, returnType, ...(throws && { throws }) };
 }
 
 // Hack-style pipes, as in the TC39 proposal: left-associative, looser than `? :`, with `%`
@@ -106,7 +109,7 @@ function pipeline(c: Cursor): Expr {
     const used = c.topic.used;
     c.topic = outer;
     if (!used) throw new CompileError("the right side of '|>' must use the topic '%'", body.start, body.end);
-    value = { kind: "pipe", value, body, start: value.start, end: body.end };
+    value = { id: nextId(c.ids), kind: "pipe", value, body, start: value.start, end: body.end };
   }
   return value;
 }
@@ -117,7 +120,7 @@ function conditional(c: Cursor): Expr {
   const then = allowingIn(c, true, () => expression(c));
   c.expect(":");
   const otherwise = expression(c);
-  return { kind: "conditional", cond, then, else: otherwise, start: cond.start, end: otherwise.end };
+  return { id: nextId(c.ids), kind: "conditional", cond, then, else: otherwise, start: cond.start, end: otherwise.end };
 }
 
 const ASSIGN_OPERATORS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "&&=", "||=", "??="]);
@@ -147,7 +150,7 @@ function yieldExpression(c: Cursor): Expr {
   const t = c.peek();
   const ends = t.newlineBefore || t.kind === "eof" || [")", "]", "}", ",", ";", ":"].some((text) => c.at(text));
   const value = delegate || !ends ? expression(c) : undefined;
-  return { kind: "yield", value, delegate, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "yield", value, delegate, start, end: c.end() };
 }
 
 function binary(c: Cursor, minPrecedence = 0): Expr {
@@ -158,7 +161,7 @@ function binary(c: Cursor, minPrecedence = 0): Expr {
     if (atTypeOperator(c) && minPrecedence < PRECEDENCE["<"]) {
       const kind = c.next().text as "as" | "satisfies";
       const t = type(c);
-      left = { kind, expr: left, type: t, start: left.start, end: t.end };
+      left = { id: nextId(c.ids), kind, expr: left, type: t, start: left.start, end: t.end };
       continue;
     }
     if (!op || !width || PRECEDENCE[op] <= minPrecedence) return left;
@@ -167,7 +170,7 @@ function binary(c: Cursor, minPrecedence = 0): Expr {
     c.pos += width;
     // Right-associative: `a ** b ** c` is `a ** (b ** c)`.
     const right = binary(c, op === "**" ? PRECEDENCE[op] - 1 : PRECEDENCE[op]);
-    left = { kind: "binary", op, left, right, start: left.start, end: right.end };
+    left = { id: nextId(c.ids), kind: "binary", op, left, right, start: left.start, end: right.end };
   }
 }
 
@@ -210,12 +213,12 @@ export function unary(c: Cursor): Expr {
   // A throw expression, as the TC39 proposal has it, as in `x ?? throw err`.
   if (c.eat("throw")) {
     const value = unary(c);
-    return { kind: "throw", value, start: t.start, end: value.end };
+    return { id: nextId(c.ids), kind: "throw", value, start: t.start, end: value.end };
   }
   if (atComptime(c)) {
     c.next();
     const expr = unary(c);
-    return { kind: "comptime", expr, start: t.start, end: expr.end };
+    return { id: nextId(c.ids), kind: "comptime", expr, start: t.start, end: expr.end };
   }
   // `unsafe { expr }` gives `expr`'s value; like `comptime {`, it is a syntax error in TypeScript.
   if (c.at("unsafe") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
@@ -224,23 +227,23 @@ export function unary(c: Cursor): Expr {
     const expr = expression(c);
     c.eat(";");
     c.expect("}");
-    return { kind: "unsafe", expr, start: t.start, end: c.end() };
+    return { id: nextId(c.ids), kind: "unsafe", expr, start: t.start, end: c.end() };
   }
   if (c.eat("<")) {
     const asserted = type(c);
     c.expect(">");
     const expr = unary(c);
-    return { kind: "assertion", type: asserted, expr, start: t.start, end: expr.end };
+    return { id: nextId(c.ids), kind: "assertion", type: asserted, expr, start: t.start, end: expr.end };
   }
   if (c.at("++") || c.at("--")) {
     c.next();
     const operand = unary(c);
-    return { kind: "update", op: t.text as "++" | "--", prefix: true, operand, start: t.start, end: operand.end };
+    return { id: nextId(c.ids), kind: "update", op: t.text as "++" | "--", prefix: true, operand, start: t.start, end: operand.end };
   }
   if (!UNARY.has(t.text) || (t.kind !== "punct" && t.kind !== "ident")) return postfix(c);
   c.next();
   const operand = unary(c);
-  return { kind: "unary", op: t.text as UnaryOp, operand, start: t.start, end: operand.end };
+  return { id: nextId(c.ids), kind: "unary", op: t.text as UnaryOp, operand, start: t.start, end: operand.end };
 }
 
 // A newline before `++` or `--` ends the expression instead, as in JavaScript.
@@ -253,7 +256,7 @@ function postfix(c: Cursor): Expr {
   const e = chain(c, c.at("new") ? newExpression(c) : primary(c), true);
   if ((!c.at("++") && !c.at("--")) || c.peek().newlineBefore) return e;
   const op = c.next();
-  return { kind: "update", op: op.text as "++" | "--", prefix: false, operand: e, start: e.start, end: op.end };
+  return { id: nextId(c.ids), kind: "update", op: op.text as "++" | "--", prefix: false, operand: e, start: e.start, end: op.end };
 }
 
 // Member accesses, calls, tagged templates and `!` after `e`. Without `calls`, it stops
@@ -265,9 +268,9 @@ function chain(c: Cursor, e: Expr, calls: boolean): Expr {
     const optional = calls && c.eat("?.");
     if (c.eat("[")) {
       const index = allowingIn(c, true, () => sequence(c));
-      e = { kind: "index", object: e, index, optional, start, end: c.expect("]").end };
+      e = { id: nextId(c.ids), kind: "index", object: e, index, optional, start, end: c.expect("]").end };
     } else if (c.eat(".") || (optional && !c.at("(") && !c.at("<"))) {
-      e = { kind: "member", object: e, name: propertyKey(c), optional, start, end: c.end() };
+      e = { id: nextId(c.ids), kind: "member", object: e, name: propertyKey(c), optional, start, end: c.end() };
     } else if (calls && (c.at("(") || c.at("<"))) {
       // After `?.` a `<` can only start type arguments, so a failure there is a real error.
       const typeArgs = !c.at("<") ? [] : optional ? typeArguments(c, true) : c.attempt(() => typeArguments(c, false));
@@ -275,18 +278,18 @@ function chain(c: Cursor, e: Expr, calls: boolean): Expr {
       if (c.at("(")) {
         c.next();
         const args = c.list(() => element(c), ")");
-        e = { kind: "call", callee: e, typeArgs, args, optional, start, end: c.end() };
+        e = { id: nextId(c.ids), kind: "call", callee: e, typeArgs, args, optional, start, end: c.end() };
       } else if (atTemplate(c)) {
         const quoted = template(c);
-        e = { kind: "tagged", tag: e, typeArgs, template: quoted, start, end: quoted.end };
+        e = { id: nextId(c.ids), kind: "tagged", tag: e, typeArgs, template: quoted, start, end: quoted.end };
       } else {
-        e = { kind: "instantiation", expr: e, typeArgs, start, end: c.end() };
+        e = { id: nextId(c.ids), kind: "instantiation", expr: e, typeArgs, start, end: c.end() };
       }
     } else if (atTemplate(c)) {
       const quoted = template(c);
-      e = { kind: "tagged", tag: e, typeArgs: [], template: quoted, start, end: quoted.end };
+      e = { id: nextId(c.ids), kind: "tagged", tag: e, typeArgs: [], template: quoted, start, end: quoted.end };
     } else if (c.at("!") && !t.newlineBefore) {
-      e = { kind: "nonNull", expr: e, start, end: c.next().end };
+      e = { id: nextId(c.ids), kind: "nonNull", expr: e, start, end: c.next().end };
     } else {
       return e;
     }
@@ -317,12 +320,12 @@ function newExpression(c: Cursor): Expr {
   const start = c.expect("new").start;
   if (c.eat(".")) {
     if (!c.at("target")) throw c.error("expected 'target'");
-    return { kind: "meta", name: "new.target", start, end: c.next().end };
+    return { id: nextId(c.ids), kind: "meta", name: "new.target", start, end: c.next().end };
   }
   const callee = chain(c, c.at("new") ? newExpression(c) : primary(c), false);
   const typeArgs = c.at("<") ? c.attempt(() => typeArguments(c, false)) ?? [] : [];
   const args = c.eat("(") ? c.list(() => element(c), ")") : undefined;
-  return { kind: "new", callee, typeArgs, args, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "new", callee, typeArgs, args, start, end: c.end() };
 }
 
 // A template's pieces, with each substitution parsed by `part`; shared with template literal types.
@@ -345,7 +348,7 @@ export function templateParts<T>(c: Cursor, part: (c: Cursor) => T): { quasis: s
 
 function template(c: Cursor): Expr {
   const { quasis, raw, parts, start, end } = templateParts(c, (c) => allowingIn(c, true, () => sequence(c)));
-  return { kind: "template", quasis, raw, exprs: parts, start, end };
+  return { id: nextId(c.ids), kind: "template", quasis, raw, exprs: parts, start, end };
 }
 
 export function primary(c: Cursor): Expr {
@@ -354,12 +357,12 @@ export function primary(c: Cursor): Expr {
     const t = c.next();
     if (!c.topic) throw new CompileError("'%' is only valid on the right of '|>'", t.start, t.end);
     c.topic.used = true;
-    return { kind: "topic", start: t.start, end: t.end };
+    return { id: nextId(c.ids), kind: "topic", start: t.start, end: t.end };
   }
   if (c.at("/") || c.at("/=")) {
     const t = c.regex();
     const close = t.text.lastIndexOf("/");
-    return { kind: "regex", pattern: t.text.slice(1, close), flags: t.text.slice(close + 1), start: t.start, end: t.end };
+    return { id: nextId(c.ids), kind: "regex", pattern: t.text.slice(1, close), flags: t.text.slice(close + 1), start: t.start, end: t.end };
   }
   if (c.at("[")) return array(c);
   if (c.at("{")) return object(c);
@@ -373,28 +376,28 @@ export function primary(c: Cursor): Expr {
   if (c.at("class") || c.at("@")) {
     const start = c.peek().start;
     const decorators = decoratorList(c);
-    return { kind: "class", ...classNode(c, start, false, decorators) };
+    return { kind: "class", ...classNode(c, start, false, decorators), id: nextId(c.ids) };
   }
   if (c.peek().kind === "private") {
     const t = c.next();
-    return { kind: "privateName", name: t.text, start: t.start, end: t.end };
+    return { id: nextId(c.ids), kind: "privateName", name: t.text, start: t.start, end: t.end };
   }
   const t = c.next();
   const span = { start: t.start, end: t.end };
   switch (t.kind) {
     case "int":
-      return { kind: "int", value: BigInt(t.text.replaceAll("_", "")), ...span };
+      return { id: nextId(c.ids), kind: "int", value: BigInt(t.text.replaceAll("_", "")), ...span };
     case "float":
-      return { kind: "float", value: Number(t.text.replaceAll("_", "")), ...span };
+      return { id: nextId(c.ids), kind: "float", value: Number(t.text.replaceAll("_", "")), ...span };
     case "bigint":
-      return { kind: "bigint", value: BigInt(t.text.slice(0, -1).replaceAll("_", "")), ...span };
+      return { id: nextId(c.ids), kind: "bigint", value: BigInt(t.text.slice(0, -1).replaceAll("_", "")), ...span };
     case "string":
-      return { kind: "string", value: t.text, ...span };
+      return { id: nextId(c.ids), kind: "string", value: t.text, ...span };
     case "ident":
-      if (t.text === "true" || t.text === "false") return { kind: "bool", value: t.text === "true", ...span };
-      if (t.text === "null" || t.text === "this" || t.text === "super") return { kind: t.text, ...span };
+      if (t.text === "true" || t.text === "false") return { id: nextId(c.ids), kind: "bool", value: t.text === "true", ...span };
+      if (t.text === "null" || t.text === "this" || t.text === "super") return { id: nextId(c.ids), kind: t.text, ...span };
       if (RESERVED.has(t.text)) break;
-      return { kind: "ident", name: t.text, ...span };
+      return { id: nextId(c.ids), kind: "ident", name: t.text, ...span };
   }
   if (t.text === "(") {
     const e = allowingIn(c, true, () => sequence(c));
@@ -409,11 +412,11 @@ function importExpression(c: Cursor): Expr {
   const start = c.expect("import").start;
   if (c.eat(".")) {
     if (!c.at("meta")) throw c.error("expected 'meta'");
-    return { kind: "meta", name: "import.meta", start, end: c.next().end };
+    return { id: nextId(c.ids), kind: "meta", name: "import.meta", start, end: c.next().end };
   }
   c.expect("(");
   const args = c.list(() => expression(c), ")");
-  return { kind: "import", args, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "import", args, start, end: c.end() };
 }
 
 // `match (subject)` followed by `{` on the same line. In TypeScript that is a syntax error, so
@@ -430,7 +433,7 @@ function matchHead(c: Cursor): Expr {
 function matchExpression(c: Cursor, start: number, subject: Expr): Expr {
   c.expect("{");
   const arms = c.list(() => matchArm(c), "}");
-  return { kind: "match", subject, arms, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "match", subject, arms, start, end: c.end() };
 }
 
 // `case P if guard => body`. The guard is parsed below the arrow and conditional levels, so in
@@ -441,8 +444,8 @@ function matchArm(c: Cursor): MatchArm {
   const guard = c.eat("if") ? binary(c) : undefined;
   c.expect("=>");
   const at = c.peek().start;
-  const body: MatchArm["body"] = c.at("{") ? { kind: "block", body: block(c), start: at, end: c.end() } : expression(c);
-  return { pattern, guard, body, start, end: c.end() };
+  const body: MatchArm["body"] = c.at("{") ? { id: nextId(c.ids), kind: "block", body: block(c), start: at, end: c.end() } : expression(c);
+  return { id: nextId(c.ids), pattern, guard, body, start, end: c.end() };
 }
 
 // An array element or a call argument: an expression, or `...` and one.
@@ -450,7 +453,7 @@ function element(c: Cursor): Expr {
   const start = c.peek().start;
   if (!c.eat("...")) return expression(c);
   const value = expression(c);
-  return { kind: "spread", value, start, end: value.end };
+  return { id: nextId(c.ids), kind: "spread", value, start, end: value.end };
 }
 
 function array(c: Cursor): Expr {
@@ -466,13 +469,13 @@ function array(c: Cursor): Expr {
       if (!c.at("]")) c.expect(",");
     }
   });
-  return { kind: "array", elements, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "array", elements, start, end: c.end() };
 }
 
 function object(c: Cursor): Expr {
   const start = c.expect("{").start;
   const props = c.list(() => objectProp(c), "}");
-  return { kind: "object", props, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "object", props, start, end: c.end() };
 }
 
 // `async`, `get` and `set` are modifiers only when a property name follows, so
@@ -481,7 +484,7 @@ function objectProp(c: Cursor): ObjectProp {
   const start = c.peek().start;
   if (c.eat("...")) {
     const value = expression(c);
-    return { kind: "spread", value, start, end: value.end };
+    return { id: nextId(c.ids), kind: "spread", value, start, end: value.end };
   }
   const named = (offset: number) => isPropertyName(c.peek(offset)) || isToken(c.peek(offset), "[") || isToken(c.peek(offset), "*");
   const async = c.at("async") && named(1) && !c.peek(1).newlineBefore && c.eat("async");
@@ -490,20 +493,20 @@ function objectProp(c: Cursor): ObjectProp {
     const kind = c.next().text as "get" | "set";
     const key = propertyName(c);
     const { params, returnType, body } = functionRest(c);
-    return { kind, key, params, returnType, body, start, end: c.end() };
+    return { id: nextId(c.ids), kind, key, params, returnType, body, start, end: c.end() };
   }
   const keyToken = c.peek();
   const key = propertyName(c);
   if (async || generator || c.at("(") || c.at("<")) {
-    return { kind: "method", key, async, generator, ...functionRest(c), start, end: c.end() };
+    return { id: nextId(c.ids), kind: "method", key, async, generator, ...functionRest(c), start, end: c.end() };
   }
   if (c.eat(":")) {
     const value = expression(c);
-    return { kind: "property", key, value, start, end: value.end };
+    return { id: nextId(c.ids), kind: "property", key, value, start, end: value.end };
   }
   if (keyToken.kind !== "ident" || RESERVED.has(keyToken.text)) throw c.error("expected ':'");
   const fallback = c.eat("=") ? expression(c) : undefined;
-  return { kind: "shorthand", name: keyToken.text, default: fallback, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "shorthand", name: keyToken.text, default: fallback, start, end: c.end() };
 }
 
 // `async` starts an async function only when `next` follows on the same line.
@@ -517,7 +520,7 @@ function functionExpression(c: Cursor): Expr {
   c.expect("function");
   const generator = c.eat("*");
   const name = c.at("(") || c.at("<") ? undefined : c.ident().text;
-  return { kind: "function", name, async, generator, ...functionRest(c), start, end: c.end() };
+  return { id: nextId(c.ids), kind: "function", name, async, generator, ...functionRest(c), start, end: c.end() };
 }
 
 // What follows a function's name: type parameters, parameters, return type and body.

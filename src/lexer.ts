@@ -118,9 +118,10 @@ export type Lexer = {
 };
 
 // Tokens are produced on demand, because only the parser knows whether a `/` divides or
-// starts a regular expression, and lexing past an unrecognised regex could fail.
-export function lexer(src: string): Lexer {
-  let i = 0;
+// starts a regular expression, and lexing past an unrecognised regex could fail. Scanning starts
+// at `from`, so tokens read from inside a comment keep their offsets in the file.
+export function lexer(src: string, from = 0): Lexer {
+  let i = from;
   let newlineBefore = false;
   // For each template substitution we are inside, how many `{` it has open, so the `}` that
   // closes the substitution can be told from one that closes a block or an object.

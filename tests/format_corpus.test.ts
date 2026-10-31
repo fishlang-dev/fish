@@ -22,6 +22,8 @@ const refused = new Map([
   ["tests/programs/type.fsh > type_newline_extends", "'extends' on a new line after a type"],
   ["tests/programs/throw.fsh > throw_newline", "a line break after 'throw'"],
   ["tests/programs/modules_parse_error_elsewhere/b.fsh", "a parse error in an imported file"],
+  ["tests/programs/jsdoc_throws.fsh > jsdoc_throws_conflict", "a JSDoc @throws disagreeing with the written clause"],
+  ["tests/programs/jsdoc_throws.fsh > jsdoc_throws_still_conflicts", "a JSDoc @throws disagreeing with the written clause"],
 ]);
 
 const root = new URL("..", import.meta.url).pathname;
@@ -41,7 +43,7 @@ function programs(file: string): [string, string][] {
 }
 const units = files.flatMap(programs);
 
-const tree = (src: string) => programShape(parse(src));
+const tree = (src: string) => programShape(parse(src, { last: 0 }));
 
 // A comment as the formatter may rewrite it: trailing space trimmed, and a JSDoc-shaped block
 // comment's lines read without their indentation.
@@ -52,13 +54,13 @@ function commentText(c: Comment): string {
   return lines.every((l) => l.startsWith("*")) ? lines.map((l) => l.trimEnd()).join("\n") : text;
 }
 
-const comments = (src: string) => parseWithComments(src).comments.map(commentText);
+const comments = (src: string) => parseWithComments(src, { last: 0 }).comments.map(commentText);
 
 for (const [name, src] of units) {
   test(`${name} formats keeping its comments, parses back to the same tree and formats the same again`, () => {
     const reason = refused.get(name);
     if (reason !== undefined) {
-      expect(() => parse(src), `${name} is listed as refused (${reason}) but parses`).toThrow();
+      expect(() => parse(src, { last: 0 }), `${name} is listed as refused (${reason}) but parses`).toThrow();
       return;
     }
     const formatted = format(src);

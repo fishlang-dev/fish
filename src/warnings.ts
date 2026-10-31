@@ -1,28 +1,27 @@
 import type { Body, Instance, Local } from "./check.ts";
-import { prologues } from "./defaults.ts";
+import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
+import type { Id } from "./nodes.ts";
 import type { Param, Pattern, Stmt } from "./parser.ts";
 import { STD_BASE } from "./std.ts";
 
 // What the compiler reports without failing the build: variables and parameters nothing reads,
 // and statements control can never reach.
 
-// The `let` statements and parameters that declare a name, as the checker meets them; every other
-// node the checker's `locals` holds is a use of one.
-export const declarations = new WeakSet<object>();
-
-// The nodes a macro made, which no warning points into: their author can't change them.
-export const generated = new WeakSet<object>();
-
-export function markGenerated(node: unknown) {
-  if (!node || typeof node !== "object" || generated.has(node)) return;
-  generated.add(node);
-  Object.values(node).forEach(markGenerated);
+// Marks every node of a tree a macro made as `generated`, which no warning points into: their
+// author can't change them.
+export function markGenerated(generated: Tables["generated"], node: unknown, seen: Set<unknown> = new Set<unknown>()) {
+  if (!node || typeof node !== "object" || seen.has(node)) return;
+  seen.add(node);
+  if (typeof (node as { id?: unknown }).id === "number") generated.add(node as Id);
+  Object.values(node).forEach((v) => markGenerated(generated, v, seen));
 }
 
 // The warnings for a checked program, in source order. `required` says whether a body's parameters
 // are a signature's to decide, as an export's, an override's or an interface method's are.
-export function warnings(instances: Instance[], required: (b: Body) => boolean): CompileError[] {
+// `declarations` are the `let` statements and parameters that declare a name, as the checker met
+// them; every other node an instance's `locals` holds is a use of one.
+export function warnings({ declarations, generated, prologues }: Tables, instances: Instance[], required: (b: Body) => boolean): CompileError[] {
   const used = new Set<Local>();
   for (const i of instances) {
     for (const [node, l] of i.locals) if (!declarations.has(node)) used.add(l);
@@ -49,7 +48,7 @@ export function warnings(instances: Instance[], required: (b: Body) => boolean):
   }
   const unreachable = new Map<number, CompileError>();
   for (const i of instances) {
-    if (i.body.start < STD_BASE && !generated.has(i.body)) unreachableIn(i.body.body, i, unreachable);
+    if (i.body.start < STD_BASE && !generated.has(i.body)) unreachableIn(generated, i.body.body, i, unreachable);
   }
   const all = [...[...found.values()].filter((e) => !e.used).map((e) => e.warning), ...unreachable.values()];
   return all.sort((a, b) => a.start - b.start);
@@ -70,9 +69,9 @@ function variable(s: Stmt): Pattern | undefined {
 
 // Reports the first statement after one control never passes, once per such run, in these
 // statements and the blocks inside them.
-function unreachableIn(stmts: Stmt[], i: Instance, out: Map<number, CompileError>) {
+function unreachableIn(generated: Tables["generated"], stmts: Stmt[], i: Instance, out: Map<number, CompileError>) {
   for (const [k, s] of stmts.entries()) {
-    for (const inner of blocks(s)) unreachableIn(inner, i, out);
+    for (const inner of blocks(s)) unreachableIn(generated, inner, i, out);
     const why = leaves(s, i);
     if (!why) continue;
     const next = stmts.slice(k + 1).find((x) => !HOISTED.has(x.kind) && !(x.kind === "let" && !variable(x)) && !generated.has(x));

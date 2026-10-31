@@ -1,10 +1,16 @@
 import { expect, test } from "bun:test";
+import { newCompilation, newSession } from "../src/compilation.ts";
 import { parse } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 
+const session = newSession();
+
 // The classes and functions std gives a program, by name: a program's own name for one of std's
 // leaves std's under a name no program can write, or leaves out the library it would clash with.
-const given = (src: string) => stdFor(parse(src)).flatMap((s) => (s.kind === "class" || s.kind === "function" ? [s.name] : []));
+const given = (src: string) => {
+  const compilation = newCompilation(session);
+  return stdFor(compilation, parse(src, compilation.ids)).flatMap((s) => (s.kind === "class" || s.kind === "function" ? [s.name] : []));
+};
 
 const SERVE = `async function main(): Promise<void> throws IoError { await serve({}, async (req) => new Response("hi")); }`;
 

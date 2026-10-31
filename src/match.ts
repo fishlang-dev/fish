@@ -1,6 +1,7 @@
+import { nextId, type Ids } from "./nodes.ts";
 import type { Expr, Pattern } from "./parser.ts";
 import { unsupported } from "./unsupported.ts";
-import { literalType, lower, show, unionType, type ClassType, type Field, type LiteralType, type ObjectType, type ParamType, type Type, type VariantType } from "./typing.ts";
+import type { ClassType, Field, LiteralType, ObjectType, ParamType, Type, VariantType, Typing } from "./typing.ts";
 
 // What `match` knows about patterns apart from checking expressions: what each pattern tests,
 // the names they bind, and which values of the matched type no arm covers.
@@ -33,7 +34,7 @@ export type LiteralValue = string | bigint | boolean | number | null;
 export type Shape = ObjectType | ClassType | ParamType;
 
 // A pattern's information with each type it holds as an instance sees it.
-export function lowerPattern(info: PatternInfo): PatternInfo {
+export function lowerPattern({ lower }: Typing, info: PatternInfo): PatternInfo {
   const type = lower(info.type);
   if (info.kind === "variant") return { ...info, type, variant: lower(info.variant) as VariantType };
   if (info.kind === "some") return { ...info, type, inner: lower(info.inner) };
@@ -94,12 +95,13 @@ type Case =
   | { kind: "object"; type: Shape }
   | { kind: "open"; type: Type };
 
-function cases(t: Type): Case[] {
+function cases(typing: Typing, t: Type): Case[] {
+  const { literalType, unionType } = typing;
   if (t === "boolean") return [literalType(true), literalType(false)].map((type) => ({ kind: "literal", type }));
   const members = typeof t !== "string" && t.kind === "union" ? t.members : [t];
   if (members.includes("null") && members.length > 1) return [{ kind: "none" }, { kind: "some", inner: unionType(members.filter((m) => m !== "null")) }];
   return members.flatMap((m): Case[] => {
-    if (m === "boolean") return cases(m);
+    if (m === "boolean") return cases(typing, m);
     if (m === "null") return [{ kind: "none" }];
     if (typeof m !== "string" && m.kind === "literal") return [{ kind: "literal", type: m }];
     if (typeof m !== "string" && m.kind === "variant") return [{ kind: "variant", variant: m }];
@@ -114,21 +116,21 @@ type Row = Pattern[];
 // A value no row covers, as it reads in a message, or undefined when every value is covered.
 // This is the usefulness check Rust's compiler uses: the first column is split by the case each
 // value of its type falls into, keeping the rows whose first pattern can match that case.
-export function uncovered(rows: Row[], types: Type[], recorded: (p: Pattern) => PatternInfo | undefined): string[] | undefined {
+export function uncovered(typing: Typing, ids: Ids, rows: Row[], types: Type[], recorded: (p: Pattern) => PatternInfo | undefined): string[] | undefined {
   // The wildcards made while splitting columns were never checked, and match anything.
   const info = (p: Pattern): PatternInfo => recorded(p) ?? { kind: "any", type: "void" };
   if (types.length === 0) return rows.length === 0 ? [] : undefined;
   const [type, ...rest] = types as [Type, ...Type[]];
   const expanded = rows.flatMap((row) => alternatives(row[0]!, info).map((p) => [p, ...row.slice(1)]));
-  for (const c of cases(type)) {
+  for (const c of cases(typing, type)) {
     const fields = fieldTypes(c);
     const kept: Row[] = [];
     for (const [p, ...tail] of expanded) {
-      const parts = specialize(p!, c, fields.length, info);
+      const parts = specialize(ids, p!, c, fields.length, info);
       if (parts) kept.push([...parts, ...tail]);
     }
-    const missing = uncovered(kept, [...fields, ...rest], recorded);
-    if (missing) return [render(c, missing.slice(0, fields.length)), ...missing.slice(fields.length)];
+    const missing = uncovered(typing, ids, kept, [...fields, ...rest], recorded);
+    if (missing) return [render(typing, c, missing.slice(0, fields.length)), ...missing.slice(fields.length)];
   }
   return undefined;
 }
@@ -146,9 +148,9 @@ function fieldTypes(c: Case): Type[] {
 }
 
 // The patterns for a case's fields when `p` can match a value of that case, or undefined.
-function specialize(p: Pattern, c: Case, arity: number, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
+function specialize(ids: Ids, p: Pattern, c: Case, arity: number, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
   const found = info(p);
-  const wild: Pattern[] = Array.from({ length: arity }, () => ({ kind: "wildcard", start: p.start, end: p.end }));
+  const wild: Pattern[] = Array.from({ length: arity }, (): Pattern => ({ id: nextId(ids), kind: "wildcard", start: p.start, end: p.end }));
   // On an Option, a pattern for a value is a pattern for what `Some` holds.
   if (c.kind === "some" && found.kind !== "some" && found.kind !== "none" && found.kind !== "any") return [p];
   switch (found.kind) {
@@ -165,7 +167,7 @@ function specialize(p: Pattern, c: Case, arity: number, info: (p: Pattern) => Pa
     case "object": {
       // A field the pattern leaves out matches anything.
       if (c.kind !== "object" || !found.shapes.includes(c.type)) return undefined;
-      return objectFields(c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { kind: "wildcard", start: p.start, end: p.end });
+      return objectFields(c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { id: nextId(ids), kind: "wildcard", start: p.start, end: p.end });
     }
     default:
       return undefined;
@@ -179,7 +181,7 @@ export function objectFields(t: Shape): Field[] {
   return [...(t.base ? objectFields(t.base) : []), ...t.fields].filter((f) => (f.access ?? "public") === "public");
 }
 
-function render(c: Case, fields: string[]): string {
+function render({ show }: Typing, c: Case, fields: string[]): string {
   switch (c.kind) {
     case "literal":
       return show(c.type);
@@ -200,7 +202,7 @@ function render(c: Case, fields: string[]): string {
 }
 
 // The message for a value no arm covers: the case to add, or the catch-all.
-export function missing(example: string, type: Type): string {
+export function missing({ show }: Typing, example: string, type: Type): string {
   if (example === "_") return `this match doesn't cover every '${show(type)}'; add 'case _ =>' for the rest`;
   return `this match doesn't cover ${example}; add 'case ${example} =>', or 'case _ =>' for the rest`;
 }

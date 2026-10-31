@@ -1,13 +1,15 @@
-import { extend, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrides, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
+import type { Tables } from "./compilation.ts";
+import { nextId } from "./nodes.ts";
 import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import type { TypeNode } from "./parser.ts";
+import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { retuple, fits, holdsPattern, objectType, optionalField, blockFor, show, tupleType, unionType, widenEnum, type ClassType, type Type, type VariantType } from "./typing.ts";
+import { widenEnum, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -15,7 +17,9 @@ import { retuple, fits, holdsPattern, objectType, optionalField, blockFor, show,
 // What the registry needs from the checker, which in turn needs it, so each reaches the
 // other lazily.
 type Checker = {
+  tables: Tables;
   classes: Map<string, ClassInfo>;
+  templates: Map<string, ClassNode>;
   members: Members;
   resolveType(t: TypeNode): Type;
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
@@ -26,7 +30,9 @@ type Checker = {
   classNames(at: number): string[];
 };
 
-export function registry({ classes, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
+export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
+  const { typing, ids } = tables;
+  const { optionalField, holdsPattern, fits, show, blockFor } = typing;
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new Map<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
@@ -52,18 +58,39 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
     return [...new Set([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])];
   }
 
-  // Bases are linked first, since a derived constructor may take its base's parameters.
+  // Bases are linked first, since a derived constructor may take its base's parameters. An abstract
+  // class's templates are marked, and a concrete class's copies made, before overrides are checked.
   function link(c: ClassInfo, path: Set<ClassInfo>) {
-    if (linked.has(c) || c.baseName === undefined) return;
+    if (linked.has(c)) return;
+    if (c.baseName === undefined) {
+      implementAbstracts(ids, c);
+      linked.add(c);
+      return;
+    }
     if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
-    const base = classes.get(c.baseName);
-    if (!base) throw new CompileError(`cannot find class '${c.baseName}'${didYouMean(c.baseName, classNames(c.node.extends!.start))}`, c.node.extends!.start, c.node.extends!.end);
+    const base = baseOf(c, c.baseName);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
     const rust = rustClassOf(base.type);
     if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
     link(base, path.add(c));
-    extend(c, base);
+    const at = c.node.extends!;
+    extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: nextId(ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
+    implementAbstracts(ids, c);
+    checkOverrides(c);
     linked.add(c);
+  }
+
+  // The class `extends` names, a generic one made from the type arguments it is written with,
+  // as this class's own type parameters stand for them.
+  function baseOf(c: ClassInfo, name: string): ClassInfo {
+    const at = c.node.extends!;
+    if (!classes.has(name) && !templates.has(name)) throw new CompileError(`cannot find class '${name}'${didYouMean(name, classNames(at.start))}`, at.start, at.end);
+    const args = at.kind === "instantiation" ? at.typeArgs : [];
+    // A declared class is found by name: an abstract one is no type a value can have to resolve.
+    const declared = at.kind === "instantiation" ? undefined : classes.get(name);
+    if (declared) return declared;
+    const type = withScope(c.scope, () => resolveType({ id: nextId(ids), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
+    return infoOf.get(type)!;
   }
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
@@ -71,20 +98,22 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   // Whether its fields are known, which they aren't yet while its own fields are being resolved.
   function layout(c: ClassInfo): boolean {
     if (laidOut.has(c)) return !laying.has(c) && (!c.base || layout(c.base));
+    // A generic class's instance is made after the declared classes are linked.
+    link(c, new Set());
     laidOut.add(c);
     laying.add(c);
     if (c.base) layout(c.base);
     c.type.fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
       if (f.type) {
-        const type = storable(withScope(c.scope, () => resolveType(f.type!)), f);
+        const type = storable(typing, withScope(c.scope, () => resolveType(f.type!)), f);
         const optional = f.written ? optionalField(f.name, withScope(c.scope, () => resolveType(f.written!))).optional : f.undefinedSpelled && ("undefined" as const);
         return { name: f.name, type, access: f.access, ...readonly, ...(optional && { optional }) };
       }
       if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
       const name = `${c.type.name}.${f.name} initializer`;
       const initializer: Body = {
-        name, params: [], body: [{ kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
+        id: nextId(ids), name, params: [], body: [{ id: nextId(ids), kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
         owner: c.type, scope: c.scope, start: f.start, end: f.end,
       };
       const instance = instanceOf(initializer);
@@ -155,7 +184,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
       else if (t.kind === "object") t.fields.forEach((f) => reach(f.type));
     };
     reach(c);
-    for (const h of holders) for (const f of h.fields) f.type = swapped(f.type, c, back);
+    for (const h of holders) for (const f of h.fields) f.type = swapped(typing, f.type, c, back);
   }
 
   function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
@@ -173,10 +202,11 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
 }
 
 // A type with a class it holds inline, in a union, an object or a tuple, swapped for another.
-function swapped(t: Type, from: ClassType, to: Type): Type {
+function swapped(typing: Typing, t: Type, from: ClassType, to: Type): Type {
+  const { unionType, retuple, objectType } = typing;
   if (t === from) return to;
   if (typeof t === "string") return t;
-  if (t.kind === "union") return unionType(t.members.map((m) => swapped(m, from, to)), t.name);
-  if (t.kind === "object" && !t.match) return t.tuple ? retuple(t, (e) => swapped(e, from, to)) : objectType(t.fields.map((f) => ({ ...f, type: swapped(f.type, from, to) })));
+  if (t.kind === "union") return unionType(t.members.map((m) => swapped(typing, m, from, to)), t.name);
+  if (t.kind === "object" && !t.match) return t.tuple ? retuple(t, (e) => swapped(typing, e, from, to)) : objectType(t.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
   return t;
 }

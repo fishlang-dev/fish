@@ -5,6 +5,9 @@ import { dirname, join } from "node:path";
 import { formatError } from "../src/diag.ts";
 import { build } from "../src/main.ts";
 import { sanitized } from "./sanitized.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // Each test builds a program with the JS engine, whose sources take several seconds to compile.
 setDefaultTimeout(30_000);
@@ -189,7 +192,7 @@ function run(main: string, args: string[] = [], env: Record<string, string> = {}
   const dir = project(main);
   const [entry, out] = [join(dir, "main.fsh"), join(dir, "main")];
   try {
-    build(entry, out);
+    build(session, entry, out);
   } catch (e) {
     return formatError(e as never, "main.fsh", main).split("\n")[0]!.replaceAll(`${dir}/`, "");
   }
@@ -240,7 +243,7 @@ function main() {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "HI! 3.5 5\nnull got x\ns n b e\nyes 42 string:a number:2\n4\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "HI! 3.5 5\nnull got x\ns n b e\nyes 42 string:a number:2\n4\n", stderr: "", exitCode: 0 });
 });
 
 test("a JS throw, or a result that isn't what its declaration says, panics at the call", () => {
@@ -269,7 +272,7 @@ function main() {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "3 1 3\n2 2 c\na 1 2 a\nx:?:1 y:true:2\nmade3 made4 true false\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "3 1 3\n2 2 c\na 1 2 a\nx:?:1 y:true:2\nmade3 made4 true false\n", stderr: "", exitCode: 0 });
 });
 
 test("an array whose elements aren't what the declaration says panics naming them", () => {
@@ -294,7 +297,7 @@ function main() {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "3 box1 5 5\nbox1:10\nmade2:1 10\n5 new new5 n3\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "3 box1 5 5\nbox1:10\nmade2:1 10\n5 new new5 n3\n", stderr: "", exitCode: 0 });
 });
 
 test("a compound assignment to a handle's property waits", () => {
@@ -319,7 +322,7 @@ function main() {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "5 200 1.5 2 x 7 true true\n1\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "5 200 1.5 2 x 7 true true\n1\n", stderr: "", exitCode: 0 });
 });
 
 test("a result no member of its declared union takes panics", () => {
@@ -343,7 +346,7 @@ function main() {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "[ 'a' ] [ 1, 2 ] [ 't', 9 ]\n2 true true true\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "[ 'a' ] [ 1, 2 ] [ 't', 9 ]\n2 true true true\n", stderr: "", exitCode: 0 });
 });
 
 test("a generic Fish function forwards its type parameter to a package", () => {
@@ -367,7 +370,7 @@ function main() {
 }
 `;
   const dir = project(main, { "lib.fsh": `import { relabel } from "esm";\nimport type { Result } from "esm";\nexport function counted(r: Result): string {\n  return relabel(r);\n}\n` });
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "made2 made 2 true\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "made2 made 2 true\n", stderr: "", exitCode: 0 });
 });
 
 test("a Fish type holding itself has no JS form yet", () => {
@@ -398,7 +401,7 @@ async function main(): Promise<void> throws JsError {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "42\nJsError bad input\n[JsError: bad input]\nreleased\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "42\nJsError bad input\n[JsError: bad input]\nreleased\n", stderr: "", exitCode: 0 });
 });
 
 test("awaiting a package's promise is a throw to catch or declare", () => {
@@ -425,7 +428,7 @@ function main() {
 import { make } from "esm";
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "6\n[ 'A', 'B' ] [ 'c4' ]\ngot one got two\nnone\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "6\n[ 'A', 'B' ] [ 'c4' ]\ngot one got two\nnone\n", stderr: "", exitCode: 0 });
 });
 
 test("a task panicking in a callback JS runs ends the program, since the panic would cross JS's frames", () => {
@@ -451,7 +454,7 @@ async function main() {
 `;
   const dir = project(main);
   const [entry, out] = [join(dir, "main.fsh"), join(dir, "main")];
-  build(entry, out);
+  build(session, entry, out);
   // Bounded, so a lock the panic left held fails the test rather than hanging it.
   const ran = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" }, timeout: 20_000 });
   expect({ stdout: ran.stdout.toString(), stderr: ran.stderr.toString().replaceAll(`${dir}/`, ""), exitCode: ran.exitCode }).toEqual({
@@ -485,7 +488,7 @@ async function main(): Promise<void> throws JsError {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "8 ignored\nran though ignored\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "8 ignored\nran though ignored\n", stderr: "", exitCode: 0 });
 });
 
 test("a future is given to JS only inside an async function, and only one that can't throw", () => {
@@ -520,7 +523,7 @@ async function main(): Promise<void> throws JsError {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "x! amade1,A\nsoon\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "x! amade1,A\nsoon\n", stderr: "", exitCode: 0 });
 });
 
 test("a callback or a Promise written to a handle's property goes to JS, and isn't read back", () => {
@@ -538,7 +541,7 @@ async function main(): Promise<void> throws JsError {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "why? later\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "why? later\n", stderr: "", exitCode: 0 });
   expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = s.handler;\n}\n`)).toBe("main.fsh:4:13: error: reading property 'handler' of 'Slot' isn't supported yet: it holds a function, which Fish can give JS but not read back");
   expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = (s.handler = (t) => t);\n}\n`)).toBe("main.fsh:4:14: error: a callback or a Promise written to property 'handler' goes to JS, so the assignment has no value to use; write it as a statement of its own");
 });
@@ -553,7 +556,7 @@ function main() {
 }
 `;
   const dir = project(main);
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "made3\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "made3\n", stderr: "", exitCode: 0 });
   const locked = run(`import { shout } from "esm";\nfunction main() {\n  const l = new Lock("a");\n  l.update((v) => { v = shout(v); });\n}\n`);
   expect(locked).toEqual({ stdout: "", stderr: "panicked at main.fsh:4:25:\ncalled into JS while holding a Lock, which a callback JS runs may wait for; call the package before 'update' or after it\nstack backtrace:\n   0: <arrow 4:12> at main.fsh:4:25\n   1: main at main.fsh:4:3\n", exitCode: 101 });
 });
@@ -589,7 +592,7 @@ async function main(): Promise<void> throws JsError {
   console.log(r, m);
 }
 `;
-  expect(sanitized(join(dir, "main.fsh"), main)).toEqual({ stdout: "héllo:6:true:héllo:héllo ENOENT open\n", stderr: "", exitCode: 0 });
+  expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "héllo:6:true:héllo:héllo ENOENT open\n", stderr: "", exitCode: 0 });
   // With no async runtime the file is read at once, and the promise's jobs still wait for the
   // calling JS to finish.
   expect(run(`import { ordered } from "files";\nfunction main() { console.log(ordered(${JSON.stringify(join(dir, "written.txt"))})); }\n`)).toEqual({ stdout: "sync\n", stderr: "", exitCode: 0 });
