@@ -42,7 +42,7 @@ test("fishc build with no file builds the package around the working directory i
 test("a package's entry and its errors are found through the manifest", () => {
   const p = dir("entry", { "fish.toml": `[package]\nname = "entry"\nversion = "1.0.0"\nentry = "app/start.fsh"\n`, "app/start.fsh": `function main() { const x: i64 = "no"; }\n` });
   const bad = fishc(p, "build");
-  expect([bad.code, bad.err.split("\n")[0]]).toEqual([1, `app/start.fsh:1:34: error: type '"no"' is not assignable to type 'i64'`]);
+  expect([bad.code, bad.err.split("\n")[0]]).toEqual([1, `app/start.fsh:1:34: error[E0101]: type '"no"' is not assignable to type 'i64'`]);
   const gone = dir("gone", { "fish.toml": `[package]\nname = "gone"\nversion = "1.0.0"\nentry = "src/app.fsh"\n` });
   expect(fishc(gone, "build").err.split("\n")[0]).toBe(`fish.toml:4:9: error[E0905]: the entry 'src/app.fsh' doesn't exist; create it, or name another with entry = "..."`);
   const typo = dir("typo", { "fish.toml": `[package]\nname = "typo"\nverison = "1.0.0"\n` });
@@ -144,7 +144,7 @@ test("fishc check checks a file or package without building, exiting 1 on an err
   const bad = fishc(p, "check", "bad.fsh");
   expect(bad.code).toBe(1);
   expect(bad.err).toBe(fishc(p, "build", "bad.fsh").err);
-  expect(bad.err).toContain("bad.fsh:2:18: error:");
+  expect(bad.err).toContain("bad.fsh:2:18: error[E0101]:");
 });
 
 test("fishc run builds and runs a program with its arguments and exit code", () => {
@@ -157,5 +157,5 @@ test("fishc run builds and runs a program with its arguments and exit code", () 
   const bad = fishc(p, "run", "bad.fsh");
   expect(bad.code).toBe(1);
   expect(bad.out).toBe("");
-  expect(bad.err).toContain("error:");
+  expect(bad.err).toContain("error[E0101]:");
 });

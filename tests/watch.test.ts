@@ -111,7 +111,7 @@ test("fishc watch restarts the program when a file it imports changes, and survi
     const failed = err.text.length;
     writeFileSync(join(d, "word.fsh"), word("word", `1`));
     await until(err, "[fishc] waiting for changes\n", failed);
-    expect(err.text.slice(failed)).toContain("error:");
+    expect(err.text.slice(failed)).toContain("error[E0101]:");
     writeFileSync(join(d, "word.fsh"), word("word", `"three"`));
     await until(err, "three\n");
     expect(err.text.split("\n").filter((l) => /^[a-z]+$/.test(l))).toEqual(["one", "two", "three"]);
@@ -132,7 +132,7 @@ test("fishc watch sees a new import that didn't exist or didn't build when it is
     writeFileSync(join(d, "extra.fsh"), word("extra", "1"));
     await until(err, "[fishc] waiting for changes\n", at);
     expect(err.text.slice(at)).toContain("[fishc] restarting: extra.fsh changed");
-    expect(err.text.slice(at)).toContain("error:");
+    expect(err.text.slice(at)).toContain("error[E0101]:");
     writeFileSync(join(d, "extra.fsh"), word("extra", `"fixed"`));
     await until(err, "fixed\n");
   });

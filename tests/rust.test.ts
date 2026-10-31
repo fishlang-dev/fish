@@ -236,7 +236,7 @@ function main() {
 }
 `,
   });
-  expect(refused(dir)).toStartWith("src/main.fsh:3:30: error: property 'rust' does not exist on type");
+  expect(refused(dir)).toStartWith("src/main.fsh:3:30: error[E0502]: property 'rust' does not exist on type");
   expect(trusted({ crate: "demo", path: "util::mul", symbol: rustSymbol("demo", "util::mul") }).symbol).toBe("fsh_rust_4demo4util3mul");
   for (const name of [
     { crate: "std", path: "fs::write(x)", symbol: rustSymbol("std", "fs::write(x)") },
@@ -384,7 +384,7 @@ test("a Rust type's constructor, statics and methods of each receiver are calls 
 
 test("Rust handles move and borrow as Fish values do, and cross threads", () => {
   expect(refused(handles(`function main() {\n  const c = new Counter(1);\n  consume(c);\n  console.log(c.get());\n}\n`))).toBe("src/main.fsh:5:15: error[E0201]: 'c' was moved, so it can't be used here");
-  expect(refused(handles(`function look(c: Ref<Counter>) {\n  c.add(1);\n}\nfunction main() {}\n`))).toBe("src/main.fsh:3:3: error: cannot call 'add' on 'c' because it is a shared reference ('Ref'), which only reads");
+  expect(refused(handles(`function look(c: Ref<Counter>) {\n  c.add(1);\n}\nfunction main() {}\n`))).toBe("src/main.fsh:3:3: error[E0206]: cannot call 'add' on 'c' because it is a shared reference ('Ref'), which only reads");
   const sent = handles(`async function run(c: Counter): Promise<i64> {\n  return c.get();\n}\nasync function main() {\n  const n = await spawn(run(new Counter(1)));\n  console.log(n);\n}\n`);
   const file = join(sent, "src", "main.fsh");
   expect(() => compile(session, readFileSync(file, "utf8"), file)).not.toThrow();
@@ -392,12 +392,12 @@ test("Rust handles move and borrow as Fish values do, and cross threads", () => 
 
 test("what a Rust handle can't do is refused where it is written", () => {
   const cases: [string, string][] = [
-    [`function main() {\n  const a = new Counter(1);\n  console.log(a === new Counter(2));\n}\n`, "src/main.fsh:4:15: error: values of type 'Counter' can't be compared with '===': a Rust 'Counter' isn't compared from Fish; compare what its methods give"],
-    [`function main() {\n  const a = new Counter(1);\n  console.log(a);\n}\n`, "src/main.fsh:4:15: error: printing a 'Counter' isn't supported, since it holds a Rust value; print what its methods give"],
-    [`function main() {\n  const a = new Counter(1);\n  const o = { ...a };\n}\n`, "src/main.fsh:4:15: error: a Rust 'Counter' has no fields Fish can read, so it can't be spread; call its methods for what it holds"],
-    [`function main() {\n  const b = Bare.make();\n  const c = b.clone();\n}\n`, "src/main.fsh:4:13: error: can't clone a Rust 'Bare' unless its class declares 'clone(): Bare', which calls its Clone"],
-    [`function main() {\n  const xs = [new Counter(1)];\n  const ys = xs.clone();\n}\n`, "src/main.fsh:4:14: error: can't clone a value holding a Rust 'Counter' as a whole; clone each 'Counter' with its 'clone()'"],
-    [`function main() {\n  const b = new Bare();\n}\n`, "src/main.fsh:3:13: error: the Rust type 'Bare' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function"],
+    [`function main() {\n  const a = new Counter(1);\n  console.log(a === new Counter(2));\n}\n`, "src/main.fsh:4:15: error[E0112]: values of type 'Counter' can't be compared with '===': a Rust 'Counter' isn't compared from Fish; compare what its methods give"],
+    [`function main() {\n  const a = new Counter(1);\n  console.log(a);\n}\n`, "src/main.fsh:4:15: error[E1004]: printing a 'Counter' isn't supported, since it holds a Rust value; print what its methods give"],
+    [`function main() {\n  const a = new Counter(1);\n  const o = { ...a };\n}\n`, "src/main.fsh:4:15: error[E1004]: a Rust 'Counter' has no fields Fish can read, so it can't be spread; call its methods for what it holds"],
+    [`function main() {\n  const b = Bare.make();\n  const c = b.clone();\n}\n`, "src/main.fsh:4:13: error[E0213]: can't clone a Rust 'Bare' unless its class declares 'clone(): Bare', which calls its Clone"],
+    [`function main() {\n  const xs = [new Counter(1)];\n  const ys = xs.clone();\n}\n`, "src/main.fsh:4:14: error[E0213]: can't clone a value holding a Rust 'Counter' as a whole; clone each 'Counter' with its 'clone()'"],
+    [`function main() {\n  const b = new Bare();\n}\n`, "src/main.fsh:3:13: error[E1004]: the Rust type 'Bare' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function"],
   ];
   for (const [program, error] of cases) expect(refused(handles(program))).toBe(error);
   const declared = (body: string) => refused(handles(`function main() {}\n`, `declare module "rust:demo" {\n${body}\n}\n`));
@@ -529,9 +529,9 @@ function main() {
 
 test("a shared value gives its Rust values only inside update, so they need only be Send", () => {
   expect(refused(handles(`async function main() {\n  const s = shared<{ c: Counter }>({ c: new Counter(1) });\n  console.log(s.c.get());\n}\n`)))
-    .toBe("src/main.fsh:4:15: error: 'c' holds a Rust 'Counter', which a shared value gives only inside 'update', as in 's.update((v) => v.c...)'");
+    .toBe("src/main.fsh:4:15: error[E1004]: 'c' holds a Rust 'Counter', which a shared value gives only inside 'update', as in 's.update((v) => v.c...)'");
   expect(refused(handles(`async function main() {\n  const s = shared<{ c: Counter }>({ c: new Counter(1) });\n  const c = s.c;\n}\n`)))
-    .toBe("src/main.fsh:4:13: error: 'c' holds a Rust 'Counter', which a shared value gives only inside 'update', as in 's.update((v) => v.c...)'");
+    .toBe("src/main.fsh:4:13: error[E1004]: 'c' holds a Rust 'Counter', which a shared value gives only inside 'update', as in 's.update((v) => v.c...)'");
   const dir = handles(`async function work(s: shared<{ r: Racy }>): Promise<i64> {
   for (let i = 0; i < 200; i++) {
     s.update((v) => v.r.bump());
@@ -562,7 +562,7 @@ test("a static and a method naming one Rust function are refused, and so is a Dy
   const twice = pkg({ "src/rust.fsh": `declare module "rust:demo" {\n  export class Counter {\n    constructor(start: i64);\n    @rust("zero") again(): Counter;\n    static zero(): Counter;\n  }\n}\n`, "src/main.fsh": `import { Counter } from "rust:demo";\nfunction main() {}\n` });
   expect(refused(twice)).toBe("rust.fsh:5:5: error[E1004]: 'demo::Counter::zero' is declared elsewhere as (&self): Counter; declare it with the same types");
   expect(refused(handles(`interface Getter {\n  get(): i64;\n}\nfunction main() {\n  const d: Dyn<Getter> = new Counter(4);\n}\n`)))
-    .toBe("src/main.fsh:6:26: error: a Rust 'Counter' can't become a 'Dyn<Getter>' yet; call its methods on it, or take it as a generic parameter");
+    .toBe("src/main.fsh:6:26: error[E1004]: a Rust 'Counter' can't become a 'Dyn<Getter>' yet; call its methods on it, or take it as a generic parameter");
 });
 
 test("a Rust value moves through shorthand properties, '??' and destructuring defaults", () => {
