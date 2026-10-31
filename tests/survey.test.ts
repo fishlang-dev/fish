@@ -257,6 +257,17 @@ test("the curve picks the feature freeing the most lines first, and frees a file
   });
 });
 
+test("a project using Buffer waits on typed arrays, though std has base64 and hex", () => {
+  projects([{
+    "a.ts": "import { Buffer } from \"node:buffer\";\nexport function pack(a: Uint8Array): Buffer {\n  const head = Buffer.alloc(4);\n  head.writeUInt32BE(a.length, 0);\n  return Buffer.concat([head, Buffer.from(a)]);\n}\n",
+    "b.ts": "export const one = 1;\n",
+  }], (dirs) => {
+    const r = rank(dirs);
+    expect(r.curve.start.share).toBeLessThan(100);
+    expect(r.curve.steps.map((s) => s.feature)).toEqual(["Typed arrays and DataView"]);
+  });
+});
+
 test("unread files are left out of the steps but not the shares, and the self curve stands alone", () => {
   projects([{ "a.ts": big, "bad.ts": "const = ;\n", "v.tsx": "const v = <div/>;\nconst w = 1;\n" }, { "s.ts": "for (const k in o) {}\n" }], ([repo, self]) => {
     const r = rank([repo!], self);
