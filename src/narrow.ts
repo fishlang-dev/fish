@@ -1,6 +1,7 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
 import { fits, holdsPlainJs, isNumeric, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
+import { NodeMap, WeakNodeMap } from "./nodes.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
@@ -22,7 +23,7 @@ export function category(t: Type): string {
 
 // The `instanceof Map`, `instanceof Set` and `instanceof Array` tests and the `Array.isArray`
 // calls, by the kind each tests a value for.
-export const kindTests = new WeakMap<Expr, Kind>();
+export const kindTests = new WeakNodeMap<Expr, Kind>();
 export type Kind = "Map" | "Set" | "Array";
 
 export function ofKind(t: Type, kind: Kind): boolean {
@@ -56,7 +57,7 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // What a call of a function with a type predicate proves: which argument is narrowed, and to what.
 export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: number; type: Type } | undefined;
 
-export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
+export function guard(e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const nothing: Guard = { yes: new Map(), no: new Map() };
   const of = (x: Expr) => guard(x, types, locals, narrowable, predicate);
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
@@ -141,7 +142,7 @@ export function guard(e: Expr, types: Map<Expr, Type>, locals: Map<Expr, Local>,
 }
 
 // `null`, or `undefined` where no variable takes the name.
-export const isEmpty = (e: Expr, locals: Map<Expr, Local>) => e.kind === "null" || (e.kind === "ident" && e.name === "undefined" && !locals.has(e));
+export const isEmpty = (e: Expr, locals: NodeMap<Expr, Local>) => e.kind === "null" || (e.kind === "ident" && e.name === "undefined" && !locals.has(e));
 
 const is = (t: Type, value: unknown) => typeof t !== "string" && t.kind === "literal" && t.value === value;
 

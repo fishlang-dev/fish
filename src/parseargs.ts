@@ -1,5 +1,6 @@
 import { CompileError } from "./diag.ts";
 import { parseExpression, type Expr, type ObjectProp, type Span } from "./parser.ts";
+import { nextId } from "./nodes.ts";
 
 type Call = Extract<Expr, { kind: "call" }>;
 
@@ -17,7 +18,7 @@ export function parseArgsArgs(e: Call): Expr[] {
   for (const p of config?.props ?? []) {
     const key = keyOf(p, "its config");
     if (!SETTINGS.includes(key)) throw new CompileError(`'${key}' isn't a parseArgs setting; they are ${SETTINGS.join(", ")}`, p.start, p.end);
-    settings.set(key, p.kind === "shorthand" ? { kind: "ident", name: p.name, start: p.start, end: p.end } : (p as Extract<ObjectProp, { kind: "property" }>).value);
+    settings.set(key, p.kind === "shorthand" ? { id: nextId(), kind: "ident", name: p.name, start: p.start, end: p.end } : (p as Extract<ObjectProp, { kind: "property" }>).value);
   }
   const flag = (name: string, fallback: boolean): boolean => {
     const v = settings.get(name);
@@ -75,8 +76,8 @@ export function parseArgsArgs(e: Call): Expr[] {
   // `p` reads the program's.
   renamed(builder, "p", "parsed-args");
   placed(builder, defaults);
-  const bool = (value: boolean): Expr => ({ kind: "bool", value, start: e.start, end: e.end });
-  return [settings.get("args") ?? { kind: "null", start: e.start, end: e.end }, list, bool(flag("allowPositionals", false)), bool(flag("allowNegative", false)), builder];
+  const bool = (value: boolean): Expr => ({ id: nextId(), kind: "bool", value, start: e.start, end: e.end });
+  return [settings.get("args") ?? { id: nextId(), kind: "null", start: e.start, end: e.end }, list, bool(flag("allowPositionals", false)), bool(flag("allowNegative", false)), builder];
 }
 
 // A literal default that isn't what the option gives; anything else is checked as a value.

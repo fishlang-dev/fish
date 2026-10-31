@@ -3,6 +3,7 @@ import { relative } from "node:path";
 import { CompileError, madeUpNames } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
 import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
+import { nextId } from "./nodes.ts";
 
 // Top-level `test("name", () => { ... })` blocks: left out of a build, lifted into functions of
 // their own file for `fishc test` and the language server, and run by a generated harness.
@@ -54,8 +55,8 @@ export function liftTests(modules: Module[]): Test[] {
 function lifted(name: string, body: Body, at: Span): Func {
   const [made] = parse(`${body.async ? "async " : ""}function f(): ${body.async ? "Promise<void>" : "void"} throws Error {}`) as [Func];
   placed(made, at);
-  const statements: Stmt[] = Array.isArray(body.body) ? body.body : [{ kind: "expr", expr: body.body, start: body.body.start, end: body.body.end }];
-  return { ...made, name, body: statements };
+  const statements: Stmt[] = Array.isArray(body.body) ? body.body : [{ id: nextId(), kind: "expr", expr: body.body, start: body.body.start, end: body.body.end }];
+  return { ...made, id: nextId(), name, body: statements };
 }
 
 // Gives every node of a made tree the span `at`, where its parts are written.

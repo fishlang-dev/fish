@@ -23,12 +23,12 @@ async function differ(cases: [string, string, string][], parser = "typescript") 
   }
 }
 
-// The tree without its spans, to compare a program with its formatted text.
+// The tree without its spans and ids, to compare a program with its formatted text.
 function shape(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(shape);
   if (typeof v === "bigint") return `${v}n`;
   if (!v || typeof v !== "object") return v;
-  return Object.fromEntries(Object.entries(v).filter(([k]) => k !== "start" && k !== "end").map(([k, x]) => [k, shape(x)]));
+  return Object.fromEntries(Object.entries(v).filter(([k]) => k !== "start" && k !== "end" && k !== "id").map(([k, x]) => [k, shape(x)]));
 }
 
 // Each snippet formats to text that parses back to the same tree, and formats again unchanged.

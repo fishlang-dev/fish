@@ -1,6 +1,7 @@
 import type { Expr, Pattern } from "./parser.ts";
 import { unsupported } from "./unsupported.ts";
 import { literalType, lower, show, unionType, type ClassType, type Field, type LiteralType, type ObjectType, type ParamType, type Type, type VariantType } from "./typing.ts";
+import { nextId } from "./nodes.ts";
 
 // What `match` knows about patterns apart from checking expressions: what each pattern tests,
 // the names they bind, and which values of the matched type no arm covers.
@@ -148,7 +149,7 @@ function fieldTypes(c: Case): Type[] {
 // The patterns for a case's fields when `p` can match a value of that case, or undefined.
 function specialize(p: Pattern, c: Case, arity: number, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
   const found = info(p);
-  const wild: Pattern[] = Array.from({ length: arity }, () => ({ kind: "wildcard", start: p.start, end: p.end }));
+  const wild: Pattern[] = Array.from({ length: arity }, (): Pattern => ({ id: nextId(), kind: "wildcard", start: p.start, end: p.end }));
   // On an Option, a pattern for a value is a pattern for what `Some` holds.
   if (c.kind === "some" && found.kind !== "some" && found.kind !== "none" && found.kind !== "any") return [p];
   switch (found.kind) {
@@ -165,7 +166,7 @@ function specialize(p: Pattern, c: Case, arity: number, info: (p: Pattern) => Pa
     case "object": {
       // A field the pattern leaves out matches anything.
       if (c.kind !== "object" || !found.shapes.includes(c.type)) return undefined;
-      return objectFields(c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { kind: "wildcard", start: p.start, end: p.end });
+      return objectFields(c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { id: nextId(), kind: "wildcard", start: p.start, end: p.end });
     }
     default:
       return undefined;

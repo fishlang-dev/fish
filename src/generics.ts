@@ -3,9 +3,10 @@ import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.t
 import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
-import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Expr, Id, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
 import { described, openThrows, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, heldArgument, sameCallable, callableOf, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { NodeMap, NodeSet } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -280,8 +281,8 @@ export function instancing({ resolveType, paramType, withScope, signing, members
   const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
-  const sites = new WeakMap<Span, Map<string, Type>>();
-  return { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span) => sites.get(at), returnTypeOf, constructs };
+  const sites = new NodeMap<Span & Id, Map<string, Type>>();
+  return { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf: (at: Span & Id) => sites.get(at), returnTypeOf, constructs };
 
   // The type an arrow given as a generic body's argument is checked against: its parameter's
   // function type, with the type parameters the other arguments, or the written type
@@ -419,7 +420,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       found = {
         body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
         depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
-        types: new Map(), locals: new Map(), calls: new Map(), setters: new Map(), coercions: new Map(), jumps: new Map(), borrowsFrom: new Map(), raises: new Map(), caught: new Map(), consumes: new Set(), patterns: new Map(), copiesOut: new Set(),
+        types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       };
       byKey.set(key, found);
       pending.push(found);
@@ -429,7 +430,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
 
   // The instance a call runs: a generic function's type arguments come from the call, or are
   // inferred from its arguments, and must satisfy their bounds.
-  function instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance {
+  function instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span & Id): Instance {
     const params = typeParamsOf(f);
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
       throw new CompileError(`expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
@@ -744,8 +745,8 @@ function heldInArgument(f: Body, name: string): boolean {
 export function genericClasses({ classes, templates, register, layout, members, resolveType, withScope }: ClassChecker) {
   // Where each instance was first used, and each template's instances by their arguments.
   const uses = new Map<ClassInfo, Span>();
-  const instancesOf = new Map<ClassNode, Map<string, ClassInfo>>();
-  const shapesOf = new Map<ClassNode, Set<string>>();
+  const instancesOf = new NodeMap<ClassNode, Map<string, ClassInfo>>();
+  const shapesOf = new NodeMap<ClassNode, Set<string>>();
   // An instance made while the resolver is still being built waits for `start` to check its
   // bounds and lay it out, since both need the resolver.
   let ready = false;
@@ -829,7 +830,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
 
   // A class with no constructor of its own takes its base's parameters, so its type arguments
   // are inferred through the base's, as its `extends` clause passes them on.
-  function inferred(template: ClassNode, argTypes: Type[], at: Span, seen = new Set<ClassNode>()): Map<string, Type> {
+  function inferred(template: ClassNode, argTypes: Type[], at: Span, seen = new NodeSet<ClassNode>()): Map<string, Type> {
     const names = new Set(template.typeParams.map((p) => p.name));
     const bindings = new Map<string, Type>();
     const ctor = template.members.find((m) => m.kind === "constructor");

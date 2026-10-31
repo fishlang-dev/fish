@@ -7,6 +7,7 @@ import { cacheDir } from "./mathlib.ts";
 import type { RustCrate } from "./modules.ts";
 import type { ClassMember, ClassNode, Func } from "./parser.ts";
 import type { ClassType, Type } from "./typing.ts";
+import { WeakNodeMap } from "./nodes.ts";
 
 // Rust functions reach Fish through a shim crate fishc generates: one `extern "C"` function per
 // Rust function the program declares, which catches a panic and hands its message back to the
@@ -19,7 +20,7 @@ export type RustName = { crate: string; path: string; symbol: string };
 
 // The Rust function each function, constructor and method a Rust module declares names. It is
 // kept off the AST, so a macro, which sees and makes AST, can't make a function Rust.
-export const rustNames = new WeakMap<Func | ClassMember, RustName>();
+export const rustNames = new WeakNodeMap<Func | ClassMember, RustName>();
 
 // A Rust type a class names: its crate and its path from the crate's root. Fish moves its values
 // between threads, so it must be Send, which the shim asserts.
@@ -27,7 +28,7 @@ export type RustClass = { crate: string; path: string; name: string };
 
 // The Rust type of each class a Rust module declares, by its declaration, and by its type once
 // the checker has one.
-export const rustClassNodes = new WeakMap<ClassNode, RustClass>();
+export const rustClassNodes = new WeakNodeMap<ClassNode, RustClass>();
 export const rustClasses = new WeakMap<ClassType, RustClass>();
 
 // The field a handle's class holds its boxed Rust value in.

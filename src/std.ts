@@ -4,6 +4,7 @@ import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AST } from "./ast.ts";
 import { cacheDir, partial } from "./mathlib.ts";
+import { renumber } from "./nodes.ts";
 import { parse, shiftSpans, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
@@ -3017,7 +3018,9 @@ function stdBytes(): Uint8Array {
   }
   if (bytes === undefined) {
     stdParses.count++;
-    bytes = new Uint8Array(serialize(parse(STD_SOURCE)));
+    // Ids are this process's own, so the cached tree holds zeros, and each copy is numbered as it
+    // is loaded.
+    bytes = new Uint8Array(serialize(renumber(parse(STD_SOURCE), () => 0)));
     try {
       const temp = partial(path);
       writeFileSync(temp, bytes);
@@ -3031,7 +3034,7 @@ function stdBytes(): Uint8Array {
 // The std statements a program is checked with, their spans moved past its own.
 export function stdFor(written: Stmt[]): Stmt[] {
   // Each call takes its own copy, since the passes below change the tree.
-  const all: Stmt[] = deserialize(stdBytes());
+  const all: Stmt[] = renumber(deserialize(stdBytes()));
   shiftSpans(all, STD_BASE);
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.

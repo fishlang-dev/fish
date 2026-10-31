@@ -7,8 +7,9 @@ import { parse, type Stmt, type TypeMember, type TypeNode } from "./parser.ts";
 // big integers, and an absent part `null`.
 
 const CATEGORIES: Record<string, string> = { Expr: "AstExpr", Stmt: "AstStmt", TypeNode: "AstType", Pattern: "AstPattern" };
-// The parser's types that aren't part of the tree.
-const SKIPPED = new Set(["Span", "Cursor"]);
+// The parser's types that aren't part of the tree. A node's id is the compiler's own, so macros
+// never see one.
+const SKIPPED = new Set(["Span", "Id", "Cursor"]);
 
 type Field = { name: string; optional: boolean; type: string };
 type Shape = Field[];
@@ -54,6 +55,7 @@ export function astDeclarations(src: string): string {
   // split into one shape per kind.
   const shapes = (t: TypeNode): Shape[] => {
     if (t.kind === "ref" && t.name === "Span") return [span];
+    if (t.kind === "ref" && t.name === "Id") return [[]];
     if (t.kind === "ref" && aliases.has(t.name) && !CATEGORIES[t.name]) return shapes(aliases.get(t.name)!);
     if (t.kind === "union") return t.types.flatMap(shapes);
     if (t.kind === "intersection") {

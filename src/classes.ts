@@ -1,15 +1,16 @@
 import { defaulted, prologues } from "./defaults.ts";
 import { CompileError } from "./diag.ts";
 import { rustNames, type RustName } from "./rust.ts";
-import type { ClassMember, ClassNode, Expr, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { classType, type Access, type ClassType, type FunctionType, type Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
+import { NodeSet, WeakNodeMap, nextId } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
 // and a method declared with `this: Mut<this>` may change it.
-export type Body = Span & {
+export type Body = Span & Id & {
   name: string;
   params: Param[];
   body: Stmt[];
@@ -69,7 +70,7 @@ export type ClassInfo = {
   // only appear as the target of such an assignment.
   required: Set<string>;
   // The prelude's field initializers, which can't see the constructor's parameters.
-  initializers: Set<Stmt>;
+  initializers: NodeSet<Stmt>;
   methods: Map<string, Body>;
   statics: Map<string, Body>;
   // A getter borrows `this` and returns a value; a setter takes `Mut<this>` and the value.
@@ -128,8 +129,8 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (!m.type && !m.init) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An optional field is an Option, empty until assigned.
     const at = { start: m.start, end: m.end };
-    const type: TypeNode | undefined = m.optional && m.type ? { kind: "union", types: [m.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
-    const init: Expr | undefined = m.optional ? (m.init ?? { kind: "null", ...at }) : m.init;
+    const type: TypeNode | undefined = m.optional && m.type ? { id: nextId(), kind: "union", types: [m.type, { id: nextId(), kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
+    const init: Expr | undefined = m.optional ? (m.init ?? { id: nextId(), kind: "null", ...at }) : m.init;
     add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end, ...(m.optional && m.type && { written: m.type }), ...(!m.optional && m.type && withoutUndefined(m.type) && { undefinedSpelled: true as const }) });
   }
   const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
@@ -137,7 +138,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const access = modifiers(p.modifiers, p, p.pattern.name);
     // An optional parameter property is an Option, as the parameter is.
     const at = { start: p.start, end: p.end };
-    const type: TypeNode | undefined = p.optional && p.type ? { kind: "union", types: [p.type, { kind: "ref", name: "null", args: [], ...at }], ...at } : p.type;
+    const type: TypeNode | undefined = p.optional && p.type ? { id: nextId(), kind: "union", types: [p.type, { id: nextId(), kind: "ref", name: "null", args: [], ...at }], ...at } : p.type;
     return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end, ...(p.optional && p.type && { written: p.type }), ...(!p.optional && p.type && withoutUndefined(p.type) && { undefinedSpelled: true as const }) });
   });
 
@@ -152,10 +153,11 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   // As in TypeScript, parameter properties are assigned before field initializers run.
   const initializers = fields.filter((f) => f.init).map((f) => assignField(f.name, f.init!, f));
   const prelude = [
-    ...properties.map((f) => assignField(f.name, { kind: "ident", name: f.name, start: f.start, end: f.end }, f)),
+    ...properties.map((f) => assignField(f.name, { id: nextId(), kind: "ident", name: f.name, start: f.start, end: f.end }, f)),
     ...initializers,
   ];
   const constructor: Body = {
+    id: nextId(),
     name: `${name}.constructor`,
     scope,
     params: ctor?.params ?? [],
@@ -171,7 +173,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   const required = new Set(fields.map((f) => f.name));
   const named = node.extends?.kind === "instantiation" ? node.extends.expr : node.extends;
   const baseName = named?.kind === "ident" ? named.name : undefined;
-  return { type, fields, constructor, required, initializers: new Set(initializers), scope, methods, statics, getters, setters, baseName, prelude, node, wraps: [] };
+  return { type, fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, getters, setters, baseName, prelude, node, wraps: [] };
 
   function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
     if (m.modifiers.includes("static")) throw unsupported("static accessors", m);
@@ -184,6 +186,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (m.kind === "set" && m.params.length !== 1) throw new CompileError("a setter takes exactly one parameter", m.start, m.end);
     if (m.kind === "set" && m.returnType) throw new CompileError("a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
     table.set(m.name, {
+      id: nextId(),
       name: `${name}.${m.kind} ${m.name}`,
       scope,
       params: m.params,
@@ -215,6 +218,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) namesClass(p.type);
     if (isStatic) classParamIn(m);
     table.set(m.name, {
+      id: nextId(),
       // A static method has its own symbol, since an instance method may share its name.
       name: `${isStatic ? node.name : name}.${isStatic ? "static " : ""}${m.name}`,
       scope: isStatic ? new Map() : scope,
@@ -255,7 +259,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     if (Array.isArray(t)) return t.forEach(namesClass);
     const n = t as { kind?: string; name?: string; args?: unknown[] };
     if (n.kind === "ref" && n.name === "this" && n.args?.length === 0) {
-      Object.assign(n, { name: node.name, args: node.typeParams.map((p) => ({ kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
+      Object.assign(n, { name: node.name, args: node.typeParams.map((p) => ({ id: nextId(), kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
       return;
     }
     Object.values(n).forEach(namesClass);
@@ -269,7 +273,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
 }
 
 // Each generic class's statics, declared with its first instance.
-const genericStatics = new WeakMap<ClassNode, Map<string, Body>>();
+const genericStatics = new WeakNodeMap<ClassNode, Map<string, Body>>();
 
 // A Rust type's member is a foreign function, called through the shim.
 function rustOf(m: ClassMember): { foreign?: true; rust?: RustName } {
@@ -317,19 +321,19 @@ export function extend(c: ClassInfo, base: ClassInfo, global: (name: string) => 
   if (names.size > 0) c.constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
   // Copies, so each constructor has its own parameters, and none of them is a property here.
   const params = base.constructor.params.map((p) => {
-    const copy = { ...p, modifiers: [], ...(p.type && names.size > 0 && { type: renamed(p.type, names) }) };
+    const copy = { ...p, id: nextId(), modifiers: [], ...(p.type && names.size > 0 && { type: renamed(p.type, names) }) };
     const declared = defaulted.get(p);
     if (declared) defaulted.set(copy, declared);
     return copy;
   });
   // A rest parameter is passed on spread, to be packed into the base's again.
   const args: Expr[] = params.map((p) => {
-    const name: Expr = { kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end };
-    return p.rest ? { kind: "spread", value: name, start: p.start, end: p.end } : name;
+    const name: Expr = { id: nextId(), kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end };
+    return p.rest ? { id: nextId(), kind: "spread", value: name, start: p.start, end: p.end } : name;
   });
-  const call: Expr = { kind: "call", callee: { kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
+  const call: Expr = { id: nextId(), kind: "call", callee: { id: nextId(), kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
   c.constructor.params = params;
-  c.constructor.body = [{ kind: "expr", expr: call, ...at }, ...c.prelude];
+  c.constructor.body = [{ id: nextId(), kind: "expr", expr: call, ...at }, ...c.prelude];
 }
 
 // The names a type refers to without type arguments.
@@ -403,8 +407,8 @@ function wraps(p: Param, name: string): boolean {
 // `this.name = value`, as a constructor statement at the span of what it came from.
 function assignField(name: string, value: Expr, at: Span): Stmt {
   const s = { start: at.start, end: at.end };
-  const target: Expr = { kind: "member", object: { kind: "this", ...s }, name, optional: false, ...s };
-  return { kind: "expr", expr: { kind: "assign", op: "=", target, value, ...s }, ...s };
+  const target: Expr = { id: nextId(), kind: "member", object: { id: nextId(), kind: "this", ...s }, name, optional: false, ...s };
+  return { id: nextId(), kind: "expr", expr: { id: nextId(), kind: "assign", op: "=", target, value, ...s }, ...s };
 }
 
 // A member's access, from its modifiers or a `#` name. `readonly` is read by the caller.
@@ -434,5 +438,5 @@ export function withoutUndefined(t: TypeNode): TypeNode | undefined {
   if (t.kind !== "union") return undefined;
   const rest = t.types.filter((u) => !(u.kind === "ref" && u.name === "undefined" && u.args.length === 0));
   if (rest.length === t.types.length || rest.length === 0) return undefined;
-  return rest.length === 1 ? rest[0]! : { ...t, types: rest };
+  return rest.length === 1 ? rest[0]! : { ...t, id: nextId(), types: rest };
 }

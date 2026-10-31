@@ -8,6 +8,7 @@ import { kindTests } from "./narrow.ts";
 import { asserts, computed, jsCrossings, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
 import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
 import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, optionRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { NodeMap, nextId } from "./nodes.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -18,7 +19,7 @@ import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, hold
 // Where a place moved, the note explaining it, and the pass of each loop it moved on. A place
 // is a local's id, or `this`, followed by a field path, like `3.inner.x`.
 // A variable declared without a value is moved from the start, `unassigned`.
-type Move = { start: number; end: number; note: string; passes: Map<Stmt, number>; unassigned?: boolean };
+type Move = { start: number; end: number; note: string; passes: NodeMap<Stmt, number>; unassigned?: boolean };
 
 // A place lent to references: shared or mutable, where it was lent, and who holds it, the
 // reference variables or, for an argument or receiver, the call it was lent to.
@@ -56,7 +57,7 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
   // A place put into a `Ref<T> | null` is lent to the reference the Option holds.
-  const coercions = new Map(instance.coercions);
+  const coercions = new NodeMap(instance.coercions);
   for (const [e, to] of coercions) {
     const ref = optionRef(to);
     const from = types.get(e);
@@ -65,20 +66,20 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const body = f.body;
   let state: State = { moves: new Map(), loans: new Map() };
   // The states `break` leaves to each statement, and `continue` takes back to each loop.
-  const exits = new Map<Stmt, State>();
+  const exits = new NodeMap<Stmt, State>();
   // The catches and finallies enclosing the code being checked, innermost last: what the ways
   // into each had in common, and for a finally, its try and which ways out pass through it.
   const frames: Frame[] = [];
-  const nexts = new Map<Stmt, State>();
+  const nexts = new NodeMap<Stmt, State>();
   // The guards running now, by where each starts: a guard's loan lasts only while it runs, even
   // in a state an error carried out of it.
   const guarding = new Set<number>();
   // What each `for...of` over an array reached through a reference holds while it runs.
-  const loopHolders = new Map<Stmt, Local>();
+  const loopHolders = new NodeMap<Stmt, Local>();
   // How each match arm's block hands on what its `return`s give, as its match does.
-  const arms = new Map<Stmt, [Consumer | undefined, boolean]>();
+  const arms = new NodeMap<Stmt, [Consumer | undefined, boolean]>();
   // The pass each enclosing loop is on.
-  const passes = new Map<Stmt, number>();
+  const passes = new NodeMap<Stmt, number>();
   const last = lastUses(body, instance);
   const byId = new Map([...locals.values()].map((l) => [l.id, l]));
   // What `this` keeps stays held to the end of the body, and after it.
@@ -194,7 +195,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // A declaration run again by a loop makes a fresh variable, which holds nothing yet.
         release(local);
         if (!d.init) {
-          state?.moves.set(String(local.id), { start: d.start, end: d.end, note: `'${name}' is declared here without a value`, passes: new Map(passes), unassigned: true });
+          state?.moves.set(String(local.id), { start: d.start, end: d.end, note: `'${name}' is declared here without a value`, passes: new NodeMap(passes), unassigned: true });
           return;
         }
         expr(d.init, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
@@ -288,7 +289,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           else hold(holder, s.right);
           // Each pass gives the variable a new value, which it owns.
           const each = locals.get(s.left as Stmt)!;
-          loop(s, () => ({ kind: "bool", value: false, start: s.start, end: s.start }), () => {
+          loop(s, () => ({ id: nextId(), kind: "bool", value: false, start: s.start, end: s.start }), () => {
             revive(String(each.id));
             statements(s.body);
           });
@@ -313,7 +314,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (holdsRef(each.type)) inherit(each, s.right);
         }
         // Each pass may end the loop, like a condition that may be false.
-        loop(s, () => ({ kind: "bool", value: false, start: s.start, end: s.start }), () => {
+        loop(s, () => ({ id: nextId(), kind: "bool", value: false, start: s.start, end: s.start }), () => {
           // Each pass gives a string's variable a new string, which it owns.
           if (text) revive(String(each.id));
           statements(s.body);
@@ -505,7 +506,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const built = instance.envs?.get(e);
           const lent = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias, changes: instance.changed?.has(alias) === true }))
             : built ? built.env.map((alias, i) => ({ alias, changes: built.of.changed?.has([...built.of.captures!.keys()][i]!) === true })) : [];
-          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start + (i + 1) / 8192), at: { kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
+          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start + (i + 1) / 8192), at: { id: nextId(), kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
           for (const c of captures) {
             try {
               usable(c.at, String(c.alias.id));
@@ -888,7 +889,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A closure moving out what it captures holds it, and can run only once.
     if (root && instance.captures?.has(root)) instance.moved!.add(root);
     instance.consumes.add(e);
-    state.moves.set(place, { start: e.start, end: e.end, note: hinted(type, consume!(text(e))), passes: new Map(passes) });
+    state.moves.set(place, { start: e.start, end: e.end, note: hinted(type, consume!(text(e))), passes: new NodeMap(passes) });
   }
 
   // A message without its advice to clone, for a value holding a JoinHandle, which can't be.
@@ -1346,7 +1347,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       if (!held || isCopy(from!.type)) free(place, use, mutable || (held && reborrows(from!)) ? "lend mutably" : "read");
       else {
         free(place, use, "move");
-        state?.moves.set(place, { start: use.start, end: use.end, note: `'${from!.name}' moved here into a closure, which holds it now`, passes: new Map(passes) });
+        state?.moves.set(place, { start: use.start, end: use.end, note: `'${from!.name}' moved here into a closure, which holds it now`, passes: new NodeMap(passes) });
         // A closure moving one of this closure's captures into itself moves it out of this one.
         if (instance.captures?.has(from!)) instance.moved!.add(from!);
       }
@@ -1361,7 +1362,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const built = e.kind === "ident" ? instance.envs?.get(e) : undefined;
     if (built) {
       const aliases = [...built.of.captures!.keys()];
-      return built.env.map((l, i) => [String(l.id), { kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, built.of.changed!.has(aliases[i]!), false]);
+      return built.env.map((l, i) => [String(l.id), { id: nextId(), kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, built.of.changed!.has(aliases[i]!), false]);
     }
     if (e.kind !== "arrow" || (nestedFunctions.has(e) && !e.async)) return [];
     const inner = calls.get(e)!;
@@ -1369,7 +1370,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // borrows what they use.
     const through = (instance.made?.get(e) ?? []).flatMap(({ of, env }) => {
       const aliases = [...of.captures!.keys()];
-      return env.map((l, i): [string, Named, Local | undefined, boolean, boolean] => [String(l.id), { kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, of.changed!.has(aliases[i]!), false]);
+      return env.map((l, i): [string, Named, Local | undefined, boolean, boolean] => [String(l.id), { id: nextId(), kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, of.changed!.has(aliases[i]!), false]);
     });
     return [...[...inner.captures!].flatMap(([alias, from], i): [string, Named, Local | undefined, boolean, boolean][] => {
       const use = inner.captureUses!.get(alias) as Named | undefined;

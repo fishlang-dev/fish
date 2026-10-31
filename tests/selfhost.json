@@ -39,6 +39,7 @@
     "moves.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
     "narrow.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
     "native.ts": "a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet",
+    "nodes.ts": "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock",
     "operators.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
     "parseargs.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
     "parser.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
@@ -67,5 +68,5 @@
     "unsupported.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
     "values.ts": "'node:crypto' is a Node module Fish's std doesn't have yet"
   },
-  "count": 66
+  "count": 67
 }
