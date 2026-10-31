@@ -3,9 +3,9 @@ import type { Narrowing } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { equalities, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
+import { equalities, integerCalls, integerMethod, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
+import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, lower, range, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -676,6 +676,7 @@ function interpreter() {
       if (isShort(linked)) return SHORT;
       const held = unwrap(linked);
       if (held === null && (callee.optional || e.optional)) return SHORT;
+      if (integerCalls.has(e)) return integerValue(callee.name, held as bigint, e.args[0] ? (unwrap(expr(f, e.args[0])) as bigint) : 0n, lower(typeOf(f, callee.object)) as Integer, type, e);
       if (typeof held === "string") return stringMethod(callee.name, held, e.args.map((a) => unwrap(expr(f, a))), e);
       if (callee.name === "clone") return cloned(held);
       if (held && typeof held === "object" && held.kind === "array") {
@@ -980,6 +981,70 @@ function interpreter() {
       }
     }
     return unsupported(`'${op}'`, at);
+  }
+
+  // `x.checkedAdd(y)` and its kin, as the program computes them: the exact result, then null,
+  // the wrapped value, the nearest bound, or the wrapped value and whether it overflowed.
+  function integerValue(name: string, a: bigint, b: bigint, type: Integer, result: Type, at: Span): Value {
+    const [family, operation] = integerMethod(name)!;
+    const { bits, signed } = INTEGERS[type];
+    const [min, max] = range(type);
+    let exact: bigint;
+    let over: boolean | undefined;
+    switch (operation) {
+      case "Add":
+        exact = a + b;
+        break;
+      case "Sub":
+        exact = a - b;
+        break;
+      case "Mul":
+        exact = a * b;
+        break;
+      case "Neg":
+        exact = -a;
+        break;
+      case "Div":
+      case "Rem": {
+        if (b === 0n && family === "checked") return null;
+        if (b === 0n) panic(operation === "Div" ? "attempt to divide by zero" : "attempt to calculate the remainder with a divisor of zero", at);
+        // MIN % -1 is 0, which fits, but Rust counts it as overflowing with MIN / -1.
+        over = signed && a === min && b === -1n;
+        exact = operation === "Div" ? a / b : a % b;
+        break;
+      }
+      case "Shl":
+      case "Shr": {
+        const amount = b & BigInt(bits - 1);
+        exact = operation === "Shl" ? wrap(a << amount, type) : a >> amount;
+        over = b >= BigInt(bits);
+        break;
+      }
+      default: {
+        // By squaring, as the program does, so a power that fits never overflows on the way.
+        let [power, base, exponent] = [1n, a, b];
+        over = false;
+        const times = (x: bigint, y: bigint) => {
+          if (wrap(x * y, type) !== x * y) over = true;
+          return wrap(x * y, type);
+        };
+        while (exponent > 0n) {
+          step(at);
+          if (exponent & 1n) power = times(power, base);
+          exponent >>= 1n;
+          if (exponent > 0n) base = times(base, base);
+        }
+        // A negative base to an odd power is past MIN.
+        if (family === "saturating" && over) return a < 0n && (b & 1n) === 1n ? min : max;
+        exact = power;
+      }
+    }
+    over ??= wrap(exact, type) !== exact;
+    const wrapped = wrap(exact, type);
+    if (family === "checked") return over ? null : wrapped;
+    if (family === "wrapping") return wrapped;
+    if (family === "saturating") return !over ? wrapped : exact < min ? min : max;
+    return { kind: "record", type: result as ObjectType, fields: new Map<string, Value>([["0", wrapped], ["1", over]]) };
   }
 
   // Comptime checks overflow in every build: a value that would wrap in a release build is a

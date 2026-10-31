@@ -1,7 +1,7 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import type { Narrowing } from "./overloads.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
-import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, joinCalls, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, joinCalls, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, integerCalls, integerMethod, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -221,7 +221,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // and the drop functions of the Rust types the program drops.
   const declaredRust = new Set<string>();
   const rustDrops = new Set<string>();
-  const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
+  const { operate, arithmetic, panicIf, method: integerLowering } = lowering(builder, where, release, intrinsics);
   const { convert, test, equals, unionField, holds, eachMember } = conversions(builder);
 
   // The instance each generator type resumes, and each future type polls.
@@ -589,6 +589,28 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       emit(`${v} = ${line}`);
       return v;
     }
+  }
+
+  // `x.checkedAdd(y)` and its kin: checked gives null when the operation overflowed, and
+  // overflowing pairs the wrapped value with whether it did, the intrinsic's own `{ iN, i1 }`.
+  function integerMethodCall(e: Extract<Expr, { kind: "call" }>): string {
+    const callee = e.callee as Extract<Expr, { kind: "member" }>;
+    const type = lower(valueType(callee.object)) as Integer;
+    const [family, operation] = integerMethod(callee.name)!;
+    const a = value(callee.object);
+    const [v, over] = integerLowering(family, operation, a, e.args[0] ? value(e.args[0]) : "", e, type);
+    const t = llvm(type);
+    const result = temp();
+    if (family === "checked") {
+      const option = unionType([type, "null"]);
+      emit(`${result} = select i1 ${over}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(v, type, option)}`);
+      return result;
+    }
+    if (family !== "overflowing") return v;
+    const pair = temp();
+    emit(`${pair} = insertvalue { ${t}, i1 } undef, ${t} ${v}, 0`);
+    emit(`${result} = insertvalue { ${t}, i1 } ${pair}, i1 ${over}, 1`);
+    return result;
   }
 
   // An assertion: a panic at the call, with its message or `assertion failed`, when it is false.
@@ -6235,6 +6257,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (parses.has(e)) return parseCall(e, parses.get(e)!);
       if (asserts.has(e)) return assertCall(e);
       if (fixedPrints.has(e)) return toFixed(e);
+      if (integerCalls.has(e)) return integerMethodCall(e);
       if (regexCalls.get(e) === "exec") return regexExec(e);
       if (regexStringCalls.has(e)) return regexString(e, regexStringCalls.get(e)!);
       if (regexCalls.get(e) === "test") {
