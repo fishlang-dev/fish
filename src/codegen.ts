@@ -6713,7 +6713,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // answer in every build, as an index is against the length.
   function predicateCheck(e: Extract<Expr, { kind: "call" }>, answer: string) {
     const { index, type, yes, no } = current.predicates!.get(e)!;
-    const arg = e.args[index] as Extract<Expr, { kind: "ident" }>;
+    // Only a variable is narrowed by a predicate's answer, so only one needs its answer checked.
+    const arg = e.args[index];
+    if (arg?.kind !== "ident") return;
     const local = resolved(arg);
     let [v, whole] = [temp(), local.type];
     emit(`${v} = load ${llvm(whole)}, ptr ${slot(local)}`);

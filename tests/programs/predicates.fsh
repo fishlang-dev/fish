@@ -136,3 +136,21 @@ function main(): void {
 // expect: other 3
 // expect: other true
 // expect: false no
+// case: predicates_on_fields_and_literals
+function isText(x: string | i64): x is string {
+  return typeof x === "string";
+}
+class Holder {
+  value: string | i64;
+  constructor(value: string | i64) { this.value = value; }
+  check(): boolean { return isText(this.value); }
+}
+function main(): void {
+  const h = new Holder("fin");
+  if (isText(h.value)) console.log("field");
+  if (isText("lit")) console.log("literal");
+  console.log(h.check());
+}
+// expect: field
+// expect: literal
+// expect: true

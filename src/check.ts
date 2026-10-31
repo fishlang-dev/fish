@@ -1193,7 +1193,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (!target || p?.kind !== "predicate" || !p.type) return undefined;
       const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
       const type = withScope(target.bindings, () => resolveType(p.type!));
-      return { index, type, narrows: (yes: boolean, no: boolean) => void (instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no }) };
+      return { index, type, narrows: (yes: boolean, no: boolean) => void ((yes || no) && (instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no })) };
     };
     const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
 
