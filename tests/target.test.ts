@@ -21,6 +21,8 @@ test("the host's libc is the running process's, whatever is on disk", () => {
   expect(runsOnMusl({ glibcVersionRuntime: "2.41" })).toBe(false);
   expect(runsOnMusl({})).toBe(true);
   if (process.platform === "linux") expect(hostTriple()!.endsWith("-musl")).toBe(runsOnMusl());
+  // Off Linux the process has no glibc and no musl loader is on disk, so the two ways of asking differ.
+  expect(hostTriple("linux", "arm64")).toBe(runsOnMusl() ? "aarch64-unknown-linux-musl" : "aarch64-unknown-linux-gnu");
 });
 
 test("no target, or the host's, builds as before", () => {
@@ -110,6 +112,18 @@ for (const [arch, cpu] of [["arm64", "aarch64"], ["amd64", "x86_64"]] as const) 
     }
   }, 600000);
 }
+
+// A musl target is refused before the build without lld, so it would never reach the Dockerfile.
+test.skipIf(!Bun.which("ld.lld"))("a build with --dockerfile keeps the user's own Dockerfile", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fish-dockerfile-"));
+  writeFileSync(join(dir, "main.fsh"), 'function main() {\n  console.log("app");\n}\n');
+  writeFileSync(join(dir, "Dockerfile"), "FROM node\n");
+  const sysroot = mkdtempSync(join(tmpdir(), "fish-sysroot-"));
+  const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", join(dir, "main.fsh"), "-o", join(dir, "app"), "--target", "aarch64-unknown-linux-musl", "--sysroot", sysroot, "--static", "--dockerfile"]);
+  expect(built.stderr.toString()).toContain("fishc build: '--dockerfile' would replace");
+  expect(built.exitCode).toBe(1);
+  expect(readFileSync(join(dir, "Dockerfile"), "utf8")).toBe("FROM node\n");
+});
 
 test("FISH_SYSROOT leaves a build for the host alone", () => {
   const dir = mkdtempSync(join(tmpdir(), "fish-target-"));
