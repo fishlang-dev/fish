@@ -3,6 +3,7 @@ import { rustClassOf, type RustClass } from "./rust.ts";
 import { inherited, isLifetime, upcasts, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
+import type { Direct, Narrowing } from "./overloads.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
@@ -1308,7 +1309,7 @@ export function expressions(ctx: Context) {
     const found = lifted ?? (callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined);
     // A package's function declared with several signatures is checked against the first that
     // takes the arguments, as TypeScript picks one.
-    const target = found?.js?.overloads ? jsOverload(e, found) : found;
+    const target = found?.js?.overloads ? jsOverload(e, found) : found?.overloads && !(e as Direct).implementation ? overload(e, found) : found;
     // A package's const is a value; one holding a function would be a function crossing from JS.
     if (target?.js?.const) {
       const held = resolveType(target.returnType!);
@@ -3228,6 +3229,119 @@ export function expressions(ctx: Context) {
     throw new CompileError(`no signature of '${first.js!.name}' takes (${given.map(show).join(", ")}); it takes ${shown}`, e.start, e.end);
   }
 
+  // The overload a call takes: the first, in the order declared, whose parameters its arguments
+  // pass for, as TypeScript picks one. A generic one is taken on the count of its arguments.
+  function overload(e: Call, impl: Body): Body {
+    const spread = e.args.find((a) => a.kind === "spread");
+    if (spread) throw new CompileError(`spreading arguments into the overloaded '${impl.name}' isn't supported yet; pass them one by one`, spread.start, spread.end);
+    const given = e.args.map((a) => (a.kind === "arrow" ? undefined : tried(a)));
+    const fitting = impl.overloads!.find((f) => {
+      const required = f.params.filter((p) => !p.optional && !p.rest).length;
+      if (e.args.length < required || (e.args.length > f.params.length && !f.params.at(-1)?.rest)) return false;
+      const types = signatureTypes(f);
+      return types === undefined || e.args.every((a, i) => passes(a, given[i], types[Math.min(i, types.length - 1)]!, f.params[Math.min(i, f.params.length - 1)]!));
+    });
+    if (fitting) return fitting;
+    const shown = impl.overloads!.map((f) => {
+      const types = signatureTypes(f);
+      // A destructured parameter, named only to be passed on, shows as its type alone.
+      const params = f.params.map((p, i) => {
+        const name = (p.pattern as { name?: string }).name ?? "_";
+        const type = types ? show(types[i]!) : "_";
+        return name.startsWith("argument ") ? type : `${p.rest ? "..." : ""}${name}${p.optional ? "?" : ""}: ${type}`;
+      });
+      return `(${params.join(", ")}): ${f.returnType ? show(resolveType(f.returnType)) : "_"}`;
+    });
+    const args = given.map((t) => (t === undefined ? "a function" : show(t)));
+    throw new CompileError(`no overload of '${impl.name}' takes (${args.join(", ")}); its overloads are ${shown.join(", ")}`, e.start, e.end);
+  }
+
+  // What an overload's body gives back: the implementation's value, as the members of its type the
+  // signature's return type takes; codegen panics on any other.
+  function narrowedReturn(call: Expr, node: TypeNode): Type {
+    const from = value(call);
+    const to = resolveType(node);
+    if (fits(from, to)) return from;
+    const kept = typeof from !== "string" && from.kind === "union" ? from.members.filter((m) => fits(m, to)) : [];
+    if (kept.length === 0 && fits(to, from)) throw new CompileError(`it returns '${show(to)}', narrower than the implementation's '${show(from)}', which isn't a union whose members it could be narrowed to; give the implementation a union return type, as in '${show(to)} | ...'`, node.start, node.end);
+    if (kept.length === 0) throw new CompileError(`this overload signature is not compatible with its implementation, which returns '${show(from)}', never a '${show(to)}'`, node.start, node.end);
+    return kept.length === 1 ? kept[0]! : unionType(kept);
+  }
+
+  // An argument's type before it meets a parameter, or nothing when it needs one to be typed.
+  function tried(a: Expr): Type | undefined {
+    try {
+      return value(a);
+    } catch (err) {
+      if (err instanceof CompileError) return undefined;
+      throw err;
+    }
+  }
+
+  // A signature's parameter types, unless it is generic, when each call's instance decides them.
+  function signatureTypes(f: Body): Type[] | undefined {
+    if ((f.typeParams ?? []).some((p) => !isLifetime(p)) || f.params.some((p) => p.comptime)) return undefined;
+    const bounds = implicitOf(f);
+    const known = bounds.size > 0 ? undefined : paramTypes(instanceOf(f));
+    return f.params.map((p, i) => {
+      const t = bounds.get(i) ?? known![i]!;
+      return p.optional ? unionType([t, "null"]) : p.rest && isArray(lower(t)) ? (lower(t) as ArrayType).element : t;
+    });
+  }
+
+  // Whether an argument passes for a parameter, as choosing an overload asks before the call
+  // checks it against the one chosen.
+  function passes(a: Expr, given: Type | undefined, to: Type, p: Param): boolean {
+    if (a.kind === "arrow") return arrowPasses(a, to);
+    if (given === undefined) return true;
+    if (fits(given, to)) return true;
+    if (isRefType(to)) return passes(a, isRefType(given) ? given.to : given, to.to, p);
+    if (isRefType(given)) return passes(a, given.to, to, p);
+    const n = numberLiteral(a);
+    if (typeof to === "string") {
+      if (n === undefined || !isNumeric(to)) return false;
+      if (isFloat(to)) return true;
+      return typeof n === "bigint" && isInteger(to) && n >= range(to)[0] && n <= range(to)[1];
+    }
+    if (to.kind === "union") return to.members.some((m) => passes(a, given, m, p));
+    if (to.kind === "interface") return unsatisfied(given, to, members, a) === undefined;
+    if (to.kind === "literal") return (a.kind === "string" || a.kind === "bool") ? a.value === to.value : n !== undefined && n === to.value;
+    return false;
+  }
+
+  // Whether an arrow passes for a function type: no more parameters than it takes, each one
+  // written with a type taking what it is given. Without a function type, the call decides.
+  function arrowPasses(a: Extract<Expr, { kind: "arrow" }>, to: Type): boolean {
+    if (typeof to !== "string" && to.kind === "union") return to.members.some((m) => arrowPasses(a, m));
+    if (typeof to === "string" || to.kind !== "function" || to.generic) return true;
+    if (a.params.length > to.params.length) return false;
+    return a.params.every((q, i) => {
+      if (!q.type) return true;
+      const written = tryType(q.type);
+      return written === undefined || fits(to.params[i]!, written);
+    });
+  }
+
+  function tryType(t: TypeNode): Type | undefined {
+    try {
+      return resolveType(t);
+    } catch (err) {
+      if (err instanceof CompileError) return undefined;
+      throw err;
+    }
+  }
+
+  // A numeric literal's value, negated or not: a bigint for an integer, a number for a float.
+  function numberLiteral(a: Expr): bigint | number | undefined {
+    if (a.kind === "int") return a.value;
+    if (a.kind === "float") return a.value;
+    if (a.kind === "unary" && a.op === "-") {
+      const n = numberLiteral(a.operand);
+      return n === undefined ? undefined : -n;
+    }
+    return undefined;
+  }
+
   // A call's arguments against a JS declaration's parameters: a trailing Option may be left out,
   // as an optional parameter.
   function jsArgs(e: Call | Extract<Expr, { kind: "new" }>, params: Type[], optional: boolean[]) {
@@ -3906,6 +4020,8 @@ export function expressions(ctx: Context) {
         return "never";
       // `x!` is what an Option holds; it panics when there is nothing.
       case "nonNull": {
+        const narrows = (e as Narrowing).narrows;
+        if (narrows) return narrowedReturn(e.expr, narrows);
         const option = read(e.expr);
         if (!isOption(option)) throw new CompileError(`'!' takes the value out of an Option, and this is a '${show(option)}', which is never empty`, e.start, e.end);
         return held(option);
@@ -3946,6 +4062,7 @@ export function expressions(ctx: Context) {
         }
         // A declared function named as a value is a closure calling it.
         const declared = local ? undefined : byName.get(e.name);
+        if (declared?.overloads) throw new CompileError(`'${e.name}' is overloaded, so it can't be used as a value yet; pass an arrow that calls it, as in '(x) => ${e.name}(x)'`, e.start, e.end);
         if (declared && !declared.comptime && declared.typeParams?.some((p) => !isLifetime(p))) return genericValue(declared, e);
         if (declared && !declared.comptime) {
           functionValue(e, declared);

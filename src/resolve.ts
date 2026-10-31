@@ -545,6 +545,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
         return;
       }
       if (t.fields.some((f) => f.name === name) || t.methods.some((m) => m.name === name)) {
+        if ((at as { kind?: string }).kind === "method" && t.methods.some((m) => m.name === name)) throw new CompileError(`'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
         throw new CompileError(`duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
       }
     };

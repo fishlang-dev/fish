@@ -20,6 +20,7 @@ import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts"
 import { madeFor, resetTypes, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
+import { lowerOverloads } from "./overloads.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
@@ -393,6 +394,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && member.decorators && member.decorators.length > 0) throw new CompileError("a macro on a member applies in a top-level class", member.decorators[0]!.start, member.decorators[0]!.end);
     return false;
   });
+  written = lowerOverloads(written);
   written = [...written, ...hoistLocals(written)];
   getterNames = new Set();
   holdsNode(written, (n) => {
@@ -501,7 +503,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
       funcs.push(body);
       continue;
     }
-    if (!hasBody(s)) throw unsupported("functions without a body", s);
+    if (!hasBody(s)) throw new CompileError(`'${s.name}' has no implementation; follow its overload signatures with a 'function ${s.name}' that has a body`, s.start, s.end);
     if (s.macro) macroShape(s);
     funcs.push(s);
   }
@@ -1021,6 +1023,14 @@ export function check(written: Stmt[], library = false, macros = false, module =
     done.add(instance);
   }
 
+  // An overload signature's body only passes its parameters on, so what fails there is the
+  // signature not matching its implementation.
+  function incompatible(signature: Body, e: unknown): unknown {
+    const prefix = "this overload signature is not compatible with its implementation";
+    if (!(e instanceof CompileError) || e.start < signature.start || e.end > signature.end || e.message.startsWith(prefix)) return e;
+    return new CompileError(`${prefix}: ${e.message}`, e.start, e.end, e.note);
+  }
+
   // A call made inside an instance with one of its type parameters gets the type the definition
   // gave it: the callee's return with the callee's parameters as the ones the call passed.
   function resultOf(instance: Instance, at: Span): Type {
@@ -1076,7 +1086,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
           withSight(undefined, () => withScope(scopeOf(instance), () => checkInstance(instance)));
         } catch (e) {
           inProgress.delete(instance);
-          if (!(e instanceof CompileError) || demanded === 0) throw e;
+          if (!(e instanceof CompileError) || demanded === 0) throw instance.body.signature ? incompatible(instance.body, e) : e;
         }
         if (demanded === 0) return;
         forget(instance);

@@ -39,6 +39,10 @@ export type Body = Span & {
   scope?: Map<string, Type>;
   // `owned`: a method declared `this: Own<this>` takes its object over.
   self?: { type: ClassType; constructor: boolean; mutable: boolean; owned?: boolean };
+  // An overloaded function's signatures, in the order a call tries them.
+  overloads?: Body[];
+  // A signature of an overloaded function, whose body calls the implementation.
+  signature?: true;
   // For a class's constructor and methods: the class, and who may call the method.
   owner?: ClassType;
   access?: Access;
@@ -102,8 +106,9 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
   }
   const fields: FieldDecl[] = [];
   const constructors = node.members.filter((m) => m.kind === "constructor");
-  if (constructors.length > 1) throw new CompileError("a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
   const ctor = constructors[0];
+  if (ctor && !ctor.body && constructors.length > 1) throw unsupported("constructor overloads", ctor);
+  if (constructors.length > 1) throw new CompileError("a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
   const type = classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
@@ -234,7 +239,7 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
     const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
     if (m.generator) throw unsupported("generator methods", m);
-    if (!m.body) throw unsupported("method overloads", m);
+    if (!m.body) throw new CompileError(`'${m.name}' has no implementation; follow its overload signatures with a '${m.name}' method that has a body`, m.start, m.end);
     if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
     const table = isStatic ? statics : methods;
     if (table.has(m.name)) throw new CompileError(`duplicate method '${m.name}'`, m.start, m.end);
@@ -258,7 +263,11 @@ export function declareClass(node: ClassNode & { name: string }, name = node.nam
       start: m.start,
       end: m.end,
       ...rustOf(m),
+      ...((m as { signature?: true }).signature && { signature: true as const }),
     });
+    // The implementation comes right after its signatures.
+    const overloads = (m as { overloads?: ClassMember[] }).overloads;
+    if (overloads) table.get(m.name)!.overloads = overloads.map((w) => table.get((w as typeof m).name as string)!);
   }
 
   // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
@@ -365,7 +374,10 @@ export function checkOverrides(c: ClassInfo) {
 function usesOnThis(node: unknown, name: string): boolean {
   if (typeof node !== "object" || node === null) return false;
   if (Array.isArray(node)) return node.some((n) => usesOnThis(n, name));
-  const n = node as { kind?: string; object?: { kind?: string }; name?: unknown };
+  const n = node as { kind?: string; object?: { kind?: string }; name?: unknown; implementation?: true; args?: unknown };
+  // An overload signature's call of its own class's implementation is the signature's, which an
+  // override replaces along with it.
+  if (n.implementation) return usesOnThis(n.args, name);
   if (n.kind === "member" && n.object?.kind === "this" && n.name === name) return true;
   return Object.values(node).some((v) => usesOnThis(v, name));
 }

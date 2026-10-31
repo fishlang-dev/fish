@@ -1,4 +1,5 @@
 import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
+import type { Narrowing } from "./overloads.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
@@ -8259,6 +8260,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         return result;
       }
       case "nonNull": {
+        // An overload's body narrows the implementation's value to the signature's return type.
+        if ((e as Narrowing).narrows) {
+          const [from, to] = [valueType(e.expr), types.get(e)!];
+          const v = value(e.expr);
+          if (from === to) return v;
+          const kept = typeof to !== "string" && to.kind === "union" ? to.members : [to];
+          const union = from as UnionType;
+          panicIf(holds(v, union, union.members.filter((m) => !kept.includes(m))), "the implementation returned a value this overload signature doesn't declare", e);
+          return convert(v, union, to);
+        }
         // Through a reference, the Option it points to.
         const option = valueType(e.expr) as UnionType;
         const v = value(e.expr);
