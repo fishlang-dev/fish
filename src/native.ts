@@ -716,6 +716,9 @@ static int64_t fsh_poison_count = 0;
 // How many locks this thread holds, so a call into JS under one, which could wait forever on a
 // callback JS runs that takes the same lock, is refused.
 static _Thread_local int32_t fsh_locks_held = 0;
+// The RwLock words this thread reads under, innermost last.
+static _Thread_local int32_t **fsh_reading = NULL;
+static _Thread_local int64_t fsh_reading_count = 0, fsh_reading_capacity = 0;
 // How many Fish callbacks JS is running on this thread. A panic in one would unwind through the
 // engine's frames, leaving its lock held, so it ends the program instead, as Rust's panics that
 // would cross foreign frames do.
@@ -729,6 +732,11 @@ void fsh_rt_panic(const char *message) {
     fsh_panic_reason(reason, strlen(reason));
   }
   fsh_reason_given = 0;
+  // A reader changed nothing, so its hold is given back rather than poisoning the lock, as in
+  // Rust; the unwind skips the release after its callback.
+  for (int64_t i = fsh_reading_count - 1; i >= 0; i--) __atomic_sub_fetch(fsh_reading[i], 1, __ATOMIC_RELEASE);
+  fsh_locks_held -= (int32_t)fsh_reading_count;
+  fsh_reading_count = 0;
   if (fsh_locks_held > 0 && fsh_token) {
     pthread_mutex_lock(&fsh_poison_lock);
     fsh_poison_tokens = realloc(fsh_poison_tokens, (fsh_poison_count + 1) * sizeof(int32_t));
@@ -4526,6 +4534,68 @@ int32_t fsh_rt_lock(int32_t *word) {
 void fsh_rt_unlock(int32_t *word) {
   fsh_locks_held--;
   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
+}
+
+// An RwLock's word: 0 free, n > 0 held by n readers, or minus the token of the thread writing.
+// A writer waiting for readers to leave sets FSH_WRITER_WAITING beside their count, and new
+// readers wait behind it, so a stream of overlapping reads can't starve an update. A thread
+// already reading the same lock still enters, so a read nested in a read never waits on a
+// writer that waits on it. The same 1 and 2 as a Lock's: a lock this thread already holds the
+// conflicting side of, and a writer that panicked.
+#define FSH_WRITER_WAITING 0x40000000
+
+static int fsh_reads(int32_t *word) {
+  for (int64_t i = 0; i < fsh_reading_count; i++) if (fsh_reading[i] == word) return 1;
+  return 0;
+}
+
+int32_t fsh_rt_read_lock(int32_t *word) {
+  int32_t me = fsh_me();
+  if (__atomic_load_n(word, __ATOMIC_RELAXED) == -me) return 1;
+  int nested = fsh_reads(word);
+  for (int spins = 0;; spins++) {
+    int32_t seen = __atomic_load_n(word, __ATOMIC_RELAXED);
+    if (seen >= 0 && (nested || !(seen & FSH_WRITER_WAITING))) {
+      if (__atomic_compare_exchange_n(word, &seen, seen + 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) break;
+    } else if (spins >= 64) {
+      if (seen < 0 && fsh_poison_holder(-seen)) return 2;
+      sched_yield();
+    }
+  }
+  if (fsh_reading_count == fsh_reading_capacity) {
+    fsh_reading_capacity = fsh_reading_capacity ? fsh_reading_capacity * 2 : 8;
+    fsh_reading = realloc(fsh_reading, fsh_reading_capacity * sizeof(int32_t *));
+  }
+  fsh_reading[fsh_reading_count++] = word;
+  fsh_locks_held++;
+  return 0;
+}
+
+// Reads end innermost first: a read's callback can't await, so they never interleave.
+void fsh_rt_read_unlock(int32_t *word) {
+  fsh_reading_count--;
+  fsh_locks_held--;
+  __atomic_sub_fetch(word, 1, __ATOMIC_RELEASE);
+}
+
+// Taking the word clears the waiting mark; another waiting writer sets it again on its next try.
+int32_t fsh_rt_write_lock(int32_t *word) {
+  int32_t me = fsh_me();
+  if (__atomic_load_n(word, __ATOMIC_RELAXED) == -me || fsh_reads(word)) return 1;
+  for (int spins = 0;; spins++) {
+    int32_t seen = __atomic_load_n(word, __ATOMIC_RELAXED);
+    if (seen == 0 || seen == FSH_WRITER_WAITING) {
+      if (__atomic_compare_exchange_n(word, &seen, -me, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        fsh_locks_held++;
+        return 0;
+      }
+    } else if (seen > 0 && !(seen & FSH_WRITER_WAITING)) {
+      __atomic_compare_exchange_n(word, &seen, seen | FSH_WRITER_WAITING, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    } else if (spins >= 64) {
+      if (seen < 0 && fsh_poison_holder(-seen)) return 2;
+      sched_yield();
+    }
+  }
 }
 
 // A shared value's block: its count, then a Lock's word and the value. Made with one count.

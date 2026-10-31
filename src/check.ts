@@ -1412,7 +1412,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       closing: f.closure !== undefined,
       generator: f.generator === true,
       runtime: !library && funcs.some((g) => g.name === "main" && g.async === true),
-      locked: f.closure?.expected !== undefined && lockCallbacks.has(f.closure.expected),
+      locked: f.closure?.expected === undefined ? undefined : lockCallbacks.get(f.closure.expected),
       sharing: f.closure?.expected !== undefined && sharedCallbacks.has(f.closure.expected),
       async: f.async === true,
       awaitable,

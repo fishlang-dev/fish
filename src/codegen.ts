@@ -12,7 +12,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
+import { allFields, isLock, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
@@ -884,12 +884,12 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     }
   }
 
-  // A new Atomic, Cell or Lock: what it holds, a boolean widened to a byte in an Atomic, and a
-  // Lock's word unlocked.
+  // A new Atomic, Cell, Lock or RwLock: what it holds, a boolean widened to a byte in an Atomic,
+  // and a lock's word unlocked.
   function interiorNew(e: Extract<Expr, { kind: "new" }>, t: InteriorType): string {
     const v = owned(e.args![0]!);
     const result = temp();
-    if (t.which === "Lock") emit(`${result} = insertvalue ${llvm(t)} { i32 0, ${llvm(t.of)} poison }, ${llvm(t.of)} ${v}, 1`);
+    if (isLock(t)) emit(`${result} = insertvalue ${llvm(t)} { i32 0, ${llvm(t.of)} poison }, ${llvm(t.of)} ${v}, 1`);
     else if (llvm(t) !== llvm(t.of)) emit(`${result} = zext i1 ${v} to i8`);
     else return v;
     return result;
@@ -900,7 +900,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const t = referent(valueType(callee.object)) as InteriorType;
     const at = receiver(callee.object);
     if (t.which === "Cell") return cellCall(e, callee, t, at);
-    if (t.which === "Lock") return lockUpdate(e, t, at);
+    if (isLock(t)) return lockUpdate(e, t, at);
     const ty = llvm(t);
     const align = `align ${ty === "i8" ? 1 : ty === "i16" ? 2 : ty === "i32" ? 4 : 8}`;
     const byte = ty !== llvm(t.of);
@@ -954,11 +954,12 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // Takes a lock word, panicking if this thread already holds it, which would wait forever, or
   // if a task panicked holding it, which leaves it held over a value it may have half changed.
-  function takeLock(word: string, at: Span) {
+  function takeLock(word: string, at: Span, take = "fsh_rt_lock") {
     const [taken, held, poisoned] = [temp(), temp(), temp()];
-    emit(`${taken} = call i32 @fsh_rt_lock(ptr ${word})`);
+    emit(`${taken} = call i32 @${take}(ptr ${word})`);
     emit(`${held} = icmp eq i32 ${taken}, 1`);
-    panicIf(held, "this lock is already held by an `update` running here; use the value its callback is given", at);
+    const holder = take === "fsh_rt_lock" ? "an `update`" : "a `read` or an `update`";
+    panicIf(held, `this lock is already held by ${holder} running here; use the value its callback is given`, at);
     emit(`${poisoned} = icmp eq i32 ${taken}, 2`);
     panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
   }
@@ -2550,7 +2551,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // `update`: the callback runs with a pointer to what the Lock holds, between taking and
-  // releasing its word. The callback's captures are made before the lock is taken.
+  // releasing its word; an RwLock's `read` or `update` takes its word's read or write side.
+  // The callback's captures are made before the lock is taken.
   function lockUpdate(e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string): string | undefined {
     const callback = e.args[0]!;
     // The callback's value lives in a slot it is called through; what it leaves of its captures
@@ -2559,12 +2561,13 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const env = alloca(llvm(made));
     emit(`store ${llvm(made)} ${owned(callback)}, ptr ${env}`);
     const leftovers = needsDrop(made) ? () => dispose(unstash(env, made), made) : undefined;
-    takeLock(at, e);
+    const reading = e.callee.kind === "member" && e.callee.name === "read";
+    takeLock(at, e, t.which === "Lock" ? "fsh_rt_lock" : reading ? "fsh_rt_read_lock" : "fsh_rt_write_lock");
     const inside = temp();
     emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = calls.get(callback)!;
     const result = invoke(target, env, target.body.params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
-    emit(`call void @fsh_rt_unlock(ptr ${at})`);
+    emit(`call void @${reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
     if (result && !types.has(e) && needsDrop(target.returns)) pending.push({ v: result, type: target.returns });
     return result;
   }
@@ -3528,15 +3531,15 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (type.kind === "union") return type.members.some(needsDrop);
     if (type.kind === "array" || type.kind === "map" || type.kind === "shared" || type.kind === "block" || type.kind === "dyn" || type.kind === "recursive") return true;
     if (type.kind === "fixed") return type.size > 0 && needsDrop(type.element);
-    if (type.kind === "interior" && type.which !== "Lock") return needsDrop(type.of);
+    if (type.kind === "interior" && !isLock(type)) return needsDrop(type.of);
     return parts(type).some(([t]) => needsDrop(t));
   }
 
   // The parts of an aggregate value, each with its index: an instance's embedded base, then its
   // fields; an object's or a closure's fields.
   function parts(type: Exclude<Type, string>): [Type, number][] {
-    // A Lock is its word, then what it holds.
-    if (type.kind === "interior") return type.which === "Lock" ? [[type.of, 1]] : [];
+    // A lock is its word, then what it holds.
+    if (type.kind === "interior") return isLock(type) ? [[type.of, 1]] : [];
     if (type.kind !== "object" && type.kind !== "class" && type.kind !== "closure" && type.kind !== "variant" && type.kind !== "generator" && type.kind !== "future") return [];
     const base: [Type, number][] = type.kind === "class" && type.base ? [[type.base, 0]] : [];
     return [...base, ...(type.kind === "generator" || type.kind === "future" ? type.frame : type.fields).map((f, i): [Type, number] => [f.type, i + base.length])];
@@ -3545,7 +3548,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A copy of a value, holding its own reference to each string in it.
   function copied(v: string, type: Type): string {
     if (holdsRust(type)) throw new Error(`internal error: a '${show(type)}' holds a Rust handle, which is moved, never copied`);
-    if (typeof type !== "string" && type.kind === "interior" && type.which !== "Lock") return copied(v, type.of);
+    if (typeof type !== "string" && type.kind === "interior" && !isLock(type)) return copied(v, type.of);
     if (!needsDrop(type)) return v;
     if (type === "string") {
       emit(`call void @fsh_rt_str_retain(ptr ${v})`);
@@ -3567,7 +3570,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // Gives up a value: releases a reference to everything it owns.
   function dispose(v: string, type: Type) {
-    if (typeof type !== "string" && type.kind === "interior" && type.which !== "Lock") return dispose(v, type.of);
+    if (typeof type !== "string" && type.kind === "interior" && !isLock(type)) return dispose(v, type.of);
     if (!needsDrop(type)) return;
     if (type === "string") return emit(`call void @fsh_rt_str_release(ptr ${v})`);
     if (type === "bigint") return emit(`call void @fsh_rt_big_release(ptr ${v})`);
@@ -9465,9 +9468,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (typeof v === "number") return floatConstant(v, type as "f32" | "f64");
     if (typeof v === "bigint" && type === "bigint") return bigConstant(v);
     if (typeof v === "bigint") return String(v);
-    // An Atomic is its value; an atomic boolean a byte. A Lock is its word, free, then its value.
+    // An Atomic is its value; an atomic boolean a byte. A lock is its word, free, then its value.
     if (v && typeof type !== "string" && v.kind === "interior" && type.kind === "interior") {
-      if (type.which === "Lock") {
+      if (isLock(type)) {
         const made = temp();
         emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ${llvm(type.of)} ${bake(v.value, type.of)}, 1`);
         return made;

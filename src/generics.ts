@@ -6,7 +6,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
-import { digest, unfold, elementsOf, field, holdsPart, widenLet, type FunctionType, isTuple, widenEnum, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { INTERIORS, digest, unfold, elementsOf, field, holdsPart, widenLet, type FunctionType, isTuple, widenEnum, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
 import { NodeMap, NodeSet } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
@@ -103,7 +103,7 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
     return;
   }
   // `Lock<T>` against a Lock holds a T.
-  if (node.kind === "ref" && (node.name === "Atomic" || node.name === "Lock" || node.name === "Cell") && node.args.length === 1 && !names.has(node.name)) {
+  if (node.kind === "ref" && INTERIORS.has(node.name) && node.args.length === 1 && !names.has(node.name)) {
     if (typeof arg !== "string" && arg.kind === "interior" && arg.which === node.name) infer(tables, node.args[0]!, arg.of, names, bindings, at);
     return;
   }
