@@ -401,7 +401,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const {
     fits, lowersVariants, lowersInterfaces, lowersClasses, promiseInterface, functionType, typeParameter, literalType, setJsError, jsUncalled, jsConverts, holdsRef,
     lower, show, blockType, jsTakes, uncrossable, jsView, replaced, stored, generatorType, generatorElement, futureType, promiseElement, lockCallbacks,
-    sharedCallbacks, openThrows, unionType, holdsPattern, arrayType, refType, closureType, leafOf, yieldsOf, generatorThrows, tupleType,
+    sharedCallbacks, openThrows, unionType, holdsPattern, arrayType, refType, closureType, leafOf, yieldsOf, generatorThrows, generatorSends, tupleType,
   } = typing;
   const { loopParts, nestedFunctions, nestedBindings, liftedFunctions, getterNames, destructuredParts, unusedDefaults, timerMains, selfCalls } = tables;
   const { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, presetParams, restStarts, substituted, timerWrappers, defaulted, prologues, asserts, declarations, equalities, madeArrows } = tables;
@@ -1267,6 +1267,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const generator = f.generator ? (instance.generator ??= madeBy(generatorType(f.name, instance.concrete, f.async === true), instance)) : undefined;
     const generatorName = f.async ? "AsyncGenerator" : "Generator";
     let yielded = generator && declared ? generatorElement(declared, f.async === true) : undefined;
+    // What `next(x)` sends, which a `yield` whose value is used gives.
+    const sends = generator && declared ? generatorSends(declared) : undefined;
+    if (generator && sends !== undefined) generator.sends = instance.concrete ? lower(sends) : sends;
     if (generator && declared && !yielded) throw new CompileError(`${f.async ? "an async" : "a"} generator function's return type is '${generatorName}<T>', the type of what it yields`, f.returnType!.start, f.returnType!.end);
     if (generator) declared = undefined;
     if (yielded && holdsRef(yielded)) throw unsupported("generators yielding references", f.returnType!);
@@ -1286,6 +1289,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     let inferred: Type | undefined;
     // The awaits written where the state machine can stop at them.
     const awaitable = new NodeSet<Expr>();
+    // The yields whose value is used where the generator can stop at them.
+    const yieldable = new NodeSet<Expr>();
     // How many statements with a `finally` enclose the code being checked: a generator dropped
     // at a `yield` there would never run the `finally`.
     let finalizing = 0;
@@ -1411,6 +1416,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       sharing: f.closure?.expected !== undefined && sharedCallbacks.has(f.closure.expected),
       async: f.async === true,
       awaitable,
+      yieldable,
+      yielding,
       unsafe: f.closure?.unsafe === true,
       changesCapture,
       reachable: (l) => !caseOnly.has(l),
@@ -2120,6 +2127,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             return;
           }
           if (isAwait(s.expr)) awaiting(s.expr);
+          if (s.expr.kind === "assign" && s.expr.value.kind === "yield") {
+            // The target is found after the generator resumes, so it must be one that can be.
+            let root: Expr = s.expr.target;
+            while (root.kind === "member") root = root.object;
+            if (s.expr.op !== "=" || (root.kind !== "ident" && root.kind !== "this")) {
+              throw new CompileError("'yield' can only be assigned with '=' to a variable or a field for now; yield into a 'const' first, then use it", s.expr.start, s.expr.end);
+            }
+            yieldable.add(s.expr.value);
+          }
           if (s.expr.kind === "assign" && isAwait(s.expr.value)) {
             // The target is found after the await resumes, so it must be one that can be.
             let root: Expr = s.expr.target;
@@ -2159,6 +2175,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           if (!d.init && s.keyword === "const") throw new CompileError("a 'const' needs its value where it is declared, as TypeScript requires; use 'let' to assign it later", d.start, d.end);
           if (!d.init) return unassigned(s, d, d.target.name);
           if (isAwait(d.init)) awaiting(d.init);
+          if (d.init.kind === "yield") yieldable.add(d.init);
           // A function type there makes the variable a stored callable.
           const declared = (d.type && stored(resolveType(d.type))) || demands.get(s) || partType(s);
           // A generic function type describes the value, which keeps its own type, as an
@@ -2492,9 +2509,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // The `this.x` a statement assigns, when it is a plain assignment to one of the class's
     // own fields. A setter is a method, which can't run until every field is set.
     // `yield v;`: the generator gives `v` and stops until `next()` is called again. It runs as
-    // a statement of its own, so nothing the statement made is pending across it.
-    function yielding(e: Extract<Expr, { kind: "yield" }>) {
+    // a statement of its own, or as all of a declaration's initializer or an assignment's value,
+    // so nothing the statement made is pending across it. Its value is what `next(x)` sends.
+    function yielding(e: Extract<Expr, { kind: "yield" }>): Type {
       if (!generator) throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);
+      if (yieldable.has(e) && f.async) throw unsupported("values sent into an async generator's 'next'", e);
+      if (yieldable.has(e) && sends === undefined) {
+        throw new CompileError(`this 'yield' gives what 'next(x)' sends, so declare what that is, as in 'Generator<${yielded ? show(yielded) : "T"}, void, string>'`, e.start, e.end);
+      }
       if (targets.some((t) => t.kind === "arm")) throw unsupported("'yield' inside match arms", e);
       if (finalizing > 0) throw unsupported("'yield' statements in a 'try' with a 'finally'", e);
       if (e.delegate) throw unsupported("'yield*'", e);
@@ -2504,6 +2526,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (!yielded) yielded = widenLet(t);
       if (holdsRef(yielded)) throw unsupported("generators yielding references", e.value);
       coerce(e.value, t, yielded, `type '${show(t)}' is not assignable to the generator's '${generatorName}<${show(yielded)}>'`);
+      return sends ?? "void";
     }
 
     // An `await` written as a statement of its own, or as all of a declaration's initializer,

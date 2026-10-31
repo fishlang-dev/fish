@@ -327,7 +327,141 @@ function main() {
   let it = g();
   const r = it.next(5);
 }
-// error: values sent into 'next' are not supported yet
+// error: this generator takes nothing through 'next'; to send it values, declare what it takes, as in 'Generator<i64, void, string>'
+// case: generator_send
+function* accumulate(): Generator<i64, void, i64> {
+  let total = 0;
+  while (true) {
+    const n = yield total;
+    total += n;
+  }
+}
+
+class Log { last: string = ""; count: i64 = 0; }
+
+function* echo(): Generator<string, void, string> {
+  let log = new Log();
+  let seen = "start";
+  while (true) {
+    log.last = yield seen + "!";
+    seen = log.last;
+    yield "dropped " + seen;
+  }
+}
+
+function* until(): Generator<string, undefined, string> {
+  let line = yield "ready";
+  while (line !== "quit") line = yield "got " + line;
+}
+
+function drive<G extends Generator<i64, void, i64>>(g: Mut<G>, values: i64[]): i64 {
+  let last = 0;
+  for (const v of values) {
+    const r = g.next(v);
+    if (r.done === false) last = r.value;
+  }
+  return last;
+}
+
+function main() {
+  let g = accumulate();
+  g.next(100);
+  const a = g.next(5);
+  if (a.done === false) console.log(a.value);
+  const b = g.next(7);
+  if (b.done === false) console.log(b.value);
+  let e = echo();
+  const first = e.next("never seen" + 1);
+  if (first.done === false) console.log(first.value);
+  const second = e.next("hi" + 2);
+  if (second.done === false) console.log(second.value);
+  const third = e.next("not taken" + 3);
+  if (third.done === false) console.log(third.value);
+  let u = until();
+  u.next();
+  for (const line of ["a" + 1, "quit", "late" + 2]) {
+    const r = u.next(line);
+    if (r.done === false) console.log(r.value);
+    else console.log("done");
+  }
+  let h = accumulate();
+  console.log(drive(h, [0, 1, 2, 3]));
+}
+// expect: 5
+// expect: 12
+// expect: start!
+// expect: dropped hi2
+// expect: hi2!
+// expect: got a1
+// expect: done
+// expect: done
+// expect: 6
+// case: generator_send_missing
+function* g(): Generator<i64, void, i64> {
+  const n = yield 1;
+  yield n;
+}
+
+function main() {
+  let it = g();
+  it.next();
+  it.next();
+}
+// panic: generator resumed without a value
+// case: generator_send_moved
+class Job { id: i64 = 0; }
+
+function* g(): Generator<i64, void, Job> {
+  const job = yield 1;
+  yield job.id;
+}
+
+function main() {
+  let it = g();
+  it.next();
+  const job = new Job();
+  it.next(job);
+  console.log(job.id);
+}
+// error: 'job' moved here
+// case: generator_send_undeclared
+function* g(): Generator<i64> {
+  const n = yield 1;
+}
+
+function main() {
+  let it = g();
+}
+// error: this 'yield' gives what 'next(x)' sends, so declare what that is, as in 'Generator<i64, void, string>'
+// case: generator_send_wrong_type
+function* g(): Generator<i64, void, i64> {
+  const n = yield 1;
+}
+
+function main() {
+  let it = g();
+  it.next("one");
+}
+// error: argument of type '"one"' is not assignable to parameter of type 'i64'
+// case: generator_send_return_type
+function* g(): Generator<i64, string, i64> {
+  yield 1;
+}
+
+function main() {
+  let it = g();
+}
+// error: generator return values are not supported yet
+// case: generator_send_compound
+function* g(): Generator<i64, void, i64> {
+  let n = 0;
+  n += yield 1;
+}
+
+function main() {
+  let it = g();
+}
+// error: 'yield' can only be assigned with '=' to a variable or a field for now
 // case: generator_next_const
 function* g(): Generator<i64> {
   yield 1;

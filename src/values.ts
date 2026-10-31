@@ -162,6 +162,9 @@ export type Context = {
   // Whether the body is an async function's, and the awaits written where it can stop at them.
   async: boolean;
   awaitable: NodeSet<Expr>;
+  // The yields whose value is used where the generator can stop at them, and checking one.
+  yieldable: NodeSet<Expr>;
+  yielding(e: Extract<Expr, { kind: "yield" }>): Type;
   // Whether the body is a closure written inside `unsafe`.
   unsafe: boolean;
   changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean): void;
@@ -280,7 +283,7 @@ export function expressions(ctx: Context) {
     unusedDefaults, restStarts, upcasts, typing, ids, regex, files
   } = ctx.tables;
   const {
-    show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, generatorThrows, pointerType, handleType, leafFuture,
+    show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, generatorThrows, generatorSends, pointerType, handleType, leafFuture,
     arrayType, timerCallback, jsUncalled, fits, jsTakes, promiseElement, genericFunctionType, stored: storedType, matchType, functionType, tupleType, regexType,
     holdsPattern, unjson, sameLowered, heldArgument, jsUntyped, jsOptional, uncrossable, keptByJs, jsConverts, interiorType, lockCallbacks, sharedCallbacks,
     combinedFuture, nextResult, lentPromise, promiseInterface, generatorElement, membersFor, wrapped, jsRead, literalType, objectType, sameCallable, partOfItself, unlocks, keyOf, joinedType,
@@ -3593,7 +3596,18 @@ export function expressions(ctx: Context) {
     if (callee.name !== "next") throw new CompileError(`generators have no method '${callee.name}' yet${didYouMean(callee.name, async ? ["next"] : ["next", ...Object.keys(GENERATOR_HELPERS)])}`, callee.start, callee.end);
     if (async && !awaitedNow.has(e)) throw new CompileError("an async generator's 'next()' is awaited where it is called, as in 'await g.next()'", e.start, e.end);
     if (linked(callee)) throw unsupported("optional chains calling generator methods", callee);
-    if (e.args.length > 0) throw unsupported("values sent into 'next'", e.args[0]!);
+    const sends = generatorSends(generator);
+    if (e.args.length > 0 && async) throw unsupported("values sent into an async generator's 'next'", e.args[0]!);
+    if (e.args.length > 0 && sends === undefined) throw new CompileError(`this generator takes nothing through 'next'; to send it values, declare what it takes, as in 'Generator<${show(yields)}, void, string>'`, e.args[0]!.start, e.args[0]!.end);
+    if (e.args.length > 1) throw new CompileError("'next' takes at most 1 argument, the value the generator's 'yield' gives", e.args[1]!.start, e.args[1]!.end);
+    // Like JavaScript, `next()` with nothing sent is allowed; a `yield` whose value is used panics.
+    const arg = e.args[0];
+    if (arg) {
+      expect(arg, sends!);
+      const t = value(arg);
+      if (holdsRef(t)) throw unsupported("references sent into generators", arg);
+      coerce(arg, t, sends!, `argument of type '${show(t)}' is not assignable to parameter of type '${show(sends!)}'`);
+    }
     const held = types.get(callee.object)!;
     if (isRefType(held)) coercions.set(callee.object, generator);
     if (!place(callee.object)) throw new CompileError("'next' changes its generator, so call it on a variable or a field", callee.start, callee.end);
@@ -4605,6 +4619,7 @@ export function expressions(ctx: Context) {
       case "comptime":
         return ctx.comptime(() => value(e.expr));
       case "yield":
+        if (ctx.generator && ctx.yieldable.has(e)) return ctx.yielding(e);
         if (ctx.generator) throw unsupported("'yield' inside expressions", e);
         throw new CompileError("'yield' can only be used inside a 'function*'", e.start, e.end);
       case "unary": {

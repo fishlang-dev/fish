@@ -370,8 +370,9 @@ export const unfold = (t: Type): Type => (typeof t !== "string" && t.kind === "r
 // A generator: what it yields, its parameters, which say what it borrows, and the frame its
 // state lives in, filled once the body is checked. It has no properties, so `fields` stays
 // empty. One per generator instance, so `===` is nominal identity. An async one's `next()` gives
-// a future, and its body may await between yields. `throws` is what advancing it may throw.
-export type GeneratorType = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean; throws?: Type };
+// a future, and its body may await between yields. `throws` is what advancing it may throw, and
+// `sends` what `next(x)` gives the `yield` it resumes at.
+export type GeneratorType = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean; throws?: Type; sends?: Type };
 
 // An enum's member widens to its enum where TypeScript widens it: a `let`, a field, a type
 // argument or a property, since the place may later hold another member.
@@ -1144,16 +1145,20 @@ export function newTyping() {
 
   const generators = new Map<string, InterfaceType>();
   const elements = new WeakMap<InterfaceType, Type>();
+  const sent = new WeakMap<InterfaceType, Type>();
   const asyncElements = new WeakMap<InterfaceType, Type>();
 
   // `Generator<T>`: anything whose `next()` gives `T`s, as TypeScript's type of a generator is.
-  function generatorInterface(t: Type): InterfaceType {
-    let found = generators.get(keyOf(t));
+  // `Generator<T, void, N>` is one whose `next(x)` takes `N`s too.
+  function generatorInterface(t: Type, sends?: Type): InterfaceType {
+    const key = sends === undefined ? keyOf(t) : `${keyOf(t)} sends ${keyOf(sends)}`;
+    let found = generators.get(key);
     if (!found) {
-      found = interfaceType(`Generator<${show(t)}>`);
+      found = interfaceType(sends === undefined ? `Generator<${show(t)}>` : `Generator<${show(t)}, void, ${show(sends)}>`);
       found.methods.push({ name: "next", params: [], returns: nextResult(t) });
-      generators.set(keyOf(t), found);
+      generators.set(key, found);
       elements.set(found, t);
+      if (sends !== undefined) sent.set(found, sends);
     }
     return found;
   }
@@ -1178,6 +1183,15 @@ export function newTyping() {
     if (t.kind === "dyn") return async ? generatorElement(t.of, true) : undefined;
     if (t.kind === "param") return t.concrete ? yieldsOf(t.concrete, async) : t.bound && generatorElement(t.bound, async);
     return generatorElement(t, async);
+  }
+
+  // What a generator's `next(x)` takes, or a type parameter's standing for one or bounded by
+  // `Generator<T, void, N>`.
+  function generatorSends(t: Type): Type | undefined {
+    if (typeof t === "string") return undefined;
+    if (t.kind === "generator") return t.sends;
+    if (t.kind === "param") return t.concrete ? generatorSends(t.concrete) : t.bound && generatorSends(t.bound);
+    return t.kind === "interface" ? sent.get(t) : undefined;
   }
 
   // What advancing a generator, or a type parameter standing for one, may throw.
@@ -1813,7 +1827,7 @@ export function newTyping() {
     setJsError, jsView, timerCallback, callableType, sameCallable, stored, heldArgument, jsConverts, keptByJs, jsTakes, jsRead, blockType, leafOf,
     leafFuture, handleType, joinedType, futureType, combinedOf, settledType, settledParts, combinedFuture, promiseInterface, borrowing, lentPromise, sharesDyn,
     promiseElement, regexType, recursiveType, blockFor, holdsBlock, lowersRecursive, partOfItself, unjson, unfolded, pointerType, classType,
-    interfaceType, generatorType, nextResult, generatorInterface, asyncGeneratorInterface, yieldsOf, generatorThrows, generatorElement, functionType, closureType, genericFunctionType,
+    interfaceType, generatorType, nextResult, generatorInterface, asyncGeneratorInterface, yieldsOf, generatorThrows, generatorSends, generatorElement, functionType, closureType, genericFunctionType,
     literalType, standInLiteral, unionType, membersFor, typeParameter, refType, fixedType, arrayType, standsFor, tiedBy, mapType, variantType,
     holdsRef, lockCallbacks, sharedCallbacks, wrapped, lower, replaced, lowersClasses, lowersInterfaces, lowersVariants, keyOf, tupleType, retuple,
     matchType, objectType, shapeKey, withoutNull, optionalField, fits, unlocks, madeFor, described, show,
