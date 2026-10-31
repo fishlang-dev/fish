@@ -58,3 +58,19 @@ export function resolveTarget(triple: string | undefined, sysroot: string | unde
   const macos = os === "macOS" ? [`-mmacosx-version-min=${triple.startsWith("x86_64") ? "10.12" : "11.0"}`] : [];
   return { triple, compile: ["-target", triple, "-Wno-override-module", ...macos, ...(sysroot ? ["--sysroot", sysroot] : [])], link: lld ? ["-fuse-ld=lld"] : [], ar: foreign ? "llvm-ar" : "ar" };
 }
+
+// `target` linked into one binary with no libc or loader to find at run time. Only musl is: glibc
+// can't look up names or users from a static binary.
+export function staticTarget(target: Target, host: string | undefined = hostTriple()): Target {
+  const triple = target.triple || host;
+  if (!triple || !musl(triple)) {
+    const cpu = triple?.split("-")[0] ?? "x86_64";
+    throw new Error(`fishc build: --static links musl into the binary, so it builds only for a musl target; pass --target ${cpu}-unknown-linux-musl with a musl sysroot in --sysroot or FISH_SYSROOT`);
+  }
+  return { ...target, link: [...target.link, "-static"] };
+}
+
+// A container image holding only the static binary named `binary`, built from the directory it's in.
+export function dockerfile(binary: string): string {
+  return `FROM scratch\nCOPY ${binary} /${binary}\nENTRYPOINT ${JSON.stringify([`/${binary}`])}\n`;
+}

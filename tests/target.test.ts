@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HOST_TARGET, hostTriple, resolveTarget } from "../src/target.ts";
+import { dockerfile, HOST_TARGET, hostTriple, resolveTarget, staticTarget } from "../src/target.ts";
 
 const mac = "aarch64-apple-darwin";
 const linux = "x86_64-unknown-linux-gnu";
@@ -99,4 +99,35 @@ test("Linux over musl takes a musl sysroot from any host whose libc isn't musl",
   // On a musl host, its own triple is a plain build, and glibc is the other libc.
   expect(resolveTarget("x86_64-unknown-linux-musl", undefined, "x86_64-unknown-linux-musl", none)).toBe(HOST_TARGET);
   expect(() => resolveTarget(linux, undefined, "x86_64-unknown-linux-musl", has)).toThrow("needs a Linux sysroot");
+});
+
+test("--static links only musl targets statically", () => {
+  const arm = "aarch64-unknown-linux-musl";
+  const musl = resolveTarget(arm, "/s", mac, has);
+  expect(staticTarget(musl, mac)).toEqual({ ...musl, link: ["-fuse-ld=lld", "-static"] });
+  expect(staticTarget(HOST_TARGET, arm)).toEqual({ ...HOST_TARGET, link: ["-static"] });
+  expect(() => staticTarget(HOST_TARGET, mac)).toThrow("fishc build: --static links musl into the binary, so it builds only for a musl target; pass --target aarch64-unknown-linux-musl with a musl sysroot in --sysroot or FISH_SYSROOT");
+  expect(() => staticTarget(resolveTarget(linux, "/s", mac, has), mac)).toThrow("pass --target x86_64-unknown-linux-musl");
+  expect(() => staticTarget(HOST_TARGET, linux)).toThrow("pass --target x86_64-unknown-linux-musl");
+});
+
+test("a Dockerfile holding only the binary", () => {
+  expect(dockerfile("api")).toBe('FROM scratch\nCOPY api /api\nENTRYPOINT ["/api"]\n');
+});
+
+test.skipIf(hostTriple()?.endsWith("-musl") ?? true)("--static and --dockerfile refused where they can't apply", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fish-target-"));
+  writeFileSync(join(dir, "main.fsh"), 'function main() {\n  console.log("host");\n}\n');
+  const fishc = (...args: string[]) => Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", join(dir, "main.fsh"), "-o", join(dir, "main"), ...args]);
+  const host = fishc("--static");
+  expect(host.stderr.toString()).toContain("fishc build: --static links musl into the binary, so it builds only for a musl target");
+  expect(host.exitCode).toBe(1);
+  const lib = fishc("--static", "--lib");
+  expect(lib.stderr.toString()).toBe("fishc build: '--static' builds an executable, not a library; leave out '--lib', or '--static'\n");
+  expect(lib.exitCode).toBe(2);
+  const docker = fishc("--dockerfile");
+  expect(docker.stderr.toString()).toBe("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'\n");
+  expect(docker.exitCode).toBe(2);
+  expect(existsSync(join(dir, "main"))).toBe(false);
+  expect(existsSync(join(dir, "Dockerfile"))).toBe(false);
 });
