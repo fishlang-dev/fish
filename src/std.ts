@@ -384,11 +384,19 @@ class Headers {
   }
 }
 
+// A cookie's attributes, with Bun's names. maxAge is in seconds and expires in milliseconds since
+// the epoch, as Date.now() gives.
+type CookieInit = { path?: string; domain?: string; maxAge?: i64; expires?: i64; secure?: boolean; httpOnly?: boolean; sameSite?: "strict" | "lax" | "none"; partitioned?: boolean };
+
 // Cookies by name, as Bun's CookieMap: read from a Cookie header as RFC 6265 reads one, the
-// first of a repeated name kept.
+// first of a repeated name kept, and changed by set and delete, each change a Set-Cookie line
+// a response sends.
 class CookieMap {
   #names: string[] = [];
   #values: string[] = [];
+  // The latest Set-Cookie line for each name changed, in the order they were first changed.
+  #changed: string[] = [];
+  #lines: string[] = [];
 
   constructor(header?: string) {
     if (header === null) return;
@@ -423,6 +431,125 @@ class CookieMap {
   forEach(callback: (value: string, name: string) => void) {
     for (let i = 0; i < this.#names.length; i++) callback(this.#values[i], this.#names[i]);
   }
+
+  // Sets a cookie, with Bun's defaults of path '/' and SameSite=Lax. A name must be an HTTP
+  // token and a path or domain printable ASCII without ';'; the value is percent-encoded as
+  // encodeURIComponent does, so nothing in it can end the cookie or the header.
+  set(this: Mut<this>, name: string, value: string, options?: CookieInit) {
+    const line = __cookieLine(name, value, options);
+    this.#forget(name);
+    this.#names.push(name);
+    this.#values.push(value);
+    this.#change(name, line);
+  }
+
+  // Removes a cookie, telling the client to drop its copy at the path and domain given.
+  delete(this: Mut<this>, name: string, options?: { path?: string; domain?: string }) {
+    let path: string | null = null;
+    let domain: string | null = null;
+    if (options !== null) {
+      path = options.path;
+      domain = options.domain;
+    }
+    const line = __cookieLine(name, "", { path: path, domain: domain, expires: 0, maxAge: 0 });
+    this.#forget(name);
+    this.#change(name, line);
+  }
+
+  #forget(this: Mut<this>, name: string) {
+    let names: string[] = [];
+    let values: string[] = [];
+    for (let i = 0; i < this.#names.length; i++) {
+      if (this.#names[i] !== name) {
+        names.push(this.#names[i]);
+        values.push(this.#values[i]);
+      }
+    }
+    this.#names = names;
+    this.#values = values;
+  }
+
+  #change(this: Mut<this>, name: string, line: string) {
+    for (let i = 0; i < this.#changed.length; i++) {
+      if (this.#changed[i] === name) {
+        this.#lines[i] = line;
+        return;
+      }
+    }
+    this.#changed.push(name);
+    this.#lines.push(line);
+  }
+
+  // The Set-Cookie header values the changes make, one per cookie.
+  toSetCookieHeaders(): string[] {
+    return this.#lines.clone();
+  }
+}
+
+// A Set-Cookie header's value: the cookie, then its attributes in the order Bun writes them.
+function __cookieLine(name: string, value: string, options: CookieInit | null): string {
+  assert(Http1.isToken(name), "a cookie's name must be an HTTP token, of letters, digits and !#$%&'*+-.^_|~, so '" + name + "' can't be one");
+  let out = new TextEncoder().encode(name + "=");
+  for (const c of __urlPoints(value)) {
+    const kept = __urlAlpha(c) || __urlDigit(c) || c === 33 || (c >= 39 && c <= 42) || c === 45 || c === 46 || c === 95 || c === 126;
+    __urlPut(out, c, kept ? "none" : "form");
+  }
+  let line = new TextDecoder().decode(out);
+  let path = "/";
+  let sameSite = "Lax";
+  if (options !== null) {
+    const domain = options.domain;
+    if (domain !== null) line = line + "; Domain=" + __cookieAttribute(name, "domain", domain);
+    const p = options.path;
+    if (p !== null) path = __cookieAttribute(name, "path", p);
+    const s = options.sameSite;
+    if (s !== null) sameSite = s === "strict" ? "Strict" : s === "none" ? "None" : "Lax";
+  }
+  if (path.length > 0) line = line + "; Path=" + path;
+  if (options !== null) {
+    const expires = options.expires;
+    if (expires !== null) line = line + "; Expires=" + __cookieDate(expires);
+    const maxAge = options.maxAge;
+    if (maxAge !== null) line = line + "; Max-Age=" + String(maxAge);
+    if (options.secure === true) line = line + "; Secure";
+    if (options.httpOnly === true) line = line + "; HttpOnly";
+    if (options.partitioned === true) line = line + "; Partitioned";
+  }
+  return line + "; SameSite=" + sameSite;
+}
+
+// A path or domain, which a ';' would end and a control character could break out of the header.
+function __cookieAttribute(name: string, attribute: string, value: string): string {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i) as i64;
+    assert(c >= 32 && c < 127 && c !== 59, "cookie '" + name + "' can't have a " + attribute + " holding ';', a control character or a character outside ASCII");
+  }
+  return value;
+}
+
+// Milliseconds since the epoch as an IMF-fixdate, the form HTTP writes dates in.
+function __cookieDate(ms: i64): string {
+  let days = ms / 86400000;
+  let rest = ms % 86400000;
+  if (rest < 0) {
+    days -= 1;
+    rest += 86400000;
+  }
+  // Howard Hinnant's days_from_civil, run backwards: the date of a day count from 1970-01-01.
+  const z = days + 719468;
+  const era = (z >= 0 ? z : z - 146096) / 146097;
+  const doe = z - era * 146097;
+  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const mp = (5 * doy + 2) / 153;
+  const day = doy - (153 * mp + 2) / 5 + 1;
+  const month = mp < 10 ? mp + 3 : mp - 9;
+  const year = yoe + era * 400 + (month <= 2 ? 1 : 0);
+  // 1970-01-01 was a Thursday.
+  const weekday = ((days % 7) + 11) % 7;
+  const seconds = rest / 1000;
+  const two = (n: i64) => (n < 10 ? "0" : "") + String(n);
+  return "Sun,Mon,Tue,Wed,Thu,Fri,Sat".split(",")[weekday as usize] + ", " + two(day) + " " + "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec".split(",")[(month - 1) as usize] + " " + String(year).padStart(4, "0") + " " + two(seconds / 3600) + ":" + two(seconds / 60 % 60) + ":" + two(seconds % 60) + " GMT";
 }
 
 type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal };
@@ -517,6 +644,8 @@ class Response {
   #read: Atomic<i64> = new Atomic(0);
   // The URL fetch got it from, or "" for one the program built.
   url: string = "";
+  // The cookies it sets and deletes, each sent as a Set-Cookie header of its own.
+  cookies: CookieMap = new CookieMap();
 
   // A text or streamed body is typed 'text/plain;charset=UTF-8' unless the headers say
   // otherwise; bytes are given no type, as Bun does.
@@ -579,6 +708,7 @@ class Response {
     let copy = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers.clone() });
     copy.body = this.body.clone();
     copy.url = this.url;
+    copy.cookies = this.cookies.clone();
     return copy;
   }
 
@@ -1339,6 +1469,8 @@ class Http1 {
     res.headers.forEach((value: string, name: string) => {
       if (name !== "content-length" && name !== "transfer-encoding" && name !== "connection" && name !== "date") text = text + name + ": " + value + "\\r\\n";
     });
+    // Never folded into one line, since an Expires date holds a comma.
+    for (const line of res.cookies.toSetCookieHeaders()) text = text + "set-cookie: " + line + "\\r\\n";
     text = text + framing + "date: " + httpDate() + "\\r\\n";
     if (close) text = text + "connection: close\\r\\n";
     else if (version === "HTTP/1.0") text = text + "connection: keep-alive\\r\\n";

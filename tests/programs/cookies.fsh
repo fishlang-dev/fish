@@ -60,3 +60,86 @@ async function main(): Promise<void> throws IoError | AbortError {
   const none = await ask(port, "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
   console.log(none.split("\r\n\r\n")[1]);
 }
+// case: cookies_set
+// expect: sid=again; Path=/; SameSite=Lax
+// expect: prefs=dark%20mode%3B%20lang%3Den%2C%20x%0D%0ASet-Cookie%3A%20evil%3D1%20caf%C3%A9; Domain=example.com; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Max-Age=3600; Secure; HttpOnly; Partitioned; SameSite=Strict
+// expect: none=x; Path=/app; SameSite=None
+// expect: a=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; SameSite=Lax
+// expect: gone=; Domain=d.example; Path=/p; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; SameSite=Lax
+// expect: "[b=2][prefs=dark mode; lang=en, x\r\nSet-Cookie: evil=1 café][none=x][sid=again]"
+// expect: "dark mode; lang=en, x\r\nSet-Cookie: evil=1 café"
+// expect: d=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax
+// expect: d=; Expires=Wed, 31 Dec 1969 23:59:59 GMT; SameSite=Lax
+// expect: d=; Expires=Tue, 29 Feb 2000 00:00:00 GMT; SameSite=Lax
+// expect: d=; Expires=Mon, 01 Jan 1900 00:00:00 GMT; SameSite=Lax
+// expect: d=; Expires=Fri, 31 Dec 9999 23:59:59 GMT; SameSite=Lax
+// Set and delete keep the map and one Set-Cookie line per name, attributes in Bun's order with
+// its defaults, the value percent-encoded so nothing in it ends the cookie or the header, and
+// an expiry in epoch milliseconds written as an HTTP date on either side of the epoch.
+function main() {
+  let jar = new CookieMap("a=1; b=2");
+  jar.set("sid", "abc");
+  jar.set("prefs", "dark mode; lang=en, x\r\nSet-Cookie: evil=1 café", { path: "", domain: "example.com", maxAge: 3600, expires: 1445412480000, secure: true, httpOnly: true, sameSite: "strict", partitioned: true });
+  jar.set("none", "x", { sameSite: "none", path: "/app" });
+  jar.delete("a");
+  jar.delete("gone", { path: "/p", domain: "d.example" });
+  jar.set("sid", "again");
+  for (const line of jar.toSetCookieHeaders()) console.log(line);
+  let out = "";
+  jar.forEach((value: string, name: string) => { out = out + "[" + name + "=" + value + "]"; });
+  console.log(JSON.stringify(out));
+  const back = new CookieMap(jar.toSetCookieHeaders()[1].split(";")[0]);
+  console.log(JSON.stringify(back.get("prefs")));
+  for (const ms of [0, -1, 951782400000, -2208988800000, 253402300799999]) {
+    let d = new CookieMap();
+    d.set("d", "", { path: "", expires: ms });
+    console.log(d.toSetCookieHeaders()[0]);
+  }
+}
+// case: cookies_response
+// expect: visits 41
+// expect: set-cookie: visits=42; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT; HttpOnly; SameSite=Lax|set-cookie: old=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; SameSite=Lax
+// expect: set-cookie: visits=1; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT; HttpOnly; SameSite=Lax|set-cookie: old=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; SameSite=Lax
+// expect: set-cookie: visits=8; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT; HttpOnly; SameSite=Lax|set-cookie: old=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; SameSite=Lax
+// Each cookie a response sets or deletes goes out as a Set-Cookie header of its own, never folded
+// with commas, from a buffered body and from a streamed one alike, and a clone keeps them.
+async function ask(port: i64, raw: string): Promise<string> throws IoError | AbortError {
+  const conn = await TcpStream.connect("127.0.0.1", port);
+  await conn.write(new TextEncoder().encode(raw));
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096, AbortSignal.timeout(5000));
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  return new TextDecoder().decode(all);
+}
+
+function cookieLines(raw: string): string {
+  let out: string[] = [];
+  for (const line of raw.split("\r\n\r\n")[0].split("\r\n")) if (line.startsWith("set-cookie")) out.push(line);
+  return out.join("|");
+}
+
+async function* pieces(): AsyncGenerator<string> { yield "streamed"; }
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    const visits = req.cookies.get("visits") ?? "0";
+    let res = req.path === "/stream" ? new Response(pieces()) : new Response("visits " + visits);
+    res.cookies.set("visits", String((parseInt(visits) ?? 0) + 1), { httpOnly: true, expires: 1445412480000 });
+    res.cookies.delete("old");
+    return req.path === "/clone" ? res.clone() : res;
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const port = found.port.load();
+  const one = await ask(port, "GET / HTTP/1.1\r\nHost: h\r\nCookie: visits=41\r\nConnection: close\r\n\r\n");
+  console.log(one.split("\r\n\r\n")[1]);
+  console.log(cookieLines(one));
+  const two = await ask(port, "GET /stream HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
+  console.log(cookieLines(two));
+  const three = await ask(port, "GET /clone HTTP/1.1\r\nHost: h\r\nCookie: visits=7\r\nConnection: close\r\n\r\n");
+  console.log(cookieLines(three));
+}
