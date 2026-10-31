@@ -127,7 +127,7 @@ const refused = (port: number) =>
   });
 
 const SLOW = `async function main(): Promise<void> throws IoError {
-  await serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => console.error("listening " + String(info.port)) }, async (req: Request) => {
+  await serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => console.error("listening " + String(info.port)) }, async (_req: Request) => {
     console.error("handling");
     await sleep(2000);
     return new Response("done slowly");
@@ -154,7 +154,7 @@ test("serve stops accepting at SIGINT and finishes the request in flight", async
 test("serve given its own signal leaves SIGINT alone", async () => {
   const run = start(await build("own", `async function main(): Promise<void> throws IoError {
   const ctl = new AbortController();
-  await serve({ port: 0, hostname: "127.0.0.1", signal: ctl.signal, onListen: (info: ServeInfo) => console.error("listening") }, async (req: Request) => new Response("hi"));
+  await serve({ port: 0, hostname: "127.0.0.1", signal: ctl.signal, onListen: (_info: ServeInfo) => console.error("listening") }, async (_req: Request) => new Response("hi"));
   console.log("after serve");
 }
 `));
@@ -165,7 +165,7 @@ test("serve given its own signal leaves SIGINT alone", async () => {
 
 test("a second SIGINT exits even while stdout is stuck on a full pipe", async () => {
   const binary = await build("stuck", `async function main(): Promise<void> {
-  const stop = process.shutdown;
+  const _stop = process.shutdown;
   console.error("ready");
   while (true) console.log("filling the pipe that nobody reads, until a write blocks");
 }

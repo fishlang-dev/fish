@@ -52,11 +52,12 @@ export function compile(src: string, file: string, release = false, panic: Panic
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
-function compiled(src: string, file: string, release: boolean, panic: Panic, library: boolean): { ir: string; instances: Instance[]; shim: () => Shim | undefined } {
+function compiled(src: string, file: string, release: boolean, panic: Panic, library: boolean): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[] } {
   const loaded = load(file, src);
   return withSources(loaded.sources, () => {
     const checked = check(expanded(loaded, library), library);
-    return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources }), loaded), instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances) };
+    for (const w of checked.warnings) w.sources = loaded.sources;
+    return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources }), loaded), instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances), warnings: checked.warnings };
   });
 }
 
@@ -89,8 +90,8 @@ function withSources<T>(sources: Source[], run: () => T): T {
 }
 
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
-// `<name>.h` declaring its exports beside it.
-export function buildLibrary(file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET) {
+// `<name>.h` declaring its exports beside it. Gives the warnings.
+export function buildLibrary(file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET): CompileError[] {
   const src = readFileSync(file, "utf8");
   const loaded = load(file, src);
   const checked = withSources(loaded.sources, () => check(expanded(loaded, true), true));
@@ -126,6 +127,8 @@ export function buildLibrary(file: string, out: string, kind: Library, release =
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+  for (const w of checked.warnings) w.sources = loaded.sources;
+  return checked.warnings;
 }
 
 // A C header declaring a library's exports, usable from C and C++. A parameter named like a C
@@ -163,12 +166,13 @@ function cType(t: Type): string {
 
 // Compiles `file` to a native executable at `out`, piping the IR through clang and linking the
 // cached runtime objects.
-// `links` names the C libraries the program's declared functions come from.
-export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET) {
-  const { ir, instances, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
+// `links` names the C libraries the program's declared functions come from. Gives the warnings.
+export function build(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET): CompileError[] {
+  const { ir, instances, shim, warnings } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
   const rust = shim();
   if (rust) refuseForeignRust(target);
   linked(ir, instances, out, release, links, rust, target);
+  return warnings;
 }
 
 // Cargo isn't told the target yet, so a crate would be built for the host.
@@ -196,13 +200,14 @@ function linked(ir: string, instances: Instance[], out: string, release = false,
 }
 
 // `build`, with clang run without blocking, so several builds can go at once.
-export async function buildAsync(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []) {
-  const { ir, instances, shim } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
+export async function buildAsync(file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
+  const { ir, instances, shim, warnings } = compiled(readFileSync(file, "utf8"), file, release, panic, false);
   const { std, program } = parts(ir, instances, release);
   const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map(cachedObjectAsync), mathObjectsAsync()])).flat();
   const clang = Bun.spawn(clangArgs(out, release, links, objects, shim()), { stdin: new TextEncoder().encode(program), stderr: "pipe" });
   const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
+  return warnings;
 }
 
 // Builds the tests of the package at `dir` into one program at `out`, unless it has none, and gives
@@ -661,8 +666,8 @@ else if (import.meta.main) {
       const sysroot = values.sysroot ?? (values.target !== undefined && values.target !== hostTriple() ? process.env.FISH_SYSROOT || undefined : undefined);
       const platform = resolveTarget(values.target, sysroot);
       try {
-        if (lib) buildLibrary(target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? [], platform);
-        else build(target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? [], platform);
+        const warnings = lib ? buildLibrary(target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? [], platform) : build(target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? [], platform);
+        for (const w of warnings) console.error(formatError(w, target, readFileSync(target, "utf8"), "warning"));
       } catch (e) {
         // A missing header or library for another target is most often a missing or partial sysroot.
         if (e instanceof Error && platform.compile.includes("-target") && e.message.startsWith("clang failed")) e.message += `\nfishc build: building for ${platform.triple} needs its headers and libraries; check that --sysroot or FISH_SYSROOT names a complete sysroot for it`;
