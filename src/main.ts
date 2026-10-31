@@ -30,6 +30,7 @@ import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type } from "./typing.ts";
 import { rustShim, type Shim } from "./rust.ts";
 import { split } from "./split.ts";
+import { withDebugInfo } from "./debuginfo.ts";
 import { STD_BASE } from "./std.ts";
 
 export type Panic = "unwind" | "abort";
@@ -49,8 +50,8 @@ export function analyze(session: Session, src: string, file: string, read?: (pat
 }
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
-export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false): string {
-  return compiled(session, src, file, release, panic, library, leaks).ir;
+export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
+  return compiled(session, src, file, release, panic, library, leaks, debug).ir;
 }
 
 // Checks the program whose entry is `file` as `compile` would, generating nothing, or a library
@@ -64,13 +65,14 @@ export function checkProgram(session: Session, file: string, library = false): C
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
-function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[] } {
+function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false, debug = false): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[] } {
   const compilation = newCompilation(session);
   const loaded = load(compilation, file, src);
   return withSources(compilation, loaded.sources, () => {
     const checked = check(compilation, expanded(compilation, loaded, library), library);
     for (const w of checked.warnings) w.sources = loaded.sources;
-    return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks }), loaded), instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances), warnings: checked.warnings };
+    const ir = bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks, debug }), loaded);
+    return { ir: debug ? withDebugInfo(ir, src, file, loaded.sources, release) : ir, instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances), warnings: checked.warnings };
   });
 }
 
@@ -105,12 +107,13 @@ function withSources<T>({ names }: Compilation, sources: Source[], run: () => T)
 
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
-export function buildLibrary(session: Session, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET): CompileError[] {
+export function buildLibrary(session: Session, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, debug = false): CompileError[] {
   const src = readFileSync(file, "utf8");
   const compilation = newCompilation(session);
   const loaded = load(compilation, file, src);
   const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), true));
-  const ir = withSources(compilation, loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }), loaded));
+  const made = withSources(compilation, loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources, debug }), loaded));
+  const ir = debug ? withDebugInfo(made, src, file, loaded.sources, release) : made;
   const shim = rustShim(loaded.rust, checked.instances);
   if (shim) refuseForeignRust(target);
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
@@ -119,6 +122,7 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   const fish = join(dir, "fish.o");
   const optimize = release ? "-O2" : "-O0";
+  const g = debug ? ["-g"] : [];
   const run = (args: string[], stdin?: string) => {
     const done = Bun.spawnSync(args, stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) });
     if (done.exitCode !== 0) throw new Error(`${args[0]} failed:\n${done.stderr.toString()}`);
@@ -128,9 +132,9 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
+      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
     } else {
-      run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize], ir);
+      run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
       const archive = shim ? join(dir, "fish.a") : at(`lib${name}.a`);
       if (target.ar !== "ar" && !Bun.which(target.ar)) throw new Error(`fishc build: a static library for ${target.triple} is archived with llvm-ar, which isn't on PATH; install LLVM and put its bin directory on PATH, or build with --lib=shared`);
       run([target.ar, "rcs", archive, fish, ...objects]);
@@ -183,11 +187,11 @@ function cType(t: Type): string {
 // cached runtime objects.
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
 // program reports at exit what it never freed, by where it was allocated. Gives the warnings.
-export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false): CompileError[] {
-  const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks);
+export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false): CompileError[] {
+  const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug);
   const rust = shim();
   if (rust) refuseForeignRust(target);
-  linked(session, ir, instances, out, release, links, rust, target, leaks);
+  linked(session, ir, instances, out, release, links, rust, target, leaks, debug);
   return warnings;
 }
 
@@ -208,10 +212,10 @@ function parts(ir: string, instances: Instance[], release: boolean, target: Targ
 }
 
 // Builds the IR `ir`, of `instances`, into the executable `out`.
-function linked(session: Session, ir: string, instances: Instance[], out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false) {
+function linked(session: Session, ir: string, instances: Instance[], out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false, debug = false) {
   const { std, program } = parts(ir, instances, release, target);
   const objects = [...[...runtimeUnits(ir, release, false, target, leaks), ...std].map((u) => cachedObject(session, u)), ...mathObjects(session, target.compile)];
-  const clang = Bun.spawnSync(clangArgs(out, release, links, objects, shim, target), { stdin: new TextEncoder().encode(program) });
+  const clang = Bun.spawnSync([...clangArgs(out, release, links, objects, shim, target), ...(debug ? ["-g"] : [])], { stdin: new TextEncoder().encode(program) });
   if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
 }
 
@@ -491,6 +495,7 @@ else if (import.meta.main) {
           check: { type: "boolean" },
           fix: { type: "boolean" },
           leaks: { type: "boolean" },
+          debug: { type: "boolean", short: "g" },
         },
       });
     } catch (e) {
@@ -696,7 +701,7 @@ else if (import.meta.main) {
     const binary = out ?? join(scratch!, basename(target, ".fsh"));
     let code = 1;
     try {
-      for (const w of build(session, target, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks)) console.error(formatError(w, target, readFileSync(target, "utf8"), "warning"));
+      for (const w of build(session, target, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug)) console.error(formatError(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
       // A signal ends it with 128 plus the signal's number, as a shell reports it.
       code = ran.exitCode ?? 128 + (ran.signalCode ? constants.signals[ran.signalCode as NodeJS.Signals] : 0);
@@ -709,19 +714,19 @@ else if (import.meta.main) {
     process.exit(code);
   }
   if (command !== "build" || !target || values.fix || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--leaks] [--emit-llvm]\n       fishc check [<file.fsh>]\n       fishc run [<file.fsh>] [--release] [--leaks] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--leaks] [--emit-llvm]\n       fishc check [<file.fsh>]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
   if (values.leaks && lib !== undefined) fail("fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead");
   try {
-    if (values["emit-llvm"]) process.stdout.write(compile(session, readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined, values.leaks));
+    if (values["emit-llvm"]) process.stdout.write(compile(session, readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined, values.leaks, values.debug));
     else {
       // FISH_SYSROOT is for building for another target, never the host's own plain builds.
       const sysroot = values.sysroot ?? (values.target !== undefined && values.target !== hostTriple() ? process.env.FISH_SYSROOT || undefined : undefined);
       const platform = resolveTarget(values.target, sysroot);
       try {
-        const warnings = lib ? buildLibrary(session, target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? [], platform) : build(session, target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? [], platform, values.leaks);
+        const warnings = lib ? buildLibrary(session, target, out ?? basename(target, ".fsh"), lib, values.release, panic, values.link ?? [], platform, values.debug) : build(session, target, out ?? basename(target, ".fsh"), values.release, panic, values.link ?? [], platform, values.leaks, values.debug);
         for (const w of warnings) console.error(formatError(w, target, readFileSync(target, "utf8"), "warning"));
       } catch (e) {
         // A missing header or library for another target is most often a missing or partial sysroot.

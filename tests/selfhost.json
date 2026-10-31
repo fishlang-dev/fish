@@ -11,6 +11,7 @@
     "comments.ts": "generator methods are not supported yet",
     "compilation.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "comptime.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
+    "debuginfo.ts": "an exported function's parameter can't be a 'string' in a library; C takes numbers, booleans and raw pointers like 'Ptr<u8>'",
     "declarations.ts": "generator methods are not supported yet",
     "defaults.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "dependencies.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
@@ -73,5 +74,5 @@
     "values.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet"
   },
-  "count": 72
+  "count": 73
 }

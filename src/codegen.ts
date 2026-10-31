@@ -130,12 +130,13 @@ const rustGiven = (i: Instance): Crossing | undefined => (i.body.self?.construct
 // `sources` holds the program's files other than the entry, for panic locations.
 // `harness`: the entry file is `fishc test`'s generated harness, whose functions keep no frame.
 // `leaks`: a `--leaks` build, whose frames name each allocation's site, so it keeps them in release.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean };
+// `debug`: a `-g` build, whose own functions carry the marks `withDebugInfo` turns into line tables.
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances, tables: noted }: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false }: Options): string {
+export function codegen({ instances, tables: noted }: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false, debug = false }: Options): string {
   const {
     asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers,
     jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds,
@@ -156,6 +157,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // calls it is making.
   let framing: string[] | undefined;
   let site: Span | undefined;
+  // In a `-g` build, the body of the program's own function being emitted, and the site last marked in it.
+  let debugging: string[] | undefined;
+  let marked: Span | undefined;
   let frames = false;
   const globals: string[] = [];
   const regexes = new Map<string, string>();
@@ -317,6 +321,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(harness && from === file) && !f.closure?.made;
     framing = (!release || leaks) && !library && ours ? body : undefined;
     site = undefined;
+    debugging = debug && f.start < STD_BASE && !BUILT_IN.test(from) ? body : undefined;
+    marked = undefined;
+    if (debugging) allocas.push(`  ;fsh.fn ${f.start}`);
     const machine = instance.generator ?? instance.future;
     resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };
     // A generator's variables, and its loops' state, are fields of the frame each `next()` is
@@ -411,6 +418,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...pushFrame(instance), ...popFrame(body), "}", "");
   }
   framing = undefined;
+  debugging = undefined;
   if (frames) globals.push("@fsh_rt_frames = external thread_local global ptr");
   // A cancel function wanted while making one may want another.
   for (const done = new Set<Instance>(); done.size < cancelled.size;) {
@@ -791,6 +799,10 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   function emit(line: string) {
+    if (body === debugging && site && site !== marked) {
+      body.push(`  ;fsh.at ${site.start}`);
+      marked = site;
+    }
     const callee = body === framing && site ? CALLEE.exec(line)?.[1] : undefined;
     if (callee && !QUIET.test(callee)) body.push(`  store ptr ${cString(where(site!))}, ptr %fsh.site`);
     body.push(`  ${line}`);
