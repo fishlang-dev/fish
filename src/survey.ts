@@ -192,7 +192,8 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Base64 and hex")], ["assert", PLANNED("assert")], ["timers", STD("the setTimeout and setInterval globals")],
-  ["readline", PLANNED("Reading standard input")], ["dns", PLANNED("DNS and IPv6")], ["dgram", PLANNED("UDP sockets")],
+  // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
+  ["readline", PLANNED("Reading standard input")], ["dgram", PLANNED("UDP sockets")],
   ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
 ]);

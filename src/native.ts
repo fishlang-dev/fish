@@ -4551,8 +4551,10 @@ struct fsh_file_job;
 void fsh_rt_file_job_release(struct fsh_file_job *job);
 
 // A socket's block: its count and its file descriptor, closed with the last count. A connect
-// waiting on a host name's lookup has no descriptor yet, only the lookup's job.
-typedef struct { int64_t count; int fd; struct fsh_file_job *lookup; } fsh_socket;
+// waiting on a host name's lookup has no descriptor yet, only the lookup's job; once looked up,
+// it keeps the job while connecting to its tried-th address, to fall back to the next, and the
+// time after which that attempt gives way to the next address, or 0.
+typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; } fsh_socket;
 
 static fsh_socket *fsh_socket_new(int fd) {
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
@@ -4565,6 +4567,8 @@ static fsh_socket *fsh_socket_new(int fd) {
   fsh_socket *s = fsh_rt_alloc(sizeof(fsh_socket));
   s->count = 1;
   s->fd = fd;
+  s->tried = 0;
+  s->deadline = 0;
   s->lookup = NULL;
   return s;
 }
@@ -4577,6 +4581,13 @@ void fsh_rt_socket_release(fsh_socket *s) {
   }
   fsh_rt_file_job_release(s->lookup);
   fsh_rt_free(s);
+}
+
+// Takes off a connect attempt's deadline timer, fired or not, so it neither holds nor wakes the task.
+static void fsh_connect_untimed(fsh_socket *s, fsh_task *task) {
+  if (!s->deadline) return;
+  fsh_rt_sleep_cancel(task, s);
+  s->deadline = 0;
 }
 
 // A failed call's IoError message: what was being done, and the system's reason.
@@ -4748,19 +4759,29 @@ static void fsh_file_write(fsh_file_job *job) {
   fsh_write_whole(job->path, &job->data, &job->error, &job->syscall);
 }
 
-// A host name's first IPv4 address, into the job's data, or getaddrinfo's error code.
+// A host name's IPv6 and IPv4 addresses, in the order getaddrinfo gives them, into the job's data
+// as sockaddr_storage, or getaddrinfo's error code.
 static void fsh_host_lookup(fsh_file_job *job) {
   struct addrinfo hints, *found = NULL;
   memset(&hints, 0, sizeof hints);
-  hints.ai_family = AF_INET;
+  hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   job->error = getaddrinfo(job->path, NULL, &hints, &found);
   job->syscall = "getaddrinfo";
   if (job->error) return;
-  job->data.data = fsh_rt_alloc(sizeof(struct in_addr));
-  memcpy(job->data.data, &((struct sockaddr_in *)found->ai_addr)->sin_addr, sizeof(struct in_addr));
-  job->data.length = job->data.capacity = sizeof(struct in_addr);
+  int64_t count = 0;
+  for (struct addrinfo *a = found; a; a = a->ai_next) count += a->ai_family == AF_INET || a->ai_family == AF_INET6;
+  struct sockaddr_storage *at = fsh_rt_alloc(count ? count * sizeof *at : 1);
+  int64_t n = 0;
+  for (struct addrinfo *a = found; a; a = a->ai_next) {
+    if (a->ai_family != AF_INET && a->ai_family != AF_INET6) continue;
+    memset(&at[n], 0, sizeof at[n]);
+    memcpy(&at[n++], a->ai_addr, a->ai_addrlen);
+  }
   freeaddrinfo(found);
+  job->data.data = (char *)at;
+  job->data.length = job->data.capacity = count * sizeof *at;
+  if (!count) job->error = EAI_NONAME;
 }
 
 // readFileSync, writeFileSync and existsSync: the same reads and writes, on the calling thread.
@@ -5062,18 +5083,26 @@ int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at,
   return 1;
 }
 
-// An IPv4 address and port from a string and a number, or 0 with the message saying why not.
-static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_in *at, fsh_str **message) {
+#define FSH_ADDRESS_SIZE(at) ((socklen_t)((at)->ss_family == AF_INET6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in)))
+
+static void fsh_address_port(struct sockaddr_storage *at, int64_t port) {
+  if (at->ss_family == AF_INET6) ((struct sockaddr_in6 *)at)->sin6_port = htons((uint16_t)port);
+  else ((struct sockaddr_in *)at)->sin_port = htons((uint16_t)port);
+}
+
+// An IPv4 or IPv6 address and port from a string and a number, or 0 with the message saying why not.
+static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_storage *at, fsh_str **message) {
   char *text = fsh_rt_str_cstring(host);
   memset(at, 0, sizeof *at);
-  at->sin_family = AF_INET;
-  at->sin_port = htons((uint16_t)port);
+  struct sockaddr_in *v4 = (struct sockaddr_in *)at;
+  struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)at;
   char reason[320];
   reason[0] = 0;
   if (port < 0 || port > 65535) snprintf(reason, sizeof reason, "port %lld is outside 0 to 65535", (long long)port);
-  else if (!text || inet_pton(AF_INET, text, &at->sin_addr) != 1) {
-    snprintf(reason, sizeof reason, "'%.200s' is not an IPv4 address like 127.0.0.1; host names aren't looked up", text ? text : "");
-  }
+  else if (text && inet_pton(AF_INET, text, &v4->sin_addr) == 1) at->ss_family = AF_INET;
+  else if (text && inet_pton(AF_INET6, text, &v6->sin6_addr) == 1) at->ss_family = AF_INET6;
+  else snprintf(reason, sizeof reason, "'%.200s' is not an IP address like 127.0.0.1 or ::1; host names aren't looked up", text ? text : "");
+  if (!reason[0]) fsh_address_port(at, port);
   fsh_rt_free(text);
   if (reason[0] && message) fsh_io_parts(message, reason, "EINVAL", "connect", NULL);
   return !reason[0];
@@ -5081,13 +5110,15 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_in *at, fsh_
 
 // 'TcpListener.bind(host, port)': listening at once, or 5 with the reason.
 int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
-  struct sockaddr_in at;
+  struct sockaddr_storage at;
   if (!fsh_address(host, port, &at, message)) return 5;
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  int fd = socket(at.ss_family, SOCK_STREAM, 0);
   if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
-  int on = 1;
+  int on = 1, off = 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
-  if (bind(fd, (struct sockaddr *)&at, sizeof at) < 0 || listen(fd, 128) < 0) {
+  // "::" takes IPv4 clients too, as Node's listen does unless asked for IPv6 only.
+  if (at.ss_family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
+  if (bind(fd, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) < 0 || listen(fd, 128) < 0) {
     int32_t failed = fsh_io_failed(message, "can't listen there", "listen");
     close(fd);
     return failed;
@@ -5097,10 +5128,10 @@ int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str *
 }
 
 int64_t fsh_rt_tcp_port(fsh_socket *s) {
-  struct sockaddr_in at;
+  struct sockaddr_storage at;
   socklen_t size = sizeof at;
   if (getsockname(s->fd, (struct sockaddr *)&at, &size) < 0) return -1;
-  return ntohs(at.sin_port);
+  return ntohs(at.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&at)->sin6_port : ((struct sockaddr_in *)&at)->sin_port);
 }
 
 // Polls 'accept()': a new connection, a wait for one, or 5 with the reason.
@@ -5123,6 +5154,7 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
 // connect aborted before its first poll has no socket yet.
 void fsh_rt_socket_leave(fsh_socket *s, fsh_task *task) {
   if (!s) return;
+  fsh_connect_untimed(s, task);
   pthread_mutex_lock(&fsh_io_lock);
   fsh_task **left = NULL;
   int64_t count = 0;
@@ -5187,23 +5219,57 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
 }
 
 // Starts connecting a new socket to an address, into *socket_at, or 5 with the reason.
-static int32_t fsh_connect_start(fsh_socket **socket_at, struct sockaddr_in *at, fsh_str **message) {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
+static int32_t fsh_connect_start(fsh_socket **socket_at, struct sockaddr_storage *at, fsh_str **message) {
+  int fd = socket(at->ss_family, SOCK_STREAM, 0);
   if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
   *socket_at = fsh_socket_new(fd);
   // Interrupted, it goes on connecting all the same.
-  if (connect(fd, (struct sockaddr *)at, sizeof *at) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect", "connect");
+  if (connect(fd, (struct sockaddr *)at, FSH_ADDRESS_SIZE(at)) < 0 && errno != EINPROGRESS && errno != EINTR) return fsh_io_failed(message, "can't connect", "connect");
   return 0;
+}
+
+// RFC 8305's Connection Attempt Delay: how long an address with others after it is given.
+#define FSH_ATTEMPT_DELAY 250000000
+
+// Starts connecting to a lookup's addresses from the n-th on, in place of the socket at
+// *socket_at, skipping those that fail at once. The socket keeps the job, so a connect that fails
+// later, or isn't done by its deadline, moves on to the next; with none left, 5 with the last
+// one's reason. The last address has no deadline but the system's.
+static int32_t fsh_connect_from(fsh_socket **socket_at, fsh_file_job *job, int32_t n, int64_t port, fsh_task *task, fsh_str **message) {
+  int32_t count = (int32_t)(job->data.length / sizeof(struct sockaddr_storage));
+  for (; n < count; n++) {
+    fsh_rt_socket_release(*socket_at);
+    *socket_at = NULL;
+    struct sockaddr_storage *at = (struct sockaddr_storage *)job->data.data + n;
+    fsh_address_port(at, port);
+    fsh_str *skipped[4] = { NULL };
+    if (!fsh_connect_start(socket_at, at, n + 1 < count ? skipped : message)) {
+      (*socket_at)->lookup = job;
+      (*socket_at)->tried = n;
+      if (n + 1 < count) {
+        (*socket_at)->deadline = fsh_now() + FSH_ATTEMPT_DELAY;
+        __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+        fsh_timer_add((*socket_at)->deadline, task, NULL, *socket_at);
+      }
+      return 0;
+    }
+    for (int i = 0; i < 4; i++) fsh_rt_str_release(skipped[i]);
+  }
+  fsh_rt_file_job_release(job);
+  return 5;
 }
 
 // Polls 'TcpStream.connect(host, port)': the frame keeps the socket while it connects; once
 // writable, the connection either stands, moving the socket out, or failed. A host that isn't an
-// IPv4 address is looked up on the blocking pool first, the socket waiting with no descriptor; a
-// connect dropped mid-lookup leaves the job to the pool's thread, which drops its result.
+// IP address is looked up on the blocking pool first, the socket waiting with no descriptor; a
+// connect dropped mid-lookup leaves the job to the pool's thread, which drops its result. Each
+// address is tried in turn until one connects, an attempt not done in 250 ms abandoned for the
+// next. ponytail: sequential Happy Eyeballs; RFC 8305 keeps the slow attempt going alongside the
+// next, so a slow but working first address can lose to the second here.
 int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, fsh_task *task, fsh_socket **out, fsh_str **message) {
   fsh_socket *s = *socket_at;
   if (!s) {
-    struct sockaddr_in at;
+    struct sockaddr_storage at;
     if (fsh_address(host, port, &at, NULL)) {
       if (fsh_connect_start(socket_at, &at, message)) return 5;
     } else {
@@ -5223,6 +5289,8 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       s = *socket_at = fsh_rt_alloc(sizeof(fsh_socket));
       s->count = 1;
       s->fd = -1;
+      s->tried = 0;
+      s->deadline = 0;
       s->lookup = job;
       fsh_pool_submit(job);
       return 0;
@@ -5240,30 +5308,41 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       fsh_rt_free(text);
       return 5;
     }
-    struct sockaddr_in at;
-    memset(&at, 0, sizeof at);
-    at.sin_family = AF_INET;
-    at.sin_port = htons((uint16_t)port);
-    memcpy(&at.sin_addr, job->data.data, sizeof at.sin_addr);
-    fsh_rt_socket_release(s);
-    *socket_at = NULL;
-    if (fsh_connect_start(socket_at, &at, message)) return 5;
+    s->lookup = NULL;
+    if (fsh_connect_from(socket_at, job, 0, port, task, message)) return 5;
   }
-  s = *socket_at;
-  int error = 0;
-  socklen_t size = sizeof error;
-  getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size);
-  if (error) {
-    errno = error;
-    return fsh_io_failed(message, "can't connect", "connect");
+  for (;;) {
+    s = *socket_at;
+    int error = 0;
+    socklen_t size = sizeof error;
+    getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size);
+    if (!error) {
+      struct sockaddr_storage peer;
+      socklen_t peer_size = sizeof peer;
+      if (getpeername(s->fd, (struct sockaddr *)&peer, &peer_size) == 0) break;
+      if (errno == ENOTCONN && (!s->deadline || fsh_now() < s->deadline)) {
+        fsh_io_wait(s->fd, 1, task);
+        return 0;
+      }
+      // Past its deadline the attempt gives way to the next address. A refusal that lands after
+      // SO_ERROR was read shows on macOS as getpeername's EINVAL, with SO_ERROR holding the reason.
+      error = errno == ENOTCONN ? ETIMEDOUT : errno;
+      int late = 0;
+      getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &late, &size);
+      if (late) error = late;
+    }
+    fsh_connect_untimed(s, task);
+    fsh_file_job *job = s->lookup;
+    if (!job || (int64_t)(s->tried + 1) * (int64_t)sizeof(struct sockaddr_storage) >= job->data.length) {
+      errno = error;
+      return fsh_io_failed(message, "can't connect", "connect");
+    }
+    s->lookup = NULL;
+    if (fsh_connect_from(socket_at, job, s->tried + 1, port, task, message)) return 5;
   }
-  struct sockaddr_in peer;
-  socklen_t peer_size = sizeof peer;
-  if (getpeername(s->fd, (struct sockaddr *)&peer, &peer_size) < 0) {
-    if (errno != ENOTCONN) return fsh_io_failed(message, "can't connect", "connect");
-    fsh_io_wait(s->fd, 1, task);
-    return 0;
-  }
+  fsh_connect_untimed(s, task);
+  fsh_rt_file_job_release(s->lookup);
+  s->lookup = NULL;
   *out = s;
   *socket_at = NULL;
   return 1;

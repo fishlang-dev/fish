@@ -417,7 +417,8 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     const listen = options.onListen;
     if (listen !== null) listen({ hostname: hostname, port: bound });
     const boxed: ServeHandler = handler;
-    const host = hostname + ":" + String(bound);
+    // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL.
+    const host = (hostname.includes(":") ? "[" + hostname + "]" : hostname) + ":" + String(bound);
     while (true) {
       try {
         const conn = await listener.accept(stop);
@@ -1080,7 +1081,9 @@ function __urlFetchAddress(url: string): { host: string; port: i64; authority: s
   if (typeof parsed === "string") throw new IoError("can't fetch '" + url + "': " + parsed);
   const authority = parsed.port >= 0 ? parsed.host + ":" + String(parsed.port) : parsed.host.clone();
   const query = parsed.hasQuery ? "?" + parsed.query : "";
-  return { host: parsed.host.clone(), port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
+  // An IPv6 host connects without the brackets it has in the URL and the Host header.
+  const host = parsed.host.startsWith("[") ? parsed.host.slice(1, (parsed.host.length as i64) - 1) : parsed.host.clone();
+  return { host: host, port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
 }
 `;
 
@@ -1960,7 +1963,6 @@ function __urlFetchTarget(url: string): __urlRecord | string {
   if (parsed.scheme === "https") return "https: needs TLS, which isn't supported yet";
   if (parsed.scheme !== "http") return "only http: URLs are supported";
   if (parsed.username.length > 0 || parsed.password.length > 0) return "a URL can't hold a user name or password";
-  if (parsed.host.startsWith("[")) return "IPv6 hosts aren't supported yet";
   if (parsed.port === 0) return "the port isn't a number from 1 to 65535";
   return parsed;
 }
