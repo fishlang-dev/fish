@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { CompileError, formatError, madeUpNames, shown } from "../src/diag.ts";
 
 const src = "let a = 1\nuse(a)\n";
@@ -22,4 +24,9 @@ test("only names the compiler made up are rewritten in messages, never text a us
   expect(shown(`can't find the package 'test "\\x"'`)).toBe(`can't find the package 'test "\\x"'`);
   expect(shown(`can't find 'test "other"'`)).toBe(`can't find 'test "other"'`);
   expect(shown("'helper-fsh2' is unused")).toBe("'helper' is unused");
+});
+
+test("diagnostics import nothing, so they compile without the rest of the compiler", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "src", "diag.ts"), "utf8");
+  expect(source.split("\n").filter((line) => line.startsWith("import "))).toEqual([]);
 });

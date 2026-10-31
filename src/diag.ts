@@ -1,4 +1,3 @@
-import { STD_BASE, STD_FILE, STD_SOURCE } from "./std.ts";
 
 // Names the compiler made up, as a message should show them: a test's function, `test "x"`, as
 // the test it is. Only names recorded here are rewritten, so text a user wrote is left alone.
@@ -41,10 +40,9 @@ export class CompileError extends Error {
   }
 }
 
-// Which source an offset is in: the entry file's, another file's from `sources`, or the std
-// library's, which sits past them all.
+// Which source an offset is in: the entry file's, or another file's from `sources`, which ends
+// with std's when the program was loaded with it.
 export function sourceOf(src: string, file: string, offset: number, sources: Source[] = []): { src: string; file: string; offset: number } {
-  if (offset >= STD_BASE) return { src: STD_SOURCE, file: STD_FILE, offset: offset - STD_BASE };
   const other = sources.findLast((s) => offset >= s.base);
   return other ? { src: other.src, file: other.file, offset: offset - other.base } : { src, file, offset };
 }

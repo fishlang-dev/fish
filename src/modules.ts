@@ -9,7 +9,7 @@ import { parse, shiftSpans, type ClassMember, type Expr, type Func, type Span, t
 import { fishFiles } from "./fmt.ts";
 import { MANIFEST, type RustDependency } from "./manifest.ts";
 import { HANDLE, RUST_NAME, rustClassNodes, rustNames, rustSymbol } from "./rust.ts";
-import { ENGINE_HOOK, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
+import { ENGINE_HOOK, STD, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
 import { NodeMap, nextId } from "./nodes.ts";
@@ -250,11 +250,12 @@ export function load(entry: string, src = readFileSync(entry, "utf8"), read = (p
   try {
     visit(entry, src, entry);
   } catch (e) {
-    if (e instanceof CompileError) e.sources = sources;
+    if (e instanceof CompileError) e.sources = [...sources, STD];
     throw e;
   }
   loadedFiles = modules.map(({ base, file }) => ({ base, file: base === 0 ? basename(entry) : file }));
-  return { modules, sources, packages, rust };
+  // std's text sits past every file's, so it goes last, where an offset past them finds it.
+  return { modules, sources: [...sources, STD], packages, rust };
 }
 
 // `declare module "rust:<crate>" { ... }`.

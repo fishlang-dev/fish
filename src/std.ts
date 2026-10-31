@@ -1,5 +1,6 @@
 import { deserialize, serialize } from "bun:jsc";
 import { createHash } from "node:crypto";
+import type { Source } from "./diag.ts";
 import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AST } from "./ast.ts";
@@ -2989,6 +2990,8 @@ class JsError extends Error {
 
 export const STD_SOURCE = PRELUDE + HTTP + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR;
 export const STD_FILE = "<fish std>";
+// std's text as a program's last source, for rendering an error or a panic inside it.
+export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
 
 // A hash of the std source, the compiler's own sources and Bun's version, which decides the
 // serialization format, so no other parser's tree is ever loaded.
