@@ -539,6 +539,8 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     const stands = (name: string) => instance.bindings.get(name)!;
     const outer = classParams(f);
     const scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(outer, (t, s) => withScope(s, () => resolveType(t)), stands) : new Map(f.scope);
+    // A constructor taking its base's parameters also holds the base's type arguments.
+    for (const [name, t] of f.scope ?? []) if (!scope.has(name)) scope.set(name, t);
     const names = [...typeParamsOf(f).map((p) => p.name), ...[...implicitOf(f).keys()].map((i) => `#${i}`)];
     // A function-typed parameter of a class's member is seen in terms of the class's parameters
     // as this body holds them, even while the parameter itself is still open.
@@ -737,7 +739,9 @@ export function genericClasses({ classes, templates, register, layout, members, 
   // An instance made while the resolver is still being built waits for `start` to check its
   // bounds and lay it out, since both need the resolver.
   let ready = false;
-  return { classNamed, construct, start, define };
+  // Each generic class as its definition is checked, which holds the statics every instance shares.
+  const defined = new Map<string, ClassInfo>();
+  return { classNamed, construct, start, define, definedClass: (name: string) => defined.get(name) };
 
   function start() {
     ready = true;
@@ -747,7 +751,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
   // A generic class, like a generic body, is checked once at its definition with
   // placeholders for its type parameters, whether or not anything instantiates it.
   function define() {
-    templates.forEach((t) => classInstance(t, [...classPlaceholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t));
+    templates.forEach((t) => defined.set(t.name, classInstance(t, [...classPlaceholders(t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t)));
   }
 
   function classNamed(name: string, args: Type[], at: Span): ClassType | undefined {
@@ -804,15 +808,28 @@ export function genericClasses({ classes, templates, register, layout, members, 
     const template = templates.get(name);
     if (!template) return c;
     if (typeArgs.length > 0) return classInstance(template, typeArgs.map(resolveType), at);
-    const ctor = template.members.find((m) => m.kind === "constructor");
-    const names = new Set(template.typeParams.map((p) => p.name));
-    const bindings = new Map<string, Type>();
-    ctor?.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
+    const bindings = inferred(template, argTypes, at);
     const args = template.typeParams.map((p) => {
       const type = bindings.get(p.name);
       if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
       return type;
     });
     return classInstance(template, args, at);
+  }
+
+  // A class with no constructor of its own takes its base's parameters, so its type arguments
+  // are inferred through the base's, as its `extends` clause passes them on.
+  function inferred(template: ClassNode, argTypes: Type[], at: Span, seen = new Set<ClassNode>()): Map<string, Type> {
+    const names = new Set(template.typeParams.map((p) => p.name));
+    const bindings = new Map<string, Type>();
+    const ctor = template.members.find((m) => m.kind === "constructor");
+    if (ctor) ctor.params.forEach((p, i) => p.type && argTypes[i] && infer(p.type, argTypes[i]!, names, bindings, at));
+    const base = template.extends?.kind === "instantiation" && template.extends.expr.kind === "ident" ? templates.get(template.extends.expr.name) : undefined;
+    if (!ctor && base && !seen.has(base) && template.extends?.kind === "instantiation") {
+      const given = inferred(base, argTypes, at, seen.add(template));
+      const passed = template.extends.typeArgs;
+      base.typeParams.forEach((p, i) => given.has(p.name) && passed[i] && infer(passed[i]!, given.get(p.name)!, names, bindings, at));
+    }
+    return bindings;
   }
 }

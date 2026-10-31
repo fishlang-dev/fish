@@ -1,10 +1,10 @@
-import { extend, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrides, extend, type Body, type ClassInfo } from "./classes.ts";
 import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import type { TypeNode } from "./parser.ts";
+import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
 import { retuple, fits, holdsPattern, objectType, optionalField, blockFor, show, tupleType, unionType, widenEnum, type ClassType, type Type, type VariantType } from "./typing.ts";
 
@@ -15,6 +15,7 @@ import { retuple, fits, holdsPattern, objectType, optionalField, blockFor, show,
 // other lazily.
 type Checker = {
   classes: Map<string, ClassInfo>;
+  templates: Map<string, ClassNode>;
   members: Members;
   resolveType(t: TypeNode): Type;
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
@@ -23,7 +24,7 @@ type Checker = {
   checkBody(i: Instance): void;
 };
 
-export function registry({ classes, members, resolveType, withScope, instanceOf, definition, checkBody }: Checker) {
+export function registry({ classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody }: Checker) {
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new Map<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
@@ -53,14 +54,24 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   function link(c: ClassInfo, path: Set<ClassInfo>) {
     if (linked.has(c) || c.baseName === undefined) return;
     if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
-    const base = classes.get(c.baseName);
-    if (!base) throw new CompileError(`cannot find class '${c.baseName}'`, c.node.extends!.start, c.node.extends!.end);
+    const base = baseOf(c, c.baseName);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
     const rust = rustClassOf(base.type);
     if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
     link(base, path.add(c));
     extend(c, base);
+    checkOverrides(c);
     linked.add(c);
+  }
+
+  // The class `extends` names, a generic one made from the type arguments it is written with,
+  // as this class's own type parameters stand for them.
+  function baseOf(c: ClassInfo, name: string): ClassInfo {
+    const at = c.node.extends!;
+    if (!classes.has(name) && !templates.has(name)) throw new CompileError(`cannot find class '${name}'`, at.start, at.end);
+    const args = at.kind === "instantiation" ? at.typeArgs : [];
+    const type = withScope(c.scope, () => resolveType({ kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
+    return infoOf.get(type)!;
   }
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
@@ -68,6 +79,8 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   // Whether its fields are known, which they aren't yet while its own fields are being resolved.
   function layout(c: ClassInfo): boolean {
     if (laidOut.has(c)) return !laying.has(c) && (!c.base || layout(c.base));
+    // A generic class's instance is made after the declared classes are linked.
+    link(c, new Set());
     laidOut.add(c);
     laying.add(c);
     if (c.base) layout(c.base);
