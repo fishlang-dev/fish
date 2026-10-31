@@ -1,7 +1,7 @@
 import type { Checked } from "./check.ts";
 import { upcasts } from "./classes.ts";
 import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
-import { freshId, shared } from "./compilation.ts";
+import { freshId, shared, type Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Stmt } from "./parser.ts";
@@ -376,7 +376,7 @@ function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: NodeSet
 }
 
 // The top-level declarations a program's quotes make.
-function quoteDeclarations(s: Stmt): string[] {
+function quoteDeclarations(parsed: Tables["parsedQuotes"], s: Stmt): string[] {
   const found: string[] = [];
   const visit = (node: unknown) => {
     if (!node || typeof node !== "object") return;
@@ -384,7 +384,7 @@ function quoteDeclarations(s: Stmt): string[] {
     const n = node as Expr;
     if (n.kind === "tagged" && n.tag.kind === "ident" && (n.tag.name === "quote" || n.tag.name === "quoteType")) {
       try {
-        found.push(...declaredBy(quoted(n, n.tag.name === "quoteType")));
+        found.push(...declaredBy(quoted(parsed, n, n.tag.name === "quoteType")));
       } catch {
         // A quote that doesn't parse is reported when the macro is checked.
       }
@@ -428,7 +428,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   };
   // The declarations this macro's quotes make are known from the start, so a quote naming one
   // made by a quote it builds later means it.
-  const declared = reached(code, macro).flatMap(quoteDeclarations);
+  const declared = reached(code, macro).flatMap((s) => quoteDeclarations(ctx.checked.tables.parsedQuotes, s));
   const members = new Set(loaded.modules.flatMap((m) => m.statements.flatMap((s) => {
     const d = s.kind === "export" ? s.body : s;
     return d?.kind === "enum" ? d.members.map((x) => x.name) : [];

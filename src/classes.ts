@@ -1,12 +1,11 @@
-import { freshId } from "./compilation.ts";
-import { defaulted, prologues } from "./defaults.ts";
+import { freshId, type Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { rustNames, type RustName } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { classType, type Access, type ClassType, type FunctionType, type Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
-import { NodeSet, WeakNodeMap } from "./nodes.ts";
+import { NodeSet } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
@@ -92,7 +91,8 @@ export type ClassInfo = {
 // Collects a class declaration's fields and builds the constructor it compiles to. A generic
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
-export function declareClass(node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
+export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
+  const { genericStatics } = tables;
   if (node.abstract) throw unsupported("abstract classes", node);
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   if (node.extends && node.extends.kind !== "ident" && !(node.extends.kind === "instantiation" && node.extends.expr.kind === "ident")) {
@@ -275,9 +275,6 @@ export function declareClass(node: ClassNode & { name: string }, name: string = 
   }
 }
 
-// Each generic class's statics, declared with its first instance.
-const genericStatics = new WeakNodeMap<ClassNode, Map<string, Body>>();
-
 // A Rust type's member is a foreign function, called through the shim.
 function rustOf(m: ClassMember): { foreign?: true; rust?: RustName } {
   const rust = rustNames.get(m);
@@ -293,7 +290,8 @@ export const upcasts = new Set<string>();
 // Links a derived class to the base it embeds. Its constructor must start with
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
 // a constructor of its own it passes its arguments on to the base's.
-export function extend(c: ClassInfo, base: ClassInfo, global: (name: string) => Type) {
+export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (name: string) => Type) {
+  const { defaulted, prologues } = tables;
   c.base = base;
   c.type.base = base.type;
   for (let b: ClassInfo | undefined = base; b; b = b.base) {

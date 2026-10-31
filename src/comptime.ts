@@ -2,8 +2,8 @@ import type { Instance } from "./check.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
-import { equalities, quotes, restStarts, stringBuilds, timerNames } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
+import type { Tables } from "./compilation.ts";
 import { baseOf, elementsOf, isSubclass, isTuple, field, fits, INTEGERS, standInLiteral, type LiteralType, isFloat, isInteger, membersFor, show, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
@@ -84,17 +84,17 @@ type Interpreter = ReturnType<typeof interpreter>;
 
 // The value of `comptime expr`, written in `instance`.
 export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime" }): Value {
-  return guarded(site, (run) => run.expr(seeded(instance), site.expr));
+  return guarded(instance.tables, site, (run) => run.expr(seeded(instance), site.expr));
 }
 
 // Runs a `comptime { }` block written in `instance`, for what it checks.
 export function comptimeBlock(instance: Instance, site: Stmt & { kind: "comptime" }) {
-  guarded(site, (run) => run.block(seeded(instance), site.body));
+  guarded(instance.tables, site, (run) => run.block(seeded(instance), site.body));
 }
 
 // A comptime parameter's argument at a call written in `instance`.
 export function comptimeArgument(instance: Instance, arg: Expr): Value {
-  return guarded(arg, (run) => run.expr(seeded(instance), arg));
+  return guarded(instance.tables, arg, (run) => run.expr(seeded(instance), arg));
 }
 
 // The value an instance's comptime parameter was given, from the literal type it is keyed by.
@@ -131,7 +131,7 @@ function renameQuoted(v: Value, from: string, to: string) {
 // A function run while compiling with the given arguments, as a macro runs on a declaration;
 // a failure is reported at `site`.
 export function comptimeCall(instance: Instance, args: Value[], site: Span): Value {
-  return guarded(site, (run) => run.call(instance, args, undefined, site));
+  return guarded(instance.tables, site, (run) => run.call(instance, args, undefined, site));
 }
 
 // How a quoted tree, or a declaration a macro takes, becomes a value while compiling.
@@ -199,16 +199,16 @@ const computing = new Set<Instance>();
 // A top-level const's value, or a `comptime { }` block run at the top level: its body.
 export function comptimeBody(instance: Instance): Value {
   if (constants.has(instance)) return constants.get(instance);
-  const v = guarded(instance.body, (run) => run.constant(instance, instance.body));
+  const v = guarded(instance.tables, instance.body, (run) => run.constant(instance, instance.body));
   constants.set(instance, v);
   return v;
 }
 
 // Runs comptime code; a panic, a refusal or an error it didn't catch is a compile error at the
 // comptime site, noting where inside it happened.
-function guarded(site: Span, go: (run: Interpreter) => Value): Value {
+function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): Value {
   try {
-    return go(interpreter());
+    return go(interpreter(tables));
   } catch (e) {
     let stop = e;
     if (e instanceof Thrown) stop = new Stop(`this comptime code threw an error it didn't catch: ${described(e.value)}`, e.at, false);
@@ -223,7 +223,8 @@ function guarded(site: Span, go: (run: Interpreter) => Value): Value {
 
 const constName = (c: Instance) => c.body.name.slice("const ".length);
 
-function interpreter() {
+function interpreter(tables: Tables) {
+  const { equalities, quotes, restStarts, stringBuilds, timerNames, parsedQuotes } = tables;
   let steps = 0;
   let depth = 0;
   return { expr, block, constant, call };
@@ -489,7 +490,7 @@ function interpreter() {
       case "tagged": {
         const types = quotes.get(e);
         if (!types) return unsupported("this tagged template", e);
-        const q = quoted(e, e.tag.kind === "ident" && e.tag.name === "quoteType");
+        const q = quoted(parsedQuotes, e, e.tag.kind === "ident" && e.tag.name === "quoteType");
         const holes = q.holes.map((x) => ({ value: expr(f, x), type: f.instance.types.get(x) }));
         // A quote spliced in shares its bindings with this one, and a name it leaves free means
         // this one's binding of it; what this one leaves free, a quote around it may bind.

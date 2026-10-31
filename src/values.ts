@@ -1,4 +1,4 @@
-import { freshId, shared } from "./compilation.ts";
+import { freshId, shared, type Tables } from "./compilation.ts";
 import { fileAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
 import { inherited, isLifetime, upcasts, type Body, type ClassInfo } from "./classes.ts";
@@ -6,22 +6,21 @@ import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
-import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
+import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
+import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { allFields, heldArgument, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, optionRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
-import { unusedDefaults } from "./check.ts";
 import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
-import { declaredTypes, defaulted, fallbacks, holdsNull } from "./defaults.ts";
+import { holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
-import { isEmpty, kindTests, literalValue, type Facts, type Guard } from "./narrow.ts";
+import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 import { NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber } from "./nodes.ts";
 
@@ -64,6 +63,7 @@ const printable = (t: Type): boolean =>
 
 // What expression checking needs from the program and the function it is in.
 export type Context = {
+  tables: Tables;
   types: NodeMap<Expr, Type>;
   locals: NodeMap<Expr | Stmt | Param | ObjectProp, Local>;
   coercions: NodeMap<Expr, Type>;
@@ -183,61 +183,11 @@ export type Context = {
   infer(e: Expr, to: Type): boolean;
 };
 
-// The member reads a pipe wrote in for its topic. A generic body is checked once, so whether one
-// is a stored field or a getter's is only known for each instance.
-export const substituted = new WeakNodeSet<Expr>();
-
-// The element types written on `Array.of<T>(...)` calls, which became array literals.
-const ofElements = new WeakNodeMap<Expr, TypeNode>();
-// `new Array(n).fill(x)` calls, rewritten into calls of the prelude's `array filled`.
-const fills = new WeakNodeSet<Expr>();
-const filling = new WeakNodeSet<Expr>();
-// Calls whose trailing arguments have been packed into their rest parameter's array.
-const packed = new WeakNodeSet<Expr>();
-// The pairs of a `new Map([[k, v]])` given no types, each a tuple of what it holds.
-const pairs = new WeakNodeSet<Expr>();
-
-// The `FixedArray.filled` calls, by the fixed array each makes.
-export const fixedFills = new WeakNodeSet<Expr>();
-// `String.fromCharCode(...)` and `String.fromCodePoint(...)`, by their call, their arguments
-// gathered into one array.
-export const stringBuilds = new WeakNodeMap<Expr, "units" | "points">();
-// The parameters of the closures declared functions named as values became: the function as
-// written, its parameters' names, and which of them take values a caller would have to clone.
-const namedParams = new WeakNodeMap<Param, { fn: string; names: string[]; clones: boolean[] }>();
-// Their types, resolved where the function is declared.
-export const presetParams = new WeakNodeMap<Param, Type>();
-// The `fill length` checks that panic on a negative length.
-export const lengthChecks = new WeakNodeSet<Expr>();
-// The `fileRead` and `fileWrite` calls of the std's file module.
-export const fileCalls = new WeakNodeSet<Expr>();
-// The blocking calls the std's sync file module is written over, by their name.
-export const syncFileCalls = new WeakNodeMap<Expr, string>();
-// The calls that print: `console.log`, `console.error`, `console.warn` and `print`.
-export const printCalls = new WeakNodeSet<Expr>();
-// node:util's `format` calls.
-export const formatCalls = new WeakNodeSet<Expr>();
 // The ways several Promises are awaited at once.
 type Combiner = "all" | "race" | "allSettled" | "any";
 const COMBINERS: string[] = ["all", "race", "allSettled", "any"];
-// The timer calls written in a program, rewritten into the std's own, and the async arrows
-// running their callbacks.
-const timerSets = new WeakNodeSet<Expr>();
-export const timerWrappers = new WeakNodeSet<Expr>();
-// The name each rewritten timer call was written with, for messages about it.
-export const timerNames = new WeakNodeMap<Expr, string>();
 // The timer globals, Node's and the browser's.
 const TIMER_CALLS = new Set(["setTimeout", "setInterval", "clearTimeout", "clearInterval"]);
-// `Promise.all`, `race`, `allSettled` and `any` calls, each its own combined future.
-export const combinedCalls = new WeakNodeSet<Expr>();
-// The operands of an `await`, while they are checked.
-const awaitedNow = new WeakNodeSet<Expr>();
-// node:util's `inspect` calls.
-export const inspectCalls = new WeakNodeSet<Expr>();
-// The `isDeepStrictEqual` calls checked as the `===` they were turned into.
-const deepEqualities = new WeakNodeSet<Expr>();
-// The `parseArgs` calls whose config has been turned into the arguments std's port takes.
-const parsedArgs = new WeakNodeSet<Expr>();
 
 // What a literal format does with the arguments after it, as the runtime's routine reads it:
 // the specifier each one it takes is given to, and where those left, appended, start.
@@ -259,20 +209,8 @@ export function formatPlan(format: string, count: number): { specs: string[]; re
   }
   return { specs, rest: last === 0 ? 0 : taken + 1 };
 }
-// The values printed as Node's util.inspect prints them, whose types as written say how their
-// fields were spelled.
-export const printed = new WeakNodeSet<Expr>();
-// The `Date.now()` and `performance.now()` calls, by which each is.
-export const clocks = new WeakNodeMap<Expr, "Date.now" | "performance.now">();
-// The `JSON.stringify` and `JSON.parse` calls, by which each is.
-export const jsonCalls = new WeakNodeMap<Expr, "stringify" | "parse">();
-// The `parseInt`, `parseFloat` and `Number(s)` calls, by which each is.
-export const parses = new WeakNodeMap<Expr, "parseInt" | "parseFloat" | "Number">();
-// Calls of the global `assert`, which panics where it is called.
-export const asserts = new WeakNodeSet<Expr>();
 // The string methods that may take a regex, and the calls that did, by method.
 const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "matchAll", "search"]);
-export const regexStringCalls = new WeakNodeMap<Expr, string>();
 
 // What a string method given a regex gives, from the regex: one whose captures aren't known may
 // have one that takes no part. Each instance of a generic body works it out from its own regex.
@@ -283,16 +221,8 @@ export function regexStringType(name: string, rx: RegexType, unknown: boolean): 
   if (name === "split") return arrayType(rx.captures.some((c) => c.optional) || unknown ? unionType(["string", "null"]) : "string");
   return "string";
 }
-// The regex method calls, by method.
-export const regexCalls = new WeakNodeMap<Expr, "test" | "exec">();
-// The `new RegExp(...)` expressions, which are regexes known while compiling.
-export const regexNews = new WeakNodeSet<Expr>();
 // A regex's flag properties, by the flag each reads.
 export const REGEX_FLAGS: Record<string, string> = { hasIndices: "d", global: "g", ignoreCase: "i", multiline: "m", dotAll: "s", unicode: "u", unicodeSets: "v", sticky: "y" };
-// The `toFixed` calls.
-export const fixedPrints = new WeakNodeSet<Expr>();
-// The `Math` calls and constants, which codegen lowers itself.
-export const maths = new WeakNodeSet<Expr>();
 // `Math`'s functions on f64, by how many numbers each takes.
 export const MATH_FLOAT: Record<string, number> = {
   floor: 1, ceil: 1, round: 1, trunc: 1, sqrt: 1, cbrt: 1, exp: 1, expm1: 1, log: 1, log1p: 1, log2: 1, log10: 1,
@@ -303,82 +233,32 @@ export const MATH_CONSTANTS: Record<string, number> = {
   PI: Math.PI, E: Math.E, LN2: Math.LN2, LN10: Math.LN10, LOG2E: Math.LOG2E, LOG10E: Math.LOG10E, SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
 };
 
-// The calls a tagged template became, the only calls yet that fill a rest parameter.
-const tagCalls = new WeakNodeSet<Expr>();
-// The `equals` each class's `===` calls.
-export const equalities = new WeakMap<ClassType, Instance>();
-
-// Each quote, by the Ast types it was checked with, for comptime to build its value from.
-export const quotes = new WeakNodeMap<Expr, Record<Category, Type>>();
-
-// The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
-// body's next instance checks again as tuples.
-const tupleLiterals = new WeakNodeSet<Expr>();
-
 const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
 
-// A rest tuple's array, read as its field `...`, and how many fixed elements come before it.
-export const restStarts = new WeakNodeMap<Expr, number>();
-
 // How a rest tuple's element or its array reads in a message, as written: `t[2]` and `t[1...]`.
-export function restText(e: Expr, text: (e: Expr) => string): string | undefined {
+export function restText(restStarts: Tables["restStarts"], e: Expr, text: (e: Expr) => string): string | undefined {
   if (e.kind === "index" && e.index.kind === "int" && restStarts.has(e.object)) return `${text((e.object as Extract<Expr, { kind: "member" }>).object)}[${BigInt(restStarts.get(e.object)!) + e.index.value}]`;
   if (e.kind === "member" && restStarts.has(e)) return `${text(e.object)}[${restStarts.get(e)}...]`;
   return undefined;
 }
 
-// Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
-// through a Dyn: values, not places.
-export const computed = new WeakNodeSet<Expr>();
-
-// For each concrete type boxed into a Dyn, by the keys of the type and the Dyn: the instance
-// each interface method runs, then for each field the getter supplying it, or none when it is
-// a field. And each method call through a Dyn, with the receiver its interface declares.
-export const dynMembers = new Map<string, DynTable>();
-
 // What a type's Dyn runs: each method's instance, each field's getter (none for a field), and
 // what '.clone()' runs: the class's own `clone`, the compiler's copy, or nothing when the type
 // can't be cloned.
 export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
-// A rewritten call of a prelude promise helper whose T, in a generic body, may be void in an
-// instance: its name and type arguments for a T that isn't, the void helper taking the rest.
-const promiseVariants = new WeakNodeMap<Expr, { name: string; typeArgs: TypeNode[] }>();
-// The reads of a package's consts that can't be converted, refused once the program is checked.
-export const jsUses: Expr[] = [];
-// The calls into a package, whose arguments cross by copy, so nothing moves into them.
-export const jsCrossings = new WeakNodeSet<Expr>();
-// The function each of a package's signatures is checked as, by its declaration.
-export const jsBodies = new WeakNodeMap<Stmt, Body>();
-// A package's classes, by name: what `new` and their statics are checked against.
-export const jsClasses = new Map<string, Interface>();
-// Where each of a package's functions is first called, noted on a refusal of its declaration.
-export const jsCalledAt = new WeakMap<object, Expr>();
-// The std's timer calls, by which one each is.
-export const timerCalls = new WeakNodeMap<Expr, "timerSet" | "timerNext" | "timerClear">();
-// The test hook's `jsEvaluate(source)` calls, each running a JS module.
-export const jsEvaluations = new WeakNodeSet<Expr>();
-// The `v === null` and `v === undefined` tests of a JsValue: what is tested, and for which.
-export const jsEmptyTests = new WeakNodeMap<Expr, [Expr, "null" | "undefined"]>();
-// The reads of a package's consts, by the export each reads.
-export const jsExports = new WeakNodeMap<Expr, JsName>();
-// The calls of a package's functions, by the export each calls, with the signature checked.
-export const jsCalls = new WeakNodeMap<Expr, JsName>();
-// The values given to JS, converted by the call or write that gives them.
-export const jsGiven = new WeakNodeSet<Expr>();
-// A handle's property reads and writes, and its method calls.
-export const jsMembers = new WeakNodeSet<Expr>();
-export const jsMethods = new WeakNodeSet<Expr>();
-// `new` of a package's class, and its static members read or called, by the class's export.
-export const jsNews = new WeakNodeMap<Expr, JsName>();
-export const jsStatics = new WeakNodeMap<Expr, JsName>();
-// Which declared parameters of a handle's method, a constructor or a static method a call takes
-// are optional, written with `?`, which JS may leave out: an empty value is undefined there.
-export const jsOptionalOf = new WeakNodeMap<Expr, boolean[]>();
-// The `get`, `at` and `has` calls on a JsValue.
-export const jsAccessors = new WeakNodeSet<Expr>();
-export const dynCalls = new WeakNodeMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>();
 
 export function expressions(ctx: Context) {
+  const {
+    asserts, awaitedNow, clocks, combinedCalls, computed, declaredTypes, deepEqualities, defaulted,
+    dynCalls, dynMembers, equalities, fallbacks, fileCalls, filling, fills, fixedFills,
+    fixedPrints, formatCalls, inspectCalls, jsAccessors, jsBodies, jsCalledAt, jsCalls, jsClasses,
+    jsCrossings, jsEmptyTests, jsEvaluations, jsExports, jsGiven, jsMembers, jsMethods, jsNews,
+    jsOptionalOf, jsStatics, jsUses, jsonCalls, kindTests, lengthChecks, maths, namedParams,
+    ofElements, packed, pairs, parsedArgs, parses, presetParams, presetTypes, printCalls, printed,
+    promiseVariants, quotes, regexCalls, regexNews, regexStringCalls, stringBuilds, substituted,
+    syncFileCalls, tagCalls, timerCalls, timerNames, timerSets, timerWrappers, tupleLiterals,
+    unusedDefaults, restStarts, parsedQuotes
+  } = ctx.tables;
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
@@ -414,7 +294,7 @@ export function expressions(ctx: Context) {
   // Powers of literals whose exponent no u32 holds, unless they became floats.
   const powers: [Expr, Expr][] = [];
   const unions: Union = {
-    types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
+    kindTests, types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
     adapt: (e, to) => adapt(e, to),
   };
@@ -1414,7 +1294,7 @@ export function expressions(ctx: Context) {
   // `quoteType`, a type's; each splice takes a node of the category its place holds.
   function quote(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Type {
     if (e.typeArgs.length > 0) throw new CompileError("a quote takes no type arguments", e.start, e.end);
-    const q = quoted(e, asType);
+    const q = quoted(parsedQuotes, e, asType);
     q.asExpressions.clear();
     q.names.clear();
     const at = { start: e.start, end: e.end };
@@ -5538,7 +5418,7 @@ export function expressions(ctx: Context) {
 
   // How a place reads in a message, like `p.inner.x`.
   function placeText(e: Expr): string {
-    const rest = restText(e, placeText);
+    const rest = restText(restStarts, e, placeText);
     if (rest) return rest;
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${placeText(e.object)}[${e.name}]` : `${placeText(e.object)}.${e.name}`;
     if (e.kind === "index") return `${placeText(e.object)}[${indexText(e.index)}]`;

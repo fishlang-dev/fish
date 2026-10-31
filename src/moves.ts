@@ -5,9 +5,8 @@ import { CompileError, indexText } from "./diag.ts";
 import type { Expr, ObjectProp, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
-import { kindTests } from "./narrow.ts";
-import { asserts, computed, jsCrossings, restText, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, MAP_CHANGES, regexStringCalls } from "./values.ts";
-import { holdsNode, nestedFunctions, selfCalls } from "./check.ts";
+import { restText, MAP_CHANGES } from "./values.ts";
+import { holdsNode } from "./check.ts";
 import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, optionRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
@@ -57,6 +56,7 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
+  const { kindTests, asserts, computed, jsCrossings, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts } = instance.tables;
   // A place put into a `Ref<T> | null` is lent to the reference the Option holds.
   const coercions = new NodeMap(instance.coercions);
   for (const [e, to] of coercions) {
@@ -1461,7 +1461,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // How a place reads in a message.
   function text(e: Named): string {
     // A tuple's element reads as it is written, `t[0]`.
-    const rest = restText(e as Expr, (x) => text(x as Named));
+    const rest = restText(restStarts, e as Expr, (x) => text(x as Named));
     if (rest) return rest;
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${text(e.object)}[${e.name}]` : `${text(e.object)}.${e.name}`;
     if (e.kind === "index") return `${text(e.object)}[${indexText(e.index)}]`;

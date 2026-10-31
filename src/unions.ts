@@ -1,6 +1,7 @@
 import { CompileError } from "./diag.ts";
+import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
-import { JS_TYPEOF, kindTests, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
+import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
 import { baseOf, field, fits, isNumeric, isPlainJs, membersFor, objectType, show, unfold, unionType, lower } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
@@ -10,6 +11,7 @@ import { NodeMap } from "./nodes.ts";
 
 // What these rules need from expression checking.
 export type Union = {
+  kindTests: Tables["kindTests"];
   types: NodeMap<Expr, Type>;
   coercions: NodeMap<Expr, Type>;
   value(e: Expr): Type;
@@ -106,7 +108,7 @@ export function unionField(union: UnionType, name: string, at: Span): Type | und
 
 // `x instanceof C` checks whether x holds an instance of C or of a class extending it; each
 // keeps its own type when narrowed, its base's fields reached through the base it embeds.
-export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, value, classNamed }: Union): Type {
+export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTests, types, value, classNamed }: Union): Type {
   const left = value(e.left);
   const held = typeof left !== "string" && left.kind === "ref" ? left.to : left;
   if (typeof held !== "string" && held.kind === "dyn") {

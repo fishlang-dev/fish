@@ -1,7 +1,7 @@
-import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
+import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { shared } from "./compilation.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
-import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { formatPlan, printStream, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -11,7 +11,6 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { kindTests } from "./narrow.ts";
 import { allFields, arrayType, callableOf, sameCallable, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
@@ -124,7 +123,14 @@ export type Options = { src: string; file: string; release: boolean; panic: "unw
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances }: Checked, { src, file, release, panic, library = false, sources = [] }: Options): string {
+export function codegen({ instances, tables: noted }: Checked, { src, file, release, panic, library = false, sources = [] }: Options): string {
+  const {
+    asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers,
+    jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds,
+    syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
+    dynMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
+    fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests
+  } = noted;
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
   const globals: string[] = [];
   const regexes = new Map<string, string>();
@@ -225,7 +231,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const declaredRust = new Set<string>();
   const rustDrops = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
-  const { convert, test, equals, unionField, holds, eachMember } = conversions(builder);
+  const { convert, test, equals, unionField, holds, eachMember } = conversions(builder, kindTests);
 
   // The instance each generator type resumes, and each future type polls.
   const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));

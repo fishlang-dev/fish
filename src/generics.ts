@@ -1,6 +1,7 @@
 import { holdsNode, type Instance } from "./check.ts";
 import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
+import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
@@ -247,6 +248,7 @@ const visiting = new Set<ClassType>();
 
 // What instantiating needs from the checker.
 type Checker = {
+  tables: Tables;
   resolveType(t: TypeNode): Type;
   paramType(p: Param, property?: boolean): Type;
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
@@ -268,7 +270,7 @@ export function comptimeName(p: Param): string {
   return `comptime ${paramName(p)}`;
 }
 
-export function instancing({ resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
+export function instancing({ tables, resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
   const explicit = new WeakMap<Body, Map<string, Type>>();
   const instances = new Map<Body, Map<string, Instance>>();
   const sharedPlaceholders = new Map<TypeParam[], Map<string, Type>>();
@@ -418,7 +420,7 @@ export function instancing({ resolveType, paramType, withScope, signing, members
       const isConcrete = complete && [...bindings.values()].every(concrete);
       const generic = bindings.size > 0;
       found = {
-        body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
+        tables, body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
         depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
         types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       };
@@ -721,6 +723,7 @@ function repeats(f: Body, name: string): boolean {
 
 // What generic classes need from the checker.
 type ClassChecker = {
+  tables: Tables;
   classes: Map<string, ClassInfo>;
   templates: Map<string, ClassNode & { name: string }>;
   register(c: ClassInfo): void;
@@ -742,7 +745,7 @@ function heldInArgument(f: Body, name: string): boolean {
 }
 
 // Generic classes: each set of type arguments declares the class again, on first use.
-export function genericClasses({ classes, templates, register, layout, members, resolveType, withScope }: ClassChecker) {
+export function genericClasses({ tables, classes, templates, register, layout, members, resolveType, withScope }: ClassChecker) {
   // Where each instance was first used, and each template's instances by their arguments.
   const uses = new Map<ClassInfo, Span>();
   const instancesOf = new NodeMap<ClassNode, Map<string, ClassInfo>>();
@@ -795,7 +798,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
     if (!shapes.has(shape) && shapes.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && a.kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
-    const c = declareClass(template, `${template.name}<${args.map(show).join(", ")}>`, scope);
+    const c = declareClass(tables, template, `${template.name}<${args.map(show).join(", ")}>`, scope);
     byKey.set(key, c);
     shapes.add(shape);
     register(c);

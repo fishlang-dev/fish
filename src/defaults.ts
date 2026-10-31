@@ -1,39 +1,26 @@
-import { freshId } from "./compilation.ts";
+import { freshId, type Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
 import type { Type } from "./typing.ts";
-import { WeakNodeMap, WeakNodeSet } from "./nodes.ts";
 
 // Default parameter values, lowered before checking. A parameter `x: T = v` becomes an optional
 // parameter under a name no source can write, and the body starts with `const x: T = <it> ?? v`,
 // so the default runs in the callee each time the argument is left out, after the parameters
 // before it, which it may read. The checker holds calls and defaults to `T` itself.
 
-// Each lowered parameter: its name as written, and whether its default is `null`.
-export const defaulted = new WeakNodeMap<Param, { name: string; empty: boolean }>();
-// Each `<it> ?? v` a default became, with the parameter's declared type, which `v` is checked
-// against.
-export const fallbacks = new WeakNodeMap<Expr, TypeNode>();
-// Each lowered parameter's declared type, resolved where the function is written.
-export const declaredTypes = new WeakNodeMap<Param, Type>();
-// Parameters renamed for the body, with the name shown for them in function types.
-const renamed = new WeakNodeMap<Param, string>();
-// The statements binding defaults and destructured parameters, which come before a derived
-// constructor's `super(...)`.
-export const prologues = new WeakNodeSet<Stmt>();
-
-export function lowerDefaults(node: unknown) {
+export function lowerDefaults(tables: Tables, node: unknown) {
   if (!node || typeof node !== "object") return;
   if (Array.isArray(node)) {
-    for (const x of node) lowerDefaults(x);
+    for (const x of node) lowerDefaults(tables, x);
     return;
   }
   const f = node as { kind?: string; params?: unknown; body?: unknown };
-  if (Array.isArray(f.params) && f.body !== undefined) lowered(f as { kind?: string; params: Param[]; body: Expr | Stmt[] });
-  for (const value of Object.values(node)) lowerDefaults(value);
+  if (Array.isArray(f.params) && f.body !== undefined) lowered(tables, f as { kind?: string; params: Param[]; body: Expr | Stmt[] });
+  for (const value of Object.values(node)) lowerDefaults(tables, value);
 }
 
-function lowered(f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
+function lowered(tables: Tables, f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
+  const { defaulted, fallbacks, renamed, prologues } = tables;
   const firsts: Stmt[] = [];
   f.params.forEach((p, i) => {
     if (p.rest && i !== f.params.length - 1) throw new CompileError("a rest parameter has to be the last one, since it takes every argument after those before it", p.start, p.end);
@@ -93,8 +80,8 @@ function literalType(e: Expr): TypeNode | undefined {
 }
 
 // A parameter's name as its source wrote it.
-export function writtenName(p: Param): string {
-  return defaulted.get(p)?.name ?? renamed.get(p) ?? (p.pattern as { name: string }).name;
+export function writtenName(tables: Tables, p: Param): string {
+  return tables.defaulted.get(p)?.name ?? tables.renamed.get(p) ?? (p.pattern as { name: string }).name;
 }
 
 // Whether a type is `null` or an Option, which a call may pass in place of a default.

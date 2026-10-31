@@ -1,12 +1,12 @@
 import { declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
-import { freshId, shared } from "./compilation.ts";
+import { freshId, newTables, shared, type Tables } from "./compilation.ts";
 import { CompileError, named } from "./diag.ts";
 import { STD_BASE, stdFor } from "./std.ts";
 import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
-import { NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber } from "./nodes.ts";
+import { NodeMap, NodeSet, WeakNodeMap, renumber } from "./nodes.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
@@ -18,7 +18,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
-import { defaulted, lowerDefaults, prologues, writtenName } from "./defaults.ts";
+import { lowerDefaults, writtenName } from "./defaults.ts";
 import { madeFor, openThrows, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, optionRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
@@ -26,7 +26,7 @@ import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
+import { expressions, stringLike } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -38,13 +38,16 @@ type Func = Declared & { body: Stmt[] };
 export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number; generic?: Func };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
-export type Checked = { instances: Instance[] };
+// A checked program: the functions to compile, and the tables its check filled in.
+export type Checked = { instances: Instance[]; tables: Tables };
 
 // One compiled function: a body checked with concrete types, and the tables codegen reads
 // to lower it. `symbol` names it in the IR.
 export type Instance = {
   body: Body;
   symbol: string;
+  // The tables of the check that made it.
+  tables: Tables;
   // What a generic body's type parameters stand for in this instance. An instance holding a
   // type parameter is the definition check, which is never compiled.
   bindings: Map<string, Type>;
@@ -290,31 +293,12 @@ const RUNTIME_NAMES = new Set([
   ...MATH_RUNTIME.map((f) => `fsh_math_${f}`),
 ]);
 
-// The names a loop's pattern binds, made as declarations of the parts; a generic body checked
-// again for another instance meets them already made.
-const loopParts = new WeakNodeSet<Declarator>();
-// The arrows nested function declarations became, with their names; they lend what they capture
-// per call.
-export const nestedFunctions = new WeakNodeMap<Expr, string>();
-// The bindings nested function declarations make, and closures' captures of them.
-const nestedBindings = new WeakSet<Local>();
-// The generic functions written inside bodies, each lifted to a function of its own, by the
-// statement that declared it, or the generic arrow written as a value.
-const liftedFunctions = new WeakNodeMap<Stmt | Expr, { name: string; fn: Func }>();
 let lifts = 0;
 let destructures = 0;
-// Every name a class or object literal gives a getter, so a destructuring source reading one
-// runs it once.
-let getterNames = new Set<string>();
-// The fresh variable a destructuring assignment's literal part goes into, by the target whose
-// type it takes; and the defaults it adds, which an Option's absence takes and anything else
-// never needs.
-const destructuredParts = new WeakNodeMap<Stmt, Expr>();
-export const unusedDefaults = new WeakNodeSet<Expr>();
 
 // A program setting timers runs on the async runtime, as Node's does, so a sync `main` runs as
 // an async one, its timers firing once it returns.
-function timersRunAsync(written: Stmt[]) {
+function timersRunAsync(written: Stmt[], timerMains: Tables["timerMains"]) {
   const top = written.map((s) => (s.kind === "function" ? s : (s as { declaration?: Stmt }).declaration)).filter((s): s is Func => s?.kind === "function");
   const main = top.find((f) => f.name === "main");
   if (!main || main.async) return;
@@ -327,7 +311,6 @@ function timersRunAsync(written: Stmt[]) {
   if (returns?.kind === "ref" && returns.name === "void") main.returnType = { id: freshId(), kind: "ref", name: "Promise", args: [returns], start: returns.start, end: returns.end };
 }
 const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
-const timerMains = new WeakNodeSet<Func>();
 
 // Whether a piece of syntax holds a node `found` picks out.
 export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen: Set<unknown> = new Set<unknown>()): boolean {
@@ -359,8 +342,6 @@ function arrowFunction(name: string, arrow: Extract<Expr, { kind: "arrow" }>, at
   const body: Stmt[] = Array.isArray(arrow.body) ? arrow.body : [{ id: freshId(), kind: "return", value: arrow.body, start: arrow.body.start, end: arrow.body.end }];
   return { id: freshId(), kind: "function", name, async: arrow.async, generator: false, macro: false, typeParams: arrow.typeParams, params: arrow.params, returnType: arrow.returnType, body, start: at.start, end: at.end } as Func;
 }
-// A nested function's calls of itself, which run with the calling closure's own captures.
-export const selfCalls = new WeakNodeSet<Expr>();
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 const MEMBERS = new Set(["field", "method", "constructor", "get", "set", "index", "staticBlock"]);
@@ -389,8 +370,9 @@ export function check(written: Stmt[], library = false, macros = false, module =
 }
 
 function checkAll(written: Stmt[], library: boolean, macros: boolean, module: boolean): Checked {
-  jsUses.length = 0;
-  jsClasses.clear();
+  const tables = newTables();
+  const { loopParts, nestedFunctions, nestedBindings, liftedFunctions, getterNames, destructuredParts, unusedDefaults, timerMains, selfCalls } = tables;
+  const { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, presetParams, restStarts, substituted, timerWrappers, defaulted, prologues } = tables;
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
   holdsNode(written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
@@ -401,14 +383,13 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
     return false;
   });
   written = [...written, ...hoistLocals(written)];
-  getterNames = new Set();
   holdsNode(written, (n) => {
     if (n.kind === "get" && typeof (n as { name?: unknown; key?: unknown }).name === "string") getterNames.add((n as { name: string }).name);
     if (n.kind === "get" && typeof (n as { key?: unknown }).key === "string") getterNames.add((n as { key: string }).key);
     return false;
   });
-  lowerDefaults(written);
-  if (!library) timersRunAsync(written);
+  lowerDefaults(tables, written);
+  if (!library) timersRunAsync(written, timerMains);
   const program = [...stdFor(written), ...written];
   const funcs: Func[] = [];
   const aliases = new Map<string, TypeAlias>();
@@ -441,7 +422,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       const node = { ...s, id: freshId(), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
       if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
       if (node.typeParams.length > 0) templates.set(s.name, node);
-      else classes.set(s.name, declareClass(node));
+      else classes.set(s.name, declareClass(tables, node));
       const rust = rustClassNodes.get(s);
       if (rust) rustClasses.set(classes.get(s.name)!.type, rust);
       // A Rust type declaring no constructor is never made with `new`, so its handle needs no
@@ -539,15 +520,15 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
     },
   };
   const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
-    classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+    tables, classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
   });
   classes.forEach(register);
   const { classNamed, construct, start, define, definedClass } = genericClasses({
-    classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+    tables, classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
   infersAliases((name) => aliases.get(name));
-  const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance } = resolver(aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
+  const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance } = resolver(tables, aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
     // An interface is met by shape, as a conditional type's `extends` asks of it.
     (from, to, at) => (typeof to !== "string" && to.kind === "interface" ? unsatisfied(from, to, members, at) === undefined : fits(from, to)));
   // A generic enum's variant made with other type arguments, while lowering.
@@ -575,7 +556,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
   // How many new demands the body being checked made itself, not counting its callees'.
   let demanded = 0;
   const { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
-    resolveType, paramType, withScope, members, checking: () => checking,
+    tables, resolveType, paramType, withScope, members, checking: () => checking,
     signing: (f, run) => withSight((n, at) => writtenIn(f, at) && f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n), run),
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
     comptimeArgument: (arg) => comptimeLiteral(arg),
@@ -637,7 +618,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       const param = f.params[i]?.pattern;
       throw new CompileError(`'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : open.name}'; write the return type`, at.start, at.end);
     }
-    return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(p) : "_")), declaredParams(f), result);
+    return functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(tables, p) : "_")), declaredParams(f), result);
   }
 
   // A comptime parameter's argument: its value, computed in the calling instance, as a literal
@@ -739,7 +720,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
   const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !jsGiven.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
   if (crossing) throw new CompileError("turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
-  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)] };
+  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)], tables };
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
   // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
@@ -1200,7 +1181,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
       return { index, type: withScope(target.bindings, () => resolveType(p.type!)) };
     };
-    const proves = (e: Expr) => guard(e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
+    const proves = (e: Expr) => guard(tables.kindTests, e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
     // the target of an assignment to one of them, and the constructor can't return.
@@ -1224,7 +1205,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
     const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
-      types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
+      tables, types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
       templateParams, definedClass, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
       envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of, env }),
       nestedLocal,
@@ -1855,7 +1836,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
         body: value ? [{ id: freshId(), kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
-        body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
+        tables, body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
         types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       };
@@ -1914,7 +1895,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
       // An async arrow's call only makes its future, which carries what it throws.
       const throws = inner.future ? undefined : inner.throws && laid(inner.throws);
-      const type = madeBy(closureType(e.params.map(writtenName), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete, throws), inner);
+      const type = madeBy(closureType(e.params.map((p) => writtenName(tables, p)), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete, throws), inner);
       // One throwing what the function type it is given as doesn't take can't be given as it.
       if (expected && throws && e.throws && !openThrows.has(expected) && !(expected.throws && fits(throws, expected.throws))) {
         const takes = expected.throws ? `which throws '${show(expected.throws)}'` : "which throws nothing";

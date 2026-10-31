@@ -1,7 +1,8 @@
 import type { Builder } from "./arithmetic.ts";
-import { category, kindTests, ofKind, typeofTest } from "./narrow.ts";
+import { category, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
+import type { Tables } from "./compilation.ts";
 import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, lower, membersFor, optionRef, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
@@ -77,7 +78,7 @@ export type Slots = Builder & { alloca(type: string): string; text(value: string
 // Whether values of a type compare part by part rather than as one word.
 export const compound = (t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(t.kind);
 
-export function conversions(b: Slots) {
+export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
   const { emit, temp, label, startBlock, alloca, deep } = b;
   return { convert, test, equals, unionField, holds, eachMember };
 

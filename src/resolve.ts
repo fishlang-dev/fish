@@ -1,8 +1,8 @@
-import { freshId } from "./compilation.ts";
+import { freshId, type Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
-import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
+import { holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { NodeMap, WeakNodeMap } from "./nodes.ts";
+import { NodeMap } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { ANY_REGEX, heldArgument, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, optionRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
@@ -30,11 +30,6 @@ export function paramName(p: Param): string {
   if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
   return p.pattern.name;
 }
-
-// Type nodes the checker makes for a type it already knows, as a rewritten call's type arguments.
-// Made while checking a generic body's definition, they name its placeholders, which each
-// instance swaps for what it binds them to.
-export const presetTypes = new WeakNodeMap<TypeNode, Type>();
 
 // The classes every program's prelude declares.
 const STD_CLASSES = new Set(["AbortError", "IoError", "TextEncoder", "TextDecoder"]);
@@ -64,8 +59,9 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
-export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type,
+export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type,
   conforms: (from: Type, to: Type, at: Span) => boolean) {
+  const { declaredTypes, defaulted, presetTypes } = tables;
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
   const layouts: Set<string>[] = [];

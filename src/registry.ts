@@ -1,5 +1,5 @@
 import { checkOverrides, extend, type Body, type ClassInfo } from "./classes.ts";
-import { freshId } from "./compilation.ts";
+import { freshId, type Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
@@ -15,6 +15,7 @@ import { retuple, fits, holdsPattern, objectType, optionalField, blockFor, show,
 // What the registry needs from the checker, which in turn needs it, so each reaches the
 // other lazily.
 type Checker = {
+  tables: Tables;
   classes: Map<string, ClassInfo>;
   templates: Map<string, ClassNode>;
   members: Members;
@@ -25,7 +26,7 @@ type Checker = {
   checkBody(i: Instance): void;
 };
 
-export function registry({ classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody }: Checker) {
+export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody }: Checker) {
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new Map<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
@@ -61,7 +62,7 @@ export function registry({ classes, templates, members, resolveType, withScope, 
     if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
     link(base, path.add(c));
     const at = c.node.extends!;
-    extend(c, base, (name) => withScope(new Map(), () => resolveType({ id: freshId(), kind: "ref", name, args: [], start: at.start, end: at.end })));
+    extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: freshId(), kind: "ref", name, args: [], start: at.start, end: at.end })));
     checkOverrides(c);
     linked.add(c);
   }

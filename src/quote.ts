@@ -1,9 +1,9 @@
-import { freshId, shared } from "./compilation.ts";
+import { freshId, shared, type Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
-import { WeakNodeMap, renumber } from "./nodes.ts";
+import { renumber } from "./nodes.ts";
 import { field, unfold, unfolded, type ObjectType, type Type, type UnionType } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the
@@ -18,12 +18,10 @@ export type Category = "AstExpr" | "AstStmt" | "AstType";
 // identifier's name.
 export type Quote = { tree: Expr | Stmt | TypeNode; category: Category; holes: Expr[]; asExpressions: Set<number>; names: Set<number> };
 
-const parsed = new WeakNodeMap<Expr, Quote>();
-
 // The tree a quote's text parses to: a type for `quoteType`, else an expression when the whole
 // text is one and doesn't start as JavaScript's statements do, else one statement or
-// declaration.
-export function quoted(e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Quote {
+// declaration. `parsed` holds each quote parsed so far.
+export function quoted(parsed: Tables["parsedQuotes"], e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Quote {
   const made = parsed.get(e);
   if (made) return made;
   const template = e.template;
