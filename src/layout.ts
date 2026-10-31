@@ -3,7 +3,7 @@ import { category, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Tables } from "./compilation.ts";
-import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, optionRef, unfold, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
+import { baseOf, isLock, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, optionRef, unfold, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -26,7 +26,7 @@ export function layoutOf({ lower }: Typing): (t: Type) => string {
     if (t.kind === "dyn") return DYN;
     if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
     // Atomic instructions need whole bytes, so an atomic boolean is a byte.
-    if (t.kind === "interior") return t.which === "Lock" ? `{ i32, ${llvm(t.of)} }` : t.which === "Atomic" && lower(t.of) === "boolean" ? "i8" : llvm(t.of);
+    if (t.kind === "interior") return isLock(t) ? `{ i32, ${llvm(t.of)} }` : t.which === "Atomic" && lower(t.of) === "boolean" ? "i8" : llvm(t.of);
     const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => llvm(f.type))];
     return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
   };
@@ -63,7 +63,7 @@ function size(t: Type): [number, number] {
   if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (t.kind === "union") return [8 + 8 * words(t), 8];
-  if (t.kind === "interior" && t.which !== "Lock") return size(t.of);
+  if (t.kind === "interior" && !isLock(t)) return size(t.of);
   const parts = t.kind === "interior" ? [[4, 4] as [number, number], size(t.of)] : [...(t.kind === "class" && t.base ? [t.base] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => f.type)].map(size);
   const align = Math.max(1, ...parts.map(([, a]) => a));
   let bytes = 0;
