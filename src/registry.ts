@@ -46,7 +46,7 @@ export function registry({ classes, members, resolveType, withScope, instanceOf,
   }
 
   function bodiesOf(c: ClassInfo): Body[] {
-    return [c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values()];
+    return [...new Set([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])];
   }
 
   // Bases are linked first, since a derived constructor may take its base's parameters.

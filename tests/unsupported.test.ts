@@ -61,7 +61,8 @@ for (const [type, what, part] of MEMBERS) {
 
 // Class forms that parse but have no meaning yet: the rejected part is the third column.
 const CLASSES: [string, string, string][] = [
-  ["abstract class A {}", "abstract classes", "abstract class A {}"],
+  ["abstract class A { abstract n: i64 }", "abstract fields", "abstract n: i64"],
+  ["abstract class A<T> {}", "generic abstract classes", "abstract class A<T> {}"],
   ["class A extends f() {}", "base class expressions", "f()"],
   ["class A { static n = 1 }", "static fields", "static n = 1"],
   ["class A { override n = 1 }", "'override' modifiers", "override n = 1"],

@@ -79,7 +79,7 @@ const RULES: Rule[] = [
   { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
   { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
-  { id: "classForms", action: "unsupported", title: "#private names and abstract classes", feature: "Abstract classes and #private fields" },
+  { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "math", action: "unsupported", title: "Math.random", feature: "Randomness" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
@@ -100,7 +100,6 @@ const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNa
 // Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
 const numberKey = (args: unknown) => Array.isArray(args) && isNode(args[0]) && args[0].kind === "ref" && args[0].name === "number";
 const memberOf = (n: unknown, object: string, names: string[]) => isNode(n) && n.kind === "member" && named(n.object, object) && names.includes(n.name as string);
-const isPrivate = (name: unknown) => typeof name === "string" && name.startsWith("#");
 
 // Every TypeScript file under `dir`, skipping dependencies, hidden directories, declarations and
 // symbolic links (which may loop, or count a file twice); an entry that can't be read is skipped.
@@ -373,7 +372,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
-      if (isPrivate(n.name)) push("classForms");
       break;
     case "unary":
       if (n.op === "delete" && envEntry(n.operand)) push("process");
@@ -443,8 +441,6 @@ function classify(n: Node, depth: number, ambient: boolean, head: boolean, argum
   const specifier = n.module ?? n.require ?? dynamic;
   const rule = MODULE_FORMS.has(n.kind) ? moduleRule(n, specifier) : undefined;
   if (rule) found.push([rule, at, rule === "nodeBuiltins" ? builtinModule(String(specifier)) : undefined]);
-  // A class's base is one expression; an interface's are a list, which Fish keeps.
-  if (n.abstract === true && "members" in n) push("classForms");
   return found;
 }
 
@@ -552,7 +548,7 @@ function genericFunctionType(t: unknown): boolean {
 
 function memberRules(n: Node, push: (id: string) => void) {
   if (n.optional === true) push("A2");
-  if (isPrivate(n.name) || (Array.isArray(n.modifiers) && n.modifiers.includes("abstract"))) push("classForms");
+  if (n.kind === "field" && Array.isArray(n.modifiers) && n.modifiers.includes("abstract")) push("classForms");
   if (n.kind === "field" && genericFunctionType(n.type)) push("genericFunctionsHeld");
 }
 

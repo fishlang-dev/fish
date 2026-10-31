@@ -1,4 +1,4 @@
-import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrides, declareClass, extend, implementAbstracts, isLifetime, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
 import { CompileError } from "./diag.ts";
 import { STD_BASE, stdFor } from "./std.ts";
@@ -11,7 +11,7 @@ import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, resetEnums, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, objectsMeet } from "./unions.ts";
-import { comptimeName, infersAliases, genericClasses, instancing, typeParamsOf } from "./generics.ts";
+import { comptimeName, infer, infersAliases, genericClasses, instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
@@ -24,7 +24,7 @@ import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
-import { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
+import { type DynTable, equalities, jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, expressions, presetParams, restStarts, substituted, stringLike, timerWrappers } from "./values.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -96,6 +96,8 @@ export type Instance = {
   // bindings for what it captures, in its environment's order, from which the call or the
   // value builds it.
   envs?: Map<Expr, { of: Instance; env: Local[] }>;
+  // What each value boxed into a Dyn runs for the interface's members.
+  dyns?: Map<Expr, DynTable>;
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
   made?: Map<Expr, { of: Instance; env: Local[] }[]>;
@@ -412,6 +414,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
   const enums = new Map<string, EnumInfo>();
   // For each class declaring lifetimes, which of its type parameters are lifetimes.
   const slots = new Map<string, boolean[]>();
+  separatePrivateNames(program.flatMap((s) => (s.kind === "class" && s.name !== undefined ? [{ ...s, name: s.name }] : [])));
   for (const s of program) {
     if (s.kind === "enum") {
       typeName(s.name, s, aliases, classes, templates, interfaces, enums);
@@ -670,6 +673,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
   const closureBodies = new Map<ClosureType, Instance>();
 
   classes.forEach((c) => link(c, new Set()));
+  classes.forEach(implementAbstracts);
   classes.forEach(checkOverrides);
   setJsError(classes.get("JsError")?.type);
   // Classes are laid out before any body is checked, since checking one may need another's
@@ -682,6 +686,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
   // payload naming no type is caught unused.
   validate();
   for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
+  classes.forEach(implementsSignatures);
   funcs.forEach((f) => {
     try {
       checkBody(definition(f));
@@ -700,9 +705,13 @@ export function check(written: Stmt[], library = false, macros = false, module =
   if (main && (typeof started !== "string" && started?.kind === "future" ? started.gives : started) !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
-  const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf)]);
+  // An abstract member and a template are checked but never compiled; each concrete class's copy is.
+  const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf).filter((f) => !f.abstract && !f.template)]);
+  // So is an instance made for an abstract class, which only a template's check makes.
+  const checkedOnly = (i: Instance): boolean => i.body.template === true || [...i.bindings.values()].some(abstractPart) || (i.body.closure !== undefined && checkedOnly(i.body.closure.parent));
+  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js && !checkedOnly(i)), ...closures.filter((i) => i.concrete && !checkedOnly(i))];
+  unreached(compiledInstances, (i) => i.body.abstract === true || checkedOnly(i));
   // A package's const whose value has no JS form yet stops the program where it is read.
-  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)];
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses);
   if (used) throw new CompileError("reading this package's const isn't supported yet, as its value has no JS form", used.start, used.end);
@@ -722,7 +731,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
   const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !jsGiven.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
   if (crossing) throw new CompileError("turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
-  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)] };
+  return { instances: compiledInstances };
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
   // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
@@ -1029,6 +1038,55 @@ export function check(written: Stmt[], library = false, macros = false, module =
     return replaced(views.get(instance) ?? returns, new Map([...site].map(([name, t]) => [own.get(name)!, t])));
   }
 
+  // Each member a class writes that implements an abstract member takes what the declaration
+  // takes and gives what it gives, as a template calling it through the abstract class expects.
+  function implementsSignatures(c: ClassInfo) {
+    for (const table of ["methods", "getters", "setters"] as const) {
+      for (const [name, f] of c[table]) {
+        if (f.abstract || f.copyOf) continue;
+        for (let b = c.base; b; b = b.base) {
+          const declared = b[table].get(name);
+          if (declared?.abstract) implementsSignature(f, declared, b);
+        }
+      }
+    }
+    for (let b = c.base; b; b = b.base) {
+      for (const [name, declared] of b.getters) {
+        const own = c.type.fields.find((x) => x.name === name);
+        if (!declared.abstract || !own) continue;
+        const wanted = returnOf(instanceOf(declared), declared);
+        const at = c.fields.find((x) => x.name === name)!;
+        // A field is read as it is, so it has the declared type exactly.
+        if (own.type !== wanted) throw new CompileError(`'${name}' must be a '${show(wanted)}', not a '${show(own.type)}', as '${b.type.name}' declares it abstract`, at.start, at.end);
+      }
+    }
+  }
+
+  function implementsSignature(f: Body, declared: Body, b: ClassInfo) {
+    const why = (text: string) => new CompileError(`'${declared.name.slice(b.type.name.length + 1)}' ${text}, as '${b.type.name}' declares it abstract`, f.start, f.end);
+    const want = declaredParams(declared);
+    const rest = f.params.find((p) => p.rest);
+    if (rest && !declared.params.some((p) => p.rest)) throw new CompileError(`'${f.name.slice(f.owner!.name.length + 1)}' can't gather its arguments into a rest parameter yet where '${b.type.name}' declares it abstract with separate ones`, rest.start, rest.end);
+    // A generic implementation is the instance its type parameters take from the declaration's.
+    const names = new Set(typeParamsOf(f).map((p) => p.name));
+    const bindings = new Map<string, Type>();
+    if (names.size > 0) f.params.forEach((p, i) => p.type && want[i] !== undefined && infer(p.type, want[i]!, names, bindings, f));
+    if (bindings.size < names.size) throw why(`must take (${want.map(show).join(", ")})`);
+    const instance = names.size > 0 ? instanceOf(f, new Map([...(f.scope ?? []), ...bindings])) : instanceOf(f);
+    const have = names.size > 0 ? paramTypes(instance) : declaredParams(f);
+    // Parameters past the declaration's must be optional, as the calls through it leave them out.
+    const extra = f.params.slice(want.length).some((p) => !p.optional);
+    if (have.length < want.length || extra || want.some((t, i) => !fits(t, have[i]!))) throw why(`must take (${want.map(show).join(", ")})`);
+    if (!!f.async !== !!declared.async) throw why(declared.async ? "must be async" : "can't be async");
+    if (!!f.generator !== !!declared.generator) throw why(declared.generator ? "must be a generator" : "can't be a generator");
+    if (f.self!.mutable && !declared.self!.mutable) throw why("can't change 'this'; it borrows 'this' read-only");
+    if (!!f.self!.owned !== !!declared.self!.owned) throw why(declared.self!.owned ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
+    const [error, allowed] = [errorOf(instance), errorOf(instanceOf(declared))];
+    if (error && (!allowed || !fits(error, allowed))) throw why(allowed ? `can only throw '${show(allowed)}'` : "can't throw");
+    const [gives, wanted] = [returnOf(instance, f), returnOf(instanceOf(declared), declared)];
+    if (!fits(gives, wanted)) throw why(`must return '${show(wanted)}', not '${show(gives)}'`);
+  }
+
   // What a call of an instance may throw, as its caller sees it.
   function errorOf(instance: Instance): Type | undefined {
     const f = instance.body;
@@ -1088,6 +1146,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     instance.returns = "void";
     delete instance.throws;
     delete instance.envs;
+    delete instance.dyns;
     delete instance.made;
     const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
     // A closure checked within a discarded pass isn't in progress any more either.
@@ -1108,6 +1167,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
     if (fixedParam && f.foreign && !f.rust) throw new CompileError("a C function can't take a comptime parameter: C takes every argument at run time", fixedParam.start, fixedParam.end);
     if (fixedParam && f.accessor) throw new CompileError("an accessor can't take a comptime parameter, since a read or an assignment gives it no value while compiling", fixedParam.start, fixedParam.end);
     if (f.foreign) return foreignSignature(instance);
+    if (f.abstract) {
+      instance.returns = returnTypeOf(f, instance.bindings) ?? "void";
+      done.add(instance);
+      return;
+    }
     if (f.js) return jsSignature(instance);
     if (fixedParam && (f.async || f.generator)) throw unsupported("comptime parameters on async functions and generators", fixedParam);
     if (fixedParam && f.exported) throw new CompileError("an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
@@ -1201,10 +1265,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
       types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
       templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
       envOf: (e, of, env) => void (instance.envs ??= new Map()).set(e, { of, env }),
+      dynOf: (e, table) => void (instance.dyns ??= new Map()).set(e, table),
       nestedLocal,
       owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
       self,
-      owner: f.closure ? closureOwner(f) : f.owner && f.owner === f.self?.type ? self!.type : f.owner,
+      owner: f.closure ? closureOwner(f) : f.declared ?? (f.owner && f.owner === f.self?.type ? self!.type : f.owner),
       superCall,
       selfCall,
       thisReady,
@@ -2524,7 +2589,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
     function closureOwner(b: Body): Body["owner"] {
       let outerBody = b;
       while (outerBody.closure) outerBody = outerBody.closure.parent.body;
-      return outerBody.owner && outerBody.owner === enclosing?.type ? self!.type : outerBody.owner;
+      return outerBody.declared ?? (outerBody.owner && outerBody.owner === enclosing?.type ? self!.type : outerBody.owner);
     }
 
     // A variable's type where something narrowed it: a captured one as it was where the closure
@@ -2571,3 +2636,61 @@ export type Origin = number | "this";
 
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 
+// An abstract class a type holds as a value, not one embedded as a concrete class's base.
+function abstractPart(t: Type): ClassType | undefined {
+  const bases = new Set<Type>();
+  let found: ClassType | undefined;
+  holdsPart(t, (u) => {
+    if (typeof u === "string" || u.kind !== "class") return false;
+    if (u.base) bases.add(u.base);
+    if (u.abstract && !bases.has(u)) found = u;
+    return found !== undefined;
+  }, true);
+  return found;
+}
+
+// A net under the rules that decide what is compiled: no compiled function calls, and no
+// compiled Dyn's table holds, an instance that isn't compiled. Only a value of an abstract
+// class's own type, which escaped where no rule saw it, could reach one.
+export function unreached(compiled: Instance[], dropped: (i: Instance) => boolean) {
+  for (const i of compiled) {
+    const reached: [Expr, Instance, string][] = [
+      ...[...i.calls, ...i.setters].map(([at, target]): [Expr, Instance, string] => [at, target, ""]),
+      ...[...(i.dyns ?? [])].flatMap(([at, table]) => [...table.methods, ...table.fields, table.clone].flatMap((target): [Expr, Instance, string][] => (target && target !== "copy" ? [[at, target, " through a 'Dyn'"]] : []))),
+    ];
+    // A comparison of values runs each class's `equals` it reaches, through objects and unions.
+    for (const [e] of i.types) {
+      if (e.kind !== "binary" || !["===", "!==", "==", "!="].includes(e.op)) continue;
+      for (const target of [...comparedBy(i.types.get(e.left)), ...comparedBy(i.types.get(e.right))]) reached.push([e, target, " to compare them"]);
+    }
+    const found = reached.find(([, target]) => dropped(target));
+    if (!found) continue;
+    const [at, target, through] = found;
+    const abstract = (target.body.abstract ? target.body.owner : undefined) ?? [...target.bindings.values()].map(abstractPart).find((t) => t) ?? target.body.declared ?? target.body.owner;
+    const root = (i.body.closure ? closureRoot(i) : i).body;
+    const member = (root.owner ? root.name.slice(root.owner.name.length + 1) : root.name).replace(/#.*$/, "");
+    // The name the call wrote, rather than the prelude function it may run.
+    const callee = at.kind === "call" || at.kind === "new" ? at.callee : undefined;
+    const named = callee?.kind === "ident" || callee?.kind === "member" ? callee.name : target.body.name.replace(/#.*$/, "");
+    throw new CompileError(`a value of the abstract class '${abstract?.name}' can't reach '${named}'${through} here yet; pass a subclass's value instead, or give '${member}' to each subclass`, at.start, at.end);
+  }
+}
+
+// Each `equals` a comparison of two values runs, as codegen finds them: a class's own stops the
+// search, and otherwise its base and fields, an object's fields and a union's members compare.
+function comparedBy(t: Type | undefined, seen = new Set<Type>()): Instance[] {
+  if (t === undefined || typeof t === "string" || seen.has(t)) return [];
+  seen.add(t);
+  if (t.kind === "ref") return comparedBy(t.to, seen);
+  if (t.kind === "class") {
+    const own = equalities.get(t);
+    return own ? [own] : [t.base, ...t.fields.map((f) => f.type)].flatMap((u) => comparedBy(u, seen));
+  }
+  if (t.kind === "union") return t.members.flatMap((u) => comparedBy(u, seen));
+  if (t.kind === "object") return t.fields.flatMap((f) => comparedBy(f.type, seen));
+  return [];
+}
+
+function closureRoot(i: Instance): Instance {
+  return i.body.closure ? closureRoot(i.body.closure.parent) : i;
+}
