@@ -1,4 +1,5 @@
 import type { Instance } from "./check.ts";
+import type { Narrowing } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
@@ -553,6 +554,15 @@ function interpreter() {
       case "as":
         return convert(unwrap(expr(f, e.expr)), type, e);
       case "nonNull": {
+        // An overload's body narrows the implementation's value to the signature's return type.
+        if ((e as Narrowing).narrows) {
+          const [from, to] = [f.instance.types.get(e.expr), type];
+          const held = expr(f, e.expr);
+          if (from === to) return held;
+          const kept = typeof to !== "string" && to.kind === "union" ? to.members : [to];
+          if (!kept.includes(memberType(held, from)!)) panic("the implementation returned a value this overload signature doesn't declare", e);
+          return retag(held, from, to);
+        }
         const v = unwrap(expr(f, e.expr));
         if (v === null) panic("called `Option::unwrap()` on a `None` value", e);
         return v;
