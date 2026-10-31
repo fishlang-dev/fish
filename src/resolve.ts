@@ -3,7 +3,7 @@ import { declaredTypes, defaulted, holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
+import { ANY_REGEX, familyHeld, jsOptional, jsShape, jsUntyped, recursiveType, holdsBlock, standsFor, lowersRecursive, type RecursiveType, field, fits, fixedType, tupleType, holdsPattern, isFloat, splitTemplate, textFits, typeParameter, optionalField, shapeKey, withoutNull, arrayType, blockType, dynType, stored, generatorElement, promiseElement, holdsHandle, holdsPart, replaced, type BlockType, interiorType, sharedType, isInteger, mapType, type MapType, type ArrayType, variantType, functionType, generatorInterface, asyncGeneratorInterface, handleType, holdsRef, pointerType, promiseInterface, INTEGERS, interfaceType, type Integer, keyOf, literalType, lower, objectType, refType, show, unionType, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -358,7 +358,7 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     }
     if (t.name === "Dyn") {
       const of = t.args.length === 1 ? resolveType(t.args[0]!) : undefined;
-      if (typeof of === "string" || of?.kind !== "interface" || promiseElement(of) !== undefined || generatorElement(of) !== undefined) {
+      if (typeof of === "string" || of?.kind !== "interface" || promiseElement(of) !== undefined || generatorElement(of) !== undefined || generatorElement(of, true) !== undefined) {
         throw new CompileError("'Dyn' takes the interface its values implement, like 'Dyn<Handler>'", t.start, t.end);
       }
       return dynType(of);
@@ -398,6 +398,10 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
     if (t.name === "Generator") {
       if (t.args.length !== 1) throw new CompileError("'Generator' takes the type it yields, like 'Generator<i64>'", t.start, t.end);
       return generatorInterface(resolveType(t.args[0]!));
+    }
+    if (t.name === "AsyncGenerator") {
+      if (t.args.length !== 1) throw new CompileError("'AsyncGenerator' takes the type it yields, like 'AsyncGenerator<i64>'", t.start, t.end);
+      return asyncGeneratorInterface(resolveType(t.args[0]!));
     }
     if (t.name === "Option") {
       if (t.args.length !== 1) throw new CompileError("'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);
@@ -995,7 +999,7 @@ export function collection(key: Type, value: Type, set: boolean, at: Span): MapT
   return mapType(key, stored(value), set);
 }
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "Ref", "Mut", "Lifetime", "Option", "Generator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

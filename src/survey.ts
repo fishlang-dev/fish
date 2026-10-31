@@ -71,6 +71,7 @@ const RULES: Rule[] = [
   { id: "spread", action: "guided", title: "rest parameters on arrow functions, and spread arguments: Fish takes rest parameters on declared functions and methods, and spreads an argument only into a rest parameter" },
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet" },
   { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
+  { id: "forAwaitArrays", action: "guided", title: "for await over an array of promises: Fish loops with for await over an async generator or a Channel, so await Promise.all(...) and loop over its result with for...of" },
   { id: "numberKeys", action: "guided", title: "a Map or Set keyed by 'number': Fish hashes integers and strings, so give it an integer key such as i64" },
   { id: "dynamicRegex", action: "reject", title: "regexes built while the program runs: Fish compiles every regex while compiling" },
   { id: "regexStrings", action: "guided", title: "match, matchAll and search given a string, and next() on matchAll: Fish takes a regex literal there, and matchAll gives an array" },
@@ -298,6 +299,9 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
   const heads = new WeakSet<object>();
   // Spreads written as call arguments, which fill only a rest parameter.
   const inCalls = new WeakSet<object>();
+  // The names the file declares as arrays, and its `for await` loops, judged once both are known.
+  const arrays = new Set<string>();
+  const awaitLoops: Node[] = [];
   while (stack.length > 0) {
     const [value, depth, ambient] = stack.pop()!;
     if (Array.isArray(value)) {
@@ -311,6 +315,8 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
     let under = ambient;
     if (isNode(o)) {
       if ((o.kind === "forOf" || o.kind === "forIn") && isNode(o.left)) heads.add(o.left);
+      if (o.kind === "forOf" && o.await === true) awaitLoops.push(o);
+      for (const name of arrayNames(o)) arrays.add(name);
       if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.add(a);
       for (const [id, at, module] of classify(o, depth, ambient, heads.has(o), inCalls.has(o))) note(id, at, module);
       const whole = o.kind === "member" && isNode(o.object) && o.object.kind === "ident" ? wholes.get(o.object.name as string) : undefined;
@@ -321,6 +327,31 @@ function scan(program: unknown[], note: (id: string, offset: number, module?: st
     }
     for (const [key, child] of Object.entries(o)) if (key !== "start" && key !== "end" && typeof child === "object") stack.push([child, inner, under]);
   }
+  for (const loop of awaitLoops) if (isNode(loop.right) && arrayValue(loop.right, arrays)) note("forAwaitArrays", loop.right.start);
+}
+
+// The array methods that give a new array, as in `for await (const r of urls.map(fetch))`.
+const ARRAY_MAKERS = new Set(["map", "filter", "slice", "concat", "flat", "flatMap", "toSorted", "toReversed"]);
+
+// Whether an expression is an array: a literal, an array method's result, `Array.from`, or a name
+// the file declares as one. Read from syntax alone, so an array reached any other way is missed.
+function arrayValue(e: unknown, arrays: Set<string>): boolean {
+  if (!isNode(e)) return false;
+  if (e.kind === "array") return true;
+  if (e.kind === "ident") return arrays.has(e.name as string);
+  if (e.kind !== "call" || !isNode(e.callee) || e.callee.kind !== "member") return false;
+  return ARRAY_MAKERS.has(e.callee.name as string) || (named(e.callee.object, "Array") && e.callee.name === "from");
+}
+
+// The names a declaration or a parameter list gives an array: by an array type, or a value that is one.
+function arrayNames(n: Node): string[] {
+  const typed = (t: unknown) => isNode(t) && (t.kind === "array" || t.kind === "tuple" || (t.kind === "ref" && (t.name === "Array" || t.name === "ReadonlyArray")));
+  const declared = (target: unknown) => (isNode(target) && target.kind === "ident" ? [target.name as string] : []);
+  if (n.kind === "let" && Array.isArray(n.declarations)) {
+    return (n.declarations as Record<string, unknown>[]).flatMap((d) => (typed(d.type) || arrayValue(d.init, new Set()) ? declared(d.target) : []));
+  }
+  if (Array.isArray(n.params)) return (n.params as Record<string, unknown>[]).flatMap((p) => (typed(p.type) ? declared(p.pattern) : []));
+  return [];
 }
 
 // Whether Fish takes a parameter's default as written: trailing, on a type without null, and

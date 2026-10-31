@@ -3528,7 +3528,8 @@ static void fsh_timer_remove(int64_t at) {
 }
 
 // An aborted or cancelled sleep takes its timer off the heap, so it neither waits out its deadline
-// holding the task nor wakes it later; one never polled has none.
+// holding the task nor wakes it later; one never polled has none. Its state marks it cancelled, so
+// an async generator paused on it, polled again, re-arms its timer for the same deadline.
 // ponytail: an O(n) search for the entry, a handle kept in the frame if timer heaps grow large
 void fsh_rt_sleep_cancel(fsh_task *task, void *frame) {
   pthread_mutex_lock(&fsh_timer_lock);
@@ -3536,6 +3537,7 @@ void fsh_rt_sleep_cancel(fsh_task *task, void *frame) {
   while (at < fsh_timer_count && (fsh_timers[at].task != task || fsh_timers[at].tag != frame)) at++;
   if (at == fsh_timer_count) return (void)pthread_mutex_unlock(&fsh_timer_lock);
   fsh_timer_remove(at);
+  *(int32_t *)frame = 2;
   pthread_mutex_unlock(&fsh_timer_lock);
   fsh_task_release(task);
 }
@@ -3713,9 +3715,17 @@ static void fsh_timeouts_main_returned(void) {
 // Polls a sleep, whose frame holds its state and first the delay in milliseconds, then its
 // deadline: done once the deadline has passed, and until then its one timer, added at its first
 // poll and never firing early, wakes the task; a poll before then from another wake waits on.
+// One whose timer was cancelled (state 2) adds it again, for what is left of its delay.
 int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
   int32_t *state = (int32_t *)frame;
   int64_t *deadline = frame + 1;
+  if (*state == 2) {
+    if (fsh_now() >= *deadline) return 1;
+    *state = 1;
+    __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+    fsh_timer_add(*deadline, task, NULL, frame);
+    return 0;
+  }
   if (*state != 0) return fsh_now() >= *deadline;
   *state = 1;
   int64_t ms = *deadline > 0 ? *deadline : 0, now = fsh_now();
@@ -4818,8 +4828,11 @@ static void *fsh_pool_work(void *arg) {
     if (job->op == 0) fsh_file_read(job);
     else if (job->op == 1) fsh_file_write(job);
     else fsh_host_lookup(job);
+    // Under the pool's lock, so a poll from another task can't hand the job over meanwhile.
+    pthread_mutex_lock(&fsh_pool_lock);
     fsh_task *task = job->task;
     __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&fsh_pool_lock);
     fsh_rt_wake(task);
     fsh_task_release(task);
     fsh_rt_file_job_release(job);
@@ -4849,6 +4862,23 @@ static void fsh_pool_submit(fsh_file_job *job) {
 
 // Polls a readFile (op 0) or writeFile (op 1): its first poll hands the job to the pool and waits;
 // once the thread is done, 1 with what a read gave in out, or 5 with the IoError's parts.
+// A job still running is polled by this task: an async generator paused on it may be polled again
+// from another task after its wait was cancelled, and the job wakes whoever polled it last.
+static int32_t fsh_job_done(fsh_file_job *job, fsh_task *task) {
+  if (__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 1;
+  fsh_task *old = NULL;
+  pthread_mutex_lock(&fsh_pool_lock);
+  int32_t done = job->done;
+  if (!done && job->task != task) {
+    old = job->task;
+    __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
+    job->task = task;
+  }
+  pthread_mutex_unlock(&fsh_pool_lock);
+  if (old) fsh_task_release(old);
+  return done;
+}
+
 int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at, int32_t op, fsh_task *task, fsh_array *out, fsh_str **error) {
   fsh_file_job *job = *job_at;
   if (!job) {
@@ -4871,7 +4901,7 @@ int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at,
     fsh_pool_submit(job);
     return 0;
   }
-  if (!__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 0;
+  if (!fsh_job_done(job, task)) return 0;
   if (job->error) return fsh_fs_failed(error, job->error, job->syscall, strcmp(job->syscall, "open") == 0 ? job->path : NULL);
   if (op == 0) {
     *out = job->data;
@@ -5048,7 +5078,7 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
     }
   } else if (s->fd < 0) {
     fsh_file_job *job = s->lookup;
-    if (!__atomic_load_n(&job->done, __ATOMIC_ACQUIRE)) return 0;
+    if (!fsh_job_done(job, task)) return 0;
     if (job->error) {
       // Node's codes: a name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
       const char *code = job->error == EAI_AGAIN ? "EAI_AGAIN" : "ENOTFOUND";

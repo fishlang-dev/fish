@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import { paramName } from "./resolve.ts";
-import { described, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { described, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, asyncGeneratorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -140,6 +140,7 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
   // `Generator<T>` against a generator matches what it yields.
   // A parameter of a generator interface, or one standing for a generator, yields too.
   if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && yieldsOf(arg) !== undefined) return infer(node.args[0]!, yieldsOf(arg)!, names, bindings, at);
+  if (node.kind === "ref" && node.name === "AsyncGenerator" && node.args.length >= 1 && yieldsOf(arg, true) !== undefined) return infer(node.args[0]!, yieldsOf(arg, true)!, names, bindings, at);
   // `FixedArray<T, N>` against a fixed array matches its element type.
   if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && typeof arg !== "string" && arg.kind === "fixed") return infer(node.args[0]!, arg.element, names, bindings, at);
   // `[A, B]` against a tuple of its length matches element by element.
@@ -438,7 +439,8 @@ export function instancing({ resolveType, paramType, withScope, signing, members
     ]);
     for (const [i, bound] of implicitOf(f)) {
       const element = generatorElement(bound);
-      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : (bound.kind === "function" || (bound.kind === "interface" && bound.generic)) && decided.size > 0 ? replaced(bound, decided) as Bound : bound;
+      const asyncElement = generatorElement(bound, true);
+      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : asyncElement !== undefined && decided.size > 0 ? asyncGeneratorInterface(replaced(asyncElement, decided)) : (bound.kind === "function" || (bound.kind === "interface" && bound.generic)) && decided.size > 0 ? replaced(bound, decided) as Bound : bound;
       own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f)!.has(i)));
       const given = argTypes[i]!;
       const held = typeof given !== "string" && given.kind === "ref" ? given.to : given;

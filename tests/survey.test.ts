@@ -202,7 +202,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(56);
+  expect(r.rules.length + r.waiting.length).toBe(57);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {
@@ -555,4 +555,25 @@ test("node:fs members the std module answers are portable; others are Node built
   project({ "a.ts": "import { readFileSync, statSync, rmSync } from \"node:fs\";\n", "b.ts": "import { mkdirSync } from \"fs\";\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
   });
+});
+
+test("async generators, their methods and for await are portable", () => {
+  project({ "a.ts": "async function* ticks(): AsyncGenerator<number> { yield 1; }\nclass Feed { async *each(): AsyncGenerator<number> { yield 1; } }\nasync function main() { for await (const t of ticks()) console.log(t); }\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[]]);
+    expect(scanFiles(dir)[0]!.findings).toEqual([]);
+  });
+});
+
+test("for await over an array of promises is a guided rewrite, counted as Fish refuses it", () => {
+  expect(counts([
+    "async function f(urls: string[], ps: Promise<number>[]) {",
+    "  for await (const x of [Promise.resolve(1)]) {}",
+    "  for await (const r of urls.map((u) => fetch(u))) {}",
+    "  for await (const p of ps) {}",
+    "  const held = [Promise.resolve(2)];",
+    "  for await (const h of held) {}",
+    "  for await (const t of ticks()) {}",
+    "}",
+    "",
+  ].join("\n"))).toEqual({ forAwaitArrays: 4 });
 });

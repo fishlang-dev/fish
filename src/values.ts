@@ -9,7 +9,7 @@ import type { Expr, Interface, JsName, ObjectProp, Param, Pattern, Span, Stmt, T
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, presetTypes, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, promiseInterface, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -1097,6 +1097,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "map" && callee.name !== "clone") return mapCall(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
+    if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver, true) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver, true)!, true);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "pointer") return pointerCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
     if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
@@ -3453,16 +3454,20 @@ export function expressions(ctx: Context) {
     return undefined;
   }
 
-  // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place.
-  function generatorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, generator: Type, yields: Type): { type: Type; what: string } {
+  // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place. An async
+  // generator's gives a future borrowing it, awaited where it is made so the borrow ends there.
+  function generatorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, generator: Type, yields: Type, async = false): { type: Type; what: string } {
     if (callee.name !== "next") throw new CompileError(`generators have no method '${callee.name}' yet; 'next' is the one they have`, callee.start, callee.end);
+    if (async && !awaitedNow.has(e)) throw new CompileError("an async generator's 'next()' is awaited where it is called, as in 'await g.next()'", e.start, e.end);
     if (linked(callee)) throw unsupported("optional chains calling generator methods", callee);
     if (e.args.length > 0) throw unsupported("values sent into 'next'", e.args[0]!);
     const held = types.get(callee.object)!;
     if (isRefType(held)) coercions.set(callee.object, generator);
     if (!place(callee.object)) throw new CompileError("'next' changes its generator, so call it on a variable or a field", callee.start, callee.end);
     changeable(callee.object, "advance");
-    return { type: nextResult(yields), what: "'next'" };
+    if (!async) return { type: nextResult(yields), what: "'next'" };
+    const made = typeof generator !== "string" && generator.kind === "param" && generator.concrete ? generator.concrete : generator;
+    return { type: typeof made !== "string" && made.kind === "generator" ? leafFuture("next", made) : promiseInterface(nextResult(yields)), what: "'next'" };
   }
 
   // Whether an expression is an index into an array, a place inside it.
