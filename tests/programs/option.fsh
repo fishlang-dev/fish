@@ -321,12 +321,12 @@ function main() {
 }
 // error: can't call 'next' through '!', which would change a copy
 // case: option_unwrap_not_option
-// '!' needs an Option.
+// A '!' on a value that can't be empty is that value.
 function main() {
   const n = 5
   print(n!)
 }
-// error: '!' takes the value out of an Option, and this is a 'i64', which is never empty
+// expect: 5
 // case: option_unwrap_out_of_borrow
 // '!' can't move a value out of an Option a reference borrows.
 class P { x: i64; constructor(x: i64) { this.x = x } }

@@ -12,7 +12,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, uninspectable, unfold, elementsOf, isTuple, baseOf, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, holdsHandle, holdsPart, type DynType, type HandleType, type BlockType, holdsInterior, interiorMutable, type SharedType, holdsMut, INTERIORS, type InteriorType, optionRef, isCopy, widenEnum, widenLet, isPlainJs, jsShape, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { allFields, unequal, uninspectable, unfold, elementsOf, isTuple, baseOf, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, isOption, redundantBang, bare, type Bang, range, derives, field, holdsHandle, holdsPart, type DynType, type HandleType, type BlockType, holdsInterior, interiorMutable, type SharedType, holdsMut, INTERIORS, type InteriorType, optionRef, isCopy, widenEnum, widenLet, isPlainJs, jsShape, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -146,6 +146,9 @@ export type Context = {
   errorOf(instance: Instance): Type | undefined;
   // What the body's function declares it throws.
   throwsDeclared(): Type | undefined;
+  // Checks the body as written first, when this is an instance of a generic one, so what that
+  // check decides holds for every instance.
+  asWritten(): void;
   // Whether the body is a sync `main` run as an async one, as a program setting timers does.
   syncMain: boolean;
   // Whether a binding stands for a variable a closure captures, and whether this is a closure;
@@ -2590,7 +2593,7 @@ export function expressions(ctx: Context) {
       return element(e) && inPlace(e.object);
     };
     if (inPlace(callee.object)) return;
-    const hint = callee.object.kind === "nonNull" ? "; narrow the Option with a check like 'if (x !== null)' instead of '!'" : "; narrow a union to one member first";
+    const hint = bare(callee.object).kind === "nonNull" ? "; narrow the Option with a check like 'if (x !== null)' instead of '!'" : "; narrow a union to one member first";
     throw new CompileError(`'${callee.name}' works on the '${t.which}' where it lives, so call it on a variable or a field${hint}`, callee.start, callee.end);
   }
 
@@ -3922,7 +3925,7 @@ export function expressions(ctx: Context) {
       case "member":
         return calls.has(e) ? undefined : copied(e.object, through);
       case "nonNull":
-        return copied(e.expr, "!");
+        return copied(e.expr, redundantBang(e) ? through : "!");
       case "binary":
         return e.op === "??" ? (copied(e.left, "??") ?? copied(e.right, "??")) : undefined;
       case "conditional":
@@ -4176,13 +4179,14 @@ export function expressions(ctx: Context) {
       case "throw":
         thrown(e, e.value);
         return "never";
-      // `x!` is what an Option holds; it panics when there is nothing.
+      // `x!` is what an Option holds; it panics when there is nothing. On a value that can't be
+      // empty, as `xs[i]!` written for TypeScript's unchecked indexes, it is that value itself.
       case "nonNull": {
         const narrows = (e as Narrowing).narrows;
         if (narrows) return narrowedReturn(e.expr, narrows);
-        const option = read(e.expr);
-        if (!isOption(option)) throw new CompileError(`'!' takes the value out of an Option, and this is a '${show(option)}', which is never empty`, e.start, e.end);
-        return held(option);
+        const given = value(e.expr);
+        if (redundant(e, given)) return given;
+        return held(loaded(e.expr, given) as UnionType);
       }
       case "bool":
         return "boolean";
@@ -4628,25 +4632,26 @@ export function expressions(ctx: Context) {
         const op = ASSIGNMENTS[e.op];
         if (!op) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         const target = assignable(e.target, op !== "=");
+        const place = bare(e.target);
         if (op === "=") expect(e.value, target);
         const assigned = op === "=" ? value(e.value) : read(e.value);
         // A variable whose type is still open takes the integer type assigned to it.
-        if (op === "=" && isInteger(assigned) && assigned !== target && ctx.infer(e.target, assigned)) return assigned;
+        if (op === "=" && isInteger(assigned) && assigned !== target && ctx.infer(place, assigned)) return assigned;
         const type = op === "=" ? assigned
-          : op === "+" && target === "string" ? join(e.target, target, e.value, widen(e.value, assigned))
-          : op === "**" ? power(e.target, target, e.value, widen(e.value, assigned), e)
-          : binaryType(typing, op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
+          : op === "+" && target === "string" ? join(place, target, e.value, widen(e.value, assigned))
+          : op === "**" ? power(place, target, e.value, widen(e.value, assigned), e)
+          : binaryType(typing, op, ...sameNumbers(place, target, e.value, widen(e.value, assigned)), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         // A handle's property is written in JS, with the value converted.
-        if (jsMembers.has(e.target)) {
+        if (jsMembers.has(place)) {
           givenToJs(e.value, assigned);
           // What JS is given is JS's to keep, so nothing is left to be the assignment's value.
-          if (keptByJs(target) && statementAssign !== e) throw new CompileError(`a callback or a Promise written to property '${(e.target as { name: string }).name}' goes to JS, so the assignment has no value to use; write it as a statement of its own`, e.start, e.end);
+          if (keptByJs(target) && statementAssign !== e) throw new CompileError(`a callback or a Promise written to property '${(place as { name: string }).name}' goes to JS, so the assignment has no value to use; write it as a statement of its own`, e.start, e.end);
         }
-        const local = e.target.kind === "ident" ? locals.get(e.target) : undefined;
-        if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(e.target)) rebind(local, e.value);
+        const local = place.kind === "ident" ? locals.get(place) : undefined;
+        if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(place)) rebind(local, e.value);
         const narrow = local && narrowed(local);
-        if (local && op === "=" && coercions.has(e.target) && narrow && isRefType(narrow) && !fits(type, narrow.to)) rewritten(local, e);
+        if (local && op === "=" && coercions.has(place) && narrow && isRefType(narrow) && !fits(type, narrow.to)) rewritten(local, e);
         return target;
       }
       case "update": {
@@ -5461,7 +5466,25 @@ export function expressions(ctx: Context) {
     }
   }
 
+  // Whether a `!` is on a value that can't be empty, decided where the `!` is first checked and
+  // marked there. Only `null` itself is always empty.
+  function redundant(e: Extract<Expr, { kind: "nonNull" }>, given: Type): boolean {
+    const bang = e as Bang;
+    if (bang.redundant === undefined) ctx.asWritten();
+    if (bang.redundant !== undefined) return bang.redundant;
+    const held = isRefType(given) ? given.to : given;
+    if (held === "null") throw new CompileError("'!' takes the value out of an Option, and this is a 'null', which is always empty", e.start, e.end);
+    return (bang.redundant = !isOption(held));
+  }
+
   function assignableTo(target: Expr, reads: boolean): Type {
+    // Only a `!` that can't fail is a place: the place it is written on.
+    if (target.kind === "nonNull") {
+      const type = assignableTo(target.expr, reads);
+      if (!redundant(target, types.get(target.expr)!)) throw new CompileError("can only assign to a variable or a field", target.start, target.end);
+      types.set(target, types.get(target.expr)!);
+      return type;
+    }
     untuple(target);
     if ((target.kind === "member" || target.kind === "index") && target.object.kind === "ident") objects.add(target.object);
     const setter = target.kind === "member" ? accessor(target) : undefined;
@@ -5484,8 +5507,8 @@ export function expressions(ctx: Context) {
       throw new CompileError(`a string's '${(target as { name: string }).name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
     }
     // A top-level const, or a part of one, was computed while compiling and never changes.
-    let root = target;
-    while (root.kind === "member" || root.kind === "index") root = root.object;
+    let root: Expr = target;
+    while (root.kind === "member" || root.kind === "index" || root.kind === "nonNull") root = root.kind === "nonNull" ? root.expr : root.object;
     if (root.kind === "ident" && !lookup(root.name) && byName.has(`const ${root.name}`)) {
       throw new CompileError(`'${root.name}' is a top-level const, computed while compiling, so it never changes; a global that changes is a const holding an Atomic or a Lock`, target.start, target.end);
     }
@@ -5575,12 +5598,11 @@ export function expressions(ctx: Context) {
   // temporary.
   // A getter's result is a temporary, so a path through one isn't a place.
   function place(e: Expr): boolean {
-    while ((e.kind === "member" && !e.optional && !calls.has(e)) || element(e)) {
+    for (e = bare(e); (e.kind === "member" && !e.optional && !calls.has(e)) || element(e); e = bare(e.object)) {
       // An enum's member, and a field every member of a union shares, are values, not places.
       const object = types.get(e.object);
       const held = typeof object !== "string" && object?.kind === "ref" ? object.to : object;
       if (!held || (typeof held !== "string" && held.kind === "union")) return false;
-      e = e.object;
     }
     return e.kind === "this" || (e.kind === "ident" && lookup(e.name) !== undefined);
   }
@@ -5591,7 +5613,7 @@ export function expressions(ctx: Context) {
   function changeable(target: Expr, action: string) {
     // Below a read through a Dyn, the place is part of a copy.
     if (readCopy(target) && !computed.has(target)) throw new CompileError(`cannot ${action} this: it is part of a value read through a Dyn, which gives a copy, so the change would be lost; change it through a method`, target.start, target.end);
-    let root = target;
+    let root = bare(target);
     let path = "";
     // Through a mutable reference anything below it may change, whatever variable holds the
     // reference, as long as nothing above it is shared.
@@ -5601,19 +5623,19 @@ export function expressions(ctx: Context) {
       const holder = types.get(root.object);
       const referred = typeof holder !== "string" && holder?.kind === "ref" ? holder.to : holder;
       if (typeof referred !== "string" && referred?.kind === "shared") {
-        throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is shared between threads; change it inside '${placeText(root.object)}.update(...)'`, target.start, target.end);
+        throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(bare(root.object))}' is shared between threads; change it inside '${placeText(bare(root.object))}.update(...)'`, target.start, target.end);
       }
       if (ctx.sharing && interiorMutable(types.get(root)!) && isParamPath(root)) {
         throw new CompileError(`cannot ${action} '${placeText(target)}' inside 'update': other tasks borrow '${placeText(root)}' without the lock, so it changes only through its own methods`, target.start, target.end);
       }
       if (typeof holder !== "string" && holder?.kind === "ref" && holder.mutable) throughMut = true;
       else if (typeof holder !== "string" && holder?.kind === "ref") {
-        throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(root.object)}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
+        throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(bare(root.object))}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
       }
       // A rest tuple's element is named by its place in the tuple, its array left unsaid.
       if (root.kind === "index" && root.index.kind === "int" && restStarts.has(root.object)) path = `[${BigInt(restStarts.get(root.object)!) + root.index.value}]${path}`;
       else if (!(root.kind === "member" && restStarts.has(root))) path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${shownName(root.name)}`) : "[...]"}${path}`;
-      root = root.object;
+      root = bare(root.object);
     }
     if (ctx.sharing && path === "" && isParamPath(root)) {
       const whole = types.get(root)!;
@@ -5915,6 +5937,7 @@ export function expressions(ctx: Context) {
     if (rest) return rest;
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${placeText(e.object)}[${e.name}]` : `${placeText(e.object)}.${shownName(e.name)}`;
     if (e.kind === "index") return `${placeText(e.object)}[${indexText(e.index)}]`;
+    if (e.kind === "nonNull") return `${placeText(e.expr)}!`;
     return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "(...)";
   }
 
