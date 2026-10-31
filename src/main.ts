@@ -210,7 +210,7 @@ export function buildTests(dir: string, out: string): Test[] {
     hideMains(loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
     loaded.modules[0]!.statements.push(...harnessMain(tests, loaded.modules));
     const checked = check(expanded(loaded, false));
-    linked(bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), checked.instances, out, false, [], rustShim(loaded.rust, checked.instances));
+    linked(bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources, harness: true }), loaded), checked.instances, out, false, [], rustShim(loaded.rust, checked.instances));
     return tests;
   });
 }

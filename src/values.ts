@@ -204,6 +204,9 @@ export const stringBuilds = new WeakMap<Expr, "units" | "points">();
 const namedParams = new WeakMap<Param, { fn: string; names: string[]; clones: boolean[] }>();
 // Their types, resolved where the function is declared.
 export const presetParams = new WeakMap<Param, Type>();
+// The arrows the checker writes around a function given as a value or a timer's callback, which
+// keep no frame in a backtrace, since nobody wrote them.
+export const madeArrows = new WeakSet<Expr>();
 // The `fill length` checks that panic on a negative length.
 export const lengthChecks = new WeakSet<Expr>();
 // The `fileRead` and `fileWrite` calls of the std's file module.
@@ -1566,6 +1569,7 @@ export function expressions(ctx: Context) {
     const call: Expr = { kind: "call", callee: { kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n) => ({ kind: "ident", name: n, ...at })), optional: false, ...at };
     delete (e as { name?: string }).name;
     Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
+    madeArrows.add(e);
   }
 
   // The Dyn of an interface a value meeting `t` is boxed into: `t` itself, or the one in an
@@ -1658,6 +1662,7 @@ export function expressions(ctx: Context) {
     const call: Expr = { kind: "call", callee: { kind: "ident", name: written, ...at }, typeArgs: [], args, optional: false, ...at };
     delete (e as { name?: string }).name;
     Object.assign(e, { kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call });
+    madeArrows.add(e);
   }
 
   // The nested function a name calls, unless it is async, whose future holds what it uses. A
@@ -2947,6 +2952,7 @@ export function expressions(ctx: Context) {
       : { kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ kind: "expr", expr: body, ...span }], ...span };
     const wrapper: Expr = givesPromise(callback) ? { kind: "call", callee: { kind: "ident", name: "timer detached", ...span }, args: [kept], typeArgs: [], optional: false, ...span } : kept;
     timerWrappers.add(kept);
+    if (!own) madeArrows.add(kept);
     const loop: Expr = { kind: "call", callee: { kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
     const ms = e.args[1] ?? { kind: "int", value: 0n, ...at };
     helper("timerSet", [wrapper, ms, { kind: "bool", value: name === "setInterval", ...at }, loop]);

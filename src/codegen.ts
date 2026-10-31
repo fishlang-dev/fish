@@ -10,6 +10,7 @@ import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
+import { STD_BASE } from "./std.ts";
 import { kindTests } from "./narrow.ts";
 import { allFields, arrayType, callableOf, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, leafFuture, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType } from "./typing.ts";
 
@@ -54,6 +55,14 @@ function floatConstant(value: number, type: "f32" | "f64"): string {
   view.setFloat64(0, type === "f32" ? Math.fround(value) : value);
   return `0x${view.getBigUint64(0).toString(16).toUpperCase().padStart(16, "0")}`;
 }
+
+// The callee of a call or invoke line, and the callees a frame's site needn't be stored before:
+// intrinsics, printing and reference counts, none of which panics or calls back into Fish.
+const CALLEE = /^(?:%\S+ = )?(?:call|invoke) [^@%]*([@%][^(]*)\(/;
+const FRAME = "{ ptr, ptr, ptr }";
+// The files of std's built-in modules, such as `node:path` and `fish:engine`.
+const BUILT_IN = /^(node|fish):/;
+const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_release$)/;
 
 // A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
 // test by its name, which may hold quotes, so those are escaped as LLVM spells them.
@@ -116,13 +125,20 @@ const rustGiven = (i: Instance): Crossing | undefined => (i.body.self?.construct
 
 // A library has no C `main`; each export gets a C function under its own name instead.
 // `sources` holds the program's files other than the entry, for panic locations.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[] };
+// `harness`: the entry file is `fishc test`'s generated harness, whose functions keep no frame.
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances }: Checked, { src, file, release, panic, library = false, sources = [] }: Options): string {
+export function codegen({ instances }: Checked, { src, file, release, panic, library = false, sources = [], harness = false }: Options): string {
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
+  // In a debug build each of the program's own functions keeps a frame on the runtime's shadow
+  // stack, `{ site, name, prev }`, for a panic's backtrace: `framing` is the body of the one being
+  // emitted, and `site` the expression or statement whose calls it is making.
+  let framing: string[] | undefined;
+  let site: Span | undefined;
+  let frames = false;
   const globals: string[] = [];
   const regexes = new Map<string, string>();
   const out: string[] = [];
@@ -276,6 +292,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     scopes = [[]];
     const type = instance.returns;
     framed = new Set();
+    // std's functions, its built-in modules' included, keep no frame, as Rust's short backtrace
+    // hides std's internals; nor do the arrows the checker wraps around a callback.
+    const from = sourceOf(src, file, f.start, sources).file;
+    const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(harness && from === file) && !f.closure?.made;
+    framing = !release && !library && ours ? body : undefined;
+    site = undefined;
     const machine = instance.generator ?? instance.future;
     resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };
     // A generator's variables, and its loops' state, are fields of the frame each `next()` is
@@ -337,6 +359,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     });
     if (f.closure) self = selfOf(f)?.type;
     f.body.forEach(statement);
+    // Falling off the end drops what the body holds there, at its closing brace.
+    site = { start: f.end - 1, end: f.end };
     // The last block is unreachable when every path returned; the checker guarantees it for values.
     if (type === "void" || resuming) leave(undefined);
     else emit("unreachable");
@@ -347,14 +371,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       if (resuming.type.kind === "generator") emit(`ret ${resultType(instance)} ${yieldedAs(answer(undefined, resuming.type.yields))}`);
       else emit("unreachable");
       const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
-      allocas.push("  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
+      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
       const takes = resuming.type.kind === "future" || resuming.type.async ? "ptr %frame, ptr %cx" : "ptr %frame";
-      out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+      out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...popFrame(body), "}", "");
       continue;
     }
     // Fish's own functions stay inside this module, so two libraries never clash over them.
-    out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
+    out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...pushFrame(instance), ...popFrame(body), "}", "");
   }
+  framing = undefined;
+  if (frames) globals.push("@fsh_rt_frames = external thread_local global ptr");
   // A cancel function wanted while making one may want another.
   for (const done = new Set<Instance>(); done.size < cancelled.size;) {
     for (const i of [...cancelled]) {
@@ -385,6 +411,44 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     ...filled,
     "",
   ].join("\n");
+
+  // A framed function's entry pushes its frame: a generator or future's on each resume, since it
+  // pops at every suspend, so an `await` chain or a generator's resumer is the stack below it.
+  // The record is `{ site, name, prev }`, the site first so each call's store is to the slot
+  // itself; nothing else outlives the entry block, so unoptimized code spills nothing more.
+  function pushFrame(i: Instance): string[] {
+    if (body !== framing) return [];
+    frames = true;
+    return [
+      `  %fsh.site = alloca ${FRAME}`,
+      `  %fsh.name = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 1`,
+      `  %fsh.link = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`,
+      "  %fsh.prev = load ptr, ptr @fsh_rt_frames",
+      "  store ptr null, ptr %fsh.site",
+      `  store ptr ${cString(frameName(i))}, ptr %fsh.name`,
+      "  store ptr %fsh.prev, ptr %fsh.link",
+      "  store ptr %fsh.site, ptr @fsh_rt_frames",
+    ];
+  }
+
+  // Every return pops it; an unwinding panic leaves it, for the runtime to reset.
+  function popFrame(lines: string[]): string[] {
+    if (lines !== framing) return lines;
+    let n = 0;
+    return lines.flatMap((line) => {
+      if (!line.startsWith("  ret ")) return [line];
+      const [link, prev] = [`%fsh.link${n}`, `%fsh.prev${n++}`];
+      return [`  ${link} = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`, `  ${prev} = load ptr, ptr ${link}`, `  store ptr ${prev}, ptr @fsh_rt_frames`, line];
+    });
+  }
+
+  // A frame's name: the function as written, a generic one's instance without its number, a
+  // nested function by its name and an arrow by where it starts.
+  function frameName(i: Instance): string {
+    const closure = i.body.closure;
+    if (closure) return closure.self ?? `<arrow ${where(i.body).split(":").slice(-2).join(":")}>`;
+    return i.symbol.replace(/#\w+/g, "");
+  }
 
   // The part of a generated symbol telling `owner` apart in its family: a hash of its description
   // rather than a count, so it is the same in every program making it. Owners described alike
@@ -623,6 +687,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   function emit(line: string) {
+    const callee = body === framing && site ? CALLEE.exec(line)?.[1] : undefined;
+    if (callee && !QUIET.test(callee)) body.push(`  store ptr ${cString(where(site!))}, ptr %fsh.site`);
     body.push(`  ${line}`);
   }
 
@@ -2609,6 +2675,13 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   }
 
   function statement(s: Stmt) {
+    const outer = site;
+    site = s;
+    lowerStatement(s);
+    site = outer;
+  }
+
+  function lowerStatement(s: Stmt) {
     switch (s.kind) {
       case "expr":
         if (s.expr.kind === "yield") return yielded(s.expr);
@@ -8298,7 +8371,16 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     return slot;
   }
 
+  // The calls an expression makes are made from its site, once its operands' own calls are done.
   function evaluate(e: Expr): string {
+    const outer = site;
+    site = e;
+    const v = evaluated(e);
+    site = outer;
+    return v;
+  }
+
+  function evaluated(e: Expr): string {
     switch (e.kind) {
       case "int": {
         const type = types.get(e)!;

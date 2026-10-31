@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CompileError, formatError } from "../src/diag.ts";
 import { buildAsync } from "../src/main.ts";
 import { parse } from "../src/parser.ts";
@@ -12,6 +12,8 @@ import { parse } from "../src/parser.ts";
 //   // panic: <text>    the program must exit with 101 and stderr containing <text>
 //   // fails: <text>    the program must exit with 1, an error escaping main, and stderr
 //                       containing <text>
+//   // stderr: <line>   a line of stderr; a program's `stderr:` lines must appear in it together
+//                       and in order, with paths in the program's directory read from it
 //   // mode: release    build with --release
 //   // mode: abort      build with --panic=abort: a panic aborts (SIGABRT) instead of exiting 101
 //   // mode: parse      only parse; passing means it parsed
@@ -80,7 +82,7 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
 // A test's program: a file, a directory's `main.fsh`, or a case of a file, which is written out
 // as its own file; or what is wrong with a file's cases.
 type Program = { label: string; file: string; src: string; problem?: string };
-const DIRECTIVE = /^\/\/ (expect|error|panic|fails|mode|link):/;
+const DIRECTIVE = /^\/\/ (expect|error|panic|fails|stderr|mode|link):/;
 
 function programsOf(entry: string): [string, Program][] {
   const file = entry.endsWith(".fsh") ? join(dir, entry) : join(dir, entry, "main.fsh");
@@ -125,12 +127,13 @@ function ahead(at: number) {
 
 for (const name of programs) {
   test(name, async () => {
-    const { src, label, problem } = sources.get(name)!;
+    const { src, label, problem, file } = sources.get(name)!;
     if (problem) throw new Error(problem);
     const expected = [...src.matchAll(/\/\/ expect: (.*)/g)].map((m) => m[1] + "\n").join("");
     const errors = [...src.matchAll(/\/\/ error: (.*)/g)].map((m) => m[1]!);
     const panics = [...src.matchAll(/\/\/ panic: (.*)/g)].map((m) => m[1]!);
     const failures = [...src.matchAll(/\/\/ fails: (.*)/g)].map((m) => m[1]!);
+    const lines = [...src.matchAll(/\/\/ stderr: (.*)/g)].map((m) => m[1]!);
     ahead(programs.indexOf(name));
     const run = await outcomes.get(name)!;
 
@@ -146,6 +149,7 @@ for (const name of programs) {
     expect(run.timedOut).toBe(false);
     expect(run.stdout).toBe(expected);
     for (const text of [...panics, ...failures]) expect(run.stderr).toContain(text);
+    if (lines.length > 0) expect(`\n${run.stderr.replaceAll(dirname(file) + "/", "")}`).toContain(`\n${lines.join("\n")}\n`);
     // A panic that unwinds drops everything on the way out, so it leaks nothing either.
     if (!src.includes("// mode: abort")) expect(run.stderr).not.toContain("fish: leaked");
     if (panics.length > 0 && src.includes("// mode: abort")) expect(run.signal).toBe("SIGABRT");
