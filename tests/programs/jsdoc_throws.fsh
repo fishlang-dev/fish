@@ -166,3 +166,36 @@ function main() {}
 function f(): i64 { return 1 }
 function main() { print(f()) }
 // error: jsdoc_throws_unknown.fsh:2:14: error: cannot find type 'Missing'
+// case: jsdoc_throws_order_and_repeats
+class A { message: string = "a"; }
+class B { message: string = "b"; }
+class C { message: string = "c"; }
+/**
+ * @throws {C} when c
+ * @throws {A | B} otherwise
+ * @throws {C} again
+ */
+function pick(n: i64): i64 throws A | B | C {
+  if (n === 1) throw new A();
+  if (n === 2) throw new C();
+  return n;
+}
+function main(): void {
+  try {
+    console.log(pick(5));
+    pick(2);
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+// expect: 5
+// expect: c
+// case: jsdoc_throws_still_conflicts
+class A { message: string = "a"; }
+class B { message: string = "b"; }
+/** @throws {A | B} */
+function pick(n: i64): i64 throws A {
+  return n;
+}
+function main(): void {}
+// error: the JSDoc says '@throws {A | B}' but the function says 'throws A'

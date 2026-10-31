@@ -477,7 +477,8 @@ export function documentedThrows(c: Cursor, at: number, written: TypeNode | unde
   const shape = (t: TypeNode) => JSON.stringify(t, (k, v) => {
     if (k === "id" || k === "start" || k === "end") return undefined;
     if (typeof v === "bigint") return `${v}n`;
-    return v?.kind === "union" ? { kind: "union", types: members(v) } : v;
+    // A union is its members as a set, so neither their order nor a repeat makes a difference.
+    return v?.kind === "union" ? { kind: "union", types: [...new Set(members(v).map(shape))].sort() } : v;
   });
   if (shape(doc) !== shape(written)) {
     const text = (t: TypeNode) => c.src.slice(t.start, t.end);
