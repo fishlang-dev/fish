@@ -10,7 +10,7 @@ function main() {
   print(sum(p))
   print(p.x)
 }
-// error: 10:9: error: 'p.x' can't be used here because 'p' was moved
+// error: 10:9: error[E0201]: 'p.x' can't be used here because 'p' was moved
 // error: 9:13: note: 'p' moved here: passing it to 'sum' hands it over, as if 'sum' kept it; pass 'p.clone()' to keep a copy
 // case: move_after_let
 class Box {
