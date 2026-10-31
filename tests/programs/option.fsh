@@ -358,3 +358,13 @@ function main() {
 // expect: 1
 // expect: 1
 // expect: 1
+
+// case: option_object_literal_fields
+type Note = { message: string; start: usize; end: usize };
+function endOf(n: Note | undefined): usize { return n === undefined ? 0 : n.end; }
+function main() {
+  console.log(endOf({ message: "x", start: 6, end: 7 }));
+  console.log(endOf(undefined));
+}
+// expect: 7
+// expect: 0

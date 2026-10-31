@@ -484,15 +484,7 @@ export function expressions(ctx: Context) {
     if (e.kind === "pipe") expect(e.body, t);
     // An object literal where a union is expected is expected to be the member it names: the one
     // with all its names whose literal fields its literals match.
-    if (e.kind === "object" && typeof t !== "string" && t.kind === "union") {
-      const props = e.props.filter((p): p is Extract<typeof p, { kind: "property" }> => p.kind === "property" && typeof p.key === "string");
-      const named = t.members.map(unfold).filter((m): m is ObjectType => typeof m !== "string" && m.kind === "object" && props.every((p) => field(m, p.key as string)));
-      const matching = named.filter((m) => props.every((p) => {
-        const f = field(m, p.key as string)!.type;
-        return typeof f === "string" || f.kind !== "literal" || (p.value.kind === "string" && p.value.value === f.value);
-      }));
-      if (matching.length === 1) t = matching[0]!;
-    }
+    if (e.kind === "object") t = memberNamed(e, t) ?? t;
     if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
@@ -500,6 +492,19 @@ export function expressions(ctx: Context) {
     if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "shared" && typeof t !== "string" && t.kind === "shared") wanted.set(e, t);
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
+  }
+
+  // The member of a union an object literal names: the one with all its names whose literal
+  // fields its literals match.
+  function memberNamed(e: Extract<Expr, { kind: "object" }>, t: Type): ObjectType | undefined {
+    if (typeof t === "string" || t.kind !== "union") return undefined;
+    const props = e.props.filter((p): p is Extract<typeof p, { kind: "property" }> => p.kind === "property" && typeof p.key === "string");
+    const named = t.members.map(unfold).filter((m): m is ObjectType => typeof m !== "string" && m.kind === "object" && props.every((p) => field(m, p.key as string)));
+    const matching = named.filter((m) => props.every((p) => {
+      const f = field(m, p.key as string)!.type;
+      return typeof f === "string" || f.kind !== "literal" || (p.value.kind === "string" && p.value.value === f.value);
+    }));
+    return matching.length === 1 ? matching[0] : undefined;
   }
 
   // Whether an array literal's length suits `t`: any array's, or a tuple's or fixed array's count.
@@ -4750,6 +4755,9 @@ export function expressions(ctx: Context) {
   }
 
   function adaptFields(e: Expr, type: Type, to: Type): Type {
+    to = unfolded(to);
+    // An object literal meeting a union adapts to the member it names, then joins the union.
+    if (e.kind === "object") to = memberNamed(e, to) ?? to;
     if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class")) return type;
     // Only a property no later part replaces gives its field, so only that one adapts.
     const winners = e.props.filter((p): p is Extract<ObjectProp, { kind: "property" }> =>

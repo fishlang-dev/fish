@@ -144,9 +144,210 @@ function f<T>(t: T & { a: i64 }): i64 {
 function main() {}
 // error: intersections with type parameters are not supported yet
 // case: intersection_union
-function f(p: { a: i64 } & ({ b: i64 } | { c: i64 })): i64 {
-  return p.a
+// `A & (B | C)` distributes, as in TypeScript: a tagged union whose every member has the shared
+// fields, narrowed by its tag.
+type Span = { start: i64; end: i64 }
+type Id = { id: i64 }
+type Shape = Span & Id & (| { kind: "circle"; r: i64 } | { kind: "rect"; w: i64; h: i64 })
+
+function area(s: Ref<Shape>): i64 {
+  if (s.kind === "circle") return s.r * s.r * 3
+  return s.w * s.h
 }
 
+function width(s: Ref<Shape>): i64 {
+  switch (s.kind) {
+    case "circle":
+      return s.r * 2
+    case "rect":
+      return s.w
+  }
+  return 0
+}
+
+function grow(s: Shape): Shape {
+  if (s.kind === "rect") return { kind: "rect", w: s.w + 1, h: s.h, start: s.start, end: s.end, id: s.id }
+  return s
+}
+
+function main() {
+  const c: Shape = { kind: "circle", r: 2, start: 0, end: 4, id: 1 }
+  const r: Shape = { kind: "rect", w: 3, h: 5, start: 5, end: 9, id: 2 }
+  console.log(area(c), area(r), width(c), width(r), c.start + r.end, c.id + r.id, area(grow(r.clone())))
+  console.log(r)
+}
+// expect: 12 15 4 3 9 3 20
+// expect: { end: 9, h: 5, id: 2, kind: 'rect', start: 5, w: 3 }
+// case: intersection_union_recursive
+type Span = { start: i64; end: i64 }
+type E = Span & ({ kind: "num"; value: i64 } | { kind: "add"; left: E; right: E })
+
+function evaluate(e: Ref<E>): i64 {
+  if (e.kind === "num") return e.value
+  return evaluate(e.left) + evaluate(e.right)
+}
+
+function show(e: Ref<E>): string {
+  if (e.kind === "num") return `${e.value}`
+  return `(${show(e.left)} + ${show(e.right)})`
+}
+
+function lhs(e: Ref<Extract<E, { kind: "add" }>>): i64 {
+  return evaluate(e.left) * 10 + e.start
+}
+
+function num(value: i64, at: i64): E {
+  return { kind: "num", value, start: at, end: at + 1 }
+}
+
+function main() {
+  const e: E = { kind: "add", left: num(1, 0), right: { kind: "add", left: num(2, 4), right: num(3, 8), start: 4, end: 9 }, start: 0, end: 9 }
+  console.log(evaluate(e), show(e))
+  if (e.kind === "add") console.log(lhs(e))
+  console.log(num(7, 2))
+  console.log(e)
+}
+// expect: 6 (1 + (2 + 3))
+// expect: 10
+// expect: { end: 3, kind: 'num', start: 2, value: 7 }
+// expect: {
+// expect:   end: 9,
+// expect:   kind: 'add',
+// expect:   left: { end: 1, kind: 'num', start: 0, value: 1 },
+// expect:   right: {
+// expect:     end: 9,
+// expect:     kind: 'add',
+// expect:     left: { end: 5, kind: 'num', start: 4, value: 2 },
+// expect:     right: { end: 9, kind: 'num', start: 8, value: 3 },
+// expect:     start: 4
+// expect:   },
+// expect:   start: 0
+// expect: }
+// case: intersection_union_generic
+type Span = { start: i64 }
+type Tree<T> = Span & ({ kind: "leaf"; v: T } | { kind: "pair"; a: Tree<T>; b: Tree<T> })
+
+function count<T>(t: Ref<Tree<T>>): i64 {
+  if (t.kind === "leaf") return 1
+  return count<T>(t.a) + count<T>(t.b)
+}
+
+function main() {
+  const t: Tree<string> = { kind: "pair", start: 0, a: { kind: "leaf", v: "x", start: 1 }, b: { kind: "leaf", v: "y", start: 2 } }
+  console.log(count<string>(t), t)
+}
+// expect: 2 {
+// expect:   a: { kind: 'leaf', start: 1, v: 'x' },
+// expect:   b: { kind: 'leaf', start: 2, v: 'y' },
+// expect:   kind: 'pair',
+// expect:   start: 0
+// expect: }
+// case: intersection_union_sides
+// Two union sides give every combination.
+type T = ({ a: i64 } | { b: i64 }) & ({ kind: "x" } | { kind: "y"; y: i64 })
+
+function f(t: T): i64 {
+  if (t.kind === "y") return t.y
+  return 0
+}
+
+function main() {
+  const t: T = { a: 1, kind: "y", y: 2 }
+  const u: T = { b: 3, kind: "x" }
+  console.log(t, u)
+  console.log(f(t), f(u))
+}
+// expect: { a: 1, kind: 'y', y: 2 } { b: 3, kind: 'x' }
+// expect: 2 0
+// case: intersection_union_equal
+type Shape = { id: i64 } & ({ kind: "c"; r: i64 } | { kind: "s"; w: i64 })
+function main() {
+  const a: Shape = { kind: "c", r: 1, id: 1 }
+  const b: Shape = { kind: "c", r: 1, id: 1 }
+  console.log(a === b)
+}
+// expect: true
+// case: intersection_union_conflict
+type K = { kind: "a"; n: i64 } & ({ n: boolean } | { m: i64 })
 function main() {}
-// error: intersections with unions are not supported yet
+// error: property 'n' has type 'i64' on one side of '&' and 'boolean' on the other
+// case: intersection_union_interface
+interface I { n: i64 }
+function f(x: I & ({ a: i64 } | { b: i64 })): i64 { return 1 }
+function main() {}
+// error: intersections of interfaces with unions are not supported yet
+// case: intersection_union_literals
+// Object literals meeting a distributed union take the member they name, its integer and literal
+// field types included, wherever they go.
+type Span = { start: usize; end: usize }
+type F = Span & (
+  | { kind: "num"; value: i64; note?: string }
+  | { kind: "neg"; inner: F }
+  | { kind: "list"; items: F[]; label: string | undefined; big: bigint }
+)
+type Holder = { node: F; count: u8 }
+
+function num(value: i64, at: usize): F {
+  return { kind: "num", value, start: at, end: at + 1 }
+}
+
+function zero(): F {
+  return { kind: "num", value: 0, start: 0, end: 1, note: "zero" }
+}
+
+function size(f: Ref<F>): usize {
+  if (f.kind === "list") {
+    let n: usize = 1
+    for (const x of f.items) n += size(x)
+    return n
+  }
+  if (f.kind === "neg") return 1 + size(f.inner)
+  return 1
+}
+
+function main() {
+  const f: F = { kind: "neg", inner: { kind: "num", value: 1, start: 1, end: 2 }, start: 0, end: 2 }
+  const l: F = { kind: "list", items: [{ kind: "num", value: 2, start: 0, end: 1 }, { kind: "neg", inner: zero(), start: 2, end: 3 }], label: undefined, big: 5n, start: 0, end: 3 }
+  const empty: F = { kind: "list", items: [], label: "none", big: 0n, start: 4, end: 6 }
+  let all: F[] = []
+  all.push({ kind: "num", value: 3, start: 7, end: 8 })
+  all.push(num(4, 9))
+  let h: Holder = { node: { kind: "num", value: 5, start: 0, end: 1 }, count: 1 }
+  h.node = { kind: "neg", inner: { kind: "num", value: 6, start: 1, end: 2 }, start: 0, end: 2 }
+  console.log(size(f), size(l), size(empty), size({ kind: "num", value: 1, start: 0, end: 1 }), all.length, size(h.node))
+  console.log(l)
+  console.log(empty, zero())
+}
+// expect: 2 4 1 1 2 2
+// expect: {
+// expect:   big: 5n,
+// expect:   end: 3,
+// expect:   items: [
+// expect:     { end: 1, kind: 'num', start: 0, value: 2 },
+// expect:     { end: 3, inner: [Object], kind: 'neg', start: 2 }
+// expect:   ],
+// expect:   kind: 'list',
+// expect:   start: 0
+// expect: }
+// expect: { big: 0n, end: 6, items: [], kind: 'list', label: 'none', start: 4 } { end: 1, kind: 'num', note: 'zero', start: 0, value: 0 }
+// case: intersection_union_literals_plain
+// The same holds for a union written out.
+type E = { kind: "num"; value: bigint; start: usize } | { kind: "add"; left: E; right: E; items: E[]; note: string | undefined; flag: boolean };
+function main() {
+  const e: E = { kind: "add", left: { kind: "num", value: 1n, start: 0 }, right: { kind: "add", left: { kind: "num", value: 2n, start: 3 }, right: { kind: "num", value: 3n, start: 4 }, items: [{ kind: "num", value: 4n, start: 9 }], note: "a \"q\"", flag: false }, items: [], note: undefined, flag: true };
+  console.log(e);
+}
+// expect: {
+// expect:   flag: true,
+// expect:   items: [],
+// expect:   kind: 'add',
+// expect:   left: { kind: 'num', start: 0, value: 1n },
+// expect:   right: {
+// expect:     flag: false,
+// expect:     items: [ [Object] ],
+// expect:     kind: 'add',
+// expect:     left: { kind: 'num', start: 3, value: 2n },
+// expect:     note: 'a "q"',
+// expect:     right: { kind: 'num', start: 4, value: 3n }
+// expect:   }
+// expect: }

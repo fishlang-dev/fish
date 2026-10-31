@@ -44,7 +44,7 @@ const MEMBERS: [string, string, string][] = [
 const INTERSECTIONS: [string, string, string][] = [
   ["i64 & { a: i64 }", "intersections with primitive types", "i64"],
   ["{ a: i64 } & A", "intersections with classes", "A"],
-  ["{ a: i64 } & (1 | 2)", "intersections with unions", "1 | 2"],
+  ["{ a: i64 } & (1 | 2)", "intersections with unions of other than object types", "1 | 2"],
 ];
 
 for (const [type, what, part] of INTERSECTIONS) {

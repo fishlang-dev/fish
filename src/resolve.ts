@@ -526,14 +526,23 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   }
 
   // `A & B` of object types is one object type with the fields of both. With an interface it
-  // is a combined bound: an interface with every side's fields and methods.
+  // is a combined bound: an interface with every side's fields and methods. A union of object
+  // types as a side distributes, as in TypeScript: `A & (B | C)` is `(A & B) | (A & C)`.
   function intersection(nodes: TypeNode[]): Type {
     const sides = nodes.map((node) => {
       const t = resolveType(node);
       if (typeof t !== "string" && (t.kind === "object" || t.kind === "interface")) return t;
-      throw unsupported(`intersections with ${typeof t === "string" || t.kind === "literal" ? "primitive types" : SIDE_FORMS[t.kind]}`, node);
+      if (typeof t !== "string" && t.kind === "union" && t.members.every((m) => typeof m !== "string" && m.kind === "object")) return t;
+      throw unsupported(`intersections with ${typeof t === "string" || t.kind === "literal" ? "primitive types" : t.kind === "union" ? "unions of other than object types" : SIDE_FORMS[t.kind]}`, node);
     });
     const [from, to] = [nodes[0]!, nodes.at(-1)!];
+    if (sides.some((s) => s.kind === "union")) {
+      const at = nodes[sides.findIndex((s) => s.kind === "interface")];
+      if (at) throw unsupported("intersections of interfaces with unions", at);
+      const choices = sides.map((s) => (s.kind === "union" ? s.members : [s]) as ObjectType[]);
+      const combos = choices.reduce<ObjectType[][]>((acc, ms) => acc.flatMap((c) => ms.map((m) => [...c, m])), [[]]);
+      return unionType(combos.map((c) => c.reduce((a, b) => merged(typing, a, b, from, to))));
+    }
     const fields = sides.map((s) => objectType(s.fields)).reduce((a, b) => merged(typing, a, b, from, to));
     if (sides.every((s) => s.kind === "object")) return fields;
     const key = sides.map(keyOf).join(" & ");
