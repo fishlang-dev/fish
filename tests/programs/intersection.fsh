@@ -276,3 +276,78 @@ interface I { n: i64 }
 function f(x: I & ({ a: i64 } | { b: i64 })): i64 { return 1 }
 function main() {}
 // error: intersections of interfaces with unions are not supported yet
+// case: intersection_union_literals
+// Object literals meeting a distributed union take the member they name, its integer and literal
+// field types included, wherever they go.
+type Span = { start: usize; end: usize }
+type F = Span & (
+  | { kind: "num"; value: i64; note?: string }
+  | { kind: "neg"; inner: F }
+  | { kind: "list"; items: F[]; label: string | undefined; big: bigint }
+)
+type Holder = { node: F; count: u8 }
+
+function num(value: i64, at: usize): F {
+  return { kind: "num", value, start: at, end: at + 1 }
+}
+
+function zero(): F {
+  return { kind: "num", value: 0, start: 0, end: 1, note: "zero" }
+}
+
+function size(f: Ref<F>): usize {
+  if (f.kind === "list") {
+    let n: usize = 1
+    for (const x of f.items) n += size(x)
+    return n
+  }
+  if (f.kind === "neg") return 1 + size(f.inner)
+  return 1
+}
+
+function main() {
+  const f: F = { kind: "neg", inner: { kind: "num", value: 1, start: 1, end: 2 }, start: 0, end: 2 }
+  const l: F = { kind: "list", items: [{ kind: "num", value: 2, start: 0, end: 1 }, { kind: "neg", inner: zero(), start: 2, end: 3 }], label: undefined, big: 5n, start: 0, end: 3 }
+  const empty: F = { kind: "list", items: [], label: "none", big: 0n, start: 4, end: 6 }
+  let all: F[] = []
+  all.push({ kind: "num", value: 3, start: 7, end: 8 })
+  all.push(num(4, 9))
+  let h: Holder = { node: { kind: "num", value: 5, start: 0, end: 1 }, count: 1 }
+  h.node = { kind: "neg", inner: { kind: "num", value: 6, start: 1, end: 2 }, start: 0, end: 2 }
+  console.log(size(f), size(l), size(empty), size({ kind: "num", value: 1, start: 0, end: 1 }), all.length, size(h.node))
+  console.log(l)
+  console.log(empty, zero())
+}
+// expect: 2 4 1 1 2 2
+// expect: {
+// expect:   big: 5n,
+// expect:   end: 3,
+// expect:   items: [
+// expect:     { end: 1, kind: 'num', start: 0, value: 2 },
+// expect:     { end: 3, inner: [Object], kind: 'neg', start: 2 }
+// expect:   ],
+// expect:   kind: 'list',
+// expect:   start: 0
+// expect: }
+// expect: { big: 0n, end: 6, items: [], kind: 'list', label: 'none', start: 4 } { end: 1, kind: 'num', note: 'zero', start: 0, value: 0 }
+// case: intersection_union_literals_plain
+// The same holds for a union written out.
+type E = { kind: "num"; value: bigint; start: usize } | { kind: "add"; left: E; right: E; items: E[]; note: string | undefined; flag: boolean };
+function main() {
+  const e: E = { kind: "add", left: { kind: "num", value: 1n, start: 0 }, right: { kind: "add", left: { kind: "num", value: 2n, start: 3 }, right: { kind: "num", value: 3n, start: 4 }, items: [{ kind: "num", value: 4n, start: 9 }], note: "a \"q\"", flag: false }, items: [], note: undefined, flag: true };
+  console.log(e);
+}
+// expect: {
+// expect:   flag: true,
+// expect:   items: [],
+// expect:   kind: 'add',
+// expect:   left: { kind: 'num', start: 0, value: 1n },
+// expect:   right: {
+// expect:     flag: false,
+// expect:     items: [ [Object] ],
+// expect:     kind: 'add',
+// expect:     left: { kind: 'num', start: 3, value: 2n },
+// expect:     note: 'a "q"',
+// expect:     right: { kind: 'num', start: 4, value: 3n }
+// expect:   }
+// expect: }
