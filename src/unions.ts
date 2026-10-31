@@ -1,15 +1,18 @@
 import { CompileError } from "./diag.ts";
+import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
-import { JS_TYPEOF, kindTests, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
+import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { baseOf, field, fits, isNumeric, isPlainJs, membersFor, objectType, show, unfold, unionType, lower } from "./typing.ts";
-import type { ClassType, Field, LiteralType, Type, UnionType } from "./typing.ts";
+import { baseOf, field, isNumeric, isPlainJs, unfold } from "./typing.ts";
+import type { ClassType, Field, LiteralType, Type, Typing, UnionType } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
 
 // What these rules need from expression checking.
 export type Union = {
+  kindTests: Tables["kindTests"];
+  typing: Typing;
   types: NodeMap<Expr, Type>;
   coercions: NodeMap<Expr, Type>;
   value(e: Expr): Type;
@@ -23,13 +26,14 @@ export type Union = {
 // The shape a fresh object literal takes when its literal-valued properties fit the literal
 // fields of `to`, and how to record that: each such property is coerced to its field's
 // literal type, and the literal gets the shape. Undefined when it doesn't fit that way.
-export function literalShape(e: Expr, to: Type, types: NodeMap<Expr, Type>): { type: Type; apply(coercions: NodeMap<Expr, Type>): void } | undefined {
+export function literalShape(typing: Typing, e: Expr, to: Type, types: NodeMap<Expr, Type>): { type: Type; apply(coercions: NodeMap<Expr, Type>): void } | undefined {
+  const { fits, objectType } = typing;
   to = unfold(to);
   // Meeting a union, it takes the shape of the first member it can, as a nested literal of a
   // recursive type does.
   if ((e.kind === "object" || e.kind === "array") && typeof to !== "string" && to.kind === "union") {
     for (const m of to.members) {
-      const shape = literalShape(e, m, types);
+      const shape = literalShape(typing, e, m, types);
       if (shape) return shape;
     }
     return undefined;
@@ -39,7 +43,7 @@ export function literalShape(e: Expr, to: Type, types: NodeMap<Expr, Type>): { t
     const steps: ((coercions: NodeMap<Expr, Type>) => void)[] = [];
     for (const x of e.elements as Expr[]) {
       const have = types.get(x)!;
-      const shape = fits(have, to.element) ? undefined : literalShape(x, to.element, types);
+      const shape = fits(have, to.element) ? undefined : literalShape(typing, x, to.element, types);
       if (!shape && !fits(have, to.element)) return undefined;
       steps.push((coercions) => {
         shape?.apply(coercions);
@@ -65,7 +69,7 @@ export function literalShape(e: Expr, to: Type, types: NodeMap<Expr, Type>): { t
     // A literal's value takes the literal type wanted, alone or in a union of them.
     const choices = typeof want !== "string" && want.kind === "union" ? want.members : [want];
     const literal = value && choices.find((c): c is LiteralType => typeof c !== "string" && c.kind === "literal" && !c.owner && literalValue(value) === c.value);
-    const nested = value && !literal && !fits(have, want) ? literalShape(value, want, types) : undefined;
+    const nested = value && !literal && !fits(have, want) ? literalShape(typing, value, want, types) : undefined;
     if (!literal && !nested && !fits(have, want)) return undefined;
     fields.push({ name, type: literal ? literal : nested ? nested.type : have });
     if (literal) steps.push((coercions) => coercions.set(value!, literal));
@@ -83,7 +87,7 @@ export function literalShape(e: Expr, to: Type, types: NodeMap<Expr, Type>): { t
 // A field write must reach one member: through a union, which may hold any of several, the
 // field could sit anywhere, so the union has to be narrowed to one member first.
 // A mutating method call likewise needs its receiver in one member.
-export function intoMember(target: Expr, types: NodeMap<Expr, Type>, action = "assign to") {
+export function intoMember({ show }: Typing, target: Expr, types: NodeMap<Expr, Type>, action = "assign to") {
   for (let e = target; e.kind === "member"; e = e.object) {
     const found = types.get(e.object);
     const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
@@ -98,7 +102,7 @@ export function intoMember(target: Expr, types: NodeMap<Expr, Type>, action = "a
 
 // A field every member of a union has, read without narrowing first: its type is the union
 // of the members' field types. This is how a discriminant like `x.kind` is read.
-export function unionField(union: UnionType, name: string, at: Span): Type | undefined {
+export function unionField({ unionType }: Typing, union: UnionType, name: string, at: Span): Type | undefined {
   const found = union.members.map((m) => (typeof m === "string" ? undefined : field(m, name)));
   if (found.some((f) => !f || (f.access ?? "public") !== "public")) return undefined;
   return unionType(found.map((f) => f!.type));
@@ -106,7 +110,7 @@ export function unionField(union: UnionType, name: string, at: Span): Type | und
 
 // `x instanceof C` checks whether x holds an instance of C or of a class extending it; each
 // keeps its own type when narrowed, its base's fields reached through the base it embeds.
-export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, value, classNamed }: Union): Type {
+export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTests, typing: { show }, types, value, classNamed }: Union): Type {
   const left = value(e.left);
   const held = typeof left !== "string" && left.kind === "ref" ? left.to : left;
   if (typeof held !== "string" && held.kind === "dyn") {
@@ -137,7 +141,7 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { types, v
 }
 
 // A `?:` whose sides have different types makes the union of both, as in TypeScript.
-export function bothSides(e: Extract<Expr, { kind: "conditional" }>, then: Type, otherwise: Type, coerce: Coerce): Type {
+export function bothSides({ show, unionType }: Typing, e: Extract<Expr, { kind: "conditional" }>, then: Type, otherwise: Type, coerce: Coerce): Type {
   const both = [then, otherwise];
   if (both.some((t) => typeof t !== "string" && t.kind === "closure")) throw unsupported("unions holding functions", e);
   if (both.some((t) => t === "void" || (typeof t !== "string" && (t.kind === "interface" || t.kind === "param")))) {
@@ -153,7 +157,8 @@ type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
 
 // A value goes into the one union member it is or fits; a literal expression may also be a
 // literal member with its value. A union goes into a wider one member by member.
-export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { types, coercions, excess, adapt }: Union) {
+export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { typing, types, coercions, excess, adapt }: Union) {
+  const { membersFor, show } = typing;
   // A literal goes into the one number type a union holds.
   const numbers = to.members.filter(isNumeric);
   if (!to.members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
@@ -173,7 +178,7 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
     let into = membersFor(source, to);
     // A fresh object literal may fit a member through its literal fields, as `{ ok: true }`
     // fits `{ ok: true }`; when exactly one member takes it that way, it becomes that shape.
-    const shapes = into.length === 0 && sources.length === 1 ? to.members.map((m) => literalShape(e, m, types)) : [];
+    const shapes = into.length === 0 && sources.length === 1 ? to.members.map((m) => literalShape(typing, e, m, types)) : [];
     if (shapes.filter((s) => s).length === 1) {
       const shape = shapes.find((s) => s)!;
       shape.apply(coercions);
@@ -204,7 +209,7 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
 
 // `x === v` with x a union compares the member x holds with v, so it needs a member v might
 // equal.
-export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { value }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
+export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing: { lower, show }, value }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
   let [left, right] = [value(e.left), value(e.right)];
   // A literal compared with a union holding one number type takes that type.
   const number = (t: Type) => (typeof t !== "string" && t.kind === "union" ? opened(t).filter(isNumeric) : []);

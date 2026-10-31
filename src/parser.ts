@@ -4,7 +4,7 @@ import { isToken, lexer, type Comment, type Token } from "./lexer.ts";
 import { atClass, atDeclarationKeyword, classDeclaration, decoratorList, exportDeclaration } from "./declarations.ts";
 import { bindingPattern, toPattern } from "./patterns.ts";
 import { annotation, parameters, returnAnnotation, throwsClause, type, typeMembers, typeParameters, typeReference } from "./types.ts";
-import { nextId, type Id } from "./nodes.ts";
+import { nextId, type Id, type Ids } from "./nodes.ts";
 
 export type Span = { start: number; end: number };
 
@@ -326,9 +326,11 @@ export type Cursor = {
   // Whether JSDoc `@throws` tags declare what a function throws: when compiling, not when
   // formatting or linting, which keep the comment as written.
   docs: boolean;
+  // Where each node's id comes from, given by the caller.
+  ids: Ids;
 };
 
-function cursor(src: string, from = 0, docs = false): Cursor {
+function cursor(src: string, ids: Ids, from = 0, docs = false): Cursor {
   const lex = lexer(src, from);
   // Every token lexed so far; lookahead and backtracking move `pos` within it.
   const tokens: Token[] = [];
@@ -342,6 +344,7 @@ function cursor(src: string, from = 0, docs = false): Cursor {
     comments: lex.comments,
     src,
     docs,
+    ids,
     pos: 0,
     conditionalAllowed: true,
     inAllowed: true,
@@ -412,30 +415,30 @@ export function allowingIn<T>(c: Cursor, allowed: boolean, parse: () => T): T {
 }
 
 // A program is a list of statements; which of them may appear at the top level is the
-// checker's call.
-export function parse(src: string): Stmt[] {
-  return parseWithComments(src, true).program;
+// checker's call. Its nodes' ids come from `ids`.
+export function parse(src: string, ids: Ids): Stmt[] {
+  return parseWithComments(src, ids, true).program;
 }
 
 // The program, and the comments the lexer kept, for the formatter, and its tokens.
-export function parseWithComments(src: string, docs = false): { program: Stmt[]; comments: Comment[]; tokens: Token[] } {
-  const c = cursor(src, 0, docs);
+export function parseWithComments(src: string, ids: Ids, docs = false): { program: Stmt[]; comments: Comment[]; tokens: Token[] } {
+  const c = cursor(src, ids, 0, docs);
   const program: Stmt[] = [];
   while (c.peek().kind !== "eof") program.push(statement(c));
   return { program, comments: c.comments, tokens: c.tokens };
 }
 
 // One expression filling the whole text, as a quote's is.
-export function parseExpression(src: string): Expr {
-  const c = cursor(src);
+export function parseExpression(src: string, ids: Ids): Expr {
+  const c = cursor(src, ids);
   const e = expression(c);
   if (c.peek().kind !== "eof") throw c.error("expected the end of the expression");
   return e;
 }
 
 // One type filling the whole text.
-export function parseType(src: string): TypeNode {
-  const c = cursor(src);
+export function parseType(src: string, ids: Ids): TypeNode {
+  const c = cursor(src, ids);
   const t = type(c);
   if (c.peek().kind !== "eof") throw c.error("expected the end of the type");
   return t;
@@ -470,9 +473,9 @@ export function documentedThrows(c: Cursor, at: number, written: TypeNode | unde
     const m = c.comments[k]!;
     if (m.end <= to && /^\/\*\*[^/]/.test(m.text)) jsdoc.unshift(m);
   }
-  const types = jsdoc.flatMap((m) => thrownTypes(c.src, m));
+  const types = jsdoc.flatMap((m) => thrownTypes(c.src, c.ids, m));
   if (types.length === 0) return written;
-  const doc: TypeNode = types.length === 1 ? types[0]! : { id: nextId(), kind: "union", types: types.flatMap(members), start: types[0]!.start, end: types.at(-1)!.end };
+  const doc: TypeNode = types.length === 1 ? types[0]! : { id: nextId(c.ids), kind: "union", types: types.flatMap(members), start: types[0]!.start, end: types.at(-1)!.end };
   if (!written) return doc;
   const shape = (t: TypeNode) => JSON.stringify(t, (k, v) => {
     if (k === "id" || k === "start" || k === "end") return undefined;
@@ -490,7 +493,7 @@ export function documentedThrows(c: Cursor, at: number, written: TypeNode | unde
 // The types of a JSDoc comment's `@throws` tags. As in TypeScript, only `@throws {E} why` names a
 // type: `@throws INVALID_PARAM` only describes, and so does a tag whose type doesn't parse, such
 // as `{@link E}` or `{?E}`, so any TypeScript file still parses.
-function thrownTypes(src: string, m: Comment): TypeNode[] {
+function thrownTypes(src: string, ids: Ids, m: Comment): TypeNode[] {
   const types: TypeNode[] = [];
   const close = m.end - 2;
   for (const tag of m.text.matchAll(/(?<![^\s*])@throws(?![\p{ID_Continue}$])[ \t]*/gu)) {
@@ -501,7 +504,7 @@ function thrownTypes(src: string, m: Comment): TypeNode[] {
         if (src[end] === "{") depth++;
         else if (src[end] === "}" && --depth === 0) break;
       }
-      const t = end < close ? typeAt(src, start + 1, end) : undefined;
+      const t = end < close ? typeAt(src, ids, start + 1, end) : undefined;
       if (t) types.push(t);
     }
   }
@@ -510,8 +513,8 @@ function thrownTypes(src: string, m: Comment): TypeNode[] {
 
 // The type written from `start` to `end` of `src`, its spans offsets into the whole text, or
 // undefined when that text isn't one type.
-function typeAt(src: string, start: number, end: number): TypeNode | undefined {
-  const c = cursor(src.slice(0, end), start);
+function typeAt(src: string, ids: Ids, start: number, end: number): TypeNode | undefined {
+  const c = cursor(src.slice(0, end), ids, start);
   return c.attempt(() => {
     const t = type(c);
     if (c.peek().kind !== "eof") throw c.error("expected the end of the type");
@@ -527,7 +530,7 @@ export function decorated(c: Cursor, start: number, decorators: Expr[]): Stmt {
     || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum"));
   if (!at) throw c.error("expected a class, function, type, interface or enum after decorators");
   const s = statement(c);
-  return { ...s, id: nextId(), decorators, start } as Stmt;
+  return { ...s, id: nextId(c.ids), decorators, start } as Stmt;
 }
 
 // Only `export default function` may leave out the name, so `name` is "" there.
@@ -545,7 +548,7 @@ export function func(c: Cursor, anonymous = false): Func {
   let body: Stmt[] | undefined;
   if (c.at("{")) body = block(c);
   else endStatement(c);
-  return { id: nextId(), kind: "function", name, async, generator, macro: false, typeParams, params, returnType, ...(throws && { throws }), body, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "function", name, async, generator, macro: false, typeParams, params, returnType, ...(throws && { throws }), body, start, end: c.end() };
 }
 
 export function block(c: Cursor): Stmt[] {
@@ -569,19 +572,19 @@ function body(c: Cursor): Stmt[] {
 export function statement(c: Cursor): Stmt {
   const start = c.peek().start;
   if (c.at("function") || (c.at("async") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore)) return func(c);
-  if (c.at("{")) return { id: nextId(), kind: "block", body: block(c), start, end: c.end() };
+  if (c.at("{")) return { id: nextId(c.ids), kind: "block", body: block(c), start, end: c.end() };
   // Both are contextual: in TypeScript `comptime {` and `macro function` are syntax errors.
   if (c.at("comptime") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
     c.next();
-    return { id: nextId(), kind: "comptime", body: block(c), start, end: c.end() };
+    return { id: nextId(c.ids), kind: "comptime", body: block(c), start, end: c.end() };
   }
   if (c.at("unsafe") && isToken(c.peek(1), "{") && !c.peek(1).newlineBefore) {
     c.next();
-    return { id: nextId(), kind: "unsafe", body: block(c), start, end: c.end() };
+    return { id: nextId(c.ids), kind: "unsafe", body: block(c), start, end: c.end() };
   }
   if (c.at("macro") && isToken(c.peek(1), "function") && !c.peek(1).newlineBefore) {
     c.next();
-    return { ...func(c), id: nextId(), macro: true, start };
+    return { ...func(c), id: nextId(c.ids), macro: true, start };
   }
   const decorators = decoratorList(c);
   if (atClass(c)) return classDeclaration(c, start, decorators);
@@ -589,7 +592,7 @@ export function statement(c: Cursor): Stmt {
   if (decorators.length > 0) return decorated(c, start, decorators);
   const declaration = atDeclarationKeyword(c);
   if (declaration) return declaration;
-  if (c.at(";")) return { id: nextId(), kind: "empty", start, end: c.next().end };
+  if (c.at(";")) return { id: nextId(c.ids), kind: "empty", start, end: c.next().end };
   if (c.at("if")) return ifStatement(c);
   if (c.at("while")) return whileStatement(c);
   if (c.at("for")) return forStatement(c);
@@ -599,11 +602,11 @@ export function statement(c: Cursor): Stmt {
     const label = c.next().text;
     c.next();
     const labeled = statement(c);
-    return { id: nextId(), kind: "labeled", label, body: labeled, start, end: labeled.end };
+    return { id: nextId(c.ids), kind: "labeled", label, body: labeled, start, end: labeled.end };
   }
   if (c.at("do")) return doWhileStatement(c);
   if (c.at("interface")) return interfaceDeclaration(c);
-  const s: Stmt = c.at("debugger") ? { id: nextId(), kind: "debugger", start, end: c.next().end }
+  const s: Stmt = c.at("debugger") ? { id: nextId(c.ids), kind: "debugger", start, end: c.next().end }
     : atTypeAlias(c) ? typeAlias(c)
     : simpleStatement(c);
   endStatement(c);
@@ -617,7 +620,7 @@ function ifStatement(c: Cursor): Stmt {
   c.expect(")");
   const then = body(c);
   const otherwise = c.eat("else") ? body(c) : undefined;
-  return { id: nextId(), kind: "if", cond, then, else: otherwise, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "if", cond, then, else: otherwise, start, end: c.end() };
 }
 
 function whileStatement(c: Cursor): Stmt {
@@ -626,7 +629,7 @@ function whileStatement(c: Cursor): Stmt {
   const cond = sequence(c);
   c.expect(")");
   const loop = body(c);
-  return { id: nextId(), kind: "while", cond, body: loop, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "while", cond, body: loop, start, end: c.end() };
 }
 
 // `for (init; test; update)`, `for (left in right)`, `for (left of right)` and `for await`.
@@ -639,19 +642,19 @@ function forStatement(c: Cursor): Stmt {
   const init = declared ?? expr;
   if (init && (c.at("in") || c.at("of"))) {
     const kind = c.next().text === "in" ? "forIn" : "forOf";
-    const left = declared ?? toPattern(expr!);
+    const left = declared ?? toPattern(c, expr!);
     // `for...in` takes any expression; `for...of` one without a top-level comma.
     const right = kind === "forIn" ? sequence(c) : expression(c);
     c.expect(")");
-    return { id: nextId(), kind, await: isAwait, left, right, body: body(c), start, end: c.end() };
+    return { id: nextId(c.ids), kind, await: isAwait, left, right, body: body(c), start, end: c.end() };
   }
   c.expect(";");
   const test = c.at(";") ? undefined : sequence(c);
   c.expect(";");
   const update = c.at(")") ? undefined : sequence(c);
   c.expect(")");
-  const initStmt: Stmt | undefined = declared ?? (expr && { id: nextId(), kind: "expr", expr, start: expr.start, end: expr.end });
-  return { id: nextId(), kind: "for", init: initStmt, test, update, body: body(c), start, end: c.end() };
+  const initStmt: Stmt | undefined = declared ?? (expr && { id: nextId(c.ids), kind: "expr", expr, start: expr.start, end: expr.end });
+  return { id: nextId(c.ids), kind: "for", init: initStmt, test, update, body: body(c), start, end: c.end() };
 }
 
 function switchStatement(c: Cursor): Stmt {
@@ -672,9 +675,9 @@ function switchStatement(c: Cursor): Stmt {
       if (c.peek().kind === "eof") throw c.error("expected '}'");
       body.push(statement(c));
     }
-    cases.push({ id: nextId(), test, body, start: caseStart, end: c.end() });
+    cases.push({ id: nextId(c.ids), test, body, start: caseStart, end: c.end() });
   }
-  return { id: nextId(), kind: "switch", discriminant, cases, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "switch", discriminant, cases, start, end: c.end() };
 }
 
 function tryStatement(c: Cursor): Stmt {
@@ -694,7 +697,7 @@ function tryStatement(c: Cursor): Stmt {
   }
   const finalizer = c.eat("finally") ? block(c) : undefined;
   if (!handler && !finalizer) throw c.error("expected 'catch' or 'finally'");
-  return { id: nextId(), kind: "try", block: tried, param, paramType, handler, finalizer, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "try", block: tried, param, paramType, handler, finalizer, start, end: c.end() };
 }
 
 // The `;` after `do...while (x)` is optional even on the same line, unlike other statements.
@@ -706,7 +709,7 @@ function doWhileStatement(c: Cursor): Stmt {
   const cond = sequence(c);
   c.expect(")");
   c.eat(";");
-  return { id: nextId(), kind: "doWhile", body: loop, cond, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "doWhile", body: loop, cond, start, end: c.end() };
 }
 
 const atDeclaration = (c: Cursor) => c.at("let") || c.at("const") || c.at("var");
@@ -723,7 +726,7 @@ function declaration(c: Cursor): Stmt {
     const throws = documentedThrows(c, start, init.throws);
     if (throws) init.throws = throws;
   }
-  return { id: nextId(), kind: "let", keyword, declarations, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "let", keyword, declarations, start, end: c.end() };
 }
 
 function simpleStatement(c: Cursor): Stmt {
@@ -733,23 +736,23 @@ function simpleStatement(c: Cursor): Stmt {
     const kind = c.next().text as "break" | "continue";
     // A label must be on the same line, as with `return`'s value.
     const label = c.peek().kind === "ident" && !c.peek().newlineBefore && !RESERVED.has(c.peek().text) ? c.next().text : undefined;
-    return { id: nextId(), kind, label, start, end: c.end() };
+    return { id: nextId(c.ids), kind, label, start, end: c.end() };
   }
   if (c.at("throw")) {
     c.next();
     if (c.peek().newlineBefore) throw new CompileError("a line break is not allowed after 'throw'", start, c.peek().start);
     const value = sequence(c);
-    return { id: nextId(), kind: "throw", value, start, end: value.end };
+    return { id: nextId(c.ids), kind: "throw", value, start, end: value.end };
   }
   if (c.at("return")) {
     const end = c.next().end;
     // A newline after `return` ends the statement, as in JavaScript.
-    if (c.at(";") || c.at("}") || c.peek().newlineBefore || c.peek().kind === "eof") return { id: nextId(), kind: "return", value: undefined, start, end };
+    if (c.at(";") || c.at("}") || c.peek().newlineBefore || c.peek().kind === "eof") return { id: nextId(c.ids), kind: "return", value: undefined, start, end };
     const value = sequence(c);
-    return { id: nextId(), kind: "return", value, start, end: value.end };
+    return { id: nextId(c.ids), kind: "return", value, start, end: value.end };
   }
   const expr = sequence(c);
-  return { id: nextId(), kind: "expr", expr, start, end: expr.end };
+  return { id: nextId(c.ids), kind: "expr", expr, start, end: expr.end };
 }
 
 function declarator(c: Cursor): Declarator {
@@ -757,7 +760,7 @@ function declarator(c: Cursor): Declarator {
   const target = bindingPattern(c);
   const type = c.at(":") ? annotation(c) : undefined;
   const init = c.eat("=") ? expression(c) : undefined;
-  return { id: nextId(), target, type, init, start, end: c.end() };
+  return { id: nextId(c.ids), target, type, init, start, end: c.end() };
 }
 
 // `type` is contextual: only a name following on the same line makes it a declaration.
@@ -772,7 +775,7 @@ function typeAlias(c: Cursor): TypeAlias {
   const typeParams = typeParameters(c);
   c.expect("=");
   const t = type(c);
-  return { id: nextId(), kind: "typeAlias", name, typeParams, type: t, start, end: t.end };
+  return { id: nextId(c.ids), kind: "typeAlias", name, typeParams, type: t, start, end: t.end };
 }
 
 function interfaceDeclaration(c: Cursor): Interface {
@@ -786,7 +789,7 @@ function interfaceDeclaration(c: Cursor): Interface {
   }
   c.expect("{");
   const members = typeMembers(c);
-  return { id: nextId(), kind: "interface", name, typeParams, extends: bases, members, start, end: c.end() };
+  return { id: nextId(c.ids), kind: "interface", name, typeParams, extends: bases, members, start, end: c.end() };
 }
 
 // Automatic semicolon insertion: a `;`, a newline or a closing brace ends a statement.

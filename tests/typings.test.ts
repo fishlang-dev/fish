@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
+import { newCompilation, newSession } from "../src/compilation.ts";
 import { load } from "../src/modules.ts";
 import { exportsOf, findTypings } from "../src/typings.ts";
 
@@ -141,7 +142,7 @@ test("a declaration file's exports, through its re-exports", () => {
     "node_modules/p/index.d.ts": DECLARATIONS,
     "node_modules/p/more.d.ts": "export declare function fromMore(): void;\nexport default 1;\n",
   }, (dir) => {
-    const read = exportsOf(join(dir, "node_modules/p/index.d.ts"));
+    const read = exportsOf({ last: 0 }, join(dir, "node_modules/p/index.d.ts"));
     if (typeof read === "string") throw new Error(read);
     const exports = read.names;
     expect([...exports.keys()].sort()).toEqual(["Box", "Kind", "Mode", "OTHER", "Options", "VERSION", "camelCase", "default", "fromMore", "ns", "plain", "renamed", "shown"]);
@@ -159,10 +160,10 @@ test("export = a namespace, and a types package's declare module", () => {
     "node_modules/@types/r/index.d.ts": "declare module \"r\" {\n  export function run(): void;\n}\ndeclare module \"r/other\" {\n  export const x: number;\n}\n",
     "node_modules/r/index.js": "",
   }, (dir) => {
-    const q = exportsOf(join(dir, "node_modules/q/index.d.ts"));
+    const q = exportsOf({ last: 0 }, join(dir, "node_modules/q/index.d.ts"));
     expect(typeof q === "string" ? q : [...q.names.keys()].sort()).toEqual(["chunk", "default", "version"]);
     const t = findTypings(join(dir, "main.fsh"), "r");
-    const r = "file" in t ? exportsOf(t.file, "r") : t.missing;
+    const r = "file" in t ? exportsOf({ last: 0 }, t.file, "r") : t.missing;
     expect(typeof r === "string" ? r : [...r.names.keys()]).toEqual(["run"]);
   });
 });
@@ -176,7 +177,7 @@ test("an import from a package that doesn't have the name is refused saying what
   }, (dir) => {
     const error = (file: string) => {
       try {
-        load(join(dir, file));
+        load(newCompilation(newSession()), join(dir, file));
       } catch (e) {
         return (e as Error).message;
       }
@@ -234,7 +235,7 @@ test("a symlinked package resolves to its real path, and its own dependencies be
     const t = findTypings(join(dir, "src/main.fsh"), "a");
     if (!("file" in t)) throw new Error(t.missing);
     expect(relative(dir, t.file)).toBe("node_modules/.pnpm/a@1/node_modules/a/index.d.ts");
-    const e = exportsOf(t.file, "a");
+    const e = exportsOf({ last: 0 }, t.file, "a");
     expect(typeof e === "string" ? e : [...e.names.keys()]).toEqual(["fromDep"]);
   });
 });
@@ -256,7 +257,7 @@ function names(files: Record<string, string>, spec = "a"): string[] | string {
   project(files, (dir) => {
     const t = findTypings(join(dir, "src/main.fsh"), spec);
     if (!("file" in t)) return void (out = t.missing);
-    const e = exportsOf(t.file, spec);
+    const e = exportsOf({ last: 0 }, t.file, spec);
     out = typeof e === "string" ? e : [...e.names.keys()].sort();
   });
   return out;
@@ -290,7 +291,7 @@ test("a Node built-in Fish lacks is named as one, and a re-export that can't be 
   }, (dir) => {
     const error = (file: string) => {
       try {
-        load(join(dir, file));
+        load(newCompilation(newSession()), join(dir, file));
       } catch (e) {
         return (e as Error).message;
       }

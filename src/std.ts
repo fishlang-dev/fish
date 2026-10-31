@@ -1,11 +1,12 @@
 import { deserialize, serialize } from "bun:jsc";
 import { createHash } from "node:crypto";
+import type { Compilation, Session } from "./compilation.ts";
 import type { Source } from "./diag.ts";
 import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AST } from "./ast.ts";
 import { cacheDir, partial } from "./mathlib.ts";
-import { renumber } from "./nodes.ts";
+import { nextId, renumber } from "./nodes.ts";
 import { parse, shiftSpans, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
@@ -3001,17 +3002,12 @@ export function stdKey(source: string, dir: string): string {
   return hash.digest("hex").slice(0, 16);
 }
 
-// How many times this process has parsed std rather than loading its tree.
-export const stdParses = { count: 0 };
-
-let stdTree: { path: string; bytes: Uint8Array } | undefined;
-let key: string | undefined;
-
-// std's parsed tree, serialized: kept in memory, else read from the cache, else parsed and
-// written there. A cache that can't be read or written only costs the parse.
-function stdBytes(): Uint8Array {
-  const path = join(cacheDir(), "std", `ast-${(key ??= stdKey(STD_SOURCE, import.meta.dir))}.bin`);
-  if (stdTree?.path === path) return stdTree.bytes;
+// std's parsed tree, serialized: kept in the session's memory, else read from the cache, else
+// parsed and written there, the session counting the parse. A cache that can't be read or written
+// only costs the parse.
+function stdBytes({ std }: Session): Uint8Array {
+  const path = join(cacheDir(), "std", `ast-${(std.key ??= stdKey(STD_SOURCE, import.meta.dir))}.bin`);
+  if (std.tree?.path === path) return std.tree.bytes;
   let bytes: Uint8Array | undefined;
   try {
     bytes = readFileSync(path);
@@ -3022,24 +3018,24 @@ function stdBytes(): Uint8Array {
     bytes = undefined;
   }
   if (bytes === undefined) {
-    stdParses.count++;
-    // Ids are this process's own, so the cached tree holds zeros, and each copy is numbered as it
-    // is loaded.
-    bytes = new Uint8Array(serialize(renumber(parse(STD_SOURCE), () => 0)));
+    std.parses++;
+    // Ids are each compilation's own, so the cached tree holds zeros, and each copy is numbered
+    // as it is loaded.
+    bytes = new Uint8Array(serialize(renumber(parse(STD_SOURCE, { last: 0 }), () => 0)));
     try {
       const temp = partial(path);
       writeFileSync(temp, bytes);
       renameSync(temp, path);
     } catch {}
   }
-  stdTree = { path, bytes };
+  std.tree = { path, bytes };
   return bytes;
 }
 
 // The std statements a program is checked with, their spans moved past its own.
-export function stdFor(written: Stmt[]): Stmt[] {
+export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // Each call takes its own copy, since the passes below change the tree.
-  const all: Stmt[] = renumber(deserialize(stdBytes()));
+  const all: Stmt[] = renumber(deserialize(stdBytes(session)), () => nextId(ids));
   shiftSpans(all, STD_BASE);
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.

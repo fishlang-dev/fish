@@ -1,6 +1,6 @@
-import { llvm, type Slots } from "./layout.ts";
+import { layoutOf, type Slots } from "./layout.ts";
 import type { Expr } from "./parser.ts";
-import { INTEGERS, show, type Integer, type Type } from "./typing.ts";
+import { INTEGERS, type Integer, type Type } from "./typing.ts";
 
 // What compiled programs call into: libc's printf, and the C runtime. A panic is the runtime's
 // `fsh_rt_panic`, which prints its message, then aborts or unwinds, as the build chose.
@@ -305,7 +305,9 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
 // Writes text and values, joined by spaces and ending in a newline, to stdout (1) or stderr (2).
 // A value of a type with no printed form, like an object, prints as its type's name.
 export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slots, convert: Convert) {
-  const { emit, temp, label, startBlock, cString } = b;
+  const { emit, temp, label, startBlock, cString, typing } = b;
+  const { show } = typing;
+  const llvm = layoutOf(typing);
   let format = "";
   let values: string[] = [];
   emit(`call void @fsh_rt_print_begin(i32 ${stream})`);

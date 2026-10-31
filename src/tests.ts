@@ -1,9 +1,10 @@
 import { availableParallelism } from "node:os";
 import { relative } from "node:path";
-import { CompileError, madeUpNames } from "./diag.ts";
+import type { Compilation } from "./compilation.ts";
+import { CompileError } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
+import { nextId, type Ids } from "./nodes.ts";
 import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
-import { nextId } from "./nodes.ts";
 
 // Top-level `test("name", () => { ... })` blocks: left out of a build, lifted into functions of
 // their own file for `fishc test` and the language server, and run by a generated harness.
@@ -34,7 +35,7 @@ export function stripTests({ modules }: Loaded) {
 // Turns each test of `modules`, in order, into a function of its own file, `test "name"`, which
 // no program can write. A test's function throws Error, so a body may throw, and is async when
 // the body is. Names are unique across the files; a second use of one is refused.
-export function liftTests(modules: Module[]): Test[] {
+export function liftTests({ names, ids }: Compilation, modules: Module[]): Test[] {
   const tests: Test[] = [];
   for (const module of modules) {
     module.statements = module.statements.map((s) => {
@@ -45,18 +46,18 @@ export function liftTests(modules: Module[]): Test[] {
       if (twin) throw new CompileError(`there is already a test named '${name.value}' in '${twin.module.file}'; give each test a name of its own`, name.start, name.end);
       tests.push({ name: name.value, module, index: tests.length, async: body.async });
       const symbol = `test ${JSON.stringify(name.value)}`;
-      madeUpNames.set(symbol, `the test '${name.value}'`);
-      return lifted(symbol, body, s);
+      names.madeUp.set(symbol, `the test '${name.value}'`);
+      return lifted(ids, symbol, body, s);
     });
   }
   return tests;
 }
 
-function lifted(name: string, body: Body, at: Span): Func {
-  const [made] = parse(`${body.async ? "async " : ""}function f(): ${body.async ? "Promise<void>" : "void"} throws Error {}`) as [Func];
+function lifted(ids: Ids, name: string, body: Body, at: Span): Func {
+  const [made] = parse(`${body.async ? "async " : ""}function f(): ${body.async ? "Promise<void>" : "void"} throws Error {}`, ids) as [Func];
   placed(made, at);
-  const statements: Stmt[] = Array.isArray(body.body) ? body.body : [{ id: nextId(), kind: "expr", expr: body.body, start: body.body.start, end: body.body.end }];
-  return { ...made, id: nextId(), name, body: statements };
+  const statements: Stmt[] = Array.isArray(body.body) ? body.body : [{ id: nextId(ids), kind: "expr", expr: body.body, start: body.body.start, end: body.body.end }];
+  return { ...made, id: nextId(ids), name, body: statements };
 }
 
 // Gives every node of a made tree the span `at`, where its parts are written.
@@ -77,7 +78,7 @@ export function harnessImports(dir: string, files: string[]): string {
 // The harness's `main`. Given `--list`, it prints the test names, one per line, in order; given a
 // test's index, it runs that test, which passes when the process exits with 0. A test's function
 // is reached as `name-fsh<n>`, the name file n declares, which no program can write.
-export function harnessMain(tests: Test[], modules: Module[]): Stmt[] {
+export function harnessMain(ids: Ids, tests: Test[], modules: Module[]): Stmt[] {
   const call = (t: Test) => `__test${t.index}`;
   const runs = tests.map((t) => `  if (which === "${t.index}") {\n    ${t.async ? "await " : ""}${call(t)}();\n    return;\n  }\n`);
   const text = `async function main(): Promise<void> throws Error {
@@ -89,7 +90,7 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
   exit(2);
 }
 `;
-  const made = parse(text);
+  const made = parse(text, ids);
   const named = new Map(tests.map((t) => [call(t), `test ${JSON.stringify(t.name)}-fsh${modules.indexOf(t.module)}`]));
   const rename = (v: unknown) => {
     if (Array.isArray(v)) return v.forEach(rename);
@@ -104,24 +105,22 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 
 // Gives each file's `main` a name no program can write, since the harness is the program's
 // `main`; a test or function calling a file's `main` still reaches it.
-export function hideMains(modules: Module[]) {
-  madeUpNames.set("file main", "'main'");
-  for (const m of modules) renameIn(m.statements, (name) => (name === "main" ? "file main" : undefined));
+export function hideMains({ names, ids }: Compilation, modules: Module[]) {
+  names.madeUp.set("file main", "'main'");
+  for (const m of modules) renameIn(ids, m.statements, (name) => (name === "main" ? "file main" : undefined));
 }
 
 const LIMIT = 10_000;
 
 type Outcome = { passed: boolean; output: string };
 
-// The process groups of the tests running now.
-const running = new Set<number>();
-
-// Ends every test running now, along with anything it started.
-export function stopTests() {
-  for (const group of running) ended(group);
+// Ends every test running now, along with anything it started: `running` holds the process
+// groups of a run's tests while they run.
+export function stopTests(running: Set<number>) {
+  for (const group of running) ended(running, group);
 }
 
-function ended(group: number) {
+function ended(running: Set<number>, group: number) {
   running.delete(group);
   try {
     process.kill(-group, "SIGKILL");
@@ -133,18 +132,18 @@ function ended(group: number) {
 // Runs `test` in a process group of its own, failing it when it exits with anything but 0 or runs
 // past the limit. Once it exits, the rest of its group is killed: a child it left behind would
 // otherwise hold its output open, and the verdict is the test's own.
-async function run(binary: string, test: Test, cwd: string): Promise<Outcome> {
+async function run(running: Set<number>, binary: string, test: Test, cwd: string): Promise<Outcome> {
   const child = Bun.spawn([binary, String(test.index)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
   running.add(child.pid);
   const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
   let late = false;
   const timer = setTimeout(() => {
     late = true;
-    ended(child.pid);
+    ended(running, child.pid);
   }, LIMIT);
   const code = await child.exited;
   clearTimeout(timer);
-  ended(child.pid);
+  ended(running, child.pid);
   const [stdout, stderr] = await output;
   const text = stdout + stderr;
   const passed = code === 0 && !late;
@@ -155,12 +154,13 @@ async function run(binary: string, test: Test, cwd: string): Promise<Outcome> {
 
 // Runs each of `tests` in the program `binary`, as many at once as the machine has cores, and
 // reports them in order: `ok` or `FAIL`, the file and the name, a failed test's output, then the
-// counts. Gives the exit code, 1 when any failed.
-export async function runTests(binary: string, tests: Test[], cwd: string): Promise<number> {
+// counts, noting each test's process group in `running` while it runs. Gives the exit code, 1 when
+// any failed.
+export async function runTests(running: Set<number>, binary: string, tests: Test[], cwd: string): Promise<number> {
   const outcomes = tests.map(() => Promise.withResolvers<Outcome>());
   let next = 0;
   const worker = async () => {
-    for (let at = next++; at < tests.length; at = next++) outcomes[at]!.resolve(await run(binary, tests[at]!, cwd).catch((e) => ({ passed: false, output: `the test couldn't be run: ${e instanceof Error ? e.message : e}\n` })));
+    for (let at = next++; at < tests.length; at = next++) outcomes[at]!.resolve(await run(running, binary, tests[at]!, cwd).catch((e) => ({ passed: false, output: `the test couldn't be run: ${e instanceof Error ? e.message : e}\n` })));
   };
   for (let n = 0; n < Math.min(availableParallelism(), tests.length); n++) void worker();
   let failed = 0;

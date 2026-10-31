@@ -35,7 +35,7 @@ function shape(v: unknown): unknown {
 function roundTrip(cases: string[]) {
   for (const code of cases) {
     const out = format(code);
-    expect([code, shape(parse(out))]).toEqual([code, shape(parse(code))]);
+    expect([code, shape(parse(out, { last: 0 }))]).toEqual([code, shape(parse(code, { last: 0 }))]);
     expect([code, format(out)]).toEqual([code, out]);
   }
 }
@@ -43,11 +43,11 @@ function roundTrip(cases: string[]) {
 // Each snippet formats keeping its comments, in order and with the same text, to a program that
 // parses back to the same tree and formats again unchanged.
 function keepsComments(cases: string[]) {
-  const texts = (src: string) => parseWithComments(src).comments.map((c) => c.text.trim());
+  const texts = (src: string) => parseWithComments(src, { last: 0 }).comments.map((c) => c.text.trim());
   for (const code of cases) {
     const out = format(code);
     expect([code, texts(out)]).toEqual([code, texts(code)]);
-    expect([code, shape(parse(out))]).toEqual([code, shape(parse(code))]);
+    expect([code, shape(parse(out, { last: 0 }))]).toEqual([code, shape(parse(code, { last: 0 }))]);
     expect([code, format(out)]).toEqual([code, out]);
   }
 }
@@ -1277,19 +1277,19 @@ test("a one-line comment before such a token stays in place without flushing a p
   await agree(["type R = A /* c */[];", "x = a /* c */!;", "x = a /* c */++;", "x = a /* c */ as T;", "type R = A /* c */ extends B ? C : D;"]);
   // Prettier flushes the line comment here, putting a line break before `[]` and splitting the
   // declaration; the tree is kept at the cost of the comments' order.
-  const texts = (src: string) => parseWithComments(src).comments.map((c) => c.text).sort();
+  const texts = (src: string) => parseWithComments(src, { last: 0 }).comments.map((c) => c.text).sort();
   for (const code of ["type R = A[ // c2\n] /* c3 */ [];", "const os: (string | null // c1\n)/** c2 */[] = [null];"]) {
     const out = format(code);
-    expect([code, shape(parse(out)), texts(out)]).toEqual([code, shape(parse(code)), texts(code)]);
+    expect([code, shape(parse(out, { last: 0 })), texts(out)]).toEqual([code, shape(parse(code, { last: 0 })), texts(code)]);
     expect(format(out)).toBe(out);
   }
 });
 
 test("output whose tree differs from the source's is refused as a change of meaning", () => {
-  const meaning = programShape(parse("x = a - (b - c);"));
-  expect(() => assertSameProgram(meaning, parse("x = a - b - c;"))).toThrow("the formatter changed the program's meaning");
-  expect(() => assertSameProgram(meaning, parse("x = (a - (b - c));"))).not.toThrow();
-  expect(() => assertSameProgram(programShape(parse("x = a && (b && c);")), parse("x = a && b && c;"))).not.toThrow();
+  const meaning = programShape(parse("x = a - (b - c);", { last: 0 }));
+  expect(() => assertSameProgram(meaning, parse("x = a - b - c;", { last: 0 }))).toThrow("the formatter changed the program's meaning");
+  expect(() => assertSameProgram(meaning, parse("x = (a - (b - c));", { last: 0 }))).not.toThrow();
+  expect(() => assertSameProgram(programShape(parse("x = a && (b && c);", { last: 0 })), parse("x = a && b && c;", { last: 0 }))).not.toThrow();
 });
 
 test("comments that fall back to an enclosing node are moved in time linear in their number", () => {
@@ -1358,7 +1358,7 @@ test("comments anywhere are kept, in order, with the tree the same and formattin
 });
 
 test("a template's CR and CRLF line endings read as LF, as JavaScript reads them", () => {
-  const template = (src: string) => (parse(src)[0] as Extract<Stmt, { kind: "expr" }>).expr;
+  const template = (src: string) => (parse(src, { last: 0 })[0] as Extract<Stmt, { kind: "expr" }>).expr;
   expect(shape(template("x = `a\rb\r\nc`;"))).toEqual(shape(template("x = `a\nb\nc`;")));
   expect(format("x = `a\r\nb${c}\rd`;\r\n")).toBe("x = `a\nb${c}\nd`;\n");
 });

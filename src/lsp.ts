@@ -3,10 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Checked } from "./check.ts";
+import { newSession, type Session } from "./compilation.ts";
 import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
 import { analyze } from "./main.ts";
 import { STD_BASE } from "./std.ts";
-import { show, type Type } from "./typing.ts";
+import type { Type } from "./typing.ts";
 
 type Message = { id?: number | string | null; method?: string; params?: Params };
 // The parameters of the methods served, which all name a document.
@@ -53,28 +54,31 @@ function located(path: string, text: string, sources: Source[], start: number, e
 }
 
 // The diagnostics checking `text`, the document at `path`, gives, with its imports read by `read`,
-// and the checked program when there are none. An error in another file shows at the document's
-// start, saying where it is.
-function diagnose(path: string, text: string, read: (path: string) => string): { diagnostics: object[]; checked?: Checked } {
+// and the checked program when there are none, within the server's `session`. An error in another
+// file shows at the document's start, saying where it is.
+function diagnose(session: Session, path: string, text: string, read: (path: string) => string): { diagnostics: object[]; checked?: Checked } {
   try {
-    return { diagnostics: [], checked: analyze(text, path, read).checked };
+    return { diagnostics: [], checked: analyze(session, text, path, read).checked };
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     const uri = pathToFileURL(path).href;
     const at = located(path, text, e.sources, e.start, e.end);
     const note = e.note && located(path, text, e.sources, e.note.start, e.note.end);
-    const related = [...(note ? [{ location: note, message: shown(e.note!.message) }] : [])];
-    if (at?.uri === uri) return { diagnostics: [{ range: at.range, severity: 1, source: "fish", message: shown(e.message), ...(related.length > 0 && { relatedInformation: related }) }] };
+    const related = [...(note ? [{ location: note, message: shown(e.note!.message, e.names) }] : [])];
+    if (at?.uri === uri) return { diagnostics: [{ range: at.range, severity: 1, source: "fish", message: shown(e.message, e.names), ...(related.length > 0 && { relatedInformation: related }) }] };
     const elsewhere = sourceOf(text, path, e.start, e.sources);
     const { line, col } = locate(elsewhere.src, Math.min(elsewhere.offset, elsewhere.src.length));
-    if (at) related.unshift({ location: at, message: shown(e.message) });
+    if (at) related.unshift({ location: at, message: shown(e.message, e.names) });
     const start = { line: 0, character: 0 };
-    return { diagnostics: [{ range: { start, end: start }, severity: 1, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message)}`, ...(related.length > 0 && { relatedInformation: related }) }] };
+    return { diagnostics: [{ range: { start, end: start }, severity: 1, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message, e.names)}`, ...(related.length > 0 && { relatedInformation: related }) }] };
   }
 }
 
 const before = (a: Position, b: Position) => a.line < b.line || (a.line === b.line && a.character <= b.character);
-const named = (t: Type) => shown(written(show(t)));
+// A type as its program's names read to the user.
+function named({ compilation: { names, typing } }: Checked, t: Type): string {
+  return shown(written(typing.show(t), names), names);
+}
 
 // A hint after each fallible call and `await` in `text` within `range`, naming what it can throw.
 // A generic body's definition and its instances share nodes, so a place is hinted once.
@@ -86,8 +90,8 @@ export function hints(checked: Checked, text: string, range: Range) {
       if (at.kind === "throw" || at.end > text.length || found.has(at.end)) continue;
       const place = position(text, at.end);
       if (!before(range.start, place) || !before(place, range.end)) continue;
-      const tooltip = raised.wrapper && `becomes '${named(raised.to)}' through 'From'`;
-      found.set(at.end, { position: place, label: `throws ${named(raised.from)}`, paddingLeft: true, ...(tooltip && { tooltip }) });
+      const tooltip = raised.wrapper && `becomes '${named(checked, raised.to)}' through 'From'`;
+      found.set(at.end, { position: place, label: `throws ${named(checked, raised.from)}`, paddingLeft: true, ...(tooltip && { tooltip }) });
     }
   }
   return [...found].sort(([a], [b]) => a - b).map(([, hint]) => hint);
@@ -102,6 +106,8 @@ export function serveLsp() {
   let shutdown = false;
   const exit = () => process.exit(shutdown ? 0 : 1);
   const notify = (method: string, params: unknown) => send({ method, params });
+  // What every check this server runs shares, as std's parsed tree.
+  const session = newSession();
 
   // The open documents' text, by URI.
   const documents = new Map<string, string>();
@@ -117,7 +123,7 @@ export function serveLsp() {
     if (text === undefined || !uri.startsWith("file:")) return;
     results.set(uri, { text });
     try {
-      const { diagnostics, checked } = diagnose(fileURLToPath(uri), text, read);
+      const { diagnostics, checked } = diagnose(session, fileURLToPath(uri), text, read);
       results.set(uri, { text, checked });
       notify("textDocument/publishDiagnostics", { uri, diagnostics });
     } catch (e) {

@@ -16,8 +16,9 @@ export type Package = { manifest: Manifest; dir: string; deps: Map<string, Packa
 
 // The packages a program whose entry is `entry` is built from, the one holding the entry first,
 // or none when no `fish.toml` is at or above it. Each package's dependencies come from its own
-// manifest; a package reached twice from the same place is one package.
-export function resolvePackages(entry: string): Package[] | undefined {
+// manifest; a package reached twice from the same place is one package. `locking` says how the
+// lockfile may change.
+export function resolvePackages(entry: string, locking: Locking): Package[] | undefined {
   const file = findManifest(dirname(resolve(entry)));
   if (!file) return undefined;
   const root: Package = { manifest: loadManifest(file), dir: realpathSync(dirname(file)), deps: new Map() };
@@ -56,7 +57,7 @@ export function resolvePackages(entry: string): Package[] | undefined {
     }
   };
   visit(root, []);
-  if (wanted.length > 0) fromRegistry(root, wanted, byName, byDir);
+  if (wanted.length > 0) fromRegistry(locking, root, wanted, byName, byDir);
   const packages = [...byDir.values()];
   // A lib inside a package nested in this one would build as that package's file, and reach
   // what is private to it.
@@ -74,7 +75,7 @@ export function resolvePackages(entry: string): Package[] | undefined {
     const table = parseToml(src).get("rust-dependencies") as Table;
     throw inManifest(new CompileError(`the dependency '${p.manifest.name}' lists Rust crates under [rust-dependencies]; only the package being built may list them for now`, table.start, table.end), file, src);
   }
-  lock(packages);
+  lock(locking, packages);
   return packages;
 }
 
@@ -82,11 +83,11 @@ export const LOCKFILE = "fish.lock";
 
 // Whether a build may change `fish.lock`, as `fishc build --locked` says it may not, for CI;
 // and which registry packages `fishc update` moves past their locked versions, "all" for every one.
-export const locking: { locked: boolean; update?: Set<string> | "all" } = { locked: false };
+export type Locking = { locked: boolean; update?: Set<string> | "all" };
 
 // Writes `fish.lock` beside the root package's manifest when what it resolves to has changed,
 // after checking that each git package's files still hash to what the lock recorded.
-function lock(packages: Package[]) {
+function lock(locking: Locking, packages: Package[]) {
   const [root, ...deps] = packages;
   const file = join(root!.dir, LOCKFILE);
   const had = existsSync(file) ? readFileSync(file, "utf8") : undefined;
@@ -121,7 +122,7 @@ type Wanted = { pkg: Package; dep: Extract<Dependency, { version: string }>; fai
 
 // The registry packages the program's own packages ask for, one version of each name, fetched
 // and linked to whoever asked; a registry package's own dependencies are all the registry's.
-function fromRegistry(root: Package, wanted: Wanted[], byName: Map<string, Package>, byDir: Map<string, Package>) {
+function fromRegistry(locking: Locking, root: Package, wanted: Wanted[], byName: Map<string, Package>, byDir: Map<string, Package>) {
   const first = new Map<string, (message: string) => unknown>();
   const roots = new Map<string, Request[]>();
   for (const { pkg, dep, fail } of wanted) {

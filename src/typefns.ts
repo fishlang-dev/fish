@@ -1,23 +1,23 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { allFields, isNumeric, patternType, promiseElement, literalType, objectType, optionalField, show, unionType, withoutNull, type ClassType, type Field, type Hole, type ParamType, type Type } from "./typing.ts";
+import { allFields, isNumeric, type ClassType, type Field, type Hole, type ParamType, type Type, type Typing } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
 
 // The type parameter `t` is, or with `deep` the first anywhere in it, standing for no type yet.
-export function openParam(t: Type, deep: boolean, seen: Set<Type> = new Set<Type>()): ParamType | undefined {
+export function openParam(typing: Typing, t: Type, deep: boolean, seen: Set<Type> = new Set<Type>()): ParamType | undefined {
   // A type holding itself is looked into once.
   if (typeof t === "string" || seen.has(t)) return undefined;
   seen.add(t);
-  if (t.kind === "param") return t.concrete ? openParam(t.concrete, deep, seen) : t;
+  if (t.kind === "param") return t.concrete ? openParam(typing, t.concrete, deep, seen) : t;
   if (!deep) return undefined;
-  const promised = promiseElement(t);
+  const promised = typing.promiseElement(t);
   const parts = promised ? [promised] : t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "ref" ? [t.to]
     : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? [])
     : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns] : [];
   for (const part of parts) {
-    const open = openParam(part, deep, seen);
+    const open = openParam(typing, part, deep, seen);
     if (open) return open;
   }
   return undefined;
@@ -26,9 +26,9 @@ export function openParam(t: Type, deep: boolean, seen: Set<Type> = new Set<Type
 // A type function can't look inside a type parameter: the type it stands for is known only per
 // instance. While a generic alias is checked before any use, the parameter stands in for the
 // result, so the rest of the alias is still checked; generic function code is refused.
-export function standIn(types: Type[], what: string, at: Span, deep: boolean, deferring: () => boolean): Type | undefined {
+export function standIn(typing: Typing, types: Type[], what: string, at: Span, deep: boolean, deferring: () => boolean): Type | undefined {
   for (const t of types) {
-    const open = openParam(t, deep);
+    const open = openParam(typing, t, deep);
     if (!open) continue;
     if (deferring()) return open;
     throw new CompileError(`${what} of the type parameter '${open.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
@@ -40,7 +40,8 @@ export function standIn(types: Type[], what: string, at: Span, deep: boolean, de
 // indexed access, and the utility types. A class's fields are known once it is laid out, which
 // `layout` does when first asked, saying whether they are known yet.
 // `conforms` is whether a type fits another, an interface by shape, as `extends` asks.
-export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () => boolean, conforms: (from: Type, to: Type, at: Span) => boolean) {
+export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean, deferring: () => boolean, conforms: (from: Type, to: Type, at: Span) => boolean) {
+  const { show, unionType, literalType, objectType, optionalField, withoutNull, promiseElement, patternType } = typing;
   // The fields a type-level function reads: an object type's, or a class's public fields, which
   // are its data (a class's methods aren't values in Fish).
   function fieldsOf(t: Type, what: string, at: Span): Field[] {
@@ -68,7 +69,7 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
 
   // `keyof T`: the union of T's field names.
   function keyofType(t: Type, at: Span): Type {
-    const held = standIn([t], "'keyof'", at, false, deferring);
+    const held = standIn(typing, [t], "'keyof'", at, false, deferring);
     if (held) return held;
     const fields = fieldsOf(t, "'keyof'", at);
     if (fields.length === 0) throw new CompileError(`'${show(t)}' has no public fields, so 'keyof' of it has no keys`, at.start, at.end);
@@ -78,7 +79,7 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
   // `T[K]`: the type of the field K names, or the union of those a union of keys names; an array's
   // `T[number]` is its element type.
   function indexedType(t: Type, k: Type, at: Span, keyAt: Span): Type {
-    const held = standIn([t, k], "an indexed access type", at, false, deferring);
+    const held = standIn(typing, [t, k], "an indexed access type", at, false, deferring);
     if (held) return held;
     if (typeof t !== "string" && t.kind === "param" && t.concrete) return indexedType(t.concrete, k, at, keyAt);
     if (typeof t !== "string" && t.kind === "array") {
@@ -211,6 +212,6 @@ export function typeFunctions(layout: (c: ClassType) => boolean, deferring: () =
     ["Uncapitalize", 1, intrinsic("Uncapitalize", (s) => s.charAt(0).toLowerCase() + s.slice(1)), 'Uncapitalize<"A">', [0], false],
   ];
   const UTILITIES = new Map(entries.map(([name, count, apply, example, read, deep]): [string, [number, Utility, string]] => [name, [count, (args, at, argAt) =>
-    standIn(read.map((i) => args[i]!), `'${name}'`, at, deep, deferring) ?? apply(args, at, argAt), example]]));
+    standIn(typing, read.map((i) => args[i]!), `'${name}'`, at, deep, deferring) ?? apply(args, at, argAt), example]]));
   return { keyofType, indexedType, fieldsOf, keysOf, templateType, UTILITIES };
 }

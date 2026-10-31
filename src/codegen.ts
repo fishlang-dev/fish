@@ -1,6 +1,6 @@
-import { selfCalls, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
+import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
-import { asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers, jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds, syncFileCalls, combinedCalls, formatCalls, formatPlan, inspectCalls, equalities, jsonCalls, dynCalls, dynMembers, fixedFills, printCalls, printStream, clocks, fileCalls, lengthChecks, MATH_CONSTANTS, MATH_FLOAT, maths, parses, fixedPrints, REGEX_FLAGS, regexCalls, regexNews, regexStringCalls, regexStringType, type DynTable } from "./values.ts";
+import { formatPlan, printStream, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
@@ -8,10 +8,9 @@ import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { ARRAY, DYN, compound, conversions, llvm } from "./layout.ts";
+import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
-import { kindTests } from "./narrow.ts";
-import { allFields, arrayType, callableOf, sameCallable, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, lower, show, field, fieldPath, handleType, holdsPart, sharesDyn, INTEGERS, isCopy, nextResult, SLEEP, unionType, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, keyOf, described, digest, promiseElement, lentPromise, stored as storedType, blockType, interiorType, leafOf, isFloat, isInteger, isOption, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, matchType, regexType, unfold, tiedBy, isTuple, tupleType, combinedOf, settledParts, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
@@ -26,7 +25,7 @@ const indexes = (t: Type): boolean => {
 
 // What a reference points to, or the type itself.
 const isDyn = (t: Type): t is DynType => typeof t !== "string" && t.kind === "dyn";
-const relays = (from: Type, to: DynType) => isDyn(from) && callableOf.has(from.of) && callableOf.has(to.of) && !sameCallable(from, to);
+const relays = ({ callableOf, sameCallable }: Typing, from: Type, to: DynType) => isDyn(from) && callableOf.has(from.of) && callableOf.has(to.of) && !sameCallable(from, to);
 const referent = (t: Type): Type => (typeof t !== "string" && t.kind === "ref" ? t.to : t);
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
@@ -89,24 +88,25 @@ const holdsRust = (t: Type) => holdsPart(t, (u) => rustClassOf(u) !== undefined)
 // How a narrow value crosses to C, which expects it widened by its caller: a boolean, a byte
 // holding 0 or 1, and unsigned integers zero-extended, signed ones sign-extended.
 const extension = (type: Type) => (type === "boolean" || type === "u8" || type === "u16" ? "zeroext" : type === "i8" || type === "i16" ? "signext" : "");
-const crossing = (type: Type) => [llvm(type), extension(type)].filter(Boolean).join(" ");
-const crossed = (type: Type) => [extension(type), llvm(type)].filter(Boolean).join(" ");
+const crossing = (llvm: Llvm, type: Type) => [llvm(type), extension(type)].filter(Boolean).join(" ");
+const crossed = (llvm: Llvm, type: Type) => [extension(type), llvm(type)].filter(Boolean).join(" ");
+type Llvm = (t: Type) => string;
 
 // The C parameters a value crossing to a Rust shim is passed as: a pointer for a Rust type, a
 // string or an Option of either, which is null when empty; an array's buffer and length; and a
 // flag first for an Option of a number, a boolean or an array.
-function shimParams(c: Crossing): string[] {
-  if (c.kind === "plain") return [crossing(c.type)];
+function shimParams(llvm: Llvm, c: Crossing): string[] {
+  if (c.kind === "plain") return [crossing(llvm, c.type)];
   if (c.kind === "array") return ["ptr", "i64"];
-  if (c.kind === "option" && (c.of.kind === "plain" || c.of.kind === "array")) return ["i1 zeroext", ...shimParams(c.of)];
+  if (c.kind === "option" && (c.of.kind === "plain" || c.of.kind === "array")) return ["i1 zeroext", ...shimParams(llvm, c.of)];
   return ["ptr"];
 }
 
 // What a Rust shim returns for what its function gives, and the type of the slot it writes the
 // rest of it into: an array, or what an Option of a number, a boolean or an array holds.
-function shimGives(c: Crossing | undefined): { returns: string; out?: string } {
+function shimGives(llvm: Llvm, c: Crossing | undefined): { returns: string; out?: string } {
   if (!c) return { returns: "void" };
-  if (c.kind === "plain") return { returns: crossed(c.type) };
+  if (c.kind === "plain") return { returns: crossed(llvm, c.type) };
   if (c.kind === "array") return { returns: "void", out: ARRAY };
   if (c.kind === "option" && c.of.kind === "plain") return { returns: "zeroext i1", out: llvm(c.inner) };
   if (c.kind === "option" && c.of.kind === "array") return { returns: "zeroext i1", out: ARRAY };
@@ -123,7 +123,19 @@ export type Options = { src: string; file: string; release: boolean; panic: "unw
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances }: Checked, { src, file, release, panic, library = false, sources = [] }: Options): string {
+export function codegen({ instances, tables: noted }: Checked, { src, file, release, panic, library = false, sources = [] }: Options): string {
+  const {
+    asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers,
+    jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds,
+    syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
+    dynMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
+    fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, typing, regex: regexTables
+  } = noted;
+  const {
+    tiedBy, show, lower, unionType, arrayType, leafOf, blockType, callableOf, promiseElement, keyOf, described, sharesDyn, stored: storedType, lentPromise,
+    interiorType, nextResult, tupleType, handleType, combinedOf, settledParts, regexType, matchType,
+  } = typing;
+  const llvm = layoutOf(typing);
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
   const globals: string[] = [];
   const regexes = new Map<string, string>();
@@ -215,7 +227,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   // The functions `sort` compares through: one per comparator, and one per element type for the
   // default order.
   const orders = new Map<string, string>();
-  const builder = { emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call), deep: (a: string, b: string, type: Type) => deepEquals(a, b, type), inspect: (v: string, type: Type) => inspected(v, type) };
+  const builder = { typing, emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call), deep: (a: string, b: string, type: Type) => deepEquals(a, b, type), inspect: (v: string, type: Type) => inspected(v, type) };
   const intrinsics = new Set<string>();
   // The C functions the program declares itself, which the libm functions Math uses may be.
   const foreign = new Set<string>();
@@ -224,7 +236,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
   const declaredRust = new Set<string>();
   const rustDrops = new Set<string>();
   const { operate, arithmetic, panicIf } = lowering(builder, where, release, intrinsics);
-  const { convert, test, equals, unionField, holds, eachMember } = conversions(builder);
+  const { convert, test, equals, unionField, holds, eachMember } = conversions(builder, kindTests);
 
   // The instance each generator type resumes, and each future type polls.
   const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
@@ -255,12 +267,12 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
         if (declaredRust.has(rust)) continue;
         declaredRust.add(rust);
         const self = instance.body.self && !instance.body.self.constructor ? ["ptr"] : [];
-        const gives = shimGives(rustGiven(instance));
-        const params = [...self, ...instance.signature!.flatMap((t) => shimParams(rustCrossing(t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
+        const gives = shimGives(llvm, rustGiven(instance));
+        const params = [...self, ...instance.signature!.flatMap((t) => shimParams(llvm, rustCrossing(t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
         out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
         continue;
       }
-      if (!DECLARED.has(instance.body.name)) out.push(`declare ${crossed(instance.returns)} ${symbol(instance)}(${instance.signature!.map(crossing).join(", ")})`, "");
+      if (!DECLARED.has(instance.body.name)) out.push(`declare ${crossed(llvm, instance.returns)} ${symbol(instance)}(${instance.signature!.map((t) => crossing(llvm, t)).join(", ")})`, "");
       continue;
     }
     current = instance;
@@ -5896,7 +5908,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
     // else a copy of it.
     // So is a stored callable held in one that throws more.
-    if (to && isDyn(to) && (!isDyn(types.get(e)!) || relays(types.get(e)!, to))) {
+    if (to && isDyn(to) && (!isDyn(types.get(e)!) || relays(typing, types.get(e)!, to))) {
       const type = types.get(e)!;
       let v = known.get(e) ?? evaluate(e);
       if (current.consumes.has(e) && lendable(e)) emit(`store ${llvm(e.kind === "member" ? stored(e) : type)} zeroinitializer, ptr ${address(e)}`);
@@ -6983,8 +6995,8 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     if (target.body.rust) return rustInvoke(target, pointer, args, at!, cleanup, after);
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
-    const passed = target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(target.signature![i]!)} `)) : values;
-    const call = `call ${target.body.foreign ? crossed(type) : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
+    const passed = target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(llvm, target.signature![i]!)} `)) : values;
+    const call = `call ${target.body.foreign ? crossed(llvm, type) : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
       unwinding(call, undefined, cleanup);
       after?.();
@@ -7050,7 +7062,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const pass = (c: Crossing, t: Type, v: string): string[] => {
       switch (c.kind) {
         case "plain":
-          return [`${crossing(t)} ${v}`];
+          return [`${crossing(llvm, t)} ${v}`];
         case "handle":
           return [`ptr ${v}`];
         case "string":
@@ -7097,7 +7109,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     };
     args.forEach((a, i) => passed.push(...pass(rustCrossing(target.signature![i]!), target.signature![i]!, a.slice(a.lastIndexOf(" ") + 1))));
     const gives = rustGiven(target);
-    const shim = shimGives(gives);
+    const shim = shimGives(llvm, gives);
     const out = shim.out ? alloca(shim.out) : undefined;
     if (out) passed.push(`ptr ${out}`);
     const err = target.throws ? alloca("ptr") : undefined;
@@ -8048,7 +8060,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     // A library's panics all unwind, the runtime's default, whichever way the build chose: the
     // abort happens here, before C sees the unwind.
     const call = `${i.returns === "void" ? "" : "%r = "}invoke ${llvm(i.returns)} ${symbol(i)}(${params.map(([t, a]) => `${llvm(t)} ${a}`).join(", ")})`;
-    const head = `define ${crossed(i.returns)} @"${i.body.name}"(${params.map(([t, a]) => `${crossing(t)} ${a}`).join(", ")}) ${UNWINDS} {`;
+    const head = `define ${crossed(llvm, i.returns)} @"${i.body.name}"(${params.map(([t, a]) => `${crossing(llvm, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
     const done = i.returns === "void" ? "  ret void" : `  ret ${llvm(i.returns)} %r`;
     return [head, "entry:", `  ${call} to label %ok unwind label %pad`, "ok:", done, "pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  call void @abort()", "  unreachable", "}", ""];
   }
@@ -8986,10 +8998,10 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
       const held = untagged(tagged) as string;
       const slash = held.indexOf("/");
       const [flags, pattern] = [held.slice(0, slash), held.slice(slash + 1)];
-      return regex(regexType(pattern, flags, parsePattern(pattern, flags).captures));
+      return regex(regexType(pattern, flags, parsePattern(pattern, flags, regexTables).captures));
     }
     if (typeof type !== "string" && type.kind === "union") {
-      const member = memberOf(tagged, type);
+      const member = memberOf(typing, tagged, type);
       return convert(bake(untagged(tagged), member), member, type);
     }
     const v = untagged(tagged);
@@ -9150,7 +9162,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const re = value(e.args[0]!);
     // A call used as a statement has no type of its own; what it makes, from this instance's
     // regex, is dropped at its end.
-    const type = types.get(e) ?? regexStringType(name, regexT, regexT.any === true);
+    const type = types.get(e) ?? regexStringType(typing, name, regexT, regexT.any === true);
     const call = (line: string) => {
       const v = temp();
       emit(`${v} = call ${line}`);
@@ -9271,7 +9283,7 @@ export function codegen({ instances }: Checked, { src, file, release, panic, lib
     const key = `${t.flags}/${t.pattern}`;
     const made = regexes.get(key);
     if (made) return made;
-    const program = compileRegex(parsePattern(t.pattern, t.flags));
+    const program = compileRegex(parsePattern(t.pattern, t.flags, regexTables), regexTables);
     const name = `@.regex.${stableId("regex", key)}`;
     globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
     regexes.set(key, name);

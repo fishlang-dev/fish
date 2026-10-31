@@ -16,7 +16,7 @@ type Shape = Field[];
 
 export function astDeclarations(src: string): string {
   const aliases = new Map<string, TypeNode>();
-  for (const s of parse(src)) {
+  for (const s of parse(src, { last: 0 })) {
     const t = s.kind === "export" ? s.body : s;
     if (t.kind === "typeAlias" && !SKIPPED.has(t.name)) aliases.set(t.name, t.type);
   }

@@ -3,8 +3,17 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { check } from "../src/check.ts";
+import { newCompilation, newSession } from "../src/compilation.ts";
 import { buildLibrary } from "../src/main.ts";
 import { parse } from "../src/parser.ts";
+
+const session = newSession();
+
+// `src` checked as a program of its own, its nodes numbered by its compilation.
+const checkSource = (src: string, library = false) => {
+  const compilation = newCompilation(session);
+  return check(compilation, parse(src, compilation.ids), library);
+};
 
 // Fish built into libraries, and C programs built against them.
 const tmp = mkdtempSync(join(tmpdir(), "fish-library-"));
@@ -79,7 +88,7 @@ function library(kind: "static" | "shared", panic: "unwind" | "abort" = "unwind"
   const dir = mkdtempSync(join(tmp, `${kind}-`));
   writeFileSync(join(dir, "mathy.fsh"), LIBRARY);
   writeFileSync(join(dir, "main.c"), PROGRAM);
-  buildLibrary(join(dir, "mathy.fsh"), join(dir, "mathy"), kind, false, panic);
+  buildLibrary(session, join(dir, "mathy.fsh"), join(dir, "mathy"), kind, false, panic);
   const linked = kind === "static" ? [join(dir, "libmathy.a"), "-lm"] : [`-L${dir}`, "-lmathy"];
   const clang = Bun.spawnSync(["clang", join(dir, "main.c"), ...linked, "-o", join(dir, "prog")]);
   if (clang.exitCode !== 0) throw new Error(clang.stderr.toString());
@@ -129,8 +138,8 @@ test("two Fish libraries link into one C program, from C and C++", () => {
   const dir = mkdtempSync(join(tmp, "two-"));
   writeFileSync(join(dir, "la.fsh"), "function helper(n: i64): i64 { return n + 1; }\nexport function fromA(n: i64): i64 { return helper(n); }\n");
   writeFileSync(join(dir, "lb.fsh"), "function helper(n: i64): i64 { return n * 100; }\nexport function fromB(n: i64): i64 { return helper(n); }\nexport function pp(a: Ptr<Ptr<u8>>, b: Ptr<MutPtr<u8>>, c: MutPtr<MutPtr<u8>>, int: i64): i64 { return int; }\n");
-  buildLibrary(join(dir, "la.fsh"), join(dir, "la"), "static");
-  buildLibrary(join(dir, "lb.fsh"), join(dir, "1lb"), "static");
+  buildLibrary(session, join(dir, "la.fsh"), join(dir, "la"), "static");
+  buildLibrary(session, join(dir, "lb.fsh"), join(dir, "1lb"), "static");
   const header = readFileSync(join(dir, "1lb.h"), "utf8");
   expect(header).toContain("int64_t pp(const uint8_t *const *a, uint8_t *const *b, uint8_t **c, int64_t);");
   expect(header).toContain("#ifndef FISH_1LB_H");
@@ -160,16 +169,16 @@ for (const [src, message] of [
   ["export function _Unwind_Resume(a: i64): i64 { return a; }", "since C's library or the Fish runtime already uses that name"],
 ]) {
   test(src!, () => {
-    expect(() => check(parse(src!), true)).toThrow(message!);
+    expect(() => checkSource(src!, true)).toThrow(message!);
   });
 }
 
 test("a library may export names that only appear in the runtime's comments", () => {
-  expect(() => check(parse("export function start(n: i64): i64 { return n; }\nexport function end(n: i64): i64 { return n; }"), true)).not.toThrow();
+  expect(() => checkSource("export function start(n: i64): i64 { return n; }\nexport function end(n: i64): i64 { return n; }", true)).not.toThrow();
 });
 
 test("outside a library an export is an ordinary function", () => {
-  expect(() => check(parse("export function f(s: string): string { return s; }\nfunction main() { console.log(f(\"x\")); }"))).not.toThrow();
+  expect(() => checkSource("export function f(s: string): string { return s; }\nfunction main() { console.log(f(\"x\")); }")).not.toThrow();
 });
 
 test("a library in several files gives C only its entry file's exports", () => {
@@ -177,7 +186,7 @@ test("a library in several files gives C only its entry file's exports", () => {
   writeFileSync(join(dir, "api.fsh"), 'import { twice } from "./util";\nexport function quad(n: i64): i64 { return twice(twice(n)); }\n');
   writeFileSync(join(dir, "util.fsh"), "export function twice(n: i64): i64 { return n * 2; }\n");
   writeFileSync(join(dir, "main.c"), '#include <stdio.h>\n#include "api.h"\nint main(void) { printf("%lld\\n", (long long)quad(3)); return 0; }\n');
-  buildLibrary(join(dir, "api.fsh"), join(dir, "api"), "static");
+  buildLibrary(session, join(dir, "api.fsh"), join(dir, "api"), "static");
   const header = readFileSync(join(dir, "api.h"), "utf8");
   expect(header).toContain("int64_t quad(int64_t n);");
   expect(header).not.toContain("twice");
@@ -189,8 +198,8 @@ test("a library in several files gives C only its entry file's exports", () => {
 test("a library's export list names C functions, and a re-export in its entry is refused", () => {
   const dir = mkdtempSync(join(tmp, "listed-"));
   writeFileSync(join(dir, "api.fsh"), "function quad(n: i64): i64 { return n * 4; }\nexport { quad };\n");
-  buildLibrary(join(dir, "api.fsh"), join(dir, "api"), "static");
+  buildLibrary(session, join(dir, "api.fsh"), join(dir, "api"), "static");
   expect(readFileSync(join(dir, "api.h"), "utf8")).toContain("int64_t quad(int64_t n);");
   writeFileSync(join(dir, "re.fsh"), 'export { quad } from "./api";\n');
-  expect(() => buildLibrary(join(dir, "re.fsh"), join(dir, "re"), "static")).toThrow("write 'export function' on the function itself");
+  expect(() => buildLibrary(session, join(dir, "re.fsh"), join(dir, "re"), "static")).toThrow("write 'export function' on the function itself");
 });

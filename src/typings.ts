@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import type { Ids } from "./nodes.ts";
 import { CompileError, locate } from "./diag.ts";
 import { parseWithComments, type Stmt } from "./parser.ts";
 
@@ -176,20 +177,20 @@ export type Exports = { names: Map<string, Declared>; problems: string[] };
 type Scope = { file: string; src: string; statements: Stmt[] };
 // One pass of a lookup: the files it has finished, those it is reading, and what the previous
 // pass found, given where a file is reached again through its own re-exports. Files are parsed
-// once for the whole lookup.
+// once for the whole lookup, its nodes numbered from `ids`.
 type Parsed = { src: string; statements: Stmt[] } | string;
-type Lookup = { done: Map<string, Exports>; reading: Set<string>; before: Map<string, Exports>; parsed: Map<string, Parsed>; cyclic: boolean };
+type Lookup = { ids: Ids; done: Map<string, Exports>; reading: Set<string>; before: Map<string, Exports>; parsed: Map<string, Parsed>; cyclic: boolean };
 
 // The names a declaration file exports, each with where it is declared, or why the file can't
 // be read; for a types package written as `declare module "pkg"`, the names that module exports.
 // Where re-exports go round in a cycle, passes repeat, each starting the cycle from what the last
 // found, until no file's exports grow: `export *` only adds names, so this ends.
-export function exportsOf(file: string, specifier?: string): Exports | string {
+export function exportsOf(ids: Ids, file: string, specifier?: string): Exports | string {
   const parsed = new Map<string, Parsed>();
   const size = (m: Map<string, Exports>) => [...m.values()].reduce((n, x) => n + x.names.size, 0);
   let before = new Map<string, Exports>();
   for (;;) {
-    const lookup: Lookup = { done: new Map(), reading: new Set(), before, parsed, cyclic: false };
+    const lookup: Lookup = { ids, done: new Map(), reading: new Set(), before, parsed, cyclic: false };
     const made = read(file, specifier, lookup);
     if (typeof made === "string" || !lookup.cyclic || (before.size > 0 && size(lookup.done) === size(before))) return made;
     before = lookup.done;
@@ -207,7 +208,7 @@ function parsedFile(file: string, lookup: Lookup): Parsed {
     const src = readFileSync(file, "utf8");
     try {
       // A package's JSDoc `@throws` tags describe JS throws, which reach Fish as panics, not errors.
-      made = { src, statements: parseWithComments(src).program };
+      made = { src, statements: parseWithComments(src, lookup.ids).program };
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
       const { line, col } = locate(src, e.start);

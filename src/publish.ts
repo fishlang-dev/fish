@@ -85,7 +85,7 @@ function readsBack(files: { path: string; data: Uint8Array }[], lib: string) {
       seen.add(file);
       let program: Stmt[];
       try {
-        program = parse(readFileSync(file, "utf8"));
+        program = parse(readFileSync(file, "utf8"), { last: 0 });
       } catch (e) {
         throw new Error(`${relative(at, file)} doesn't parse: ${e instanceof Error ? e.message : e}`);
       }
@@ -118,7 +118,7 @@ export function unsafeUses(files: { path: string; text: string }[]): UnsafeUse[]
   for (const { path, text } of files.filter((f) => f.path.endsWith(".fsh"))) {
     let program: Stmt[];
     try {
-      program = parse(text);
+      program = parse(text, { last: 0 });
     } catch (e) {
       throw new Error(`${path} doesn't parse: ${e instanceof Error ? e.message : e}`);
     }

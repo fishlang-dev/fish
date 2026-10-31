@@ -1,13 +1,13 @@
 import type { Checked } from "./check.ts";
-import { upcasts } from "./classes.ts";
 import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
-import { CompileError, LOCAL_NAMES } from "./diag.ts";
+import type { Compilation, Tables } from "./compilation.ts";
+import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
-import { fits, show, type Type } from "./typing.ts";
-import { NodeMap, NodeSet, nextId, renumber } from "./nodes.ts";
+import type { Type } from "./typing.ts";
+import { nextId, NodeMap, NodeSet, renumber, type Ids } from "./nodes.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on
 // it while compiling, and what the macro gives replaces it in its file, before the files are
@@ -27,14 +27,11 @@ type Decl = Stmt & { decorators?: Expr[] };
 // A decorated top-level declaration of a file, and whether it is exported.
 type Site = { module: Module; index: number; decl: Decl; exported: boolean };
 
-let expansions = 0;
-
 // Expands every file's macros in place. A round links a copy of the files, checks the macros
 // with every decorator's arguments, then applies each declaration's decorators in turn: its
 // members' and parameters', nearest first, then its own. A decorator a macro gave applies in
 // the next round.
-export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (program: Stmt[]) => Checked) {
-  upcasts.clear();
+export function expandMacros(compilation: Compilation, loaded: Loaded, library: boolean, checkMacros: (program: Stmt[]) => Checked) {
   // The pinned names every round's quotes made, which a later round's macro may give back.
   const pins = new Set<string>();
   for (let round = 0; ; round++) {
@@ -46,8 +43,8 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
     }
     // The program as linked, from copies, for checking and running the macros; an import of what
     // an expansion will make isn't there yet, and nothing the macros use may need one.
-    const { loaded: copy, of } = copied(loaded);
-    const program = flatten(copy, library, true);
+    const { loaded: copy, of } = copied(compilation.ids, loaded);
+    const program = flatten(compilation.ids, copy, library, true);
     const macros = macroFunctions(program);
     const linked = (site: Site) => {
       const s = of.get(site.module.statements[site.index]!)!;
@@ -62,13 +59,13 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
       const twins = placed(linked(site));
       own.forEach((d, i) => {
         const twin = twins[i]!.decorator;
-        prepared.set(d.decorator, builtin(twin, macros) ? { linked: twin, args: [], builtin: true } : { linked: twin, args: argumentsOf(twin, macros, d.where) });
+        prepared.set(d.decorator, builtin(twin, macros) ? { linked: twin, args: [], builtin: true } : { linked: twin, args: argumentsOf(compilation, twin, macros, d.where) });
       });
     }
     const constants = [...prepared.values()].flatMap((p) => p.args.flatMap((a) => (a.constant ? [a.constant] : [])));
     const macroCode = macroProgram(program, macros, new NodeSet(sites.map(linked)), constants);
     const checked = checkArguments(() => checkMacros(macroCode), constants);
-    const context = { macros, checked, code: macroCode, loaded, pins, library };
+    const context = { compilation, macros, checked, code: macroCode, loaded, pins, library };
     for (const site of [...sites].reverse()) {
       // What the site's macros give stands in its file as each one runs, so a later one sees it.
       const statements = site.module.statements;
@@ -85,7 +82,7 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
         const pending = pendingOf(d);
         const ready = prepared.get(pending.decorator);
         if (!ready) break;
-        const out = ready.builtin ? derived(d, s.kind === "export", pending) : run(d, s.kind === "export", site.module, pending, ready, context);
+        const out = ready.builtin ? derived(compilation, d, s.kind === "export", pending) : run(d, s.kind === "export", site.module, pending, ready, context);
         statements.splice(site.index + at, 1, ...out);
         count += out.length - 1;
       }
@@ -107,7 +104,7 @@ function checkArguments(check: () => Checked, constants: Stmt[]): Checked {
 }
 
 type Prepared = { linked: Expr; args: Argument[]; builtin?: true };
-type Context = { macros: Map<string, Func>; checked: Checked; code: Stmt[]; loaded: Loaded; pins: Set<string>; library: boolean };
+type Context = { compilation: Compilation; macros: Map<string, Func>; checked: Checked; code: Stmt[]; loaded: Loaded; pins: Set<string>; library: boolean };
 
 // Whether a decorator is `@derive(...)`, which the compiler gives unless the program has its own.
 function builtin(d: Expr, macros: Map<string, Func>): boolean {
@@ -117,7 +114,7 @@ function builtin(d: Expr, macros: Map<string, Func>): boolean {
 
 // `@derive(Eq, Json)`: a mark on the class or enum that `===` and `JSON` read, and on a class
 // with Eq, the `equals` comparing every field that `===` calls, unless the class has one.
-function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
+function derived({ upcasts, ids }: Compilation, d: Decl, exported: boolean, pending: Pending): Stmt[] {
   const at = pending.decorator;
   if (pending.where !== "own" || (d.kind !== "class" && d.kind !== "enum")) throw new CompileError("'derive' applies to a class or an enum", at.start, at.end);
   const traits = at.kind === "call" ? at.args : [];
@@ -126,7 +123,7 @@ function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
     if (t.kind !== "ident" || (t.name !== "Eq" && t.name !== "Json")) throw new CompileError(`'derive' knows 'Eq' and 'Json' so far; '${t.kind === "ident" ? t.name : "this"}' isn't one it can derive yet`, t.start, t.end);
     return t.name;
   });
-  const decl = { ...d, id: nextId(), decorators: (d.decorators ?? []).slice(0, -1) } as Decl;
+  const decl = { ...d, id: nextId(ids), decorators: (d.decorators ?? []).slice(0, -1) } as Decl;
   if (decl.kind === "class" || decl.kind === "enum") decl.derives = [...(decl.derives ?? []), ...names];
   if (decl.kind === "class" && names.includes("Eq") && !decl.members.some((m) => m.kind === "method" && m.name === "equals" && !m.modifiers.includes("static"))) {
     const fields = decl.members.flatMap((m) => {
@@ -137,13 +134,13 @@ function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
     // A base's fields compare through the base's own `equals`.
     const parts = [...(decl.extends ? ["super.equals(other)"] : []), ...fields.map((f) => `this.${f} === other.${f}`)];
     const test = parts.length === 0 ? "true" : parts.join(" && ");
-    const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`)[0] as Extract<Stmt, { kind: "class" }>;
+    const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`, ids)[0] as Extract<Stmt, { kind: "class" }>;
     const method = made.members[0]!;
     respan(method, at);
     upcasts.add(`${at.start}:${at.end}`);
     decl.members = [...decl.members, method];
   }
-  return [exported ? ({ id: nextId(), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl];
+  return [exported ? ({ id: nextId(ids), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl];
 }
 
 // Gives every node of a tree one span, as code a decorator made.
@@ -167,11 +164,11 @@ function placed(d: Decl): { decorator: Expr; where: Pending["where"] }[] {
 
 // Every file's statements copied, so linking the copy leaves the files as written, and the copy
 // of each statement.
-function copied(loaded: Loaded): { loaded: Loaded; of: NodeMap<Stmt, Stmt> } {
+function copied(ids: Ids, loaded: Loaded): { loaded: Loaded; of: NodeMap<Stmt, Stmt> } {
   const copies = new Map<Module, Module>();
   const of = new NodeMap<Stmt, Stmt>();
   for (const m of loaded.modules) {
-    const statements = renumber(structuredClone(m.statements));
+    const statements = renumber(structuredClone(m.statements), () => nextId(ids));
     m.statements.forEach((s, i) => of.set(s, statements[i]!));
     copies.set(m, { ...m, statements, targets: new NodeMap() });
   }
@@ -271,9 +268,8 @@ function macroOf(d: Expr, macros: Map<string, Func>): Func {
 // A decorator's argument: its syntax, for a parameter typed `Ast` or `AstExpr`, or else the
 // constant that computes its value.
 type Argument = { expr: Expr; syntax: boolean; constant?: Stmt; name?: string; none?: true };
-let constants = 0;
 
-function argumentsOf(d: Expr, macros: Map<string, Func>, where: Pending["where"]): Argument[] {
+function argumentsOf({ counts, ids }: Compilation, d: Expr, macros: Map<string, Func>, where: Pending["where"]): Argument[] {
   const macro = macroOf(d, macros);
   const before = where === "own" ? 1 : 2;
   if (before === 2) {
@@ -300,9 +296,9 @@ function argumentsOf(d: Expr, macros: Map<string, Func>, where: Pending["where"]
     if (!arg && !param.default) return { expr: d, syntax: false, none: true };
     const expr = arg ?? param.default!;
     if (arg && t?.kind === "ref" && (t.name === "Ast" || t.name === "AstExpr") && t.args.length === 0) return { expr, syntax: true };
-    const name = `__fishArgument${constants++}`;
+    const name = `__fishArgument${counts.constants++}`;
     const at = { start: expr.start, end: expr.end };
-    const constant: Stmt = { id: nextId(), kind: "let", keyword: "const", declarations: [{ id: nextId(), target: { id: nextId(), kind: "ident", name, ...at }, type: t, init: expr, ...at }], ...at };
+    const constant: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name, ...at }, type: t, init: expr, ...at }], ...at };
     return { expr, syntax: false, constant, name };
   });
 }
@@ -375,7 +371,7 @@ function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: NodeSet
 }
 
 // The top-level declarations a program's quotes make.
-function quoteDeclarations(s: Stmt): string[] {
+function quoteDeclarations(tables: Tables, s: Stmt): string[] {
   const found: string[] = [];
   const visit = (node: unknown) => {
     if (!node || typeof node !== "object") return;
@@ -383,7 +379,7 @@ function quoteDeclarations(s: Stmt): string[] {
     const n = node as Expr;
     if (n.kind === "tagged" && n.tag.kind === "ident" && (n.tag.name === "quote" || n.tag.name === "quoteType")) {
       try {
-        found.push(...declaredBy(quoted(n, n.tag.name === "quoteType")));
+        found.push(...declaredBy(quoted(tables, n, n.tag.name === "quoteType")));
       } catch {
         // A quote that doesn't parse is reported when the macro is checked.
       }
@@ -399,7 +395,8 @@ function quoteDeclarations(s: Stmt): string[] {
 // on the declaration of the same name, or the same kind, and on its members and parameters of
 // the same name, or at the same place.
 function run(decl: Decl, exported: boolean, module: Module, pending: Pending, ready: Prepared, ctx: Context): Stmt[] {
-  const { macros, checked, code, loaded, pins, library } = ctx;
+  const { compilation, macros, checked, code, loaded, pins, library } = ctx;
+  const { ids } = compilation;
   const nearest = ready.linked;
   const macro = macroOf(nearest, macros);
   const before = pending.where === "own" ? 1 : 2;
@@ -411,23 +408,23 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const returns = instance.returns;
   if (typeof returns === "string" || returns.kind === "literal") throw new CompileError(`a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${returns}'`, macro.start, macro.end);
   const input = instance.locals.get(param)!.type;
-  const { bare, restore } = stripped(decl, pending);
+  const { bare, restore } = stripped(ids, decl, pending);
   const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
   let value: Value;
   try {
-    value = built<Value>({ tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
+    value = built<Value>(checked.tables, { tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
   } catch (e) {
     if (e instanceof CompileError) throw e;
     throw new CompileError("a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
   }
-  const suffix = `@m${expansions++}`;
+  const suffix = `@m${compilation.counts.expansions++}`;
   const fresh = (name: string) => {
-    LOCAL_NAMES.add(`${name}${suffix}`);
+    compilation.names.local.add(`${name}${suffix}`);
     return `${name}${suffix}`;
   };
   // The declarations this macro's quotes make are known from the start, so a quote naming one
   // made by a quote it builds later means it.
-  const declared = reached(code, macro).flatMap(quoteDeclarations);
+  const declared = reached(code, macro).flatMap((s) => quoteDeclarations(ctx.checked.tables, s));
   const members = new Set(loaded.modules.flatMap((m) => m.statements.flatMap((s) => {
     const d = s.kind === "export" ? s.body : s;
     return d?.kind === "enum" ? d.members.map((x) => x.name) : [];
@@ -440,11 +437,11 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     const t = instance.locals.get(macro.params[i + before]!)!.type;
     if (a.none) return null;
     if (!a.syntax) return comptimeBody(checked.instances.find((c) => c.body.name === `const ${a.name}`)!);
-    return built<Value>({ tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
+    return built<Value>(checked.tables, { tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
-  const result = withHygiene(hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
-  const node = nodeOf(result);
+  const result = withHygiene(checked.tables, hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
+  const node = nodeOf(ids, result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
   const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
@@ -465,22 +462,22 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     // On an exported declaration, what the macro gives under names the program can see is
     // exported too; its private declarations aren't. A library's exports are C functions, so
     // there only the declaration's own name stays exported.
-    const visible = namesOf(decl).every((n) => !LOCAL_NAMES.has(n)) && EXPORTABLE.has(decl.kind) && (!library || namesOf(decl)[0] === name);
-    return exported && !isExport(decl) && visible ? ({ id: nextId(), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
+    const visible = namesOf(decl).every((n) => !compilation.names.local.has(n)) && EXPORTABLE.has(decl.kind) && (!library || namesOf(decl)[0] === name);
+    return exported && !isExport(decl) && visible ? ({ id: nextId(ids), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
   });
 }
 
 // A declaration without its decorators, and how to put back those still to apply on what a
 // macro gives in its place.
-function stripped(decl: Decl, pending: Pending): { bare: Stmt; restore(given: Decl[]): void } {
+function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore(given: Decl[]): void } {
   const own = pending.where === "own" ? (decl.decorators ?? []).slice(0, -1) : (decl.decorators ?? []);
   const later = <T extends { decorators: Expr[] }>(x: T, i: number, where: Pending["where"]) => (pending.where === where && pending.index === i ? x.decorators.slice(0, -1) : x.decorators);
   const members = decl.kind === "class" ? decl.members.map((m, i) => later(m, i, "member")) : [];
   const params = decl.kind === "function" ? decl.params.map((p, i) => later(p, i, "param")) : [];
   const clear = <T extends { decorators: Expr[] }>(x: T) => ({ ...x, decorators: [] });
-  const bare = decl.kind === "class" ? { ...decl, id: nextId(), decorators: [], members: decl.members.map(clear) }
-    : decl.kind === "function" ? { ...decl, id: nextId(), decorators: undefined, params: decl.params.map(clear) }
-    : { ...decl, id: nextId(), decorators: undefined };
+  const bare = decl.kind === "class" ? { ...decl, id: nextId(ids), decorators: [], members: decl.members.map(clear) }
+    : decl.kind === "function" ? { ...decl, id: nextId(ids), decorators: undefined, params: decl.params.map(clear) }
+    : { ...decl, id: nextId(ids), decorators: undefined };
   const name = namesOf(decl)[0];
   const restore = (given: Decl[]) => {
     const named = given.find((d) => d.kind === decl.kind && namesOf(d)[0] === name);
@@ -537,15 +534,15 @@ function findName(node: unknown, bad: (name: string) => boolean): string | undef
 }
 
 // A value made while compiling as the syntax tree it stands for.
-function nodeOf(v: Value): unknown {
+function nodeOf(ids: Ids, v: Value): unknown {
   if (v === null || v === undefined) return undefined;
   if (typeof v !== "object") return v;
-  if (v.kind === "member") return nodeOf(v.value);
-  if (v.kind === "array") return v.items.map(nodeOf);
+  if (v.kind === "member") return nodeOf(ids, v.value);
+  if (v.kind === "array") return v.items.map((x) => nodeOf(ids, x));
   if (v.kind !== "record") throw new Error(`internal error: an Ast value holding a '${v.kind}'`);
   const node: Record<string, unknown> = {};
-  for (const [k, x] of v.fields) node[k] = (k === "start" || k === "end") && typeof x === "bigint" ? Number(x) : nodeOf(x);
+  for (const [k, x] of v.fields) node[k] = (k === "start" || k === "end") && typeof x === "bigint" ? Number(x) : nodeOf(ids, x);
   // Ast values carry no ids, so each node made from one gets its own.
-  if ("start" in node) node.id = nextId();
+  if ("start" in node) node.id = nextId(ids);
   return node;
 }

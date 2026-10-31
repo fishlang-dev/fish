@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { analyze, compile } from "../src/main.ts";
 import { STD_BASE } from "../src/std.ts";
+import { newSession } from "../src/compilation.ts";
+
+const session = newSession();
 
 // Codegen names what it generates from what it stands for, so editing a program leaves the IR
 // of std's functions, and of the constants and glue they use, exactly as it was.
@@ -59,10 +62,10 @@ const FILE = join(mkdtempSync(join(tmpdir(), "fish-stable-")), "main.fsh");
 // bodies are its own.
 function compiled(src: string): { ir: string; std: string[]; own: string[] } {
   writeFileSync(FILE, src);
-  const instances = analyze(src, FILE).checked.instances.filter((i) => !i.body.foreign);
+  const instances = analyze(session, src, FILE).checked.instances.filter((i) => !i.body.foreign);
   const quoted = (name: string) => `"fsh.${name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`;
   const symbols = (std: boolean) => instances.filter((i) => i.body.start >= STD_BASE === std).map((i) => quoted(i.symbol));
-  return { ir: compile(src, FILE), std: symbols(true), own: symbols(false) };
+  return { ir: compile(session, src, FILE), std: symbols(true), own: symbols(false) };
 }
 
 // Each top-level definition in the IR by the symbol it defines.

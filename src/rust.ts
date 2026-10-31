@@ -6,8 +6,8 @@ import { validCrate } from "./manifest.ts";
 import { cacheDir } from "./mathlib.ts";
 import type { RustCrate } from "./modules.ts";
 import type { ClassMember, ClassNode, Func } from "./parser.ts";
-import type { ClassType, Type } from "./typing.ts";
-import { WeakNodeMap } from "./nodes.ts";
+import type { Type } from "./typing.ts";
+import type { WeakNodeMap } from "./nodes.ts";
 
 // Rust functions reach Fish through a shim crate fishc generates: one `extern "C"` function per
 // Rust function the program declares, which catches a panic and hands its message back to the
@@ -18,24 +18,21 @@ import { WeakNodeMap } from "./nodes.ts";
 // A Rust function: its crate, its path from the crate's root, and the shim's C symbol for it.
 export type RustName = { crate: string; path: string; symbol: string };
 
-// The Rust function each function, constructor and method a Rust module declares names. It is
-// kept off the AST, so a macro, which sees and makes AST, can't make a function Rust.
-export const rustNames = new WeakNodeMap<Func | ClassMember, RustName>();
-
 // A Rust type a class names: its crate and its path from the crate's root. Fish moves its values
 // between threads, so it must be Send, which the shim asserts.
 export type RustClass = { crate: string; path: string; name: string };
 
-// The Rust type of each class a Rust module declares, by its declaration, and by its type once
-// the checker has one.
-export const rustClassNodes = new WeakNodeMap<ClassNode, RustClass>();
-export const rustClasses = new WeakMap<ClassType, RustClass>();
+// A compilation's Rust declarations: the Rust function each function, constructor and method a
+// Rust module declares names, and the Rust type of each class one declares, by its declaration;
+// its type, once the checker has one, holds it too. They are kept off the AST, so a macro, which
+// sees and makes AST, can't make a function or class Rust.
+export type RustTables = { names: WeakNodeMap<Func | ClassMember, RustName>; classNodes: WeakNodeMap<ClassNode, RustClass> };
 
 // The field a handle's class holds its boxed Rust value in.
 export const HANDLE = "#handle";
 
 // The Rust type a type is, when it is one.
-export const rustClassOf = (t: Type): RustClass | undefined => (typeof t !== "string" && t.kind === "class" ? rustClasses.get(t) : undefined);
+export const rustClassOf = (t: Type): RustClass | undefined => (typeof t !== "string" && t.kind === "class" ? t.rust : undefined);
 
 export const RUST_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
