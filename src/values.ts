@@ -75,6 +75,8 @@ export type Context = {
   construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined;
   // A generic class's constructor parameters as written.
   templateParams(name: string): Param[] | undefined;
+  // A generic class as its definition is checked, whose statics every instance shares.
+  definedClass(name: string): ClassInfo | undefined;
   members: Members;
   returnOf(instance: Instance, at: Span): Type;
   // What a call returns as the calling body sees it: in terms of the calling instance's own
@@ -3590,7 +3592,7 @@ export function expressions(ctx: Context) {
   // The type of a member call's receiver, unless it is `super` or a class's name.
   function receiverType(callee: Extract<Expr, { kind: "member" }>): Type | undefined {
     const { object } = callee;
-    if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && (classes.has(object.name) || enums.has(object.name)))) return undefined;
+    if (object.kind === "super" || (object.kind === "ident" && !lookup(object.name) && (classes.has(object.name) || ctx.definedClass(object.name) || enums.has(object.name)))) return undefined;
     if (object.kind === "ident") objects.add(object);
     const type = linked(callee) ? unwrapped(object, callee.optional) : value(object);
     // A method called through a reference gets the pointer itself.
@@ -3725,7 +3727,7 @@ export function expressions(ctx: Context) {
   // receiver must be able to change when the method changes it.
   function method(callee: Extract<Expr, { kind: "member" }>, receiver: Type | undefined): Body {
     const { object, name } = callee;
-    const named = object.kind === "ident" && !lookup(object.name) ? classes.get(object.name) : undefined;
+    const named = object.kind === "ident" && !lookup(object.name) ? (classes.get(object.name) ?? ctx.definedClass(object.name)) : undefined;
     if (named) {
       const found = inherited(named, "statics", name);
       if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'`, callee.start, callee.end);
@@ -3761,12 +3763,17 @@ export function expressions(ctx: Context) {
   // TypeScript's access rules: a private member is reachable only from inside its class, and
   // a protected one also from the classes that embed it.
   function visible(access: Access | undefined, declaring: ClassType, name: string, at: Span) {
-    if (!access || access === "public" || owner === declaring) return;
-    if (access === "protected" && owner && derives(owner, declaring)) return;
+    if (!access || access === "public" || (owner && sameClass(owner, declaring))) return;
+    if (access === "protected" && owner && owner.base) for (let b: ClassType | undefined = owner.base; b; b = b.base) if (sameClass(b, declaring)) return;
     const message = name.startsWith("#")
       ? `property '${name}' is not accessible outside class '${declaring.name}' because it has a private identifier`
       : `property '${name}' is ${access} and only accessible within class '${declaring.name}'${access === "protected" ? " and its subclasses" : ""}`;
     throw new CompileError(message, at.start, at.end);
+  }
+
+  // Access is by declaration, as in TypeScript, so any two instances of one generic class share it.
+  function sameClass(a: ClassType, b: ClassType): boolean {
+    return a === b || (a.generic !== undefined && a.generic.name === b.generic?.name);
   }
 
   // The class whose own fields include `name`: `t` itself or a base it embeds.
@@ -4202,7 +4209,7 @@ export function expressions(ctx: Context) {
         // as in `new Box<(n: i64) => i64>((n) => n * 2)`.
         const early = !named && e.typeArgs.length > 0 && e.callee.kind === "ident" && !lookup(e.callee.name) ? construct(e.callee.name, e.typeArgs, [], e) : undefined;
         early?.constructor.params.forEach((p, i) => {
-          const held = p.type?.kind === "ref" && p.type.args.length === 0 ? early.scope.get(p.type.name) : undefined;
+          const held = p.type?.kind === "ref" && p.type.args.length === 0 ? (early.constructor.scope ?? early.scope).get(p.type.name) : undefined;
           if (list[i]?.kind === "arrow" && held) expect(list[i]!, held);
         });
         // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.

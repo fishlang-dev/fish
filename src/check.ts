@@ -1,4 +1,4 @@
-import { checkOverrides, declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
 import { CompileError } from "./diag.ts";
 import { STD_BASE, stdFor } from "./std.ts";
@@ -528,11 +528,11 @@ export function check(written: Stmt[], library = false, macros = false, module =
     },
   };
   const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
-    classes, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+    classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
   });
   classes.forEach(register);
-  const { classNamed, construct, start, define } = genericClasses({
+  const { classNamed, construct, start, define, definedClass } = genericClasses({
     classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
   infersAliases((name) => aliases.get(name));
@@ -665,8 +665,18 @@ export function check(written: Stmt[], library = false, macros = false, module =
   const closures: Instance[] = [];
   const closureBodies = new Map<ClosureType, Instance>();
 
+  // A generic class's constructor parameters, its base's when it declares no constructor.
+  function templateParams(name: string, seen = new Set<string>()): Param[] | undefined {
+    const t = templates.get(name);
+    if (!t || seen.has(name)) return undefined;
+    const ctor = t.members.find((m) => m.kind === "constructor");
+    if (ctor) return ctor.params;
+    const named = t.extends?.kind === "instantiation" ? t.extends.expr : t.extends;
+    if (named?.kind !== "ident") return undefined;
+    return templateParams(named.name, seen.add(name)) ?? classes.get(named.name)?.constructor.params;
+  }
+
   classes.forEach((c) => link(c, new Set()));
-  classes.forEach(checkOverrides);
   setJsError(classes.get("JsError")?.type);
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
@@ -1204,7 +1214,7 @@ export function check(written: Stmt[], library = false, macros = false, module =
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
       types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
-      templateParams: (name: string) => templates.get(name)?.members.find((m) => m.kind === "constructor")?.params, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
+      templateParams, definedClass, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
       envOf: (e, of, env) => void (instance.envs ??= new Map()).set(e, { of, env }),
       nestedLocal,
       owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
