@@ -193,3 +193,8 @@ test("a Fish class whose type refers to itself through an array is refused, not 
     "main.fsh": "import { takeL } from \"p\";\nclass K { v: string = \"a\"; items: K[] = []; }\nfunction main() { takeL(new K()); takeL({ v: \"a\", items: [{ v: \"b\", items: [] }] }); }\n",
   }))).toBe("argument of type 'K' is not assignable to parameter of type 'L': property 'items' is a 'K[]', not a 'L[]'");
 });
+
+test("a package's JSDoc @throws tags don't make its functions throw in Fish", () => {
+  const D = "/** @throws {TypeError} when s is empty */\nexport declare function up(s: string): string;\n/**\n * @throws INVALID_PARAM\n */\nexport declare function down(s: string): string;\n";
+  expect(stops({ "node_modules/t/index.d.ts": D, "main.fsh": "import { up, down } from \"t\";\nfunction main() {\n  const a: string = up(\"a\");\n  const b: string = down(\"B\");\n}\n" })).toMatch(TYPE_CHECKED);
+});

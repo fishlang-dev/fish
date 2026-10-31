@@ -1,7 +1,7 @@
 import { expression, leftHandSide, sequence } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
 import {
-  block, decorated, endStatement, func, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
+  block, decorated, documentedThrows, endStatement, func, statement, type ClassMember, type ClassNode, type Cursor, type EnumMember, type Expr, type Modifier,
   type PropertyName, type Specifier, type Stmt,
 } from "./parser.ts";
 import { annotation, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters, typeReference } from "./types.ts";
@@ -135,12 +135,13 @@ function classMember(c: Cursor): ClassMember {
     const name = memberName(c);
     const params = parameters(c);
     const returnType = returnAnnotation(c);
-    return { id: nextId(), ...member, kind, name, params, returnType, body: memberBody(c), end: c.end() };
+    const throws = documentedThrows(c, start, undefined);
+    return { id: nextId(), ...member, kind, name, params, returnType, ...(throws && { throws }), body: memberBody(c), end: c.end() };
   }
   if (c.at("constructor") && isToken(c.peek(1), "(")) {
     c.next();
     const params = parameters(c);
-    const throws = throwsClause(c);
+    const throws = documentedThrows(c, start, throwsClause(c));
     return { id: nextId(), ...member, kind: "constructor", params, ...(throws && { throws }), body: memberBody(c), end: c.end() };
   }
   const generator = c.eat("*");
@@ -150,12 +151,16 @@ function classMember(c: Cursor): ClassMember {
     const typeParams = typeParameters(c);
     const params = parameters(c);
     const returnType = returnAnnotation(c);
-    const throws = throwsClause(c);
+    const throws = documentedThrows(c, start, throwsClause(c));
     return { id: nextId(), ...member, kind: "method", name, optional, generator, typeParams, params, returnType, ...(throws && { throws }), body: memberBody(c), end: c.end() };
   }
   const definite = !optional && c.eat("!");
   const fieldType = c.at(":") ? annotation(c) : undefined;
   const init = c.eat("=") ? expression(c) : undefined;
+  if (init?.kind === "arrow") {
+    const throws = documentedThrows(c, start, init.throws);
+    if (throws) init.throws = throws;
+  }
   endMember(c);
   return { id: nextId(), ...member, kind: "field", name, optional, definite, type: fieldType, init, end: c.end() };
 }

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CompileError, locate } from "./diag.ts";
-import { parse, type Stmt } from "./parser.ts";
+import { parseWithComments, type Stmt } from "./parser.ts";
 
 // A package's declarations, found as TypeScript's `bundler` resolution finds them: the file and
 // the package directory holding it, or why there is none, said in the words of a message.
@@ -206,7 +206,8 @@ function parsedFile(file: string, lookup: Lookup): Parsed {
   try {
     const src = readFileSync(file, "utf8");
     try {
-      made = { src, statements: parse(src) };
+      // A package's JSDoc `@throws` tags describe JS throws, which reach Fish as panics, not errors.
+      made = { src, statements: parseWithComments(src).program };
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
       const { line, col } = locate(src, e.start);

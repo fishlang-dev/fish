@@ -126,8 +126,8 @@ type AstClassMember =
   | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "field"; name: AstPropertyName; optional: boolean; definite: boolean; type: AstType | null; init: AstExpr | null }
   | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "method"; name: AstPropertyName; optional: boolean; generator: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null }
   | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "constructor"; params: AstParam[]; throws?: AstType; body: AstStmt[] | null }
-  | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "get"; name: AstPropertyName; params: AstParam[]; returnType: AstType | null; body: AstStmt[] | null }
-  | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "set"; name: AstPropertyName; params: AstParam[]; returnType: AstType | null; body: AstStmt[] | null }
+  | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "get"; name: AstPropertyName; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null }
+  | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "set"; name: AstPropertyName; params: AstParam[]; returnType: AstType | null; throws?: AstType; body: AstStmt[] | null }
   | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "index"; params: AstParam[]; type: AstType }
   | { start: i64; end: i64; modifiers: AstModifier[]; decorators: AstExpr[]; kind: "staticBlock"; body: AstStmt[] };
 type AstParam =
