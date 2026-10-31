@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { check } from "../src/check.ts";
-import { shared } from "../src/compilation.ts";
+import { newCompilation, shared } from "../src/compilation.ts";
 import { CompileError } from "../src/diag.ts";
 import { expandMacros } from "../src/macros.ts";
 import { flatten, load } from "../src/modules.ts";
@@ -78,10 +78,11 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
       }
       const loaded = load(p.file, p.src);
       stripTests(loaded);
-      expandMacros(loaded, false, (macros) => check(macros, false, true));
+      const compilation = newCompilation();
+      expandMacros(compilation, loaded, false, (macros) => check(compilation, macros, false, true));
       written = flatten(loaded, false);
       problems.push(...audit([written, stdFor(written)], ids, p.name));
-      check(written);
+      check(compilation, written);
     } catch (e) {
       if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
     }

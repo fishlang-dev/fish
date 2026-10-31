@@ -1,10 +1,10 @@
 import { declareClass, extend, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassNodes, rustClasses, rustClassOf, rustNames } from "./rust.ts";
-import { freshId, newTables, shared, type Tables } from "./compilation.ts";
+import { freshId, newTables, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError, named } from "./diag.ts";
 import { STD_BASE, stdFor } from "./std.ts";
 import { comptimeArgument, comptimeChecks, stringsType, untagged } from "./comptime.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { NodeMap, NodeSet, WeakNodeMap, renumber } from "./nodes.ts";
 
@@ -13,13 +13,13 @@ import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, objectsMeet } from "./unions.ts";
-import { comptimeName, infersAliases, genericClasses, instancing, typeParamsOf } from "./generics.ts";
+import { comptimeName, genericClasses, instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
-import { madeFor, openThrows, ANY_REGEX, allFields, arrayType, blockType, holdsPart, isPlainJs, jsConverts, jsTakes, setJsError, jsUncalled, jsView, uncrossable, elementsOf, functionType, holdsPattern, isTuple, tupleType, type ObjectType, promiseInterface, closureType, field, fits, literalType, typeParameter, stored, interiorMutable, lockCallbacks, sharedCallbacks, futureType, YIELD_NOW, leafOf, generatorElement, generatorType, promiseElement, yieldsOf, type FutureType, holdsRef, optionRef, isCopy, objectType, type Field, type GeneratorType, widenLet, isInteger, isNumeric, unionType, lower, refType, lowersClasses, lowersInterfaces, lowersVariants, replaced, show, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type } from "./typing.ts";
+import { ANY_REGEX, allFields, holdsPart, isPlainJs, elementsOf, isTuple, type ObjectType, field, interiorMutable, YIELD_NOW, type FutureType, optionRef, isCopy, type Field, type GeneratorType, widenLet, isInteger, isNumeric, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { checkMoves } from "./moves.ts";
@@ -38,8 +38,9 @@ type Func = Declared & { body: Stmt[] };
 export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: number; generic?: Func };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
-// A checked program: the functions to compile, and the tables its check filled in.
-export type Checked = { instances: Instance[]; tables: Tables };
+// A checked program: the functions to compile, the tables its check filled in, and the
+// compilation it was checked in.
+export type Checked = { instances: Instance[]; tables: Tables; compilation: Compilation };
 
 // One compiled function: a body checked with concrete types, and the tables codegen reads
 // to lower it. `symbol` names it in the IR.
@@ -188,6 +189,7 @@ function patternText(p: Pattern): string {
 // array's layout that owns nothing, so dropping the frame leaves the array to its owner, and
 // moving the generator doesn't leave a pointer to the frame behind.
 function iterated(instance: Instance, e: Expr): Type {
+  const { refType, objectType } = instance.tables.typing;
   const type = instance.coercions.get(e) ?? instance.types.get(e)!;
   // A fixed array it borrows is kept as a pointer to where it lives.
   if (typeof type !== "string" && type.kind === "fixed" && plainPlace(instance, e)) return refType(type, false);
@@ -229,17 +231,18 @@ export function isAwait(e: Expr): e is Extract<Expr, { kind: "unary" }> {
 // in order, every other variable, then each `for...of` loop's array or generator and its
 // position. A closure's loops are its own.
 // An async method's object as its future holds it.
-function receiverField(self: NonNullable<Body["self"]>, laid: (t: Type) => Type): Field {
+function receiverField({ refType }: Typing, self: NonNullable<Body["self"]>, laid: (t: Type) => Type): Field {
   return { name: "this", type: laid(self.owned ? self.type : refType(self.type, self.mutable)) };
 }
 
 // A closure, future or generator type, marked as made for `instance`.
 function madeBy<T extends ClosureType | FutureType | GeneratorType>(t: T, instance: Instance): T {
-  madeFor.set(t, `${t.kind} of ${instance.symbol}`);
+  instance.tables.typing.madeFor.set(t, `${t.kind} of ${instance.symbol}`);
   return t;
 }
 
 function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
+  const { typing } = instance.tables;
   const fields: Field[] = [{ name: "state", type: "i32" }];
   const locals = new Map<Local, number>();
   const loops = new NodeMap<Stmt, number>();
@@ -253,7 +256,7 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   // An async arrow's frame holds what it captured, first, and an async method's its object.
   if (instance.body.closure) fields.push({ name: "env", type: "void" });
   const self = instance.body.self;
-  if (self && !self.constructor) fields.push(receiverField(self, (t) => (instance.concrete ? lower(t) : t)));
+  if (self && !self.constructor) fields.push(receiverField(typing, self, (t) => (instance.concrete ? typing.lower(t) : t)));
   instance.body.params.forEach((p) => add(instance.locals.get(p)!));
   // A local generic function's name holds nothing.
   [...new Set(instance.locals.values())].filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
@@ -292,9 +295,6 @@ const RUNTIME_NAMES = new Set([
   ...LOWERED,
   ...MATH_RUNTIME.map((f) => `fsh_math_${f}`),
 ]);
-
-let lifts = 0;
-let destructures = 0;
 
 // A program setting timers runs on the async runtime, as Node's does, so a sync `main` runs as
 // an async one, its timers firing once it returns.
@@ -361,16 +361,23 @@ function macroShape(f: Func) {
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 // With `module`, it may be a file another imports, checked on its own, so `main` is optional.
 // An error it throws names local declarations as they were written.
-export function check(written: Stmt[], library = false, macros = false, module = false): Checked {
+export function check(compilation: Compilation, written: Stmt[], library = false, macros = false, module = false): Checked {
   try {
-    return checkAll(written, library, macros, module);
+    return checkAll(compilation, written, library, macros, module);
   } catch (e) {
-    throw e instanceof CompileError ? named(e, shared.names) : e;
+    throw e instanceof CompileError ? named(e, compilation.names) : e;
   }
 }
 
-function checkAll(written: Stmt[], library: boolean, macros: boolean, module: boolean): Checked {
-  const tables = newTables();
+function checkAll(compilation: Compilation, written: Stmt[], library: boolean, macros: boolean, module: boolean): Checked {
+  const { counts } = compilation;
+  const tables = newTables(compilation);
+  const { typing } = tables;
+  const {
+    fits, lowersVariants, lowersInterfaces, lowersClasses, promiseInterface, functionType, typeParameter, literalType, setJsError, jsUncalled, jsConverts, holdsRef,
+    lower, show, blockType, jsTakes, uncrossable, jsView, replaced, stored, generatorType, generatorElement, futureType, promiseElement, lockCallbacks,
+    sharedCallbacks, openThrows, unionType, holdsPattern, arrayType, refType, closureType, leafOf, yieldsOf, tupleType,
+  } = typing;
   const { loopParts, nestedFunctions, nestedBindings, liftedFunctions, getterNames, destructuredParts, unusedDefaults, timerMains, selfCalls } = tables;
   const { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, presetParams, restStarts, substituted, timerWrappers, defaulted, prologues } = tables;
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
@@ -382,7 +389,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
     if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && member.decorators && member.decorators.length > 0) throw new CompileError("a macro on a member applies in a top-level class", member.decorators[0]!.start, member.decorators[0]!.end);
     return false;
   });
-  written = [...written, ...hoistLocals(written)];
+  written = [...written, ...hoistLocals(compilation.names, written)];
   holdsNode(written, (n) => {
     if (n.kind === "get" && typeof (n as { name?: unknown; key?: unknown }).name === "string") getterNames.add((n as { name: string }).name);
     if (n.kind === "get" && typeof (n as { key?: unknown }).key === "string") getterNames.add((n as { key: string }).key);
@@ -392,7 +399,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
   if (!library) timersRunAsync(written, timerMains);
   const program = [...stdFor(written), ...written];
   const funcs: Func[] = [];
-  const aliases = new Map<string, TypeAlias>();
+  const { aliases } = tables;
   const classes = new Map<string, ClassInfo>();
   // Generic classes, declared again for each set of type arguments they are used with.
   const templates = new Map<string, ClassNode & { name: string }>();
@@ -403,7 +410,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
   for (const s of program) {
     if (s.kind === "enum") {
       typeName(s.name, s, aliases, classes, templates, interfaces, enums);
-      enums.set(s.name, declareEnum(s));
+      enums.set(s.name, declareEnum(compilation, s));
       continue;
     }
     if (s.kind === "typeAlias") {
@@ -518,6 +525,8 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       const scope = scopeOf(definition(b));
       return (b.typeParams ?? []).filter((p) => !isLifetime(p)).map((p) => scope.get(p.name)!);
     },
+    typing,
+    assuming: new Set(),
   };
   const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
     tables, classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
@@ -527,7 +536,6 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
   const { classNamed, construct, start, define, definedClass } = genericClasses({
     tables, classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
-  infersAliases((name) => aliases.get(name));
   const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance } = resolver(tables, aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
     // An interface is met by shape, as a conditional type's `extends` asks of it.
     (from, to, at) => (typeof to !== "string" && to.kind === "interface" ? unsatisfied(from, to, members, at) === undefined : fits(from, to)));
@@ -542,7 +550,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
   // Each Rust function's types, by its shim symbol, as first declared.
   const rustTypes = new Map<string, string>();
   // Comptime runs a function only once the checker has been through it.
-  comptimeChecks((i) => {
+  comptimeChecks(tables, (i) => {
     if (inProgress.has(i)) return false;
     checkBody(i);
     return true;
@@ -612,7 +620,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       const returns = returnOf(def, at);
       result = f.async && typeof returns !== "string" && returns.kind === "future" ? promiseInterface(returns.gives) : returns;
     }
-    const open = openParam(result, true);
+    const open = openParam(typing, result, true);
     if (open) {
       const i = f.params.findIndex((_, i) => def.bindings.get(`#${i}`) === open);
       const param = f.params[i]?.pattern;
@@ -643,7 +651,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
     if (typeof tag !== "string" && tag?.kind === "literal") return tag;
     const v = untagged(tagged);
     if (typeof v === "bigint" || typeof v === "string" || typeof v === "boolean") return literalType(v);
-    if (typeof v === "object" && v?.kind === "array" && v.items.every((x) => typeof x === "string")) return stringsType(v.items as string[]);
+    if (typeof v === "object" && v?.kind === "array" && v.items.every((x) => typeof x === "string")) return stringsType(tables, v.items as string[]);
     throw new CompileError("a comptime parameter takes an integer, a boolean, a string, an enum member or a string array", arg.start, arg.end);
   }
   // A generic definition's placeholder for each comptime argument, one per argument.
@@ -720,7 +728,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
   const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !jsGiven.has(x as Expr) && intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
   if (crossing) throw new CompileError("turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
   // A package's declarations have no body to compile.
-  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)], tables };
+  return { instances: [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js), ...closures.filter((i) => i.concrete)], tables, compilation };
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
   // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
@@ -849,7 +857,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       const object = typeof held !== "string" && held?.kind === "ref" ? held.to : held;
       if (typeof object !== "string" && object?.kind === "class" && !field(object, e.name)) throw unsupported("pipes over a field a getter provides", e);
     }
-    instance.patterns.forEach((info, p) => instance.patterns.set(p, lowerPattern(info)));
+    instance.patterns.forEach((info, p) => instance.patterns.set(p, lowerPattern(tables.typing, info)));
     instance.raises.forEach((r, at) => instance.raises.set(at, { ...r, from: lower(r.from), to: lower(r.to), ...(r.param && { param: lower(r.param) }) }));
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
     if (instance.throws) instance.throws = lower(instance.throws);
@@ -1181,7 +1189,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
       return { index, type: withScope(target.bindings, () => resolveType(p.type!)) };
     };
-    const proves = (e: Expr) => guard(tables.kindTests, e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
+    const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
     // the target of an assignment to one of them, and the constructor can't return.
@@ -1349,7 +1357,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       future.throws = errorType && laid(errorType);
       future.params = f.params.map((p, i) => ({ name: paramName(p), type: laid(params[i]!) }));
       // An async method's future holds its object: borrowed, or owned under `Own<this>`.
-      const self = f.self && !f.self.constructor ? receiverField(f.self, laid) : undefined;
+      const self = f.self && !f.self.constructor ? receiverField(typing, f.self, laid) : undefined;
       if (self) future.params.unshift(self);
     }
     const type = generator ?? future ?? gives;
@@ -1437,7 +1445,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       // later part reads, as in '({ a: o.b, b: o.a } = o)'.
       const reads: Stmt[] = [];
       const writes: Stmt[] = [];
-      const fresh = () => `destructured ${destructures++}`;
+      const fresh = () => `destructured ${counts.destructures++}`;
       const ident = (name: string, at: Span): Expr => ({ id: freshId(), kind: "ident", name, start: at.start, end: at.end });
       const declare = (target: Pattern, init: Expr, at: Span, typedAs?: Expr): Stmt => {
         const s: Stmt = { id: freshId(), kind: "let", keyword: "const", declarations: [{ id: freshId(), target, type: undefined, init, start: at.start, end: at.end }], start: at.start, end: at.end };
@@ -2194,7 +2202,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
               const tested: Facts = c.test ? proves({ id: freshId(), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
-              const reaching: Facts = falling ? either(falling, tested) : tested;
+              const reaching: Facts = falling ? either(tables.typing, falling, tested) : tested;
               const mark = changed.length;
               assume(reaching, () => statements(c.body));
               for (const local of shared.values()) if (!before.has(local)) caseOnly.add(local);
@@ -2456,7 +2464,7 @@ function checkAll(written: Stmt[], library: boolean, macros: boolean, module: bo
       if (typed) throw new CompileError(`${who} is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
       let lifted = liftedFunctions.get(key);
       if (!lifted) {
-        lifted = { name, fn: { ...fn, id: freshId(), name: `${f.name}.${name || "arrow"}#${lifts++}` } };
+        lifted = { name, fn: { ...fn, id: freshId(), name: `${f.name}.${name || "arrow"}#${counts.lifts++}` } };
         // Its calls of itself call what it was lifted to.
         const symbol = lifted.fn.name;
         holdsNode(fn.body, (n) => {

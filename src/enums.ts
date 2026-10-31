@@ -1,6 +1,7 @@
+import type { Compilation } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { EnumMember, Expr, Span, TypeParam } from "./parser.ts";
-import { literalType, unionType, type LiteralType, type Type, type VariantType } from "./typing.ts";
+import type { LiteralType, Type, VariantType } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 
 // A C-like enum: named integer or string values, numbered on from the last integer as in
@@ -17,11 +18,13 @@ export type EnumInstance = { type: Type; variants: Map<string, VariantType> };
 
 type EnumNode = Span & { name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[]; derives?: string[] };
 
-export function declareEnum(node: EnumNode): EnumInfo {
+// Each enum's id tells enums of one name apart: their members are literals of the same values.
+export function declareEnum({ typing, counts }: Compilation, node: EnumNode): EnumInfo {
+  const { literalType, unionType } = typing;
   if (node.const) throw unsupported("const enums", node);
-  if (node.typeParams.length > 0 || node.members.some((m) => m.payload)) return dataEnum(node);
+  if (node.typeParams.length > 0 || node.members.some((m) => m.payload)) return dataEnum(node, counts.enums++);
   const members = new Map<string, LiteralType>();
-  const id = enums++;
+  const id = counts.enums++;
   let next: bigint | undefined = 0n;
   for (const m of node.members) {
     if (members.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);
@@ -39,7 +42,7 @@ export function declareEnum(node: EnumNode): EnumInfo {
 }
 
 // An enum either names values or holds data, never both, so each member means one thing.
-function dataEnum(node: EnumNode): EnumInfo {
+function dataEnum(node: EnumNode, id: number): EnumInfo {
   const seen = new Set<string>();
   for (const m of node.members) {
     if (seen.has(m.name)) throw new CompileError(`duplicate enum member '${m.name}'`, m.start, m.end);
@@ -48,13 +51,10 @@ function dataEnum(node: EnumNode): EnumInfo {
   }
   const params = node.typeParams.map((p) => p.name);
   const derives = node.derives ?? [];
-  return { type: "never", members: new Map(), data: { name: node.name, id: enums++, params, members: node.members, instances: new Map(), at: node, eq: derives.includes("Eq"), json: derives.includes("Json") } };
+  return { type: "never", members: new Map(), data: { name: node.name, id, params, members: node.members, instances: new Map(), at: node, eq: derives.includes("Eq"), json: derives.includes("Json") } };
 }
 
 const I64_MAX = (1n << 63n) - 1n;
-
-// Tells enums of one name in different programs apart, since literal types are shared.
-let enums = 0;
 
 function constant(e: Expr): bigint | string {
   if (e.kind === "int" || e.kind === "string") return e.value;

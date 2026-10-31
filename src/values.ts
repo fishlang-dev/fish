@@ -1,7 +1,7 @@
 import { freshId, shared, type Tables } from "./compilation.ts";
 import { fileAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
-import { inherited, isLifetime, upcasts, type Body, type ClassInfo } from "./classes.ts";
+import { inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { CompileError, indexText } from "./diag.ts";
@@ -10,7 +10,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, heldArgument, unequal, unjson, uninspectable, partOfItself, unfold, unfolded, arrayType, elementsOf, isTuple, tupleType, baseOf, handleType, nextResult, pointerType, SLEEP, unionType, yieldsOf, YIELD_NOW, unlocks, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, fits, holdsHandle, holdsPart, functionType, keyOf, callableOf, sameCallable, promiseElement, borrowing, lentPromise, stored as storedType, type DynType, blockType, leafFuture, leafOf, combinedFuture, genericFunctionType, type BlockType, holdsInterior, interiorMutable, interiorType, sharedCallbacks, type SharedType, holdsMut, INTERIORS, lockCallbacks, type InteriorType, holdsRef, optionRef, isCopy, literalType, lower, refType, objectType, show, widenEnum, widenLet, wrapped , sameLowered, holdsPattern, regexType, matchType, timerCallback, uncrossable, jsOptional, jsConverts, jsRead, jsTakes, keptByJs, isPlainJs, jsShape, jsUncalled, jsUntyped, jsView, type InterfaceType, type Method } from "./typing.ts";
+import { allFields, unequal, uninspectable, unfold, elementsOf, isTuple, baseOf, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, isOption, range, derives, field, holdsHandle, holdsPart, type DynType, type BlockType, holdsInterior, interiorMutable, type SharedType, holdsMut, INTERIORS, type InteriorType, optionRef, isCopy, widenEnum, widenLet, isPlainJs, jsShape, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -214,7 +214,7 @@ const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "match
 
 // What a string method given a regex gives, from the regex: one whose captures aren't known may
 // have one that takes no part. Each instance of a generic body works it out from its own regex.
-export function regexStringType(name: string, rx: RegexType, unknown: boolean): Type {
+export function regexStringType({ unionType, arrayType, matchType }: Typing, name: string, rx: RegexType, unknown: boolean): Type {
   if (name === "search") return "i64";
   if (name === "match") return rx.flags.includes("g") ? unionType([arrayType("string"), "null"]) : unionType([matchType(rx), "null"]);
   if (name === "matchAll") return arrayType(matchType(rx));
@@ -233,7 +233,6 @@ export const MATH_CONSTANTS: Record<string, number> = {
   PI: Math.PI, E: Math.E, LN2: Math.LN2, LN10: Math.LN10, LOG2E: Math.LOG2E, LOG10E: Math.LOG10E, SQRT2: Math.SQRT2, SQRT1_2: Math.SQRT1_2,
 };
 
-const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
 
 // How a rest tuple's element or its array reads in a message, as written: `t[2]` and `t[1...]`.
 export function restText(restStarts: Tables["restStarts"], e: Expr, text: (e: Expr) => string): string | undefined {
@@ -257,8 +256,17 @@ export function expressions(ctx: Context) {
     ofElements, packed, pairs, parsedArgs, parses, presetParams, presetTypes, printCalls, printed,
     promiseVariants, quotes, regexCalls, regexNews, regexStringCalls, stringBuilds, substituted,
     syncFileCalls, tagCalls, timerCalls, timerNames, timerSets, timerWrappers, tupleLiterals,
-    unusedDefaults, restStarts, parsedQuotes
+    unusedDefaults, restStarts, parsedQuotes, upcasts, typing
   } = ctx.tables;
+  const {
+    show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, pointerType, handleType, leafFuture,
+    arrayType, timerCallback, jsUncalled, fits, jsTakes, promiseElement, genericFunctionType, stored: storedType, matchType, functionType, tupleType, regexType,
+    holdsPattern, unjson, sameLowered, heldArgument, jsUntyped, jsOptional, uncrossable, keptByJs, jsConverts, interiorType, lockCallbacks, sharedCallbacks,
+    combinedFuture, nextResult, lentPromise, wrapped, jsRead, literalType, objectType, sameCallable, partOfItself, unlocks, keyOf,
+  } = typing;
+  const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
+  // Whether a value holds a future, which an array element or a sort's order can't be.
+  const holdsFuture = (t: Type): boolean => typeof t !== "string" && (t.kind === "future" || promiseElement(t) !== undefined);
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
@@ -294,7 +302,7 @@ export function expressions(ctx: Context) {
   // Powers of literals whose exponent no u32 holds, unless they became floats.
   const powers: [Expr, Expr][] = [];
   const unions: Union = {
-    kindTests, types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
+    kindTests, typing, types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
     classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
     adapt: (e, to) => adapt(e, to),
   };
@@ -525,8 +533,8 @@ export function expressions(ctx: Context) {
       if (arm.body.kind === "block") return ctx.block(arm.body, wanted);
       return [[arm.body, wanted ? value(arm.body) : result(arm.body)]];
     }));
-    const example = uncovered(e.arms.filter((a) => !a.guard).map((a) => [a.pattern]), [subject], (p) => ctx.patterns.get(p));
-    if (example) throw new CompileError(missing(example[0]!, subject), e.start, e.subject.end + 1);
+    const example = uncovered(typing, e.arms.filter((a) => !a.guard).map((a) => [a.pattern]), [subject], (p) => ctx.patterns.get(p));
+    if (example) throw new CompileError(missing(typing, example[0]!, subject), e.start, e.subject.end + 1);
     if (!wanted) return "void";
     // Arms that only throw give nothing, so some other arm has to.
     if (given.length === 0) throw new CompileError("no arm of this match gives a value; 'return' one from an arm", e.start, e.subject.end + 1);
@@ -1098,7 +1106,7 @@ export function expressions(ctx: Context) {
     }
     // The blocking calls node:fs is written over, as `fileReadSync(path)`, run on the calling
     // thread.
-    const sync = callee.kind === "ident" && fileAt(e.start).startsWith("node:") ? SYNC_FILE_CALLS[callee.name] : undefined;
+    const sync = callee.kind === "ident" && fileAt(e.start).startsWith("node:") ? syncFileSignatures(typing)[callee.name] : undefined;
     if (sync) {
       const [params, returns, throws] = sync;
       const name = (callee as Extract<Expr, { kind: "ident" }>).name;
@@ -1299,7 +1307,7 @@ export function expressions(ctx: Context) {
     q.names.clear();
     const at = { start: e.start, end: e.end };
     const types = Object.fromEntries((["AstExpr", "AstStmt", "AstType"] as const).map((n) => [n, resolveType({ id: freshId(), kind: "ref", name: n, args: [], ...at })])) as Record<Category, Type>;
-    holesOf(q, types, e).forEach((category, i) => {
+    holesOf(typing, q, types, e).forEach((category, i) => {
       const hole = q.holes[i]!;
       const t = value(hole);
       // An expression where a statement goes is the statement `e;`.
@@ -1404,7 +1412,7 @@ export function expressions(ctx: Context) {
     if (e.typeArgs.length > 0) {
       if (e.typeArgs.length !== names.length) throw new CompileError(`expected ${names.length} type argument${names.length === 1 ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
       names.forEach((n, i) => bindings.set(n, resolveType(e.typeArgs[i]!)));
-    } else written.params.forEach((p, i) => p.type && infer(p.type, argTypes[i]!, new Set(names), bindings, e.args[i]!));
+    } else written.params.forEach((p, i) => p.type && infer(ctx.tables, p.type, argTypes[i]!, new Set(names), bindings, e.args[i]!));
     for (const [i, n] of names.entries()) {
       const bound = bindings.get(n);
       if (!bound) throw new CompileError(`can't infer a type for '${n}' in this call of ${name}; pass it, as in '${(e.callee as { name?: string }).name ?? "f"}<i64>(...)'`, e.start, e.end);
@@ -1630,7 +1638,7 @@ export function expressions(ctx: Context) {
     const first = REGEX_METHODS.has(callee.name) && e.args[0] ? value(e.args[0]) : undefined;
     const rx = first === undefined ? undefined : asRegex(first);
     if (rx) return regexStringCall(e, callee, rx, lower(first!) !== rx);
-    if (first !== undefined && !STRING_METHODS[callee.name]) throw new CompileError(`'${callee.name}' takes a regex, like '${callee.name}(/x/${callee.name === "matchAll" ? "g" : ""})'; Fish doesn't turn a string into one`, e.args[0]!.start, e.args[0]!.end);
+    if (first !== undefined && !stringMethods(typing)[callee.name]) throw new CompileError(`'${callee.name}' takes a regex, like '${callee.name}(/x/${callee.name === "matchAll" ? "g" : ""})'; Fish doesn't turn a string into one`, e.args[0]!.start, e.args[0]!.end);
     // `concat` takes any number of strings, as `+` joins them.
     if (callee.name === "concat") {
       for (const a of e.args) {
@@ -1641,7 +1649,7 @@ export function expressions(ctx: Context) {
       }
       return { type: "string", what: "'concat'" };
     }
-    const method = STRING_METHODS[callee.name];
+    const method = stringMethods(typing)[callee.name];
     if (!method) throw new CompileError(`strings have no method '${callee.name}' yet`, callee.start, callee.end);
     const [params, returns, required] = method;
     if (e.args.length < required || e.args.length > params.length) {
@@ -1680,7 +1688,7 @@ export function expressions(ctx: Context) {
     }
     if (name.startsWith("replace")) replacement(e, rx, typed, unknown);
     regexStringCalls.set(e, name);
-    return { type: regexStringType(name, rx, !typed), what };
+    return { type: regexStringType(typing, name, rx, !typed), what };
   }
 
   // What replaces each match: a string with $ patterns, or an arrow function given the match,
@@ -2448,7 +2456,7 @@ export function expressions(ctx: Context) {
     const t = value(list[0]!);
     const of = given ?? heldArgument(widenLet(t));
     coerce(list[0]!, t, of, `argument of type '${show(t)}' is not assignable to parameter of type '${show(of)}'`);
-    return interior(which, of, e);
+    return interior(typing, which, of, e);
   }
 
   // An Atomic's methods, JavaScript's `Atomics` on one value: each changes it in one step, seen
@@ -2522,7 +2530,7 @@ export function expressions(ctx: Context) {
     const expected = wanted.get(e);
     const of = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : typeof expected !== "string" && expected?.kind === "block" && expected.which === "Channel" ? expected.of : undefined;
     if (!of) throw new CompileError("'Channel' needs the type it carries, as in 'new Channel<string>(8)'", e.start, e.end);
-    return channel(of, e);
+    return channel(typing, of, e);
   }
 
   // Whether a place is read through a Dyn, or a runtime-computed property, anywhere along its
@@ -2614,7 +2622,7 @@ export function expressions(ctx: Context) {
     if (list.length > 1) throw new CompileError(`'new ${name}' takes ${shape}, or nothing`, e.start, e.end);
     if (e.typeArgs.length > 0 && e.typeArgs.length !== (set ? 1 : 2)) throw new CompileError(set ? "'Set' takes the type of its members, like 'new Set<string>()'" : "'Map' takes its key and value types, like 'new Map<string, i64>()'", e.start, e.end);
     const expected = wanted.get(e);
-    const made = e.typeArgs.length > 0 ? collection(resolveType(e.typeArgs[0]!), set ? "void" : resolveType(e.typeArgs[1]!), set, e)
+    const made = e.typeArgs.length > 0 ? collection(typing, resolveType(e.typeArgs[0]!), set ? "void" : resolveType(e.typeArgs[1]!), set, e)
       : typeof expected !== "string" && expected?.kind === "map" && expected.set === set ? expected : undefined;
     // The entries or members are moved in from an array, which gives the types when nothing else does.
     const from = list[0];
@@ -2633,7 +2641,7 @@ export function expressions(ctx: Context) {
       // Each closure is its own type, so which callable type the values share must be written.
       const v = set ? undefined : lower(pair![1]!);
       if (typeof v !== "string" && v?.kind === "closure") throw new CompileError(`a 'Map' of functions needs its types written, as in 'new Map<${show(widenLet(pair![0]!))}, ${v.name}>(...)'`, e.start, e.end);
-      const result = collection(widenLet(set ? element : pair![0]!), set ? "void" : widenLet(pair![1]!), set, e);
+      const result = collection(typing, widenLet(set ? element : pair![0]!), set ? "void" : widenLet(pair![1]!), set, e);
       const wants = arrayType(set ? result.key : tupleType([result.key, result.value]));
       coerce(from, t, wants, `argument of type '${show(t)}' is not assignable to parameter of type '${show(wants)}'`);
       return result;
@@ -3208,7 +3216,7 @@ export function expressions(ctx: Context) {
     const t = value(a);
     const of = given ?? heldArgument(widenLet(t));
     coerce(a, t, of, `argument of type '${show(t)}' is not assignable to parameter of type '${show(of)}'`);
-    return { type: shareable(of, e), what: "'shared'" };
+    return { type: shareable(typing, of, e), what: "'shared'" };
   }
 
   // A shared value's `update`, a Lock's: the callback changes the value under the block's lock.
@@ -3386,7 +3394,7 @@ export function expressions(ctx: Context) {
     else if (expected) data.params.forEach((p, i) => bindings.set(p, expected.args[i]!));
     else {
       const names = new Set(data.params);
-      (member.payload ?? []).forEach((node, i) => given[i] && infer(node, widenLet(given[i]!), names, bindings, e));
+      (member.payload ?? []).forEach((node, i) => given[i] && infer(ctx.tables, node, widenLet(given[i]!), names, bindings, e));
     }
     const missing = data.params.find((p) => !bindings.has(p));
     if (missing) {
@@ -3579,7 +3587,7 @@ export function expressions(ctx: Context) {
     const through = copied(object);
     if (through) throw new CompileError(`can't call '${name}' through '${through}', which would change a copy; check '!== null' first, or call it with '?.'`, object.start, object.end);
     if (readCopy(object)) throw new CompileError(`'${name}' changes its object, and this one is read through a Dyn, which gives a copy; change it through a method`, object.start, object.end);
-    intoMember(object, types, `call '${name}' on`);
+    intoMember(typing, object, types, `call '${name}' on`);
     if (place(object)) changeable(object, `call '${name}' on`);
   }
 
@@ -3859,7 +3867,7 @@ export function expressions(ctx: Context) {
           return regexMember(e, rx, lower(object) !== rx);
         }
         const load = () => object !== through && coercions.set(e.object, object);
-        const shared = typeof object !== "string" && object.kind === "union" ? unionField(object, e.name, e) : undefined;
+        const shared = typeof object !== "string" && object.kind === "union" ? unionField(typing, object, e.name, e) : undefined;
         if (shared) {
           load();
           return linked(e) ? optional(shared, e) : shared;
@@ -3896,7 +3904,7 @@ export function expressions(ctx: Context) {
         }
         // A string's one property is its length in UTF-16 code units.
         if (stringLike(object)) {
-          if (STRING_METHODS[e.name]) throw new CompileError(`string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
+          if (stringMethods(typing)[e.name]) throw new CompileError(`string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
           if (e.name !== "length") throw new CompileError(`property '${e.name}' does not exist on type 'string'`, e.start, e.end);
           text(e.object, object, linked(e));
           return linked(e) ? optional("usize", e) : "usize";
@@ -4167,7 +4175,7 @@ export function expressions(ctx: Context) {
         const type = op === "=" ? assigned
           : op === "+" && target === "string" ? join(e.target, target, e.value, widen(e.value, assigned))
           : op === "**" ? power(e.target, target, e.value, widen(e.value, assigned), e)
-          : binaryType(op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
+          : binaryType(typing, op, ...sameNumbers(e.target, target, e.value, widen(e.value, assigned)), e);
         coerce(e.value, type, target, `type '${show(type)}' is not assignable to type '${show(target)}'`);
         // A handle's property is written in JS, with the value converted.
         if (jsMembers.has(e.target)) {
@@ -4216,7 +4224,7 @@ export function expressions(ctx: Context) {
         }
         if (isRef(then) || isRef(otherwise)) [then, otherwise] = [loaded(e.then, then), loaded(e.else, otherwise)];
         if (then === otherwise) return then;
-        return bothSides(e, then, otherwise, coerce);
+        return bothSides(typing, e, then, otherwise, coerce);
       }
       case "binary":
         // Each instance of an isDeepStrictEqual checks its own operands' types.
@@ -4233,7 +4241,7 @@ export function expressions(ctx: Context) {
           // The right side runs only when the left is true, for `&&`, or false, for `||`.
           const left = operand(e.left);
           const proven = proves(e.left);
-          return binaryType(e.op, left, assume(e.op === "&&" ? proven.yes : proven.no, () => operand(e.right)), e);
+          return binaryType(typing, e.op, left, assume(e.op === "&&" ? proven.yes : proven.no, () => operand(e.right)), e);
         }
         if (e.op === "===" || e.op === "!==") {
           const special = jsEmpty(e) ?? typeofComparison(e, unions) ?? equality(e) ?? unionComparison(e, unions, adapt);
@@ -4247,7 +4255,7 @@ export function expressions(ctx: Context) {
           const [left, right] = [operand(e.left), operand(e.right)];
           if (stringLike(left) || stringLike(right)) return join(e.left, left, e.right, right);
         }
-        return binaryType(e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
+        return binaryType(typing, e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
       // A spread anywhere but in an array literal or a call filling a rest parameter.
       case "spread":
         throw new CompileError("'...' spreads into an array literal, or as an argument into a rest parameter, as in 'function f(...xs: T[])'; it can't be used here yet", e.start, e.end);
@@ -4314,7 +4322,7 @@ export function expressions(ctx: Context) {
   // is a float.
   function power(base: Expr, left: Type, exponent: Expr, right: Type, at: Expr): Type {
     // A bigint's exponent is a bigint, as in JavaScript.
-    if (left === "bigint" || right === "bigint") return binaryType("*", left, right, at);
+    if (left === "bigint" || right === "bigint") return binaryType(typing, "*", left, right, at);
     if (isFloat(right) && left !== right && adapt(base, right)) left = right;
     // A power of literals alone may still become a float where it is written, so an exponent
     // a u32 can't hold waits to see.
@@ -4427,7 +4435,7 @@ export function expressions(ctx: Context) {
       if (part) throw new CompileError(`values of type '${show(part)}' can't be compared with '${e.op}': ${uncomparable(part)}`, e.start, e.end);
     }
     // A comparison over type parameters is checked again in each instance, once they're concrete.
-    if (openParam(l, true) || openParam(r, true)) return "boolean";
+    if (openParam(typing, l, true) || openParam(typing, r, true)) return "boolean";
     // A type parameter is compared as the type it stands for in this instance.
     const concrete = (t: Type): Type => (typeof t !== "string" && t.kind === "param" && t.concrete ? concrete(t.concrete) : t);
     const [cl, cr] = [concrete(l), concrete(r)];
@@ -4621,7 +4629,7 @@ export function expressions(ctx: Context) {
       return;
     }
     if (e.kind === "object" && typeof to !== "string" && to.kind === "object" && holdsRef(to)) type = lendFields(e, to, message);
-    const shape = !fits(type, to) ? literalShape(e, to, types) : undefined;
+    const shape = !fits(type, to) ? literalShape(typing, e, to, types) : undefined;
     if (shape) {
       shape.apply(coercions);
       type = shape.type;
@@ -4984,7 +4992,7 @@ export function expressions(ctx: Context) {
     untuple(target);
     if ((target.kind === "member" || target.kind === "index") && target.object.kind === "ident") objects.add(target.object);
     const setter = target.kind === "member" ? accessor(target) : undefined;
-    intoMember(target, types);
+    intoMember(typing, target, types);
     const indexed = target.kind === "index" ? read(target.object) : undefined;
     if (indexed !== undefined && stringLike(indexed)) {
       throw new CompileError("strings can't be changed; build a new one instead, joining parts with '+'", target.start, target.end);
@@ -5042,7 +5050,7 @@ export function expressions(ctx: Context) {
         coercions.set(target, declared.to);
         return declared.to;
       }
-      intoMember(target, types);
+      intoMember(typing, target, types);
       changeable(target, "assign to");
       const type = stored(target);
       types.set(target, type);
@@ -5476,7 +5484,7 @@ export const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.
 
 // The blocking file calls std's node:fs is written over: their parameters, what each gives, and
 // whether it throws an IoError.
-const SYNC_FILE_CALLS: Record<string, [Type[], Type, boolean]> = {
+const syncFileSignatures = ({ arrayType, tupleType }: Typing): Record<string, [Type[], Type, boolean]> => ({
   fileReadSync: [["string"], arrayType("u8"), true],
   fileWriteSync: [["string", arrayType("u8")], "void", true],
   pathExists: [["string"], "boolean", false],
@@ -5489,10 +5497,10 @@ const SYNC_FILE_CALLS: Record<string, [Type[], Type, boolean]> = {
   // A command, its arguments, the working directory ("" for this one's) and stdin, giving the
   // pid, exit status (-1 for a signal), signal number, stdout and stderr.
   processSpawn: [["string", arrayType("string"), "string", arrayType("u8")], tupleType(["i64", "i64", "i64", arrayType("u8"), arrayType("u8")]), true],
-};
+});
 
 // Each string method: its parameters, what it returns, and how many arguments it needs.
-const STRING_METHODS: Record<string, [Type[], Type, number]> = {
+const stringMethods = ({ unionType, arrayType }: Typing): Record<string, [Type[], Type, number]> => ({
   charCodeAt: [["usize"], "u16", 1],
   at: [["i64"], unionType(["string", "null"]), 1],
   charAt: [["i64"], "string", 1],
@@ -5515,7 +5523,7 @@ const STRING_METHODS: Record<string, [Type[], Type, number]> = {
   repeat: [["usize"], "string", 1],
   slice: [["i64", "i64"], "string", 1],
   substring: [["i64", "i64"], "string", 1],
-};
+});
 
 const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
 const isFixed = (t: Type): t is FixedType => typeof t !== "string" && t.kind === "fixed";
@@ -5523,9 +5531,6 @@ const isFixed = (t: Type): t is FixedType => typeof t !== "string" && t.kind ===
 // The methods an array has.
 // A type's name with its article, as `an 'i64'` or `a 'string'`.
 const article = (name: string) => `${/^[aeiou]/i.test(name) ? "an" : "a"} '${name}'`;
-
-// Whether a value holds a future, which an array element or a sort's order can't be.
-const holdsFuture = (t: Type): boolean => typeof t !== "string" && (t.kind === "future" || promiseElement(t) !== undefined);
 
 // The methods that run a callback on each element.
 const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex"]);

@@ -2,7 +2,7 @@ import { freshId, type Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { rustNames, type RustName } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { classType, type Access, type ClassType, type FunctionType, type Type } from "./typing.ts";
+import type { Access, ClassType, FunctionType, Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
 import { NodeSet } from "./nodes.ts";
@@ -92,7 +92,7 @@ export type ClassInfo = {
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
 export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
-  const { genericStatics } = tables;
+  const { genericStatics, typing: { classType } } = tables;
   if (node.abstract) throw unsupported("abstract classes", node);
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   if (node.extends && node.extends.kind !== "ident" && !(node.extends.kind === "instantiation" && node.extends.expr.kind === "ident")) {
@@ -280,12 +280,6 @@ function rustOf(m: ClassMember): { foreign?: true; rust?: RustName } {
   const rust = rustNames.get(m);
   return rust ? { foreign: true, rust } : {};
 }
-
-// The spans of `equals` methods `@derive(Eq)` wrote over a base class. Their `super.equals(other)`
-// lends `other` to the base's `equals`, which reads the embedded base a reference to the class
-// points at, though Fish code can't upcast it itself. A span outlives the copies macros make;
-// the set holds one program's spans, cleared as its macros expand.
-export const upcasts = new Set<string>();
 
 // Links a derived class to the base it embeds. Its constructor must start with
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without

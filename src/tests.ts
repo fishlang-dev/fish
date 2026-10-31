@@ -1,7 +1,7 @@
 import { availableParallelism } from "node:os";
 import { relative } from "node:path";
 import { freshId, shared } from "./compilation.ts";
-import { CompileError } from "./diag.ts";
+import { CompileError, type Names } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
 import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
 
@@ -34,7 +34,7 @@ export function stripTests({ modules }: Loaded) {
 // Turns each test of `modules`, in order, into a function of its own file, `test "name"`, which
 // no program can write. A test's function throws Error, so a body may throw, and is async when
 // the body is. Names are unique across the files; a second use of one is refused.
-export function liftTests(modules: Module[]): Test[] {
+export function liftTests(names: Names, modules: Module[]): Test[] {
   const tests: Test[] = [];
   for (const module of modules) {
     module.statements = module.statements.map((s) => {
@@ -45,7 +45,7 @@ export function liftTests(modules: Module[]): Test[] {
       if (twin) throw new CompileError(`there is already a test named '${name.value}' in '${twin.module.file}'; give each test a name of its own`, name.start, name.end);
       tests.push({ name: name.value, module, index: tests.length, async: body.async });
       const symbol = `test ${JSON.stringify(name.value)}`;
-      shared.names.madeUp.set(symbol, `the test '${name.value}'`);
+      names.madeUp.set(symbol, `the test '${name.value}'`);
       return lifted(symbol, body, s);
     });
   }
@@ -104,8 +104,8 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 
 // Gives each file's `main` a name no program can write, since the harness is the program's
 // `main`; a test or function calling a file's `main` still reaches it.
-export function hideMains(modules: Module[]) {
-  shared.names.madeUp.set("file main", "'main'");
+export function hideMains(names: Names, modules: Module[]) {
+  names.madeUp.set("file main", "'main'");
   for (const m of modules) renameIn(m.statements, (name) => (name === "main" ? "file main" : undefined));
 }
 

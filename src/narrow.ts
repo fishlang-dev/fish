@@ -1,7 +1,7 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
 import type { Tables } from "./compilation.ts";
-import { fits, holdsPlainJs, isNumeric, isSubclass, refType, unfold, unionType, type Type } from "./typing.ts";
+import { holdsPlainJs, isNumeric, isSubclass, unfold, type Type, type Typing } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
@@ -55,9 +55,11 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // What a call of a function with a type predicate proves: which argument is narrowed, and to what.
 export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: number; type: Type } | undefined;
 
-export function guard(kindTests: Tables["kindTests"], e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
+export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
+  const { kindTests, typing } = tables;
+  const { fits, refType, unionType } = typing;
   const nothing: Guard = { yes: new Map(), no: new Map() };
-  const of = (x: Expr) => guard(kindTests, x, types, locals, narrowable, predicate);
+  const of = (x: Expr) => guard(tables, x, types, locals, narrowable, predicate);
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
   const proved = e.kind === "call" && predicate ? predicate(e) : undefined;
   if (proved && e.kind === "call" && e.args[proved.index]) return split(e.args[proved.index]!, (m) => (fits(m, proved.type) ? "yes" : "no"), true);
@@ -72,7 +74,7 @@ export function guard(kindTests: Tables["kindTests"], e: Expr, types: NodeMap<Ex
     const [a, b] = [of(e.left), of(e.right)];
     // `a && b` is true when both are, and false when either is; `||` the other way round.
     const both = (x: Facts, y: Facts) => new Map([...x, ...y]);
-    return e.op === "&&" ? { yes: both(a.yes, b.yes), no: either(a.no, b.no) } : { yes: either(a.yes, b.yes), no: both(a.no, b.no) };
+    return e.op === "&&" ? { yes: both(a.yes, b.yes), no: either(typing, a.no, b.no) } : { yes: either(typing, a.yes, b.yes), no: both(a.no, b.no) };
   }
   if (e.op === "instanceof") {
     const c = types.get(e.right);
@@ -145,7 +147,7 @@ export const isEmpty = (e: Expr, locals: NodeMap<Expr, Local>) => e.kind === "nu
 const is = (t: Type, value: unknown) => typeof t !== "string" && t.kind === "literal" && t.value === value;
 
 // A variable either of two branches narrowed has, after them, whichever type it had.
-export function either(x: Facts, y: Facts): Facts {
+export function either({ unionType }: Typing, x: Facts, y: Facts): Facts {
   const out: Facts = new Map();
   for (const [local, t] of x) {
     const other = y.get(local);

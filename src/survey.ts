@@ -273,7 +273,7 @@ export function grade(score: number): string {
 function captures(program: Stmt[]): number[] {
   const found: number[] = [];
   try {
-    hoistLocals(renumber(structuredClone(program), freshId), (local) => found.push(local.start));
+    hoistLocals({ local: new Set(), madeUp: new Map() }, renumber(structuredClone(program), freshId), (local) => found.push(local.start));
   } catch {
     return [];
   }

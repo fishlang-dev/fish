@@ -3,11 +3,10 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Checked } from "./check.ts";
-import { shared } from "./compilation.ts";
 import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
 import { analyze } from "./main.ts";
 import { STD_BASE } from "./std.ts";
-import { show, type Type } from "./typing.ts";
+import type { Type } from "./typing.ts";
 
 type Message = { id?: number | string | null; method?: string; params?: Params };
 // The parameters of the methods served, which all name a document.
@@ -75,7 +74,10 @@ function diagnose(path: string, text: string, read: (path: string) => string): {
 }
 
 const before = (a: Position, b: Position) => a.line < b.line || (a.line === b.line && a.character <= b.character);
-const named = (t: Type) => shown(written(show(t), shared.names), shared.names);
+// A type as its program's names read to the user.
+function named({ compilation: { names, typing } }: Checked, t: Type): string {
+  return shown(written(typing.show(t), names), names);
+}
 
 // A hint after each fallible call and `await` in `text` within `range`, naming what it can throw.
 // A generic body's definition and its instances share nodes, so a place is hinted once.
@@ -87,8 +89,8 @@ export function hints(checked: Checked, text: string, range: Range) {
       if (at.kind === "throw" || at.end > text.length || found.has(at.end)) continue;
       const place = position(text, at.end);
       if (!before(range.start, place) || !before(place, range.end)) continue;
-      const tooltip = raised.wrapper && `becomes '${named(raised.to)}' through 'From'`;
-      found.set(at.end, { position: place, label: `throws ${named(raised.from)}`, paddingLeft: true, ...(tooltip && { tooltip }) });
+      const tooltip = raised.wrapper && `becomes '${named(checked, raised.to)}' through 'From'`;
+      found.set(at.end, { position: place, label: `throws ${named(checked, raised.from)}`, paddingLeft: true, ...(tooltip && { tooltip }) });
     }
   }
   return [...found].sort(([a], [b]) => a - b).map(([, hint]) => hint);

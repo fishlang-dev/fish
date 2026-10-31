@@ -1,13 +1,12 @@
 import type { Checked } from "./check.ts";
-import { upcasts } from "./classes.ts";
 import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
-import { freshId, shared, type Tables } from "./compilation.ts";
+import { freshId, shared, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
-import { fits, show, type Type } from "./typing.ts";
+import type { Type } from "./typing.ts";
 import { NodeMap, NodeSet, renumber } from "./nodes.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on
@@ -28,14 +27,11 @@ type Decl = Stmt & { decorators?: Expr[] };
 // A decorated top-level declaration of a file, and whether it is exported.
 type Site = { module: Module; index: number; decl: Decl; exported: boolean };
 
-let expansions = 0;
-
 // Expands every file's macros in place. A round links a copy of the files, checks the macros
 // with every decorator's arguments, then applies each declaration's decorators in turn: its
 // members' and parameters', nearest first, then its own. A decorator a macro gave applies in
 // the next round.
-export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (program: Stmt[]) => Checked) {
-  upcasts.clear();
+export function expandMacros(compilation: Compilation, loaded: Loaded, library: boolean, checkMacros: (program: Stmt[]) => Checked) {
   // The pinned names every round's quotes made, which a later round's macro may give back.
   const pins = new Set<string>();
   for (let round = 0; ; round++) {
@@ -63,13 +59,13 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
       const twins = placed(linked(site));
       own.forEach((d, i) => {
         const twin = twins[i]!.decorator;
-        prepared.set(d.decorator, builtin(twin, macros) ? { linked: twin, args: [], builtin: true } : { linked: twin, args: argumentsOf(twin, macros, d.where) });
+        prepared.set(d.decorator, builtin(twin, macros) ? { linked: twin, args: [], builtin: true } : { linked: twin, args: argumentsOf(compilation.counts, twin, macros, d.where) });
       });
     }
     const constants = [...prepared.values()].flatMap((p) => p.args.flatMap((a) => (a.constant ? [a.constant] : [])));
     const macroCode = macroProgram(program, macros, new NodeSet(sites.map(linked)), constants);
     const checked = checkArguments(() => checkMacros(macroCode), constants);
-    const context = { macros, checked, code: macroCode, loaded, pins, library };
+    const context = { compilation, macros, checked, code: macroCode, loaded, pins, library };
     for (const site of [...sites].reverse()) {
       // What the site's macros give stands in its file as each one runs, so a later one sees it.
       const statements = site.module.statements;
@@ -86,7 +82,7 @@ export function expandMacros(loaded: Loaded, library: boolean, checkMacros: (pro
         const pending = pendingOf(d);
         const ready = prepared.get(pending.decorator);
         if (!ready) break;
-        const out = ready.builtin ? derived(d, s.kind === "export", pending) : run(d, s.kind === "export", site.module, pending, ready, context);
+        const out = ready.builtin ? derived(compilation.upcasts, d, s.kind === "export", pending) : run(d, s.kind === "export", site.module, pending, ready, context);
         statements.splice(site.index + at, 1, ...out);
         count += out.length - 1;
       }
@@ -108,7 +104,7 @@ function checkArguments(check: () => Checked, constants: Stmt[]): Checked {
 }
 
 type Prepared = { linked: Expr; args: Argument[]; builtin?: true };
-type Context = { macros: Map<string, Func>; checked: Checked; code: Stmt[]; loaded: Loaded; pins: Set<string>; library: boolean };
+type Context = { compilation: Compilation; macros: Map<string, Func>; checked: Checked; code: Stmt[]; loaded: Loaded; pins: Set<string>; library: boolean };
 
 // Whether a decorator is `@derive(...)`, which the compiler gives unless the program has its own.
 function builtin(d: Expr, macros: Map<string, Func>): boolean {
@@ -118,7 +114,7 @@ function builtin(d: Expr, macros: Map<string, Func>): boolean {
 
 // `@derive(Eq, Json)`: a mark on the class or enum that `===` and `JSON` read, and on a class
 // with Eq, the `equals` comparing every field that `===` calls, unless the class has one.
-function derived(d: Decl, exported: boolean, pending: Pending): Stmt[] {
+function derived(upcasts: Set<string>, d: Decl, exported: boolean, pending: Pending): Stmt[] {
   const at = pending.decorator;
   if (pending.where !== "own" || (d.kind !== "class" && d.kind !== "enum")) throw new CompileError("'derive' applies to a class or an enum", at.start, at.end);
   const traits = at.kind === "call" ? at.args : [];
@@ -272,9 +268,8 @@ function macroOf(d: Expr, macros: Map<string, Func>): Func {
 // A decorator's argument: its syntax, for a parameter typed `Ast` or `AstExpr`, or else the
 // constant that computes its value.
 type Argument = { expr: Expr; syntax: boolean; constant?: Stmt; name?: string; none?: true };
-let constants = 0;
 
-function argumentsOf(d: Expr, macros: Map<string, Func>, where: Pending["where"]): Argument[] {
+function argumentsOf(counts: Compilation["counts"], d: Expr, macros: Map<string, Func>, where: Pending["where"]): Argument[] {
   const macro = macroOf(d, macros);
   const before = where === "own" ? 1 : 2;
   if (before === 2) {
@@ -301,7 +296,7 @@ function argumentsOf(d: Expr, macros: Map<string, Func>, where: Pending["where"]
     if (!arg && !param.default) return { expr: d, syntax: false, none: true };
     const expr = arg ?? param.default!;
     if (arg && t?.kind === "ref" && (t.name === "Ast" || t.name === "AstExpr") && t.args.length === 0) return { expr, syntax: true };
-    const name = `__fishArgument${constants++}`;
+    const name = `__fishArgument${counts.constants++}`;
     const at = { start: expr.start, end: expr.end };
     const constant: Stmt = { id: freshId(), kind: "let", keyword: "const", declarations: [{ id: freshId(), target: { id: freshId(), kind: "ident", name, ...at }, type: t, init: expr, ...at }], ...at };
     return { expr, syntax: false, constant, name };
@@ -400,7 +395,7 @@ function quoteDeclarations(parsed: Tables["parsedQuotes"], s: Stmt): string[] {
 // on the declaration of the same name, or the same kind, and on its members and parameters of
 // the same name, or at the same place.
 function run(decl: Decl, exported: boolean, module: Module, pending: Pending, ready: Prepared, ctx: Context): Stmt[] {
-  const { macros, checked, code, loaded, pins, library } = ctx;
+  const { compilation, macros, checked, code, loaded, pins, library } = ctx;
   const nearest = ready.linked;
   const macro = macroOf(nearest, macros);
   const before = pending.where === "own" ? 1 : 2;
@@ -416,14 +411,14 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
   let value: Value;
   try {
-    value = built<Value>({ tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
+    value = built<Value>(checked.tables, { tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
   } catch (e) {
     if (e instanceof CompileError) throw e;
     throw new CompileError("a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
   }
-  const suffix = `@m${expansions++}`;
+  const suffix = `@m${compilation.counts.expansions++}`;
   const fresh = (name: string) => {
-    shared.names.local.add(`${name}${suffix}`);
+    compilation.names.local.add(`${name}${suffix}`);
     return `${name}${suffix}`;
   };
   // The declarations this macro's quotes make are known from the start, so a quote naming one
@@ -441,10 +436,10 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     const t = instance.locals.get(macro.params[i + before]!)!.type;
     if (a.none) return null;
     if (!a.syntax) return comptimeBody(checked.instances.find((c) => c.body.name === `const ${a.name}`)!);
-    return built<Value>({ tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
+    return built<Value>(checked.tables, { tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
-  const result = withHygiene(hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
+  const result = withHygiene(checked.tables, hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
   const node = nodeOf(result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
@@ -466,7 +461,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     // On an exported declaration, what the macro gives under names the program can see is
     // exported too; its private declarations aren't. A library's exports are C functions, so
     // there only the declaration's own name stays exported.
-    const visible = namesOf(decl).every((n) => !shared.names.local.has(n)) && EXPORTABLE.has(decl.kind) && (!library || namesOf(decl)[0] === name);
+    const visible = namesOf(decl).every((n) => !compilation.names.local.has(n)) && EXPORTABLE.has(decl.kind) && (!library || namesOf(decl)[0] === name);
     return exported && !isExport(decl) && visible ? ({ id: freshId(), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl;
   });
 }

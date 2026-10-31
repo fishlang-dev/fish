@@ -7,7 +7,7 @@ import { CompileError } from "./diag.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { retuple, fits, holdsPattern, objectType, optionalField, blockFor, show, tupleType, unionType, widenEnum, type ClassType, type Type, type VariantType } from "./typing.ts";
+import { widenEnum, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -27,6 +27,8 @@ type Checker = {
 };
 
 export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody }: Checker) {
+  const { typing } = tables;
+  const { optionalField, holdsPattern, fits, show, blockFor } = typing;
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new Map<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
@@ -90,7 +92,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     c.type.fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
       if (f.type) {
-        const type = storable(withScope(c.scope, () => resolveType(f.type!)), f);
+        const type = storable(typing, withScope(c.scope, () => resolveType(f.type!)), f);
         const optional = f.written ? optionalField(f.name, withScope(c.scope, () => resolveType(f.written!))).optional : f.undefinedSpelled && ("undefined" as const);
         return { name: f.name, type, access: f.access, ...readonly, ...(optional && { optional }) };
       }
@@ -168,7 +170,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       else if (t.kind === "object") t.fields.forEach((f) => reach(f.type));
     };
     reach(c);
-    for (const h of holders) for (const f of h.fields) f.type = swapped(f.type, c, back);
+    for (const h of holders) for (const f of h.fields) f.type = swapped(typing, f.type, c, back);
   }
 
   function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
@@ -186,10 +188,11 @@ export function registry({ tables, classes, templates, members, resolveType, wit
 }
 
 // A type with a class it holds inline, in a union, an object or a tuple, swapped for another.
-function swapped(t: Type, from: ClassType, to: Type): Type {
+function swapped(typing: Typing, t: Type, from: ClassType, to: Type): Type {
+  const { unionType, retuple, objectType } = typing;
   if (t === from) return to;
   if (typeof t === "string") return t;
-  if (t.kind === "union") return unionType(t.members.map((m) => swapped(m, from, to)), t.name);
-  if (t.kind === "object" && !t.match) return t.tuple ? retuple(t, (e) => swapped(e, from, to)) : objectType(t.fields.map((f) => ({ ...f, type: swapped(f.type, from, to) })));
+  if (t.kind === "union") return unionType(t.members.map((m) => swapped(typing, m, from, to)), t.name);
+  if (t.kind === "object" && !t.match) return t.tuple ? retuple(t, (e) => swapped(typing, e, from, to)) : objectType(t.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
   return t;
 }

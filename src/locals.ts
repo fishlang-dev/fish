@@ -1,5 +1,5 @@
-import { freshId, shared } from "./compilation.ts";
-import { CompileError } from "./diag.ts";
+import { freshId } from "./compilation.ts";
+import { CompileError, type Names } from "./diag.ts";
 import type { Expr, Param, Pattern, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { NodeMap, NodeSet } from "./nodes.ts";
 
@@ -19,9 +19,9 @@ const BODIED = new Set(["function", "arrow", "method", "constructor", "get", "se
 // The fields of a statement that hold statement lists, each a scope of its own.
 const LISTS = ["body", "then", "else", "block", "handler", "finalizer"];
 
-// `captured`, when given, is told of each local class or enum using a variable around it, which
-// is otherwise an error.
-export function hoistLocals(program: Stmt[], captured?: (local: Local, name: string) => void): Stmt[] {
+// Each name made is noted in `names`. `captured`, when given, is told of each local class or enum
+// using a variable around it, which is otherwise an error.
+export function hoistLocals(names: Names, program: Stmt[], captured?: (local: Local, name: string) => void): Stmt[] {
   const hoisted: Stmt[] = [];
   let count = 0;
 
@@ -67,7 +67,7 @@ export function hoistLocals(program: Stmt[], captured?: (local: Local, name: str
       const name = local.name;
       // Its name holds no '.', which would read as an enum's member.
       const mangled = `${name}@${count++}`;
-      shared.names.local.add(mangled);
+      names.local.add(mangled);
       const params = uses.get(local)!;
       if (local.kind === "class" || local.kind === "enum") {
         const own = declaredWithin(local);

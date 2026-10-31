@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { check } from "../src/check.ts";
-import { shared } from "../src/compilation.ts";
+import { newCompilation, shared } from "../src/compilation.ts";
 import { buildLibrary } from "../src/main.ts";
 import { parse } from "../src/parser.ts";
 
@@ -161,16 +161,16 @@ for (const [src, message] of [
   ["export function _Unwind_Resume(a: i64): i64 { return a; }", "since C's library or the Fish runtime already uses that name"],
 ]) {
   test(src!, () => {
-    expect(() => check(parse(src!, shared.ids), true)).toThrow(message!);
+    expect(() => check(newCompilation(), parse(src!, shared.ids), true)).toThrow(message!);
   });
 }
 
 test("a library may export names that only appear in the runtime's comments", () => {
-  expect(() => check(parse("export function start(n: i64): i64 { return n; }\nexport function end(n: i64): i64 { return n; }", shared.ids), true)).not.toThrow();
+  expect(() => check(newCompilation(), parse("export function start(n: i64): i64 { return n; }\nexport function end(n: i64): i64 { return n; }", shared.ids), true)).not.toThrow();
 });
 
 test("outside a library an export is an ordinary function", () => {
-  expect(() => check(parse("export function f(s: string): string { return s; }\nfunction main() { console.log(f(\"x\")); }", shared.ids))).not.toThrow();
+  expect(() => check(newCompilation(), parse("export function f(s: string): string { return s; }\nfunction main() { console.log(f(\"x\")); }", shared.ids))).not.toThrow();
 });
 
 test("a library in several files gives C only its entry file's exports", () => {

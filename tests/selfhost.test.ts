@@ -39,10 +39,13 @@ test("every default parameter in the compiler's source has a type Fish can read"
   expect(untyped).toEqual([]);
 });
 
-// Fish refuses a top-level `let`, and a `const` is deeply immutable, so the front end keeps no
-// state of its own: no top-level `let`, and no table a top-level `const` holds is changed after
-// load, in its own file or in one importing it. Its callers hand it what it needs.
+// Fish refuses a top-level `let`, and a `const` is deeply immutable, so the front end and the
+// checker keep no state of their own: no top-level `let`, and no table a top-level `const` holds
+// is changed after load, in its own file or in one importing it. Their callers hand them what
+// they need.
 const FRONT_END = ["diag.ts", "nodes.ts", "lexer.ts", "parser.ts", "expressions.ts", "types.ts", "patterns.ts", "declarations.ts", "regex.ts"];
+const CHECKER = ["check.ts", "values.ts", "typing.ts", "classes.ts", "generics.ts", "resolve.ts", "typefns.ts", "operators.ts", "interfaces.ts", "flow.ts", "narrow.ts", "match.ts", "moves.ts", "comptime.ts", "unions.ts", "enums.ts", "registry.ts", "unsupported.ts", "defaults.ts", "locals.ts", "macros.ts", "quote.ts"];
+const STATELESS = [...FRONT_END, ...CHECKER];
 const MUTATORS = new Set(["set", "add", "delete", "clear", "push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin"]);
 
 const topLevel = (program: Stmt[]) => program.map((s) => (s.kind === "export" ? s.body : s));
@@ -77,19 +80,19 @@ function tableChanges(program: Stmt[], tables: Set<string>): string[] {
   return found;
 }
 
-test("the front end keeps no module state", () => {
+test("the front end and the checker keep no module state", () => {
   const programs = new Map(readdirSync(SRC).filter((f) => f.endsWith(".ts")).map((f) => [f, parse(readFileSync(join(SRC, f), "utf8"), shared.ids)] as const));
-  const tables = new Map(FRONT_END.map((f) => [f, new Set(tablesOf(programs.get(f)!))]));
+  const tables = new Map(STATELESS.map((f) => [f, new Set(tablesOf(programs.get(f)!))]));
   const found: string[] = [];
   for (const [f, program] of programs) {
-    if (FRONT_END.includes(f)) found.push(...topLevelLets(program).map((at) => `${f}: a top-level 'let' at ${at}`));
-    // The front end's tables this file can reach: its own, and those it imports.
+    if (STATELESS.includes(f)) found.push(...topLevelLets(program).map((at) => `${f}: a top-level 'let' at ${at}`));
+    // The tables of those files this one can reach: its own, and those it imports.
     const reached = new Set(tables.get(f));
     for (const s of program) {
       const from = s.kind === "import" && s.module.startsWith("./") ? tables.get(s.module.slice(2)) : undefined;
       if (s.kind === "import" && from) for (const n of s.named ?? []) if (from.has(n.name)) reached.add(n.alias ?? n.name);
     }
-    found.push(...tableChanges(program, reached).map((c) => `${f}: ${c} changes a front-end table`));
+    found.push(...tableChanges(program, reached).map((c) => `${f}: ${c} changes a module's table`));
   }
   expect(found).toEqual([]);
 });

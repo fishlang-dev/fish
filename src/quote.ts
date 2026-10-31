@@ -4,7 +4,7 @@ import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
 import { renumber } from "./nodes.ts";
-import { field, unfold, unfolded, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import { field, unfold, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the
 // `Ast` value it stands for, with each `${x}` a splice of another node.
@@ -102,9 +102,9 @@ function spliceOf(node: unknown): number | undefined {
 
 // The category each splice of a quote stands in, found by walking its tree beside the Ast type
 // it makes; a splice anywhere else, as a name, is an error.
-export function holesOf(q: Quote, types: Record<Category, Type>, at: Span): Category[] {
+export function holesOf(typing: Typing, q: Quote, types: Record<Category, Type>, at: Span): Category[] {
   const found: (Category | undefined)[] = q.holes.map(() => undefined);
-  walk(q.tree, types[q.category], types, q, (i, category) => {
+  walk(typing, q.tree, types[q.category], types, q, (i, category) => {
     if (i >= q.holes.length) throw new CompileError(`'${SPLICE}${i}' is the name a quote's splices are parsed under, so a quote can't use it`, at.start, at.end);
     found[i] = category;
   });
@@ -133,8 +133,8 @@ function memberFor(node: unknown, union: UnionType): Type | undefined {
   });
 }
 
-function walk(node: unknown, type: Type, types: Record<Category, Type>, q: Quote, hole: (i: number, category: Category) => void) {
-  const t = unfolded(type);
+function walk(typing: Typing, node: unknown, type: Type, types: Record<Category, Type>, q: Quote, hole: (i: number, category: Category) => void) {
+  const t = typing.unfolded(type);
   // A splice where a name goes takes an identifier, its name put there.
   const name = nameSplice(node);
   if (name !== undefined) {
@@ -146,14 +146,14 @@ function walk(node: unknown, type: Type, types: Record<Category, Type>, q: Quote
     const splice = spliceIn(node, t, types, q.asExpressions);
     if (splice) return hole(splice.i, splice.category);
     const member = memberFor(node, t);
-    if (member) walk(node, member, types, q, hole);
+    if (member) walk(typing, node, member, types, q, hole);
     return;
   }
   if (t.kind === "array" && Array.isArray(node)) {
-    for (const x of node) walk(x, t.element, types, q, hole);
+    for (const x of node) walk(typing, x, t.element, types, q, hole);
     return;
   }
-  if (t.kind === "object") for (const f of t.fields) walk((node as Record<string, unknown>)[f.name], f.type, types, q, hole);
+  if (t.kind === "object") for (const f of t.fields) walk(typing, (node as Record<string, unknown>)[f.name], f.type, types, q, hole);
 }
 
 // The splice a node in a union's place stands for: a statement written as a splice alone, or a
@@ -193,15 +193,15 @@ export type Builder<V> = {
 // gives the declaration the name means in that file; and the names of the program's enum
 // members, which a bare name in a quoted match means rather than binds.
 export type Hygiene = { declared: Map<string, string>; namesIn(file: number): Set<string>; pins: Set<string>; members: Set<string>; fresh(name: string): string };
-let hygiene: Hygiene | undefined;
 
-export function withHygiene<T>(h: Hygiene, run: () => T): T {
-  const outer = hygiene;
-  hygiene = h;
+// Runs `run` with the quotes it builds in the check `tables` belongs to taking hygiene `h`.
+export function withHygiene<T>(tables: Tables, h: Hygiene, run: () => T): T {
+  const outer = tables.hygiene;
+  tables.hygiene = h;
   try {
     return run();
   } finally {
-    hygiene = outer;
+    tables.hygiene = outer;
   }
 }
 
@@ -296,10 +296,10 @@ function hygienic(tree: unknown, h: Hygiene, file: number, bound: Map<string, st
 // Without `at`, every node keeps its own span, as a declaration a macro takes does. `scope`
 // gives the bindings of the quotes spliced in, and gets this quote's, with theirs; `free` gets
 // the names it leaves free.
-export function built<V>(q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>, scope: Map<string, string> = new Map<string, string>(), free: Free = new Map()): V {
+export function built<V>({ typing, hygiene }: Tables, q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>, scope: Map<string, string> = new Map<string, string>(), free: Free = new Map()): V {
   // `here` is the span of the node a part is in, where an error about the part is reported.
   const make = (node: unknown, type: Type, here: Span = at ?? { start: 0, end: 0 }): V => {
-    const t = unfolded(type);
+    const t = typing.unfolded(type);
     if (typeof t !== "string" && t.kind === "union") {
       if (node === null || node === undefined) return b.member(b.none, t, "null");
       const splice = spliceIn(node, t, types, q.asExpressions);

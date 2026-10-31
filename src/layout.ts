@@ -3,7 +3,7 @@ import { category, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Tables } from "./compilation.ts";
-import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, lower, membersFor, optionRef, unfold, type ClassType, type ObjectType, type Type, type UnionType } from "./typing.ts";
+import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, optionRef, unfold, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -16,18 +16,20 @@ const PRIMITIVES: Record<Exclude<Type, object>, string> = {
 // An object is a literal struct of its fields, in their sorted order. An instance is a
 // literal struct of the base it embeds, if any, then its own fields in declaration order. A
 // union is its member's index, then enough 64-bit words for its largest member.
-export function llvm(t: Type): string {
-  if (typeof t === "string") return PRIMITIVES[t];
-  // A Rust type's handle is the pointer to its boxed value, the one field its class has.
-  if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive" || rustClassOf(t)) return "ptr";
-  if (t.kind === "array") return ARRAY;
-  if (t.kind === "fixed") return `[${t.size} x ${llvm(t.element)}]`;
-  if (t.kind === "dyn") return DYN;
-  if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
-  // Atomic instructions need whole bytes, so an atomic boolean is a byte.
-  if (t.kind === "interior") return t.which === "Lock" ? `{ i32, ${llvm(t.of)} }` : t.which === "Atomic" && lower(t.of) === "boolean" ? "i8" : llvm(t.of);
-  const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => llvm(f.type))];
-  return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
+export function layoutOf({ lower }: Typing): (t: Type) => string {
+  return function llvm(t: Type): string {
+    if (typeof t === "string") return PRIMITIVES[t];
+    // A Rust type's handle is the pointer to its boxed value, the one field its class has.
+    if (t.kind === "ref" || t.kind === "pointer" || t.kind === "handle" || t.kind === "shared" || t.kind === "block" || t.kind === "map" || t.kind === "regex" || t.kind === "recursive" || rustClassOf(t)) return "ptr";
+    if (t.kind === "array") return ARRAY;
+    if (t.kind === "fixed") return `[${t.size} x ${llvm(t.element)}]`;
+    if (t.kind === "dyn") return DYN;
+    if (t.kind === "union") return `{ i32, [${words(t)} x i64] }`;
+    // Atomic instructions need whole bytes, so an atomic boolean is a byte.
+    if (t.kind === "interior") return t.which === "Lock" ? `{ i32, ${llvm(t.of)} }` : t.which === "Atomic" && lower(t.of) === "boolean" ? "i8" : llvm(t.of);
+    const parts = [...(t.kind === "class" && t.base ? [llvm(t.base)] : []), ...(t.kind === "generator" || t.kind === "future" ? t.frame : t.fields).map((f) => llvm(f.type))];
+    return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
+  };
 }
 
 function words(t: UnionType): number {
@@ -73,13 +75,16 @@ function size(t: Type): [number, number] {
 // `text` gives a pointer to a literal's string block, which lives for the whole program.
 // `deep` compares two values of one type holding objects, arrays or instances, part by part.
 // `inspect` gives the string `console.log` prints for a value laid out as Node lays one out.
-export type Slots = Builder & { alloca(type: string): string; text(value: string): string; deep?(a: string, b: string, type: Type): string; inspect?(v: string, type: Type): string };
+// `typing` holds the program's types.
+export type Slots = Builder & { typing: Typing; alloca(type: string): string; text(value: string): string; deep?(a: string, b: string, type: Type): string; inspect?(v: string, type: Type): string };
 
 // Whether values of a type compare part by part rather than as one word.
 export const compound = (t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(t.kind);
 
 export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
-  const { emit, temp, label, startBlock, alloca, deep } = b;
+  const { emit, temp, label, startBlock, alloca, deep, typing } = b;
+  const { membersFor } = typing;
+  const llvm = layoutOf(typing);
   return { convert, test, equals, unionField, holds, eachMember };
 
   // Lowers `typeof x === "name"`, `x instanceof Map` and `Array.isArray(x)`, or `x === v` with

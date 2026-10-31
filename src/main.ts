@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
-import { shared } from "./compilation.ts";
+import { newCompilation, shared, type Compilation } from "./compilation.ts";
 import { CompileError, formatError, named, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
 import { locking, resolvePackages } from "./dependencies.ts";
@@ -40,9 +40,10 @@ export type Library = "static" | "shared";
 // files it imports.
 export function analyze(src: string, file: string, read?: (path: string) => string): { checked: Checked; sources: Source[] } {
   const loaded = load(file, src, read);
-  return withSources(loaded.sources, () => {
-    liftTests(loaded.modules.filter((m) => m.pkg === loaded.modules[0]!.pkg && !m.path.startsWith("std:")));
-    return { checked: check(expanded(loaded, false), false, false, true), sources: loaded.sources };
+  const compilation = newCompilation();
+  return withSources(compilation, loaded.sources, () => {
+    liftTests(compilation.names, loaded.modules.filter((m) => m.pkg === loaded.modules[0]!.pkg && !m.path.startsWith("std:")));
+    return { checked: check(compilation, expanded(compilation, loaded, false), false, false, true), sources: loaded.sources };
   });
 }
 
@@ -55,14 +56,16 @@ export function compile(src: string, file: string, release = false, panic: Panic
 // with no main; throws its first CompileError.
 export function checkProgram(file: string, library = false) {
   const loaded = load(file, readFileSync(file, "utf8"));
-  withSources(loaded.sources, () => check(expanded(loaded, library), library));
+  const compilation = newCompilation();
+  withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, library), library));
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
 function compiled(src: string, file: string, release: boolean, panic: Panic, library: boolean): { ir: string; instances: Instance[]; shim: () => Shim | undefined } {
   const loaded = load(file, src);
-  return withSources(loaded.sources, () => {
-    const checked = check(expanded(loaded, library), library);
+  const compilation = newCompilation();
+  return withSources(compilation, loaded.sources, () => {
+    const checked = check(compilation, expanded(compilation, loaded, library), library);
     return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources }), loaded), instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances) };
   });
 }
@@ -79,19 +82,19 @@ function bundled(ir: string, loaded: Loaded): string {
 
 // The program's files with their macros expanded, linked into one program. Tests not lifted
 // already are left out.
-function expanded(loaded: Loaded, library: boolean): Stmt[] {
+function expanded(compilation: Compilation, loaded: Loaded, library: boolean): Stmt[] {
   stripTests(loaded);
-  expandMacros(loaded, library, (macros) => check(macros, false, true));
+  expandMacros(compilation, loaded, library, (macros) => check(compilation, macros, false, true));
   return flatten(loaded, library);
 }
 
 // Runs `run`, giving a compile error it throws the program's other files to render against, and
 // the names it made up.
-function withSources<T>(sources: Source[], run: () => T): T {
+function withSources<T>({ names }: Compilation, sources: Source[], run: () => T): T {
   try {
     return run();
   } catch (e) {
-    if (e instanceof CompileError) named(e, shared.names).sources = sources;
+    if (e instanceof CompileError) named(e, names).sources = sources;
     throw e;
   }
 }
@@ -101,8 +104,9 @@ function withSources<T>(sources: Source[], run: () => T): T {
 export function buildLibrary(file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = []) {
   const src = readFileSync(file, "utf8");
   const loaded = load(file, src);
-  const checked = withSources(loaded.sources, () => check(expanded(loaded, true), true));
-  const ir = withSources(loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }), loaded));
+  const compilation = newCompilation();
+  const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), true));
+  const ir = withSources(compilation, loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }), loaded));
   const shim = rustShim(loaded.rust, checked.instances);
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
@@ -213,12 +217,13 @@ export function buildTests(dir: string, out: string): Test[] {
   const entry = join(dir, MANIFEST);
   const src = harnessImports(dir, files);
   const loaded = load(entry, src);
-  return withSources(loaded.sources, () => {
-    const tests = liftTests(files.map((f) => loaded.modules.find((m) => m.path === realpathSync(f))!));
+  const compilation = newCompilation();
+  return withSources(compilation, loaded.sources, () => {
+    const tests = liftTests(compilation.names, files.map((f) => loaded.modules.find((m) => m.path === realpathSync(f))!));
     if (tests.length === 0) return tests;
-    hideMains(loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
+    hideMains(compilation.names, loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
     loaded.modules[0]!.statements.push(...harnessMain(tests, loaded.modules));
-    const checked = check(expanded(loaded, false));
+    const checked = check(compilation, expanded(compilation, loaded, false));
     linked(bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources }), loaded), checked.instances, out, false, [], rustShim(loaded.rust, checked.instances));
     return tests;
   });

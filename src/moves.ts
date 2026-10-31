@@ -7,7 +7,7 @@ import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
 import { restText, MAP_CHANGES } from "./values.ts";
 import { holdsNode } from "./check.ts";
-import { callableOf, keptByJs, field, partOfItself, holdsHandle, holdsPart, holdsMut, holdsRef, optionRef, isCopy, lower, yieldsOf, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { field, holdsHandle, holdsPart, holdsMut, optionRef, isCopy, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -56,7 +56,8 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
-  const { kindTests, asserts, computed, jsCrossings, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts } = instance.tables;
+  const { kindTests, asserts, computed, jsCrossings, dynCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts, typing } = instance.tables;
+  const { holdsRef, yieldsOf, lower, callableOf, keptByJs, partOfItself } = typing;
   // A place put into a `Ref<T> | null` is lent to the reference the Option holds.
   const coercions = new NodeMap(instance.coercions);
   for (const [e, to] of coercions) {
@@ -1490,7 +1491,8 @@ function overlaps(a: string, b: string): boolean {
 // Where each reference variable is used last: a use as an argument or receiver lasts until
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
-function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made }: Instance): Map<Local, number> {
+function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, tables }: Instance): Map<Local, number> {
+  const { holdsRef } = tables.typing;
   // An argument lent to the call, as a reference or a value holding references, is in use
   // until the call ends.
   const lentTo = (a: Expr) => {

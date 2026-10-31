@@ -1,23 +1,40 @@
 import type { Instance, Local } from "./check.ts";
+import type { Value } from "./comptime.ts";
 import type { Body } from "./classes.ts";
 import type { Names } from "./diag.ts";
 import type { Kind } from "./narrow.ts";
 import { WeakNodeMap, WeakNodeSet, type Ids } from "./nodes.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, Param, Stmt, TypeNode } from "./parser.ts";
-import type { Category, Quote } from "./quote.ts";
+import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
+import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
-import type { ClassType, Type } from "./typing.ts";
+import { newTyping, type ClassType, type LiteralType, type Type, type Typing } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
-// What a compilation hands the front end, which keeps no state of its own: the counter node ids
-// come from, the names its messages show as written, and the tables regexes are compiled with.
-export type Compilation = { ids: Ids; names: Names; regex: RegexTables };
+// One compilation of a program. Its front end, which keeps no state of its own, is handed the
+// counter node ids come from, the names its messages show as written, and the tables regexes are
+// compiled with; every check of the program shares its types, interned in `typing`, and `counts`.
+// Whatever starts a compilation makes one, so nothing one program makes reaches another.
+// `upcasts` are the spans of the `equals` methods `@derive(Eq)` wrote over a base class. Their
+// `super.equals(other)` lends `other` to the base's `equals`, which reads the embedded base a
+// reference to the class points at, though Fish code can't upcast it itself. A span outlives the
+// copies macros make.
+export type Compilation = { ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string> };
 
-// The one compilation state the whole process shares, given to the front end by whatever starts a
-// compilation. It is one because some tables keyed by node still outlive a program, the Rust
-// bindings' and the formatter's, which need ids unique in the process, and std's tree is
-// numbered from the same counter when loaded.
-export const shared: Compilation = { ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() } };
+// What a compilation numbers as it goes, from 0, so the same program is numbered the same way
+// whatever was compiled before it: its enums, which tells enums of one name apart, the generic
+// functions lifted out of bodies, destructuring assignments, macro expansions, and the constants
+// macros give values.
+export type Counts = { enums: number; lifts: number; destructures: number; expansions: number; constants: number };
+
+// What every compilation in the process shares. Node ids, because some tables keyed by node
+// outlive a program, the Rust bindings' and the formatter's, which need ids unique in the process,
+// and std's tree is numbered from the same counter when loaded. And the regex tables, which only
+// cache what Unicode's property escapes and case folds match, the same for every program.
+export const shared: { ids: Ids; regex: RegexTables } = { ids: { last: 0 }, regex: { properties: new Map(), folds: new Map() } };
+
+export function newCompilation(): Compilation {
+  return { ids: shared.ids, names: { local: new Set(), madeUp: new Map() }, regex: shared.regex, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set() };
+}
 
 // A fresh node id, for code past the parser that makes nodes.
 export const freshId = (): number => ++shared.ids.last;
@@ -26,6 +43,9 @@ export const freshId = (): number => ++shared.ids.last;
 // and for the passes after it: moves, comptime and codegen. `check` makes a fresh set, and every
 // instance it makes holds it, so nothing one program records reaches another.
 export type Tables = {
+  // The program's types, and the upcasts its macros wrote, which every check of it shares.
+  typing: Typing;
+  upcasts: Set<string>;
   // The names a loop's pattern binds, made as declarations of the parts; a generic body checked
   // again for another instance meets them already made.
   loopParts: WeakNodeSet<Declarator>;
@@ -175,6 +195,13 @@ export type Tables = {
 
   // Each generic class's statics, declared with its first instance.
   genericStatics: WeakNodeMap<ClassNode, Map<string, Body>>;
+  // A generic class's placeholders, by its type parameters, shared by its definition check and
+  // its members.
+  classScopes: WeakMap<TypeParam[], Map<string, Type>>;
+  // The program's type aliases, which inference looks through, and those being looked through,
+  // so one that holds itself is looked into once.
+  aliases: Map<string, TypeAlias>;
+  expanding: Set<string>;
 
   // The `instanceof Map`, `instanceof Set` and `instanceof Array` tests and the `Array.isArray`
   // calls, by the kind each tests a value for.
@@ -199,10 +226,31 @@ export type Tables = {
   presetTypes: WeakNodeMap<TypeNode, Type>;
   // Each quote parsed, by the quote, so its holes are the same nodes wherever it is read.
   parsedQuotes: WeakNodeMap<Expr, Quote>;
+  // While a macro runs, the hygiene its quotes are built with.
+  hygiene: Hygiene | undefined;
+  // The bindings each quote made while a macro runs, for a quote it is spliced into; the names it
+  // left free, for that quote to bind; and the spans of the quotes its nodes came from, the only
+  // nodes those names are renamed in, never the program's own, spliced in as input. Each is kept
+  // by the quote's value.
+  quoteScopes: WeakMap<object, Map<string, string>>;
+  quoteFrees: WeakMap<object, Free>;
+  quotedSpans: WeakMap<object, Set<string>>;
+  // A comptime string array's binding: a literal type standing for exactly that array, so equal
+  // arrays share an instance, with the array it stands for.
+  stringArrays: Map<LiteralType, string[]>;
+  // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
+  // function the checker hasn't reached yet.
+  ensureChecked: (instance: Instance) => boolean;
+  // Each top-level const's value, once computed, and those being computed, which a const reading
+  // itself would meet.
+  constants: WeakMap<Instance, Value>;
+  computing: Set<Instance>;
 };
 
-export function newTables(): Tables {
+export function newTables({ typing, upcasts }: Compilation): Tables {
   return {
+    typing,
+    upcasts,
     loopParts: new WeakNodeSet<Declarator>(),
     nestedFunctions: new WeakNodeMap<Expr, string>(),
     nestedBindings: new WeakSet<Local>(),
@@ -272,6 +320,9 @@ export function newTables(): Tables {
     jsAccessors: new WeakNodeSet<Expr>(),
     dynCalls: new WeakNodeMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>(),
     genericStatics: new WeakNodeMap<ClassNode, Map<string, Body>>(),
+    classScopes: new WeakMap<TypeParam[], Map<string, Type>>(),
+    aliases: new Map<string, TypeAlias>(),
+    expanding: new Set<string>(),
     kindTests: new WeakNodeMap<Expr, Kind>(),
     defaulted: new WeakNodeMap<Param, { name: string; empty: boolean }>(),
     fallbacks: new WeakNodeMap<Expr, TypeNode>(),
@@ -280,5 +331,13 @@ export function newTables(): Tables {
     prologues: new WeakNodeSet<Stmt>(),
     presetTypes: new WeakNodeMap<TypeNode, Type>(),
     parsedQuotes: new WeakNodeMap<Expr, Quote>(),
+    hygiene: undefined,
+    quoteScopes: new WeakMap<object, Map<string, string>>(),
+    quoteFrees: new WeakMap<object, Free>(),
+    quotedSpans: new WeakMap<object, Set<string>>(),
+    stringArrays: new Map<LiteralType, string[]>(),
+    ensureChecked: () => true,
+    constants: new WeakMap<Instance, Value>(),
+    computing: new Set<Instance>(),
   };
 }
