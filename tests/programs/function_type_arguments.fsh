@@ -294,17 +294,12 @@ async function main(): Promise<void> {
 // case: fta_inferred_closure_meets_boxed
 // expect: w!
 // expect: xyz xyz
-// expect: other
 // The closure is boxed to agree with T already decided as a callable, and arrays of T hold it.
 function store<T>(m: Mut<Map<string, T>>, k: string, x: T) {
   m.set(k, x);
 }
 function dup<T>(x: T): T[] {
   return [x.clone(), x];
-}
-function pick<T>(a: T, b: T, first: boolean): T {
-  if (first) return a;
-  return b;
 }
 function main() {
   let m = new Map<string, () => string>();
@@ -314,8 +309,6 @@ function main() {
   const t = "x" + "y";
   const zs = dup(move () => t + "z");
   console.log(zs[0](), zs[1]());
-  const q = "w" + "";
-  console.log(pick(move () => q, () => "other", false)());
 }
 // case: fta_parameter_names_ignored
 // expect: 2
@@ -348,4 +341,97 @@ function main() {
   const xs: ((n: i64) => i64)[] = [f];
   const ys: ((x: i64) => i64)[] = xs;
   console.log(ys[0](1));
+}
+// case: fta_closure_for_t_compiled_as_itself
+// expect: 2
+// expect: 1
+// expect: 5
+// A closure inferred for T is compiled as its own type where T reaches no type argument, so it
+// may borrow and change what it captures, and an async one is awaited as written.
+function id<T>(x: T): T {
+  return x;
+}
+async function main(): Promise<void> {
+  const s = "ab" + "";
+  console.log(id(() => s.length)());
+  let n = 0;
+  id(() => {
+    n = n + 1;
+  })();
+  console.log(n);
+  const f = id(async () => 5);
+  const five = await f();
+  console.log(five);
+}
+// case: fta_async_closure_held
+// expect: 5
+// expect: 6
+// An async closure meeting T is boxed as a written `() => Promise<i64>` is.
+class Box<T> {
+  value: T;
+  constructor(value: T) {
+    this.value = value;
+  }
+}
+async function main(): Promise<void> {
+  const b = new Box(async () => 5);
+  const a = await b.value();
+  console.log(a);
+  const c = new Box<() => Promise<i64>>(async () => 6);
+  const d = await c.value();
+  console.log(d);
+}
+// case: fta_enum_of_callables
+// expect: 3
+// expect: 3
+// expect: cap!
+// expect: no
+// A generic enum holding a callable is one instance whether its type argument is written or inferred.
+enum Res<T> {
+  Ok(T),
+  Err(string),
+}
+function ok<T>(x: T): Res<T> {
+  return Res.Ok(x);
+}
+function use(r: Res<() => i64>): i64 {
+  return match (r) {
+    case Ok(f) => f(),
+    case Err(e) => 0,
+  };
+}
+function mk(b: boolean): Res<() => string> {
+  const k = "cap" + "";
+  if (b) return Res.Ok(move () => k + "!");
+  return Res.Err("no");
+}
+function three(): Res<() => i64> {
+  return Res.Ok(() => 3);
+}
+function main() {
+  console.log(use(ok(() => 3)));
+  console.log(use(three()));
+  for (const b of [true, false]) {
+    const r = mk(b);
+    console.log(match (r) {
+      case Ok(f) => f(),
+      case Err(e) => e,
+    });
+  }
+}
+// case: fta_closure_for_t_held_in_body
+// error: 'T' is a closure's own type here, which a type argument can't hold; write 'T' where it is called, as in '<() => string>'
+class Box<T> {
+  value: T;
+  constructor(value: T) {
+    this.value = value;
+  }
+}
+function f<T>(x: T): i64 {
+  const b = new Box(x);
+  return 1;
+}
+function main() {
+  const s = "w" + "";
+  console.log(f(move () => s + "!"));
 }

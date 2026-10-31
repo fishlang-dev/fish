@@ -144,7 +144,9 @@ export function resolver(aliases: Map<string, TypeAlias>, classNamed: ClassNamed
   // A data-carrying enum made with these type arguments: a variant per member, its payload
   // types resolved with the type parameters bound, and the enum as their union. An enum
   // holding itself would be infinitely large.
-  function enumInstance(info: EnumInfo, args: Type[], at: Span): EnumInstance {
+  function enumInstance(info: EnumInfo, given: Type[], at: Span): EnumInstance {
+    given.forEach((a) => unboxedClosure(a, at));
+    const args = given.map(heldArgument);
     const data = info.data!;
     if (args.length !== data.params.length) {
       const n = data.params.length;
@@ -931,9 +933,19 @@ const SIDE_FORMS = { pattern: "template literal types", class: "classes", param:
 
 const I64_MAX = (1n << 63n) - 1n;
 
+// A closure inferred for a type parameter is compiled as its own type, so where the body holds
+// that parameter in a type argument it would need boxing the caller never did; refused there.
+export function unboxedClosure(t: Type, at: Span) {
+  if (typeof t === "string" || t.kind !== "param" || t.concrete === undefined) return;
+  const c = lower(t);
+  if (typeof c === "string" || (c.kind !== "closure" && c.kind !== "function") || c.generic) return;
+  throw new CompileError(`'${t.name}' is a closure's own type here, which a type argument can't hold; write '${t.name}' where it is called, as in '<${c.name}>', or name it in a type argument of the signature, as in 'Box<${t.name}>'`, at.start, at.end);
+}
+
 // An `Atomic<T>`, `Lock<T>` or `Cell<T>` holding a T it can hold: an Atomic, an integer or a
 // boolean, which the processor changes in one step.
 export function interior(which: InteriorType["which"], given: Type, at: Span): InteriorType {
+  unboxedClosure(given, at);
   const of = heldArgument(given);
   const held = lower(of);
   if (which === "Atomic" && isInteger(held) && INTEGERS[held].bits === 128) {
@@ -961,6 +973,7 @@ function abstractless(of: Type, holder: string, at: Span) {
 // A `shared<T>` holding a T every thread may use at once: nothing in it borrows, points
 // unchecked, or changes without a lock.
 export function shareable(given: Type, at: Span): SharedType {
+  unboxedClosure(given, at);
   const of = heldArgument(given);
   const held = lower(of);
   abstractless(of, "a 'shared' value", at);
@@ -981,6 +994,7 @@ export function shareable(given: Type, at: Span): SharedType {
 // A `Channel<T>` carrying values from one task to another: nothing in them borrows, points
 // unchecked, or changes without a lock.
 export function channel(given: Type, at: Span): BlockType {
+  unboxedClosure(given, at);
   const of = heldArgument(given);
   const held = lower(of);
   if (typeof held !== "string" && held.kind === "union" && held.members.includes("null") || held === "null") {
@@ -1020,6 +1034,7 @@ export function collection(key: Type, value: Type, set: boolean, at: Span): MapT
   const v = lower(value);
   if (typeof v !== "string" && (v.kind === "closure" || v.kind === "function") && v.generic) throw unsupported("maps of generic functions", at);
   if (typeof v !== "string" && v.kind === "interface") throw new CompileError(`a 'Map' can't hold the interface type '${v.name}' directly, since its values may each be a different type; use 'Dyn<${v.name}>'`, at.start, at.end);
+  unboxedClosure(value, at);
   return mapType(key, stored(heldArgument(value)), set);
 }
 

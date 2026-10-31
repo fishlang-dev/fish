@@ -4,8 +4,8 @@ import { CompileError } from "./diag.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
-import { paramName } from "./resolve.ts";
-import { described, openThrows, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, heldArgument, callableOf, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
+import { paramName, unboxedClosure } from "./resolve.ts";
+import { described, openThrows, digest, promiseElement, unfold, tiedBy, elementsOf, withoutNull, arrayType, field, fits, functionType, holdsPart, widenLet, type FunctionType, generatorElement, yieldsOf, generatorInterface, replaced, isTuple, holdsPattern, holdsRef, sameLowered, shapeKey, stored, heldArgument, sameCallable, callableOf, unlocks, keyOf, lower, refType, show, typeParameter, widenEnum, wrapped, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType } from "./typing.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -70,10 +70,15 @@ export function infer(node: TypeNode, arg: Type, names: Set<string>, bindings: M
     }
   }
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
-    // A type parameter holds its values, so a closure meeting one is boxed into a stored callable.
     arg = widenEnum(arg);
-    if (typeof arg !== "string" && (arg.kind === "closure" || arg.kind === "function")) arg = heldArgument(arg);
     const earlier = bindings.get(node.name);
+    // A closure meeting T already decided as the stored callable it fits is boxed into it, as one
+    // given first is boxed where the body holds T in a type argument.
+    if (earlier && sameCallable(earlier, heldArgument(arg))) return;
+    if (earlier && sameCallable(heldArgument(earlier), arg)) {
+      bindings.set(node.name, arg);
+      return;
+    }
     // A literal and its base type, as a string literal and a callback taking a string give,
     // agree on the base type, as TypeScript widens them.
     if (earlier && earlier !== arg && widenLet(earlier) === widenLet(arg)) {
@@ -440,6 +445,9 @@ export function instancing({ resolveType, paramType, withScope, signing, members
         throw new CompileError(`an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
       }
       if (typeof type !== "string" && type.kind === "function" && type.generic) throw unsupported("generic function types as type arguments", at);
+      // A closure inferred for T is the closure's own type, compiled for it, unless the body holds
+      // T in a type argument, which holds the boxed callable, as a written function type is.
+      if (typeof type !== "string" && (type.kind === "closure" || type.kind === "function") && heldInArgument(f, p.name)) bindings.set(p.name, heldArgument(type));
     }
     // A bound may name the class's parameters too, as this instance of it holds them.
     withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, resolveType(p.constraint), members, at)));
@@ -709,6 +717,17 @@ type ClassChecker = {
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
 };
 
+// Whether a body's signature or code writes its type parameter `name` inside a type argument, as
+// in `Box<T>`, `Lock<T>` or `T[]`; a reference, a pointer or an Option to T doesn't hold one.
+function heldInArgument(f: Body, name: string): boolean {
+  const isT = (n: { kind?: unknown; name?: unknown }) => n.kind === "ref" && n.name === name && (n as { args: unknown[] }).args.length === 0;
+  return holdsNode([f.params.map((p) => p.type), f.returnType, f.body], (n) => {
+    const t = n as TypeNode;
+    if (t.kind === "array") return holdsNode(t.element, isT);
+    return t.kind === "ref" && t.args.length > 0 && !["Ref", "Mut", "Ptr", "MutPtr", "Option"].includes(t.name) && holdsNode(t.args, isT);
+  });
+}
+
 // Generic classes: each set of type arguments declares the class again, on first use.
 export function genericClasses({ classes, templates, register, layout, members, resolveType, withScope }: ClassChecker) {
   // Where each instance was first used, and each template's instances by their arguments.
@@ -743,6 +762,7 @@ export function genericClasses({ classes, templates, register, layout, members, 
   // bounds, and named like `Box<i64>`.
   function classInstance(template: ClassNode & { name: string }, given: Type[], at: Span): ClassInfo {
     if (given.some((a) => typeof a !== "string" && (a.kind === "function" || a.kind === "closure") && a.generic)) throw unsupported("generic function types as type arguments", at);
+    given.forEach((a) => unboxedClosure(a, at));
     const args = given.map(heldArgument);
     const params = template.typeParams;
     if (args.length !== params.length) {

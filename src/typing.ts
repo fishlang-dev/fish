@@ -447,8 +447,12 @@ export function stored(t: Type): Type {
 export function heldArgument(t: Type): Type {
   if (typeof t === "string" || (t.kind !== "function" && t.kind !== "closure") || t.generic) return t;
   if (t.kind === "function") return callableType(t);
+  // An async closure gives a Promise, as a written `() => Promise<T>` does. One whose future
+  // throws has no written form yet, so it stays as it is, for its holder to refuse.
+  const future = typeof t.returns !== "string" && t.returns.kind === "future" ? t.returns : undefined;
+  if (future?.throws) return t;
   // What it gives widens as a `let` would, so `() => "a"` and `() => "b"` meet as `() => string`.
-  const returns = widenLet(t.returns);
+  const returns = future ? promiseInterface(future.gives) : widenLet(t.returns);
   const fn = functionType(t.params.map((_, i) => `p${i}`), t.params, returns, t.throws);
   // Shown as the closure was written, with its own parameter names, when that is still its type.
   return callableType(returns === t.returns ? { ...fn, name: t.name } : fn);
@@ -1417,7 +1421,7 @@ export function replaced(t: Type, swap: Map<Type, Type>): Type {
     return t.kind === "interior" ? interiorType(t.which, of) : t.kind === "shared" ? sharedType(of) : blockType("Channel", of);
   }
   if (typeof t !== "string" && t.kind === "variant") {
-    const args = t.args.map((a) => replaced(a, swap));
+    const args = t.args.map((a) => heldArgument(replaced(a, swap)));
     return args.some((a, i) => a !== t.args[i]) ? instanceVariant(t, args) : t;
   }
   const tied = typeof t !== "string" ? ties.get(t) : undefined;
