@@ -58,9 +58,12 @@ export function watchProgram(w: Watching): Promise<never> {
     contents: new Map<string, string | undefined>(),
     watchers: [] as FSWatcher[],
     child: undefined as Subprocess | undefined,
+    // Programs sent SIGTERM for a restart, still within their grace period.
+    stopping: new Set<Subprocess>(),
     timer: undefined as ReturnType<typeof setTimeout> | undefined,
     busy: false,
     again: false,
+    quitting: false,
   };
   const note = (text: string) => console.error(`[fishc] ${text}`);
   const shown = (f: string) => relative(process.cwd(), f) || f;
@@ -101,16 +104,26 @@ export function watchProgram(w: Watching): Promise<never> {
       note(`restarting: ${shown(file)} changed`);
       const child = state.child;
       state.child = undefined;
-      if (child) await stop(child);
+      if (child) {
+        state.stopping.add(child);
+        await stop(child);
+        state.stopping.delete(child);
+      }
+      if (state.quitting) return;
       start();
     } while (state.again);
     state.busy = false;
   };
+  // A program already sent SIGTERM is killed, as is every program on a second signal, so none
+  // outlives the watcher.
   const quit = (code: number) => async () => {
+    const child = state.child;
+    for (const c of state.quitting ? [...state.stopping, ...(child ? [child] : [])] : state.stopping) c.kill("SIGKILL");
+    if (state.quitting) return;
+    state.quitting = true;
     for (const watcher of state.watchers) watcher.close();
     clearTimeout(state.timer);
-    const child = state.child;
-    state.child = undefined;
+    await Promise.all([...state.stopping].map((c) => c.exited));
     if (child) await stop(child);
     w.done();
     process.exit(code);

@@ -156,3 +156,18 @@ test("fishc watch sees a file deleted and recreated, and an entry that is missin
     await until(err, "later\n");
   });
 });
+
+test("a program that ignores SIGTERM is killed when the watcher quits during its restart", async () => {
+  const stubborn = (shown: string) => `declare function signal(sig: i32, handler: i64): i64;\nasync function main() {\n  unsafe { signal(15, 1); }\n  console.error("${shown}");\n  await sleep(600000);\n}\n`;
+  const d = dir("stubborn", { "fish.toml": MANIFEST("stubborn"), "main.fsh": stubborn("one") });
+  const binary = join(d, "target", "debug", "stubborn");
+  const code = await watching(d, [], async (err) => {
+    await until(err, "one\n");
+    expect(running(binary)).not.toBe("");
+    writeFileSync(join(d, "main.fsh"), stubborn("two"));
+    await until(err, "[fishc] restarting:");
+    await Bun.sleep(300);
+  });
+  expect(code).toBe(143);
+  expect(running(binary)).toBe("");
+});
