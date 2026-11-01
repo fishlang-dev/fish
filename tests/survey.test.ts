@@ -473,6 +473,12 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
   });
 });
 
+test("node:readline waits on nothing, as readLine and the stdin module replace it", () => {
+  project({ "a.ts": "import { createInterface } from \"node:readline\";\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[]]);
+  });
+});
+
 test("each Node built-in waits on the feature that replaces it, and the ranking names those features", () => {
   project({
     "a.ts": "import { createSocket } from \"node:dgram\";\nimport { createHash } from \"crypto\";\n",

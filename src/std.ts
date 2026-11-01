@@ -3369,6 +3369,33 @@ function atob(data: string): string throws TypeError {
 }
 `;
 
+// Standard input, in a program that names readLine or the stdin module: each read runs on the
+// runtime's blocking pool, so other tasks keep running while it waits.
+const STDIN = String.raw`
+declare function fsh_rt_stdin_take(at: MutPtr<u8>, cap: i64, whole: i64): i64;
+
+// The next line's bytes with its newline, or with whole, all that is left; null when nothing is.
+function __stdinTake(whole: boolean): u8[] | null {
+  let out: u8[] = new Array(256).fill(0 as u8);
+  while (true) {
+    const n = unsafe { fsh_rt_stdin_take(mutPtrOf(out[0]), out.length as i64, whole ? 1 : 0) };
+    if (n < 0) return null;
+    if (n <= (out.length as i64)) return out.slice(0, n);
+    out = new Array(n).fill(0 as u8);
+  }
+}
+
+// The next line of standard input without its line ending, or null once input has ended.
+async function readLine(): Promise<string | null> {
+  const line = await spawnBlocking(() => __stdinTake(false));
+  if (line === null) return null;
+  let end = line.length;
+  if (end > 0 && line[end - 1] === 10) end--;
+  if (end > 0 && line[end - 1] === 13) end--;
+  return new TextDecoder().decode(line.slice(0, end as i64));
+}
+`;
+
 // The std modules a program reaches by a Node specifier, as `node:os` or `os`, or by naming one
 // as a global, each Fish source loaded like a file of the program.
 export const STD_MODULES: Record<string, string> = {
@@ -4078,6 +4105,28 @@ export function spawnSyncText(command: string, args: string[] = [], options: Spa
   return new SpawnSyncReturns<string>(r.pid, r.status, r.signal, text.decode(r.stdout), text.decode(r.stderr), r.error);
 }
 `,
+  // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
+  // buffer so readers can be mixed.
+  stdin: String.raw`
+export async function* lines(): AsyncGenerator<string> {
+  while (true) {
+    const line = await readLine();
+    if (line === null) return;
+    yield line;
+  }
+}
+
+export async function bytes(): Promise<u8[]> {
+  const all = await spawnBlocking(() => __stdinTake(true));
+  if (all === null) return [];
+  return all;
+}
+
+export async function text(): Promise<string> {
+  const all = await bytes();
+  return new TextDecoder().decode(all);
+}
+`,
   process: String.raw`
 declare function fsh_rt_argc(): i64;
 declare function fsh_rt_arg(i: i64): Ptr<u8>;
@@ -4146,7 +4195,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB + DATE;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB + DATE + STDIN;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -4232,9 +4281,10 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const btoa = next(BTOA);
   const atob = next(ATOB);
   const dates = next(DATE);
+  const reading = next(STDIN);
   renameValue([...json, ...jsonName]);
   const astNames = ast.flatMap(declaredNames);
-  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]]] as const;
+  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]], [reading, ["readLine"]]] as const;
   const packages = written.some(fromPackage);
   // A program's own URL, URLSearchParams or TypeError keeps its name, and std's takes one no
   // program can write.

@@ -2865,6 +2865,78 @@ void fsh_rt_random_fill(uint8_t *at, int64_t count) {
 #endif
 }
 
+// Standard input, read on the blocking pool: a pipe, a terminal and a redirected file all read
+// alike, and stdin's flags stay as they are, since a terminal shares them with the shell and
+// O_NONBLOCK on it would break the shell after the program exits. Every reader takes from one
+// buffer, so lines and whole-input reads interleave without losing bytes. The unread bytes are
+// those from start to len.
+static pthread_mutex_t fsh_stdin_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t *fsh_stdin_buf = NULL;
+static size_t fsh_stdin_start = 0, fsh_stdin_len = 0, fsh_stdin_cap = 0;
+static int fsh_stdin_eof = 0;
+
+// Reads one more chunk onto the buffer; 0 once input has ended. An error reading ends it too.
+static int fsh_stdin_fill(void) {
+  if (fsh_stdin_eof) return 0;
+  if (fsh_stdin_start > 0) {
+    memmove(fsh_stdin_buf, fsh_stdin_buf + fsh_stdin_start, fsh_stdin_len - fsh_stdin_start);
+    fsh_stdin_len -= fsh_stdin_start;
+    fsh_stdin_start = 0;
+  }
+  if (fsh_stdin_cap - fsh_stdin_len < 65536) {
+    fsh_stdin_cap = fsh_stdin_cap * 2 + 65536;
+    fsh_stdin_buf = realloc(fsh_stdin_buf, fsh_stdin_cap);
+    if (!fsh_stdin_buf) fsh_rt_panic("out of memory reading standard input\n");
+  }
+  for (;;) {
+    ssize_t got = read(0, fsh_stdin_buf + fsh_stdin_len, fsh_stdin_cap - fsh_stdin_len);
+    if (got < 0 && errno == EINTR) continue;
+    // A stdin some other process left non-blocking: wait for it rather than spin.
+    if (got < 0 && errno == EAGAIN) {
+      struct pollfd p = { .fd = 0, .events = POLLIN };
+      poll(&p, 1, -1);
+      continue;
+    }
+    if (got <= 0) {
+      fsh_stdin_eof = 1;
+      return 0;
+    }
+    fsh_stdin_len += (size_t)got;
+    return 1;
+  }
+}
+
+// The next line's length with its newline, or with whole, everything left; -1 when nothing is.
+// Its bytes are copied to at and taken only when they fit in cap, so a caller whose buffer is
+// too small asks again with one of the length given.
+int64_t fsh_rt_stdin_take(uint8_t *at, int64_t cap, int64_t whole) {
+  pthread_mutex_lock(&fsh_stdin_lock);
+  size_t n = 0, seen = 0;
+  for (;;) {
+    if (!whole) {
+      uint8_t *from = fsh_stdin_buf + fsh_stdin_start;
+      size_t left = fsh_stdin_len - fsh_stdin_start - seen;
+      uint8_t *nl = left > 0 ? memchr(from + seen, '\n', left) : NULL;
+      if (nl) {
+        n = (size_t)(nl - from) + 1;
+        break;
+      }
+      seen = fsh_stdin_len - fsh_stdin_start;
+    }
+    if (!fsh_stdin_fill()) {
+      n = fsh_stdin_len - fsh_stdin_start;
+      break;
+    }
+  }
+  int64_t result = n == 0 ? -1 : (int64_t)n;
+  if (n > 0 && (int64_t)n <= cap) {
+    memcpy(at, fsh_stdin_buf + fsh_stdin_start, n);
+    fsh_stdin_start += n;
+  }
+  pthread_mutex_unlock(&fsh_stdin_lock);
+  return result;
+}
+
 // Math.random(): 53 random bits as a double in [0, 1), from words each thread reads in bulk.
 static _Thread_local uint64_t fsh_random_words[64];
 static _Thread_local int32_t fsh_random_left = 0;

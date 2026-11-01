@@ -25,6 +25,7 @@ const session = newSession();
 //   // mode: abort      build with --panic=abort: a panic aborts (SIGABRT) instead of exiting 101
 //   // mode: parse      only parse; passing means it parsed
 //   // link: <name>     link the C library <name>, as `--link <name>` does
+//   // stdin: "<text>"  what the program reads on stdin, a JSON string; several are joined
 // A program spanning several files is a directory holding `main.fsh`, whose comments say what
 // to expect, and the files it imports.
 //
@@ -71,7 +72,9 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
     const links = [...src.matchAll(/\/\/ link: (\S+)/g)].map((m) => m[1]!);
     const warnings = await buildAsync(session, file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind", links);
     // Every program is checked for leaks: the runtime reports what is still allocated at exit.
-    const run = Bun.spawn([out], { env: { ...process.env, FISH_LEAKS: "1" }, stdout: "pipe", stderr: "pipe" });
+    const input = [...src.matchAll(/\/\/ stdin: (.*)/g)].map((m) => JSON.parse(m[1]!) as string);
+    const stdin = input.length > 0 ? new TextEncoder().encode(input.join("")) : undefined;
+    const run = Bun.spawn([out], { env: { ...process.env, FISH_LEAKS: "1" }, stdin, stdout: "pipe", stderr: "pipe" });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -89,7 +92,7 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
 // A test's program: a file, a directory's `main.fsh`, or a case of a file, which is written out
 // as its own file; or what is wrong with a file's cases.
 type Program = { label: string; file: string; src: string; problem?: string };
-const DIRECTIVE = /^\/\/ (expect|error|warning|panic|fails|stderr|mode|link):/;
+const DIRECTIVE = /^\/\/ (expect|error|warning|panic|fails|stderr|mode|link|stdin):/;
 
 function programsOf(entry: string): [string, Program][] {
   const file = entry.endsWith(".fsh") ? join(dir, entry) : join(dir, entry, "main.fsh");
