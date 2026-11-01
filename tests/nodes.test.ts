@@ -251,6 +251,29 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by an instance, body, loca
   expect(offenders).toEqual([]);
 });
 
+// The checker's records and its tables, by where each is declared. They name one another by id,
+// read back through the compilation's arenas, which alone hold the records themselves.
+const RECORDS: [string, string][] = [
+  ["compilation.ts", "Tables"], ["check.ts", "Instance"], ["check.ts", "Local"], ["classes.ts", "Body"], ["classes.ts", "ClassInfo"], ["values.ts", "DynTable"],
+];
+
+test("no instance, body, local or class holds another, nor does a checker table, but through its id", () => {
+  const offenders: string[] = [];
+  for (const [f, name] of RECORDS) {
+    const text = readFileSync(join(src, f), "utf8");
+    const start = text.search(new RegExp(`^export type ${name} = `, "m"));
+    expect(start).toBeGreaterThanOrEqual(0);
+    const first = text.slice(start, text.indexOf("\n", start));
+    // A declaration whose first line opens a brace runs to the line closing it.
+    const declared = (first.endsWith("{") ? text.slice(start, text.indexOf("\n};", start)) : first).slice(`export type ${name} = `.length);
+    for (const line of declared.replace(/\/\/.*$/gm, "").split("\n")) {
+      if (/^\s*arenas: Arenas;$/.test(line)) continue;
+      for (const m of line.matchAll(/\b(?:Instance|Body|Local|ClassInfo)\b/g)) offenders.push(`${name}: ${line.trim()} (${m[0]})`);
+    }
+  }
+  expect(offenders).toEqual([]);
+});
+
 // The checker's files: the checker, codegen and what they share.
 const CHECKER = ["check", "values", "classes", "resolve", "typefns", "operators", "typing", "generics", "interfaces", "flow", "narrow", "match", "moves", "comptime", "unions", "enums", "registry", "unsupported", "compilation", "codegen", "layout", "arithmetic", "runtime", "locals", "warnings"];
 
