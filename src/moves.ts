@@ -456,8 +456,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (key(e) !== undefined) {
           // A tuple's length looks at its optional elements and its rest, so none may have moved.
           const held = types.get(e.object)!;
-          const tuple = rec(lower(deref(held)) as ObjectType);
-          if (e.name === "length" && tuple.tuple && (tuple.required !== undefined || tuple.rest !== undefined)) usable(e.object as Named, key(e.object)!);
+          const low = lower(deref(held));
+          const tuple = typeof low === "string" ? undefined : rec(low);
+          if (e.name === "length" && tuple?.kind === "object" && tuple.tuple && (tuple.required !== undefined || tuple.rest !== undefined)) usable(e.object as Named, key(e.object)!);
           return use(e, consume);
         }
         return expr(e.object);

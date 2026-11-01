@@ -11,7 +11,7 @@ export function openParam(typing: Typing, t: Type, deep: boolean, seen: TypeSet<
   if (typeof t === "string" || seen.has(t)) return undefined;
   seen.add(t);
   const r = typing.rec(t);
-  if (r.kind === "param") return r.concrete ? openParam(typing, r.concrete, deep, seen) : r;
+  if (r.kind === "param") return r.concrete ? openParam(typing, r.concrete, deep, seen) : (t as ParamType);
   if (!deep) return undefined;
   const promised = typing.promiseElement(t);
   const parts = promised ? [promised] : r.kind === "union" ? r.members : r.kind === "array" ? [r.element] : r.kind === "ref" ? [r.to]
@@ -32,7 +32,7 @@ export function standIn(typing: Typing, types: Type[], what: string, at: Span, d
     const open = openParam(typing, t, deep);
     if (!open) continue;
     if (deferring()) return open;
-    throw new CompileError(`${what} of the type parameter '${open.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
+    throw new CompileError(`${what} of the type parameter '${typing.rec(open).name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
   }
   return undefined;
 }
@@ -50,8 +50,8 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
     const r = recOf(t);
     if (r?.kind === "object") return r.fields;
     if (r?.kind === "class") {
-      if (!layout(r)) throw new CompileError(`${what} of '${r.name}' is needed while the field types of '${r.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
-      return allFields(r).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
+      if (!layout(t as ClassType)) throw new CompileError(`${what} of '${r.name}' is needed while the field types of '${r.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
+      return allFields(t as ClassType).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
     }
     if (r?.kind === "param" && r.concrete) return fieldsOf(r.concrete, what, at);
     if (r?.kind === "interface") {

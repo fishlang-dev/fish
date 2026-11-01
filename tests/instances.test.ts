@@ -42,9 +42,9 @@ test("abstract classes compile no call to what isn't compiled", () => {
 // that isn't compiled, through an object holding the class, is refused at its span.
 test("a comparison can't reach an equals that isn't compiled", () => {
   const typing = newTyping();
-  const { classType, objectType } = typing;
+  const { classType, objectType, rec } = typing;
   const shape = classType("Shape");
-  shape.abstract = true;
+  rec(shape).abstract = true;
   const equals = { body: { name: "Shape.equals", owner: shape }, bindings: new Map() } as unknown as Instance;
   const equalities = new TypeMap<ClassType, Instance>([[shape, equals]]);
   const at = { start: 10, end: 20 };

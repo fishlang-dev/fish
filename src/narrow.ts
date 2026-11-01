@@ -60,7 +60,7 @@ export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usiz
 
 export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const { kindTests, typing } = tables;
-  const { holdsPlainJs, isSubclass, rec, unfold, fits, refType, unionType } = typing;
+  const { fieldsOf, holdsPlainJs, isSubclass, rec, unfold, fits, refType, unionType } = typing;
   const nothing: Guard = { yes: new NodeMap(), no: new NodeMap() };
   const of = (x: Expr) => guard(tables, x, types, locals, narrowable, predicate);
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
@@ -112,7 +112,7 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
     if (subject.kind === "ident") return split(subject, (m) => (is(m, value) ? "yes" : "no"), e.op === "===");
     if (subject.kind === "member") {
       return split(subject.object, (m) => {
-        const kind = typeof m === "string" ? undefined : rec(m).fields.find((f) => f.name === subject.name)?.type;
+        const kind = typeof m === "string" ? undefined : fieldsOf(m).find((f) => f.name === subject.name)?.type;
         if (kind && is(kind, value)) return "yes";
         const r = kind === undefined || typeof kind === "string" ? undefined : rec(kind);
         // A `kind` that is one of several literals is that literal only when it is among them.

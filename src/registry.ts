@@ -9,7 +9,7 @@ import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -32,7 +32,7 @@ type Checker = {
 
 export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
   const { typing, ids } = tables;
-  const { widenEnum, optionalField, holdsPattern, fits, show, blockFor, rec } = typing;
+  const { fieldsOf, widenEnum, optionalField, holdsPattern, fits, show, blockFor, rec } = typing;
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new TypeMap<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
@@ -104,7 +104,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     laidOut.add(c.type);
     laying.set(c.type, c);
     if (c.base) layout(c.base);
-    c.type.fields = c.fields.map((f) => {
+    rec(c.type).fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
       if (f.type) {
         const type = storable(typing, withScope(c.scope, () => resolveType(f.type!)), f);
@@ -142,7 +142,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       const trait = withScope(c.scope, () => resolveType(node));
       const named = typeof trait === "string" ? undefined : rec(trait);
       const name = rec(c.type).name;
-      const reason = named?.kind === "interface" ? unsatisfied(c.type, named, members, node)
+      const reason = named?.kind === "interface" ? unsatisfied(c.type, trait as InterfaceType, members, node)
         : fits(c.type, trait) ? undefined : `type '${name}' doesn't fit '${show(trait)}'`;
       if (reason) throw new CompileError(`class '${name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
     }
@@ -181,8 +181,8 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       if (typeof t === "string") return;
       const r = rec(t);
       if (r.kind === "class" || r.kind === "variant") {
-        if (holders.has(r)) return;
-        holders.add(r);
+        if (holders.has(t as ClassType | VariantType)) return;
+        holders.add(t as ClassType | VariantType);
         r.fields.forEach((f) => reach(f.type));
         if (r.kind === "class" && r.base) reach(r.base);
       } else if (r.kind === "union") r.members.forEach(reach);
@@ -196,7 +196,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     if (typeof t === "string" || seen.has(t)) return false;
     seen.add(t);
     const r = rec(t);
-    const parts = [...r.fields.map((f) => f.type), ...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "union" ? r.members : [])];
+    const parts = [...fieldsOf(t).map((f) => f.type), ...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "union" ? r.members : [])];
     return parts.some((p) => p === inner || contains(p, inner, seen));
   }
 
@@ -214,6 +214,6 @@ function swapped(typing: Typing, t: Type, from: ClassType, to: Type): Type {
   if (typeof t === "string") return t;
   const r = rec(t);
   if (r.kind === "union") return unionType(r.members.map((m) => swapped(typing, m, from, to)), r.name);
-  if (r.kind === "object" && !r.match) return r.tuple ? retuple(r, (e) => swapped(typing, e, from, to)) : objectType(r.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
+  if (r.kind === "object" && !r.match) return r.tuple ? retuple(t as ObjectType, (e) => swapped(typing, e, from, to)) : objectType(r.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
   return t;
 }

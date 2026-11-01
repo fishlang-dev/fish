@@ -3,7 +3,7 @@ import { category, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Tables } from "./compilation.ts";
-import { INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
+import { type LiteralType, INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -26,7 +26,7 @@ export function layoutOf(typing: Typing): (t: Type) => string {
     if (r.kind === "array") return ARRAY;
     if (r.kind === "fixed") return `[${r.size} x ${llvm(r.element)}]`;
     if (r.kind === "dyn") return DYN;
-    if (r.kind === "union") return `{ i32, [${words(rec, r)} x i64] }`;
+    if (r.kind === "union") return `{ i32, [${words(rec, t as UnionType)} x i64] }`;
     // Atomic instructions need whole bytes, so an atomic boolean is a byte.
     if (r.kind === "interior") return r.which === "Lock" ? `{ i32, ${llvm(r.of)} }` : r.which === "Atomic" && lower(r.of) === "boolean" ? "i8" : llvm(r.of);
     const parts = [...(r.kind === "class" && r.base ? [llvm(r.base)] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.fields).map((f) => llvm(f.type))];
@@ -65,9 +65,9 @@ function size(rec: Typing["rec"], t: Type): [usize, usize] {
   if (r === undefined) return [0, 1];
   if (r.kind === "ref" || r.kind === "pointer" || r.kind === "handle" || r.kind === "shared" || r.kind === "block" || r.kind === "map" || r.kind === "regex" || r.kind === "recursive") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
-  if (r.kind === "union") return [8 + 8 * words(rec, r), 8];
+  if (r.kind === "union") return [8 + 8 * words(rec, t as UnionType), 8];
   if (r.kind === "interior" && r.which !== "Lock") return size(rec, r.of);
-  const parts = r.kind === "interior" ? [[4, 4] as [usize, usize], size(rec, r.of)] : [...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.fields).map((f) => f.type)].map((p) => size(rec, p));
+  const parts = r.kind === "interior" ? [[4, 4] as [usize, usize], size(rec, r.of)] : [...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.kind === "param" ? (r.bound ? rec(r.bound).fields : []) : r.fields).map((f) => f.type)].map((p) => size(rec, p));
   const align = Math.max(1, ...parts.map(([, a]) => a));
   let bytes = 0;
   for (const [n, a] of parts) bytes = Math.ceil(bytes / a) * a + n;
@@ -105,7 +105,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
       const [type, c] = [typeOf(e.left), typeOf(e.right)];
       const v = value(e.left);
       const r = typeof type === "string" ? undefined : rec(type);
-      return r?.kind === "union" ? holds(v, r, r.members.filter((m) => isSubclass(m, c))) : String(isSubclass(type, c));
+      return r?.kind === "union" ? holds(v, type as UnionType, r.members.filter((m) => isSubclass(m, c))) : String(isSubclass(type, c));
     }
     if (e.op !== "===" && e.op !== "!==") return undefined;
     const kind = typeofTest(e);
@@ -148,7 +148,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     }
     if (br?.kind === "recursive" && aType !== bType) return equals(b, bType, a, aType);
     if (ar?.kind === "union") {
-      return eachMember(a, ar, "boolean", (part, m) => equals(part, m, b, bType));
+      return eachMember(a, aType as UnionType, "boolean", (part, m) => equals(part, m, b, bType));
     }
     if (br?.kind === "union") return equals(b, bType, a, aType);
     const literal = (t: Type) => {
@@ -159,10 +159,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
       const l = literal(t);
       return l ? String(l.value) : v;
     };
-    const base = (t: Type) => {
-      const l = literal(t);
-      return l ? (baseOf(l) ?? t) : t;
-    };
+    const base = (t: Type) => (literal(t) ? (baseOf(t as LiteralType) ?? t) : t);
     if (ar?.kind === "literal" && br?.kind === "literal") {
       return String(ar.value === br.value);
     }
@@ -237,7 +234,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
       return ir.kind === "union" && new Set(ir.members.map(wanted)).size > 1;
     };
     const nested = r.members.filter(mixed);
-    const direct = holds(v, r, r.members.filter((m) => !mixed(m) && wanted(m)));
+    const direct = holds(v, type as UnionType, r.members.filter((m) => !mixed(m) && wanted(m)));
     if (nested.length === 0) return direct;
     const result = b.alloca("i1");
     emit(`store i1 ${direct}, ptr ${result}`);
@@ -249,7 +246,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
       emit(`${is} = icmp eq i32 ${tag}, ${r.members.indexOf(m)}`);
       emit(`br i1 ${is}, label %${inside}, label %${next}`);
       b.startBlock(inside);
-      emit(`store i1 ${holdsWhere(payload(v, r, m), m, wanted)}, ptr ${result}`);
+      emit(`store i1 ${holdsWhere(payload(v, type as UnionType, m), m, wanted)}, ptr ${result}`);
       emit(`br label %${done}`);
       b.startBlock(next);
     }
@@ -334,14 +331,14 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     if (fr?.kind === "literal" && tr?.kind !== "union") return String(fr.value);
     if (tr?.kind === "literal") return "zeroinitializer";
     if (tr?.kind === "union") {
-      return fr?.kind === "union" ? retag(v, fr, tr) : inject(v, from, tr);
+      return fr?.kind === "union" ? retag(v, from as UnionType, to as UnionType) : inject(v, from, to as UnionType);
     }
     if (fr?.kind === "union") {
       // A member of another kind than the narrowed type, an empty one or a scalar where an
       // aggregate is wanted, is one narrowing has left out, so it isn't there.
       const absent = (member: Type) => typeof member === "string" && member !== to
         && (member === "null" || member === "never" || typeof to !== "string" || (member === "string") !== (to === "string") || (member === "boolean") !== (to === "boolean"));
-      return fr.members.includes(to) ? payload(v, fr, to) : eachMember(v, fr, to, (part, member) => (absent(member) ? "undef" : convert(part, member, to)));
+      return fr.members.includes(to) ? payload(v, from as UnionType, to) : eachMember(v, from as UnionType, to, (part, member) => (absent(member) ? "undef" : convert(part, member, to)));
     }
     if (typeof from === "string" || typeof to === "string") return v;
     const [source, target] = [fr!, tr!];

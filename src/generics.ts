@@ -6,7 +6,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
-import { TypeSet, TypeMap, digest, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
 import { WeakNodeMap, NodeMap, NodeSet, forEachChild, type AnyNode } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
@@ -27,7 +27,7 @@ export function placeholders({ show, wrapped, typeParameter, rec }: Typing, para
       if (r?.kind !== "interface" && r?.kind !== "object") {
         throw new CompileError(`a type parameter's bound must be an interface or an object type, not '${show(t)}'`, p.constraint.start, p.constraint.end);
       }
-      bound = r;
+      bound = t as ObjectType | InterfaceType;
     }
     scope.set(p.name, concrete ? wrapped(p.name, bound, concrete(p.name)) : typeParameter(p.name, bound));
   }
@@ -217,7 +217,7 @@ function substituted(node: TypeNode, given: Map<string, TypeNode>): TypeNode {
 export function checkBound(type: Type, bound: Type, members: Members, at: Span) {
   const { fits, show, rec } = members.typing;
   const trait = typeof bound === "string" ? undefined : rec(bound);
-  const reason = trait?.kind === "interface" ? unsatisfied(type, trait, members, at)
+  const reason = trait?.kind === "interface" ? unsatisfied(type, bound as InterfaceType, members, at)
     : fits(type, bound) ? undefined : "";
   if (reason === undefined) return;
   throw new CompileError(`type '${show(type)}' does not satisfy the constraint '${show(bound)}'${reason ? `: ${reason}` : ""}`, at.start, at.end);
@@ -241,12 +241,12 @@ function concreteness({ tiedBy, rec }: Typing): (t: Type) => boolean {
     if (r.kind === "param" || r.kind === "interface" || r.kind === "function") return false;
     if (r.kind === "class") {
       // A class may name itself in its base's type arguments, as `N extends Base<N>` does.
-      if (visiting.has(r)) return true;
-      visiting.add(r);
+      if (visiting.has(t as ClassType)) return true;
+      visiting.add(t as ClassType);
       try {
         return (r.generic?.args.every(concrete) ?? true) && (!r.base || concrete(r.base));
       } finally {
-        visiting.delete(r);
+        visiting.delete(t as ClassType);
       }
     }
     // A type holding itself through an array is as concrete as the type arguments it was made with.
@@ -262,12 +262,12 @@ function concreteness({ tiedBy, rec }: Typing): (t: Type) => boolean {
     if (r.kind === "map") return concrete(r.key) && concrete(r.value);
     if (r.kind === "recursive") return r.args.every(concrete);
     if (r.kind === "variant") {
-      let known = concreteVariants.get(r);
-      if (known === undefined) concreteVariants.set(r, known = r.args.every(concrete) && r.fields.every((f) => concrete(f.type)));
+      let known = concreteVariants.get(t as VariantType);
+      if (known === undefined) concreteVariants.set(t as VariantType, known = r.args.every(concrete) && r.fields.every((f) => concrete(f.type)));
       return known;
     }
-    let known = concreteObjects.get(r);
-    if (known === undefined) concreteObjects.set(r, known = r.fields.every((f) => concrete(f.type)));
+    let known = concreteObjects.get(t as ObjectType);
+    if (known === undefined) concreteObjects.set(t as ObjectType, known = r.fields.every((f) => concrete(f.type)));
     return known;
   }
 }
@@ -331,7 +331,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       if (r?.kind === "dyn") return callableOf.get(r.of);
       if (r?.kind !== "function") return undefined;
       if (r.generic) throw unsupported("generic function types as type arguments", at);
-      return r;
+      return given as FunctionType;
     }
     if (written?.kind !== "function" || !generic(f)) return undefined;
     const bindings = new Map<string, Type>();
@@ -702,7 +702,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       // A package's function or object parameter is a callback JS keeps or a JS object, its type
       // the same for every call, not a bound.
       if (!f.accessor && ((t.kind === "interface" && !(f.js && promiseElement(type) !== undefined)) || (t.kind === "function" && !f.js) || (t.kind === "regex" && t.any) || (t.kind === "object" && !t.tuple && concrete(type) && !f.js))) {
-        found!.set(i, t);
+        found!.set(i, type as FunctionType | InterfaceType | ObjectType | RegexType);
         if (written !== type) borrows.set(i, written as RefType);
       }
     }));
@@ -736,7 +736,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       if (fam?.kind === "function" && fam.generic && fam.name === b.name) return type;
       if (h?.kind === "closure" && h.generic) {
         const f = members.bodyNamed(h.generic);
-        const reason = f && familyMismatch(f, b, members, arg);
+        const reason = f && familyMismatch(f, bound as FunctionType, members, arg);
         if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
         return type;
       }
@@ -747,7 +747,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       return type;
     }
     if (b.kind === "interface") {
-      const reason = unsatisfied(t?.kind === "param" && t.concrete ? lower(type) : type, b, members, arg);
+      const reason = unsatisfied(t?.kind === "param" && t.concrete ? lower(type) : type, bound as InterfaceType, members, arg);
       if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
       return type;
     }

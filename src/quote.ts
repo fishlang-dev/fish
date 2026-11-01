@@ -155,9 +155,9 @@ function walk(typing: Typing, node: unknown, type: Type, types: Record<Category,
   if (node === null || node === undefined || typeof t === "string") return;
   const r = typing.rec(t);
   if (r.kind === "union") {
-    const splice = spliceIn(typing, node, r, types, q.asExpressions);
+    const splice = spliceIn(typing, node, t as UnionType, types, q.asExpressions);
     if (splice) return hole(splice.i, splice.category);
-    const member = memberFor(typing, node, r);
+    const member = memberFor(typing, node, t as UnionType);
     if (member) walk(typing, node, member, types, q, hole);
     return;
   }
@@ -309,9 +309,9 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
     const r = typeof t === "string" ? undefined : typing.rec(t);
     if (r?.kind === "union") {
       if (node === null || node === undefined) return b.member(b.none, t, "null");
-      const splice = spliceIn(typing, node, r, types, q.asExpressions);
+      const splice = spliceIn(typing, node, t as UnionType, types, q.asExpressions);
       if (splice) return b.splice(splice.i, type);
-      const member = memberFor(typing, node, r);
+      const member = memberFor(typing, node, t as UnionType);
       if (!member) throw new Error("internal error: a quoted node fits no member of its Ast type");
       return b.member(make(node, member, here), t, member);
     }

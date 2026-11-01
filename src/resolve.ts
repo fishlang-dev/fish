@@ -6,7 +6,7 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap, walk } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { TypeMap, ANY_REGEX, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -72,7 +72,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     promiseElement, arrayType, fixedType, replaced, refType, functionType, objectType, tupleType, pointerType, generatorElement, dynType, blockType,
     handleType, promiseInterface, generatorInterface, asyncGeneratorInterface, literalType, interfaceType, shapeKey, jsUntyped, jsOptional, optionalField, withoutNull, typeParameter, fits, rec,
   } = typing;
-  const recOf = (t: Type | undefined) => (t === undefined || typeof t === "string" ? undefined : rec(t));
+  const recOf = <T extends Type>(t: T | undefined) => (t === undefined || typeof t === "string" ? undefined : rec(t as Exclude<T, string>));
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
   const layouts: Set<string>[] = [];
@@ -114,11 +114,11 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     }
   }
   // The data-carrying enums being made, to catch one that holds itself.
-  const making = new Map<DataEnum, string>();
+  const making = new NodeMap<DataEnum, string>();
   // Where a data-carrying enum instance holds itself, by enum and type arguments.
   const enumBlocks = new Map<string, RecursiveType>();
   // The instance of a generic interface for other type arguments.
-  const interfaceInstance = (t: InterfaceType, args: Type[]) => interfaceOf(interfaces.get(t.generic!.name)!, args);
+  const interfaceInstance = (t: InterfaceType, args: Type[]) => interfaceOf(interfaces.get(rec(t).generic!.name)!, args);
   lowersRecursive((t, args) => {
     const a = recursiveAliases.get(t);
     if (!a) return t;
@@ -188,12 +188,12 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
         return [m.name, variantType(data.name, data.id, m.name, args, payload)];
       }));
       const type = unionType([...variants.values()], shown);
-      for (const v of variants.values()) v.of = type;
+      for (const v of variants.values()) rec(v).of = type;
       const back = enumBlocks.get(`${data.id} ${key}`);
       const union = recOf(type);
       if (back && union?.kind === "union") {
         standsFor(back, type);
-        holdsBlock(union, back);
+        holdsBlock(type as UnionType, back);
       }
       const instance = { type, variants };
       data.instances.set(key, instance);
@@ -335,13 +335,13 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
         const around = new Map(scope);
         const own = placeholders(typing, t.typeParams, (n, s) => withScope(new Map([...around, ...s]), () => resolveType(n)));
         const fn = withScope(new Map([...around, ...own]), () => functionType(t.params.map(paramName), t.params.map(callbackParam), resolveType(t.returns)));
-        fn.name = `<${t.typeParams.map((p) => p.name).join(", ")}>${fn.name}`;
-        fn.generic = { names: t.typeParams.map((p) => p.name), node: t, scope: around, own: [...own.values()] };
+        rec(fn).name = `<${t.typeParams.map((p) => p.name).join(", ")}>${rec(fn).name}`;
+        rec(fn).generic = { names: t.typeParams.map((p) => p.name), node: t, scope: around, own: [...own.values()] };
         return fn;
       }
       const returns = resolveType(t.returns);
       const fn = functionType(t.params.map(paramName), t.params.map(callbackParam), returns, thrownBy(t, returns));
-      if ([fn.returns, ...fn.params].some(holdsPattern)) throw unsupported("template literal pattern types in function types", t);
+      if ([rec(fn).returns, ...rec(fn).params].some(holdsPattern)) throw unsupported("template literal pattern types in function types", t);
       return fn;
     }
     if (t.kind === "object") return objectType(fields(t.members.map(member), t.members));
@@ -398,7 +398,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       if (o?.kind !== "interface" || promiseElement(of!) !== undefined || generatorElement(of!) !== undefined) {
         throw new CompileError("'Dyn' takes the interface its values implement, like 'Dyn<Handler>'", t.start, t.end);
       }
-      return dynType(o);
+      return dynType(of as InterfaceType);
     }
     if (t.name === "RegExp") {
       if (t.args.length !== 0) throw new CompileError("'RegExp' takes no type arguments", t.start, t.end);
@@ -456,7 +456,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     }
     if (alias) return aliasType(alias, args, t);
     const named = classNamed(t.name, args, t);
-    if (named?.abstract) throw new CompileError(`'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
+    if (named !== undefined && rec(named).abstract) throw new CompileError(`'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
     if (named) return named;
     const [owner, name] = t.name.split(".");
     const e = enums.get(owner!);
@@ -480,7 +480,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       // Over a JS handle, a utility type remakes its shape's fields, and gives a handle again.
       const shapes = args.map(jsShape);
       if (shapes.some((x) => x !== undefined)) {
-        const made = apply(args.map((a, k) => (shapes[k] ? objectType(shapes[k]!.fields) : a)), t, t.args);
+        const made = apply(args.map((a, k) => (shapes[k] ? objectType(rec(shapes[k]!).fields) : a)), t, t.args);
         const r = recOf(made);
         return r?.kind === "object" && !r.tuple ? blockType("JsValue", made) : made;
       }
@@ -540,30 +540,31 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   // is a combined bound: an interface with every side's fields and methods. A union of object
   // types as a side distributes, as in TypeScript: `A & (B | C)` is `(A & B) | (A & C)`.
   function intersection(nodes: TypeNode[]): Type {
-    const sides = nodes.map((node) => {
-      const t = recOf(resolveType(node));
-      if (t?.kind === "object" || t?.kind === "interface") return t;
-      if (t?.kind === "union" && t.members.every((m) => recOf(m)?.kind === "object")) return t;
+    const sides = nodes.map((node): ObjectType | InterfaceType | UnionType => {
+      const s = resolveType(node);
+      const t = recOf(s);
+      if (t?.kind === "object" || t?.kind === "interface") return s as ObjectType | InterfaceType;
+      if (t?.kind === "union" && t.members.every((m) => recOf(m)?.kind === "object")) return s as UnionType;
       throw unsupported(`intersections with ${t === undefined || t.kind === "literal" ? "primitive types" : t.kind === "union" ? "unions of other than object types" : SIDE_FORMS[t.kind]}`, node);
     });
     const [from, to] = [nodes[0]!, nodes.at(-1)!];
-    if (sides.some((s) => s.kind === "union")) {
-      const at = nodes[sides.findIndex((s) => s.kind === "interface")];
+    if (sides.some((s) => rec(s).kind === "union")) {
+      const at = nodes[sides.findIndex((s) => rec(s).kind === "interface")];
       if (at) throw unsupported("intersections of interfaces with unions", at);
-      const choices = sides.map((s) => (s.kind === "union" ? s.members.map(recOf) : [s]) as ObjectType[]);
+      const choices = sides.map((s) => { const r = rec(s); return (r.kind === "union" ? r.members : [s]) as ObjectType[]; });
       const combos = choices.reduce<ObjectType[][]>((acc, ms) => acc.flatMap((c) => ms.map((m) => [...c, m])), [[]]);
       return unionType(combos.map((c) => c.reduce((a, b) => merged(typing, a, b, from, to))));
     }
-    const fields = sides.map((s) => objectType(s.fields)).reduce((a, b) => merged(typing, a, b, from, to));
-    if (sides.every((s) => s.kind === "object")) return fields;
+    const fields = sides.map((s) => objectType(rec(s).fields)).reduce((a, b) => merged(typing, a, b, from, to));
+    if (sides.every((s) => rec(s).kind === "object")) return fields;
     const key = sides.map(keyOf).join(" & ");
     let found = combined.get(key);
     if (found) return found;
     combined.set(key, found = interfaceType(sides.map(show).join(" & ")));
-    found.fields.push(...fields.fields);
-    for (const m of sides.flatMap((s) => (s.kind === "interface" ? s.methods : []))) {
-      const same = found.methods.find((x) => x.name === m.name);
-      if (!same) found.methods.push(m);
+    rec(found).fields.push(...rec(fields).fields.map((f) => ({ ...f })));
+    for (const m of sides.flatMap((s) => { const r = rec(s); return r.kind === "interface" ? r.methods : []; })) {
+      const same = rec(found).methods.find((x) => x.name === m.name);
+      if (!same) rec(found).methods.push(m);
       else if (shapeKey(same.returns) !== shapeKey(m.returns) || same.params.length !== m.params.length || same.params.some((p, i) => shapeKey(p) !== shapeKey(m.params[i]!))) {
         throw new CompileError(`method '${m.name}' has different types on each side of '&'`, from.start, to.end);
       }
@@ -586,7 +587,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     if (found) return found;
     if (byArgs.size > 64) throw new CompileError(`instantiating interface '${i.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     const t = interfaceType(args.length > 0 ? `${i.name}<${args.map(show).join(", ")}>` : i.name);
-    if (args.length > 0) t.generic = { name: i.name, args };
+    if (args.length > 0) rec(t).generic = { name: i.name, args };
     byArgs.set(key, t);
     // Its members are written where it is declared, with its parameters standing for the arguments.
     return withSight(undefined, () => withScope(new Map(i.typeParams.map((p, k) => [p.name, args[k]!])), () => members(i, t)));
@@ -598,12 +599,12 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const inherited = new Set<string>();
     const add = (name: string, at: Span) => {
       if (i.js && inherited.delete(name)) {
-        t.fields = t.fields.filter((f) => f.name !== name);
-        t.methods = t.methods.filter((m) => m.name !== name);
+        rec(t).fields = rec(t).fields.filter((f) => f.name !== name);
+        rec(t).methods = rec(t).methods.filter((m) => m.name !== name);
         return;
       }
-      if (t.fields.some((f) => f.name === name) || t.methods.some((m) => m.name === name)) {
-        if ((at as { kind?: string }).kind === "method" && t.methods.some((m) => m.name === name)) throw new CompileError(`'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
+      if (rec(t).fields.some((f) => f.name === name) || rec(t).methods.some((m) => m.name === name)) {
+        if ((at as { kind?: string }).kind === "method" && rec(t).methods.some((m) => m.name === name)) throw new CompileError(`'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
         throw new CompileError(`duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
       }
     };
@@ -613,8 +614,8 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       const base = jsShape(resolved) ?? resolved;
       const b = recOf(base);
       if (b === undefined || (b.kind !== "interface" && !(i.js && b.kind === "object"))) throw new CompileError("an interface can only extend interfaces", node.start, node.end);
-      for (const f of b.fields) add(f.name, node), t.fields.push(f), inherited.add(f.name);
-      if (b.kind === "interface") for (const m of b.methods) add(m.name, node), t.methods.push(m), inherited.add(m.name);
+      for (const f of b.fields) add(f.name, node), rec(t).fields.push({ ...f }), inherited.add(f.name);
+      if (b.kind === "interface") for (const m of b.methods) add(m.name, node), rec(t).methods.push(m), inherited.add(m.name);
     }
     const member1 = memberOf(i, t, add);
     for (const m of i.members) {
@@ -658,12 +659,12 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
         if (i.js) method.optional = (self ? m.params.slice(1) : m.params).map((p) => p.optional);
         if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, id: nextId(ids), params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
         if ([method.returns, ...method.params].some(holdsPattern)) throw unsupported("template literal pattern types in interface methods", m);
-        t.methods.push(method);
+        rec(t).methods.push(method);
       } else {
         const f = member(m);
         if (holdsPattern(f.type)) throw unsupported("template literal pattern types in interface fields", m);
         add(f.name, m);
-        t.fields.push(f);
+        rec(t).fields.push(f);
       }
     };
   }
@@ -863,7 +864,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       if (r?.kind !== "object" && r?.kind !== "class") return false;
       return p.members.every((m) => {
         const member = m as Extract<TypeMember, { kind: "property" }>;
-        const f = field(r, member.name as string);
+        const f = field(t as ClassType | ObjectType, member.name as string);
         if (!f || (f.access ?? "public") !== "public") return member.optional === true;
         return matches(member.type!, f.type, found);
       });
@@ -948,10 +949,10 @@ function merged(typing: Typing, a: ObjectType, b: ObjectType, from: Span, to: Sp
   const { fits, show, objectType, rec } = typing;
   const object = (t: Type) => {
     const r = typeof t === "string" ? undefined : rec(t);
-    return r?.kind === "object" ? r : undefined;
+    return r?.kind === "object" ? (t as ObjectType) : undefined;
   };
-  const fields = [...a.fields];
-  for (const f of b.fields) {
+  const fields = [...rec(a).fields];
+  for (const f of rec(b).fields) {
     const i = fields.findIndex((g) => g.name === f.name);
     const g = fields[i];
     if (!g) {
@@ -998,7 +999,7 @@ export function unboxedClosure(typing: Typing, t: Type, at: Span) {
 
 // An `Atomic<T>`, `Lock<T>` or `Cell<T>` holding a T it can hold: an Atomic, an integer or a
 // boolean, which the processor changes in one step.
-export function interior(typing: Typing, which: InteriorType["which"], given: Type, at: Span): InteriorType {
+export function interior(typing: Typing, which: InteriorRecord["which"], given: Type, at: Span): InteriorType {
   const { heldArgument, lower, show, holdsRef, holdsPattern, interiorType, rec } = typing;
   unboxedClosure(typing, given, at);
   const of = heldArgument(given);

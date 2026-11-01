@@ -785,7 +785,7 @@ function interpreter(tables: Tables) {
     if (e.op === "typeof") {
       const from = typeOf(f, e.operand);
       const r = typeof from === "string" ? undefined : rec(from);
-      const member = r?.kind === "union" ? memberOf(typing, held, r) : from;
+      const member = r?.kind === "union" ? memberOf(typing, held, from as UnionType) : from;
       return member === "bigint" ? "bigint" : typeofValue(v);
     }
     if (type === "bigint") return e.op === "-" ? -(v as bigint) : e.op === "~" ? ~(v as bigint) : unsupported(`'${e.op}'`, e);
@@ -1159,7 +1159,7 @@ function retag(typing: Typing, value: Value, from: Type | undefined, to: Type | 
     const v = unwrap(value);
     const own = tag ?? from;
     const or = record(own);
-    const member = own !== undefined && tr.members.includes(own) ? own : or?.kind === "union" ? memberOf(typing, v, or) : own !== undefined ? (typing.membersFor(own, tr)[0] ?? memberOf(typing, v, tr)) : memberOf(typing, v, tr);
+    const member = own !== undefined && tr.members.includes(own) ? own : or?.kind === "union" ? memberOf(typing, v, own as UnionType) : own !== undefined ? (typing.membersFor(own, to as UnionType)[0] ?? memberOf(typing, v, to as UnionType)) : memberOf(typing, v, to as UnionType);
     return { kind: "member", type: member, value: retag(typing, v, own, member) };
   }
   const v = unwrap(value);
@@ -1181,8 +1181,8 @@ function memberType(typing: Typing, v: Value, t: Type | undefined): Type | undef
   if (v && typeof v === "object" && v.kind === "member") return memberType(typing, v.value, v.type);
   const own = deref(typing, t);
   const r = own === undefined || typeof own === "string" ? undefined : typing.rec(own);
-  if (r?.kind === "union") return memberOf(typing, v, r);
-  if (r?.kind === "literal") return typing.baseOf(r) ?? own;
+  if (r?.kind === "union") return memberOf(typing, v, own as UnionType);
+  if (r?.kind === "literal") return typing.baseOf(own as LiteralType) ?? own;
   return own;
 }
 
@@ -1197,7 +1197,7 @@ function equal(typing: Typing, a: Value, ta: Type | undefined, b: Value, tb: Typ
   // they are at run time.
   const plain = (t: Type | undefined) => {
     const r = t === undefined || typeof t === "string" ? undefined : typing.rec(t);
-    return r?.kind === "literal" ? (typing.baseOf(r) ?? t) : t;
+    return r?.kind === "literal" ? (typing.baseOf(t as LiteralType) ?? t) : t;
   };
   if (ma !== undefined && mb !== undefined && plain(ma) !== plain(mb)) return false;
   return same(typing, a, b, eq);
@@ -1220,7 +1220,7 @@ function same(typing: Typing, x: Value, y: Value, eq?: Equals): boolean {
   if (x && y && typeof x === "object" && typeof y === "object" && x.kind === "member" && y.kind === "member") {
     const plain = (t: Type) => {
       const r = typeof t === "string" ? undefined : typing.rec(t);
-      return r?.kind === "literal" ? (typing.baseOf(r) ?? t) : t;
+      return r?.kind === "literal" ? (typing.baseOf(t as LiteralType) ?? t) : t;
     };
     if (plain(x.type) !== plain(y.type)) return false;
   }

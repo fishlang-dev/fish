@@ -3,8 +3,9 @@ import type { Expr } from "./parser.ts";
 import { WeakNodeMap, type Id } from "./nodes.ts";
 import type { RustClass } from "./rust.ts";
 
-// The checker's types. Object types are interned, so two types are structurally identical,
-// the same fields with the same types in any order, exactly when they are the same object.
+// The checker's types: a primitive's name, or the id of a record in its program's arena, read
+// through `rec`. Object types are interned, so two types are structurally identical, the same
+// fields with the same types in any order, exactly when they are the same id.
 
 // A class member that isn't public is reachable only from inside its class, and never
 // counts toward a structural fit, as in TypeScript.
@@ -23,14 +24,17 @@ export type Field = { name: string; type: Type; access?: Access; readonly?: bool
 // A tuple with optional elements has `required`, the count before them; each optional one holds
 // `T | null`. A tuple ending in `...T[]` has `rest`, T, and holds those elements as an array in
 // its field `...`.
-export type ObjectType = { kind: "object"; typeId: usize; fields: Field[]; tuple?: true; match?: true; required?: usize; rest?: Type };
+// A tuple and a match also link `shape`, the object of their fields, and hold copies of its fields.
+export type ObjectRecord = { kind: "object"; fields: Field[]; tuple?: true; match?: true; required?: usize; rest?: Type; shape?: ObjectType };
+export type ObjectType = TypeId<ObjectRecord>;
 
-// A class is nominal: one object per declaration, so `===` is identity. Its own fields are in
+// A class is nominal: one per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 // An instance of a generic class also records the class it came from and its type arguments.
 // `rust`: the Rust type a class a Rust module declares stands for. An abstract class only ever
 // exists embedded in a concrete one, so it is never a value's type.
-export type ClassType = { kind: "class"; typeId: usize; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true };
+export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true };
+export type ClassType = TypeId<ClassRecord>;
 
 // An interface is a trait: fields and method signatures that any value with those members
 // satisfies. It describes values but is never one, so it never reaches codegen. Its members
@@ -43,51 +47,60 @@ export type ClassType = { kind: "class"; typeId: usize; name: string; fields: Fi
 // `throws`: what a stored callable's call may throw.
 export type Method = { name: string; params: Type[]; returns: Type; throws?: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[] };
 // A generic interface's instance knows the interface and the type arguments it was made from.
-export type InterfaceType = { kind: "interface"; typeId: usize; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
+export type InterfaceRecord = { kind: "interface"; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
+export type InterfaceType = TypeId<InterfaceRecord>;
 
 // A type parameter: it stands for any type satisfying its bound, and offers only the bound's
 // fields. At the definition it stands for nothing in particular. In an instance it also holds
 // the concrete type it stands for, so the instance checks exactly as the definition did while
 // codegen lays the value out as its concrete type; `lower` removes it before codegen.
-export type ParamType = { kind: "param"; typeId: usize; name: string; bound: Bound | undefined; fields: Field[]; concrete?: Type };
+export type ParamRecord = { kind: "param"; name: string; bound: Bound | undefined; fields: Field[]; concrete?: Type };
+export type ParamType = TypeId<ParamRecord>;
 
 // A literal type has one value, known at compile time, so on its own it takes no space: it
 // has no fields. An integer or boolean literal fits its base type; a string literal has none yet.
 // An enum's member is a literal that knows its enum, so a plain literal is never one.
-export type LiteralType = {
-  kind: "literal"; typeId: usize; value: string | bigint | boolean; fields: Field[];
+export type LiteralRecord = {
+  kind: "literal"; value: string | bigint | boolean; fields: Field[];
   // For an enum's member: the enum, unique to its declaration, and the enum's own type.
   owner?: { enum: string; member: string; id: usize; of?: Type };
 };
+export type LiteralType = TypeId<LiteralRecord>;
 
 // A union holds a value of one of its members: a tag naming which, then that member's value.
 // It has no fields; reaching into one takes narrowing to a member first.
-export type UnionType = { kind: "union"; typeId: usize; members: Type[]; fields: Field[]; name?: string };
+export type UnionRecord = { kind: "union"; members: Type[]; fields: Field[]; name?: string };
+export type UnionType = TypeId<UnionRecord>;
 
 // A borrow of a value that lives elsewhere: `Ref<T>` shared, `Mut<T>` mutable. It is a pointer
 // to the value, reads through to it, and copies like a pointer. A written lifetime names the
 // function's lifetime parameter it lives for; it is checked, then erased.
-export type RefType = { kind: "ref"; typeId: usize; to: Type; mutable: boolean; fields: Field[]; life?: string };
+export type RefRecord = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]; life?: string };
+export type RefType = TypeId<RefRecord>;
 
 // A member of a data-carrying enum: a nominal value holding positional fields named `0`, `1`,
 // ..., laid out as an object's. One per enum instance and member, so `===` is identity. A
 // generic enum's variant knows the enum's type arguments, to be made again from lowered ones.
-export type VariantType = {
-  kind: "variant"; typeId: usize; name: string; member: string; enum: string; fields: Field[]; args: Type[];
+export type VariantRecord = {
+  kind: "variant"; name: string; member: string; enum: string; fields: Field[]; args: Type[];
   // The enum it belongs to, a union of its variants, once the enum is made.
   of?: Type;
 };
+export type VariantType = TypeId<VariantRecord>;
 
 // An owned array of elements of one type, growable like Rust's Vec. One per element type, so
 // `===` is identity. It has no fields; its length and elements are reached by name and index.
-export type ArrayType = { kind: "array"; typeId: usize; element: Type; fields: Field[] };
+export type ArrayRecord = { kind: "array"; element: Type; fields: Field[] };
+export type ArrayType = TypeId<ArrayRecord>;
 
 // `FixedArray<T, N>`: exactly `size` elements stored inline, laid out as `[size x T]`; interned,
 // so `===` is identity.
-export type FixedType = { kind: "fixed"; typeId: usize; element: Type; size: usize; fields: Field[] };
+export type FixedRecord = { kind: "fixed"; element: Type; size: usize; fields: Field[] };
+export type FixedType = TypeId<FixedRecord>;
 // `Map<K, V>` and `Set<T>` (a Set's value is `void`): a pointer to an owned hash table in the
 // runtime, its entries kept in insertion order.
-export type MapType = { kind: "map"; typeId: usize; key: Type; value: Type; set: boolean; fields: Field[] };
+export type MapRecord = { kind: "map"; key: Type; value: Type; set: boolean; fields: Field[] };
+export type MapType = TypeId<MapRecord>;
 
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
 // it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
@@ -97,7 +110,8 @@ export type MapType = { kind: "map"; typeId: usize; key: Type; value: Type; set:
 // A generic function used as a value, `generic` naming it, is a closure capturing nothing whose
 // calls each instantiate that function, as calls of it by name do.
 // `throws` is what a call of it may throw; an async arrow's error is its future's instead.
-export type ClosureType = { kind: "closure"; typeId: usize; name: string; params: Type[]; returns: Type; throws?: Type; fields: Field[]; once?: string; concrete: boolean; generic?: string };
+export type ClosureRecord = { kind: "closure"; name: string; params: Type[]; returns: Type; throws?: Type; fields: Field[]; once?: string; concrete: boolean; generic?: string };
+export type ClosureType = TypeId<ClosureRecord>;
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
@@ -106,7 +120,8 @@ export type ClosureType = { kind: "closure"; typeId: usize; name: string; params
 // The type parameters around it, `scope`, are those it was written among; `own` are its type
 // parameters' placeholders, in order, for comparing it with another.
 export type Family = { names: string[]; node: unknown; scope: Map<string, Type>; own: Type[] };
-export type FunctionType = { kind: "function"; typeId: usize; name: string; names: string[]; params: Type[]; returns: Type; throws?: Type; fields: Field[]; generic?: Family };
+export type FunctionRecord = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; throws?: Type; fields: Field[]; generic?: Family };
+export type FunctionType = TypeId<FunctionRecord>;
 
 // What a type parameter may be bounded by.
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
@@ -126,7 +141,8 @@ export const isInteger = (t: Type): t is Integer => typeof t === "string" && t i
 
 // A template literal type with open holes, like `${number}px`: the strings that match it. Its
 // values are strings, so it is a checker type only, which `lower` makes `string`.
-export type PatternType = { kind: "pattern"; typeId: usize; quasis: string[]; holes: Hole[]; fields: Field[] };
+export type PatternRecord = { kind: "pattern"; quasis: string[]; holes: Hole[]; fields: Field[] };
+export type PatternType = TypeId<PatternRecord>;
 export type Hole = "string" | Numeric;
 
 // The texts a template's holes take in `s`, as TypeScript matches: each hole but the last takes
@@ -168,6 +184,11 @@ export function bare(e: Expr): Expr {
   return e;
 }
 
+// A tuple's element types, in order, from its fields.
+export function tupleElements(fields: Field[]): Type[] {
+  return fields.filter((f) => /^\d+$/.test(f.name)).toSorted((a, b) => Number(a.name) - Number(b.name)).map((f) => f.type);
+}
+
 // The values an integer type holds.
 export function range(t: Integer): [bigint, bigint] {
   const { bits, signed } = INTEGERS[t];
@@ -180,25 +201,29 @@ export function range(t: Integer): [bigint, bigint] {
 // anywhere, and a union drops it.
 export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
 
+// A type that isn't a primitive: its record's index in its program's arena, from 21 up, since
+// 1 to 20 are the primitives' ids. `R` is the record's kind, for tsc only.
+export type TypeId<R> = usize & { readonly __record?: R };
+
+// What a type's record holds.
+export type TypeRecord = ObjectRecord | ClassRecord | InterfaceRecord | ParamRecord | LiteralRecord | PatternRecord | UnionRecord | RefRecord | ClosureRecord | FunctionRecord | ArrayRecord | FixedRecord | MapRecord | VariantRecord | GeneratorRecord | PointerRecord | FutureRecord | HandleRecord | InteriorRecord | SharedRecord | BlockRecord | DynRecord | RegexRecord | RecursiveRecord;
+
+// The record a type of `T` has.
+export type RecordOf<T> = T extends { readonly __record?: infer R } ? Exclude<R, undefined> : never;
+
 // The ids the primitives key tables by, below every type record's.
-const PRIMITIVE_IDS: Record<Extract<Type, string>, usize> = {
-  i8: 1, i16: 2, i32: 3, i64: 4, i128: 5, isize: 6, u8: 7, u16: 8, u32: 9, u64: 10, u128: 11, usize: 12,
-  f32: 13, f64: 14, boolean: 15, void: 16, null: 17, never: 18, string: 19, bigint: 20,
-};
+const PRIMITIVES: Extract<Type, string>[] = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "boolean", "void", "null", "never", "string", "bigint"];
+const PRIMITIVE_IDS = new Map(PRIMITIVES.map((p, i): [string, usize] => [p, i + 1]));
 
-// The id a type keys a table by: a primitive's reserved one, or a record's `typeId`.
-export const idOf = (t: Type): usize => (typeof t === "string" ? PRIMITIVE_IDS[t] : t.typeId);
+// The id a type keys a table by: a primitive's reserved one, or the type itself.
+export const idOf = (t: Type): usize => (typeof t === "string" ? PRIMITIVE_IDS.get(t)! : t);
 
-// The type behind each id is kept, so a different object arriving with an id already in use, a
-// copy that kept its original's id, fails loudly instead of reading or replacing its entry.
-function checkedId(t: Type, known: Type | undefined): usize {
-  if (known !== undefined && known !== t) throw new Error(`internal error: two types share typeId ${idOf(t)}`);
-  return idOf(t);
-}
+// The type an id keys.
+const typeAt = (id: usize): Type => (id <= PRIMITIVES.length ? PRIMITIVES[id - 1]! : (id as Exclude<Type, string>));
 
-// A `Map` from types, keyed by their ids, holding each type as a `Map` holds its keys.
+// A `Map` from types, keyed by their ids.
 export class TypeMap<K extends Type, V> {
-  private table = new Map<usize, { type: K; value: V }>();
+  private table = new Map<usize, V>();
 
   constructor(entries?: Iterable<readonly [K, V]>) {
     if (entries) for (const [type, value] of entries) this.set(type, value);
@@ -209,20 +234,20 @@ export class TypeMap<K extends Type, V> {
   }
 
   get(type: K): V | undefined {
-    return this.table.get(checkedId(type, this.table.get(idOf(type))?.type))?.value;
+    return this.table.get(idOf(type));
   }
 
   has(type: K): boolean {
-    return this.table.has(checkedId(type, this.table.get(idOf(type))?.type));
+    return this.table.has(idOf(type));
   }
 
   set(type: K, value: V): this {
-    this.table.set(checkedId(type, this.table.get(idOf(type))?.type), { type, value });
+    this.table.set(idOf(type), value);
     return this;
   }
 
   delete(type: K): boolean {
-    return this.table.delete(checkedId(type, this.table.get(idOf(type))?.type));
+    return this.table.delete(idOf(type));
   }
 
   clear(): void {
@@ -230,15 +255,15 @@ export class TypeMap<K extends Type, V> {
   }
 
   *keys(): IterableIterator<K> {
-    for (const e of this.table.values()) yield e.type;
+    for (const id of this.table.keys()) yield typeAt(id) as K;
   }
 
-  *values(): IterableIterator<V> {
-    for (const e of this.table.values()) yield e.value;
+  values(): IterableIterator<V> {
+    return this.table.values();
   }
 
   *entries(): IterableIterator<[K, V]> {
-    for (const e of this.table.values()) yield [e.type, e.value];
+    for (const [id, value] of this.table) yield [typeAt(id) as K, value];
   }
 
   [Symbol.iterator](): IterableIterator<[K, V]> {
@@ -246,13 +271,13 @@ export class TypeMap<K extends Type, V> {
   }
 
   forEach(each: (value: V, type: K) => void): void {
-    for (const e of this.table.values()) each(e.value, e.type);
+    for (const [id, value] of this.table) each(value, typeAt(id) as K);
   }
 }
 
-// A `Set` of types, keyed by their ids, holding each type as a `Set` holds its members.
+// A `Set` of types, keyed by their ids.
 export class TypeSet<K extends Type> {
-  private table = new Map<usize, K>();
+  private table = new Set<usize>();
 
   constructor(types?: Iterable<K>) {
     if (types) for (const t of types) this.add(t);
@@ -263,56 +288,60 @@ export class TypeSet<K extends Type> {
   }
 
   has(type: K): boolean {
-    return this.table.has(checkedId(type, this.table.get(idOf(type))));
+    return this.table.has(idOf(type));
   }
 
   add(type: K): this {
-    this.table.set(checkedId(type, this.table.get(idOf(type))), type);
+    this.table.add(idOf(type));
     return this;
   }
 
   delete(type: K): boolean {
-    return this.table.delete(checkedId(type, this.table.get(idOf(type))));
+    return this.table.delete(idOf(type));
   }
 
   clear(): void {
     this.table.clear();
   }
 
-  values(): IterableIterator<K> {
-    return this.table.values();
+  *values(): IterableIterator<K> {
+    for (const id of this.table) yield typeAt(id) as K;
   }
 
   [Symbol.iterator](): IterableIterator<K> {
-    return this.table.values();
+    return this.values();
   }
 
   forEach(each: (type: K) => void): void {
-    for (const t of this.table.values()) each(t);
+    for (const id of this.table) each(typeAt(id) as K);
   }
 }
 
 // `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
 // `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
 // they hold, a Lock as its lock word, then what it holds.
-export type InteriorType = { kind: "interior"; typeId: usize; which: "Atomic" | "Lock" | "Cell"; of: Type; fields: Field[] };
+export type InteriorRecord = { kind: "interior"; which: "Atomic" | "Lock" | "Cell"; of: Type; fields: Field[] };
+export type InteriorType = TypeId<InteriorRecord>;
 
 // `shared<T>`: a counted pointer to a block holding the count, a lock word and the value, so
 // every clone is the same value, read and changed from any thread.
-export type SharedType = { kind: "shared"; typeId: usize; of: Type; fields: Field[] };
+export type SharedRecord = { kind: "shared"; of: Type; fields: Field[] };
+export type SharedType = TypeId<SharedRecord>;
 
 // `Dyn<I>`: a value of any type implementing interface I, owned in a heap block, with a vtable
 // of what that type does: drop it, clone it, and each of I's members.
 // A stored callable written with other parameter names is its own DynType, `shown` as written,
 // for the same interface and key, which `lower` gives.
-export type DynType = { kind: "dyn"; typeId: usize; of: InterfaceType; fields: Field[]; shown?: string };
+export type DynRecord = { kind: "dyn"; of: InterfaceType; fields: Field[]; shown?: string };
+export type DynType = TypeId<DynRecord>;
 
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
 // which tasks wait on without holding a thread. A Permit holds a count on its Semaphore. An
 // `AbortController` and its `AbortSignal`s are handles to one block.
 // A FileJob is a file read or write handed to the runtime's blocking pool.
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
-export type BlockType = { kind: "block"; typeId: usize; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
+export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
+export type BlockType = TypeId<BlockRecord>;
 
 // The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
 // the runtime: each frame holds its state, a count on the block (or a sleep's deadline), and for
@@ -325,16 +354,19 @@ export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect"
 // counted pointer to the task; dropping it detaches the task.
 // `joined` marks what `handle.join()` gives: the same task, awaited so that its panic is thrown as
 // the TaskPanic `panic` rather than panicking its awaiter.
-export type HandleType = { kind: "handle"; typeId: usize; gives: Type; throws?: Type; fields: Field[]; joined?: { base: HandleType; panic: Type } };
+export type HandleRecord = { kind: "handle"; gives: Type; throws?: Type; fields: Field[]; joined?: { base: HandleType; panic: Type } };
+export type HandleType = TypeId<HandleRecord>;
 
 // An async function's future, a `Promise<T>`: what it gives once awaited, what it may throw,
 // its parameters, which say what it borrows, and the frame its state lives in, as a
 // generator's. Polled where it lives and never moved after its first poll. One per async
 // instance, so `===` is nominal identity; it has no properties.
-export type FutureType = { kind: "future"; typeId: usize; name: string; gives: Type; throws?: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean };
+export type FutureRecord = { kind: "future"; name: string; gives: Type; throws?: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean };
+export type FutureType = TypeId<FutureRecord>;
 
 // `sleep(ms)`'s future: its state, then the delay, then the deadline the runtime sets.
-export const SLEEP: FutureType = { kind: "future", typeId: 21, name: "sleep", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }, { name: "deadline", type: "i64" }], concrete: true };
+const SLEEP_RECORD: FutureRecord = { kind: "future", name: "sleep", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }, { name: "deadline", type: "i64" }], concrete: true };
+export const SLEEP = 21 as FutureType;
 
 // A future awaiting several at once in its task, made for one `Promise.all` or `Promise.race`
 // call: `all` gives each one's value as a tuple, `race` the first to settle's. Its frame is its
@@ -346,34 +378,40 @@ export const SLEEP: FutureType = { kind: "future", typeId: 21, name: "sleep", gi
 export type Combined = { kind: "all" | "race" | "allSettled" | "any"; futures: (FutureType | HandleType | DynType)[]; array?: ArrayType; aggregate?: ClassType; at: { start: usize; end: usize } };
 
 // `yieldNow()`'s future, which is pending once, then done.
-export const YIELD_NOW: FutureType = { kind: "future", typeId: 22, name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true };
+const YIELD_NOW_RECORD: FutureRecord = { kind: "future", name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true };
+export const YIELD_NOW = 22 as FutureType;
 
 // A raw pointer, `Ptr<T>` or `MutPtr<T>`: an address the borrow checker doesn't follow, used
 // only inside `unsafe`. It copies like a number and owns nothing.
-export type PointerType = { kind: "pointer"; typeId: usize; to: Type; mutable: boolean; fields: Field[] };
+export type PointerRecord = { kind: "pointer"; to: Type; mutable: boolean; fields: Field[] };
+export type PointerType = TypeId<PointerRecord>;
 
 // A regex: its pattern and flags, which fix what each capture may hold. Its value points at a
 // compiled program that never changes, so it copies freely and needs no drop.
 // \`source\` is how JavaScript shows the pattern; \`pattern\` what is matched, which differ only for
 // a \`new RegExp\` whose string held a \`/\` or a line terminator.
-export type RegexType = { kind: "regex"; typeId: usize; source: string; pattern: string; flags: string; captures: { name: string | undefined; optional: boolean }[]; fields: Field[]; any?: true };
+export type RegexRecord = { kind: "regex"; source: string; pattern: string; flags: string; captures: { name: string | undefined; optional: boolean }[]; fields: Field[]; any?: true };
+export type RegexType = TypeId<RegexRecord>;
 
 // The \`RegExp\` annotation: any regex. A parameter of it is an implicit type parameter, so each
 // instance knows its regex; elsewhere it holds one whose pattern isn't known there.
-export const ANY_REGEX: RegexType = { kind: "regex", typeId: 23, source: "", pattern: "", flags: "", captures: [], fields: [], any: true };
+const ANY_REGEX_RECORD: RegexRecord = { kind: "regex", source: "", pattern: "", flags: "", captures: [], fields: [], any: true };
+export const ANY_REGEX = 23 as RegexType;
 
 // Where a type leads back to itself, as `next` does in `type Node = { next: Node | null }`: a
 // pointer to a block holding `of`, the type it stands for, which is set once that is made. It
 // is that type everywhere but in its layout, and every walk over types stops at it.
 // `args` are the alias's type arguments, so one made from type parameters is remade for what
 // they stand for.
-export type RecursiveType = { kind: "recursive"; typeId: usize; name: string; args: Type[]; of: Type; fields: Field[] };
+export type RecursiveRecord = { kind: "recursive"; name: string; args: Type[]; of: Type; fields: Field[] };
+export type RecursiveType = TypeId<RecursiveRecord>;
 
 // A generator: what it yields, its parameters, which say what it borrows, and the frame its
 // state lives in, filled once the body is checked. It has no properties, so `fields` stays
 // empty. One per generator instance, so `===` is nominal identity. An async one's `next()` gives
 // a future, and its body may await between yields.
-export type GeneratorType = { kind: "generator"; typeId: usize; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean };
+export type GeneratorRecord = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean };
+export type GeneratorType = TypeId<GeneratorRecord>;
 
 export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
 
@@ -395,14 +433,17 @@ export function familyHeld(where: string): string {
 // One program's types: the tables its types are interned in, so `===` is identity within it, and
 // the operations over them. Each compilation makes its own, so no type of one meets another's.
 export function newTyping() {
-  // The record a type that isn't a primitive stands for. A type is its record for now, so this
-  // gives it back.
-  function rec<T extends Exclude<Type, string>>(t: T): T {
-    return t;
+  // Every record of this program, the type with id `id` at `id - 21`: the module constants'
+  // first, which every program shares, then those it makes.
+  const arena: TypeRecord[] = [SLEEP_RECORD, YIELD_NOW_RECORD, ANY_REGEX_RECORD];
+
+  // The record a type that isn't a primitive stands for, which its changes are made through.
+  function rec<T extends Exclude<Type, string>>(t: T): RecordOf<T> {
+    return arena[t - 21] as RecordOf<T>;
   }
 
   // The record of a type that isn't a primitive, or undefined for a primitive or no type.
-  const recOf = (t: Type | undefined) => (typeof t === "string" || t === undefined ? undefined : rec(t));
+  const recOf = <T extends Type>(t: T | undefined) => (t === undefined || typeof t === "string" ? undefined : rec(t as Exclude<T, string>));
 
   // Whether a hole of type `t` takes `text`: any text for a string, the text a number of that type
   // prints as for a number type, a literal's own text, or for a union, what any member takes.
@@ -670,7 +711,7 @@ export function newTyping() {
 
   // A tuple's element types, in order.
   function elementsOf(t: ObjectType): Type[] {
-    return rec(t).fields.filter((f) => /^\d+$/.test(f.name)).toSorted((a, b) => Number(a.name) - Number(b.name)).map((f) => f.type);
+    return tupleElements(rec(t).fields);
   }
 
   const isTuple = (t: Type): boolean => {
@@ -678,10 +719,51 @@ export function newTyping() {
     return r?.kind === "object" && r.tuple === true;
   };
 
+  // A type's own fields; a type parameter offers its bound's, and holds none of its own.
+  function fieldsOf(t: Exclude<Type, string>): Field[] {
+    const r = rec(t);
+    return r.kind === "param" ? (r.bound ? rec(r.bound).fields : []) : r.fields;
+  }
+
+  // Every type a type's record names directly, its fields' types included.
+  function links(t: Type): Type[] {
+    if (typeof t === "string") return [];
+    const r = rec(t);
+    const fields = r.fields.map((f) => f.type);
+    const methods = (ms: Method[]) => ms.flatMap((m) => [...m.params, m.returns, ...(m.throws === undefined ? [] : [m.throws])]);
+    const maybe = (...ts: (Type | undefined)[]) => ts.flatMap((u) => (u === undefined ? [] : [u]));
+    switch (r.kind) {
+      case "object": return [...fields, ...maybe(r.rest)];
+      case "class": return [...fields, ...maybe(r.base), ...(r.generic?.args ?? [])];
+      case "interface": return [...fields, ...methods(r.methods), ...(r.generic?.args ?? [])];
+      case "param": return maybe(r.bound, r.concrete);
+      case "literal": return maybe(r.owner?.of);
+      case "union": return r.members;
+      case "ref":
+      case "pointer": return [r.to];
+      case "closure": return [...r.params, r.returns, ...maybe(r.throws), ...fields];
+      case "function": return [...r.params, r.returns, ...maybe(r.throws), ...(r.generic?.own ?? [])];
+      case "array":
+      case "fixed": return [r.element];
+      case "map": return [r.key, r.value];
+      case "variant": return [...fields, ...r.args, ...maybe(r.of)];
+      case "generator": return [r.yields, ...r.params.map((f) => f.type), ...r.frame.map((f) => f.type)];
+      case "future": return [r.gives, ...maybe(r.throws), ...r.params.map((f) => f.type), ...r.frame.map((f) => f.type)];
+      case "handle": return [r.gives, ...maybe(r.throws, r.joined?.base, r.joined?.panic)];
+      case "interior":
+      case "shared":
+      case "block":
+      case "dyn": return [r.of];
+      case "recursive": return [...r.args, r.of];
+      case "pattern":
+      case "regex": return [];
+    }
+  }
+
   // A field of an object, or of an instance or the bases it embeds.
   function field(t: Exclude<Type, string>, name: string): Field | undefined {
     const r = rec(t);
-    const own = r.fields.find((f) => f.name === name);
+    const own = fieldsOf(t).find((f) => f.name === name);
     return own ?? (r.kind === "class" && r.base ? field(r.base, name) : undefined);
   }
 
@@ -751,7 +833,7 @@ export function newTyping() {
 
   const interiors = new Map<string, InteriorType>();
 
-  function interiorType(which: InteriorType["which"], of: Type): InteriorType {
+  function interiorType(which: InteriorRecord["which"], of: Type): InteriorType {
     const key = `${which} ${keyOf(of)}`;
     let t = interiors.get(key);
     if (!t) {
@@ -895,8 +977,12 @@ export function newTyping() {
   const timerCallback = (): DynType => callableType(functionType([], [], promiseInterface("void")));
 
   function callableType(fn: FunctionType): DynType {
+    return callableFrom(rec(fn));
+  }
+
+  // The stored callable of a signature, which may be one no type has, spelled as a closure was.
+  function callableFrom(f: FunctionRecord): DynType {
     // In an instance, what its type parameters stand for decides the layout.
-    const f = rec(fn);
     const [params, returns, throws] = [f.params.map(lower), lower(f.returns), f.throws && lower(f.throws)];
     // Keyed by types alone, as parameter names don't make another function type, so
     // `Box<(n: i64) => i64>` and `Box<(m: i64) => i64>` are one class; the first spelling met is shown.
@@ -904,10 +990,9 @@ export function newTyping() {
     let i = callables.get(key);
     if (!i) {
       i = interfaceType(f.name);
-      i.methods.push({ name: "call", params, returns, ...(throws && { throws }) });
+      rec(i).methods.push({ name: "call", params, returns, ...(throws && { throws }) });
       callables.set(key, i);
-      callableOf.set(i, made<FunctionType>({ ...f, params, returns, throws }));
-
+      callableOf.set(i, made<FunctionType>({ ...f, params, returns, throws, fields: [] }));
     }
     if (f.name === rec(i).name) return dynType(i);
     let spelled = spellings.get(`${key} ${f.name}`);
@@ -961,7 +1046,7 @@ export function newTyping() {
     const returns = future ? promiseInterface(future.gives) : widenLet(r.returns);
     const fn = functionType(r.params.map((_, i) => `p${i}`), r.params, returns, r.throws);
     // Shown as the closure was written, with its own parameter names, when that is still its type.
-    return callableType(returns === r.returns ? { ...rec(fn), name: r.name } : fn);
+    return returns === r.returns ? callableFrom({ ...rec(fn), name: r.name }) : callableType(fn);
   }
 
   const blocks = new Map<string, BlockType>();
@@ -1029,7 +1114,7 @@ export function newTyping() {
     return reads.length === 1 && kinds(read) ? "one" : "several";
   }
 
-  function blockType(which: BlockType["which"], of: Type = "void"): BlockType {
+  function blockType(which: BlockRecord["which"], of: Type = "void"): BlockType {
     const key = `${which} ${keyOf(of)}`;
     let t = blocks.get(key);
     if (!t) {
@@ -1133,7 +1218,7 @@ export function newTyping() {
     const make = (gives: Type, throws: Type | undefined, frame: Field[]) => {
       const params = combined.futures.flatMap((f) => {
         const r = rec(f);
-        return r.kind === "future" ? r.params : [];
+        return r.kind === "future" ? r.params.map((p) => ({ ...p })) : [];
       });
       const t = made<FutureType>({ kind: "future", name: `Promise.${kind}`, gives, throws, fields: [], params, frame, concrete: true }, `future ${declared++}`);
       combinedOf.set(t, combined);
@@ -1202,7 +1287,7 @@ export function newTyping() {
 
   const regexes = new Map<string, RegexType>();
 
-  function regexType(pattern: string, flags: string, captures: RegexType["captures"], source: string = pattern): RegexType {
+  function regexType(pattern: string, flags: string, captures: RegexRecord["captures"], source: string = pattern): RegexType {
     const key = `regex ${flags} ${pattern}`;
     let t = regexes.get(key);
     if (!t) {
@@ -1331,24 +1416,19 @@ export function newTyping() {
   const keys = new TypeMap<Exclude<Type, string>, string>();
   let declared = 0;
 
-  // Every type of this program by its `typeId`. Ids 1 to 20 are the primitives', and 21 to 23 the
-  // module constants', which every program shares.
-  const arena = new Map<usize, Exclude<Type, string>>([[SLEEP.typeId, SLEEP], [YIELD_NOW.typeId, YIELD_NOW], [ANY_REGEX.typeId, ANY_REGEX]]);
-  let nextTypeId: usize = 24;
-
-  // A new type record: given its id, kept in the arena, and interned under `key` when it has one.
-  function made<T extends Exclude<Type, string>>(record: Omit<T, "typeId">, key?: string): T {
-    const t = record as T;
-    t.typeId = nextTypeId++;
-    arena.set(t.typeId, t);
+  // A new type: its record kept in the arena, and interned under `key` when it has one.
+  function made<T extends Exclude<Type, string>>(record: RecordOf<T>, key?: string): T {
+    arena.push(record);
+    const t = (arena.length + 20) as T;
     if (key !== undefined) keys.set(t, key);
     return t;
   }
 
-  const typeOf = (id: usize): Exclude<Type, string> | undefined => arena.get(id);
+  // The record of the type with id `id`, if this program has one.
+  const typeOf = (id: usize): TypeRecord | undefined => (id >= 21 ? arena[id - 21] : undefined);
 
   // A class's key is unique to its declaration, since two programs may reuse a class name.
-  function classType(name: string, generic?: ClassType["generic"]): ClassType {
+  function classType(name: string, generic?: ClassRecord["generic"]): ClassType {
     const t = made<ClassType>({ kind: "class", name, fields: [], generic }, `class ${declared++}`);
     return t;
   }
@@ -1377,7 +1457,7 @@ export function newTyping() {
     let found = generators.get(keyOf(t));
     if (!found) {
       found = interfaceType(`Generator<${show(t)}>`);
-      found.methods.push({ name: "next", params: [], returns: nextResult(t) });
+      rec(found).methods.push({ name: "next", params: [], returns: nextResult(t) });
       generators.set(keyOf(t), found);
       elements.set(found, t);
     }
@@ -1389,7 +1469,7 @@ export function newTyping() {
     let found = generators.get(`async ${keyOf(t)}`);
     if (!found) {
       found = interfaceType(`AsyncGenerator<${show(t)}>`);
-      found.methods.push({ name: "next", params: [], returns: promiseInterface(nextResult(t)) });
+      rec(found).methods.push({ name: "next", params: [], returns: promiseInterface(nextResult(t)) });
       generators.set(`async ${keyOf(t)}`, found);
       asyncElements.set(found, t);
     }
@@ -1437,7 +1517,7 @@ export function newTyping() {
     return t;
   }
 
-  function literalType(value: string | bigint | boolean, owner?: LiteralType["owner"]): LiteralType {
+  function literalType(value: string | bigint | boolean, owner?: LiteralRecord["owner"]): LiteralType {
     const key = `literal ${typeof value} ${value}${owner ? ` of ${owner.enum}.${owner.member} ${owner.id}` : ""}`;
     let t = literals.get(key);
     if (!t) {
@@ -1503,7 +1583,7 @@ export function newTyping() {
   }
 
   function typeParameter(name: string, bound: Bound | undefined): ParamType {
-    const t = made<ParamType>({ kind: "param", name, bound, fields: bound ? rec(bound).fields : [] }, `param ${declared++}`);
+    const t = made<ParamType>({ kind: "param", name, bound, fields: [] }, `param ${declared++}`);
     return t;
   }
 
@@ -1547,7 +1627,7 @@ export function newTyping() {
   // the array `Tree[]` means wherever it is written. The type then holds itself, a loop the walks
   // over types stop at by the recursive type kept for it.
   function standsFor(back: RecursiveType, of: Type) {
-    back.of = of;
+    rec(back).of = of;
     // A Map that leads back holds the type inline too, as an array does, so a Map written with
     // the type is the one the type holds.
     const r = recOf(of);
@@ -1555,7 +1635,7 @@ export function newTyping() {
       for (const map of [...maps.values()]) {
         const m = rec(map);
         if (m.value !== back) continue;
-        map.value = of;
+        rec(map).value = of;
         maps.set(`${m.set ? "Set" : "Map"}<${keyOf(m.key)},${keyOf(of)}>`, map);
         ties.set(of, back);
       }
@@ -1564,7 +1644,7 @@ export function newTyping() {
     // A type that is itself an array, as `type T = T[]`, has no other part to hold, so its
     // elements stay blocks.
     if (!array || typeof of === "string" || r?.kind === "array") return;
-    array.element = of;
+    rec(array).element = of;
     arrays.set(`[${keyOf(of)}]`, array);
     ties.set(of, back);
     // Its members stay as they are too, so one narrowed to is still a member of it.
@@ -1639,7 +1719,7 @@ export function newTyping() {
     const key = `param ${name} ${bound ? keyOf(bound) : ""} as ${keyOf(concrete)}`;
     let t = wrappers.get(key);
     if (!t) {
-      t = made<ParamType>({ kind: "param", name, bound, fields: bound ? rec(bound).fields : [], concrete }, key);
+      t = made<ParamType>({ kind: "param", name, bound, fields: [], concrete }, key);
       wrappers.set(key, t);
     }
     return t;
@@ -1715,8 +1795,8 @@ export function newTyping() {
       const made = functionType(r.names, params, returns, throws);
       // A generic one stays generic, the types around it it was written among replaced too.
       if (r.generic) {
-        made.name = `<${r.generic.names.join(", ")}>${rec(made).name}`;
-        made.generic = { ...r.generic, scope: new Map([...r.generic.scope].map(([n, x]) => [n, replaced(x, swap)])) };
+        rec(made).name = `<${r.generic.names.join(", ")}>${rec(made).name}`;
+        rec(made).generic = { ...r.generic, scope: new Map([...r.generic.scope].map(([n, x]) => [n, replaced(x, swap)])) };
       }
       return made;
     }
@@ -1784,9 +1864,10 @@ export function newTyping() {
     if (!t) {
       const fields: Field[] = elements.map((type, i) => ({ name: String(i), type }));
       if (rest !== undefined) fields.push({ name: "...", type: arrayType(rest) });
-      t = made<ObjectType>({ kind: "object", fields: rec(objectType(fields)).fields, tuple: true }, key);
-      if (required < elements.length) t.required = required;
-      if (rest !== undefined) t.rest = rest;
+      const shape = objectType(fields);
+      t = made<ObjectType>({ kind: "object", fields: rec(shape).fields.map((f) => ({ ...f })), tuple: true, shape }, key);
+      if (required < elements.length) rec(t).required = required;
+      if (rest !== undefined) rec(t).rest = rest;
       interned.set(key, t);
     }
     return t;
@@ -1820,7 +1901,8 @@ export function newTyping() {
         { name: "input", type: "string" },
         ...(named.length > 0 ? [{ name: "groups", type: objectType(named) as Type }] : []),
       ];
-      found = made<ObjectType>({ kind: "object", fields: rec(objectType(fields)).fields, tuple: true, match: true }, key);
+      const shape = objectType(fields);
+      found = made<ObjectType>({ kind: "object", fields: rec(shape).fields.map((f) => ({ ...f })), tuple: true, match: true, shape }, key);
       interned.set(key, found);
     }
     return found;
@@ -1832,7 +1914,8 @@ export function newTyping() {
     const key = sorted.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}${f.optional ? `?${f.optional}` : ""}:${keyOf(f.type)}`).join(",");
     let t = interned.get(key);
     if (!t) {
-      t = made<ObjectType>({ kind: "object", fields: sorted }, key);
+      // Its fields are its own, so no other type holds one of them.
+      t = made<ObjectType>({ kind: "object", fields: sorted.map((f) => ({ ...f })) }, key);
       interned.set(key, t);
     }
     return t;
@@ -2048,10 +2131,11 @@ export function newTyping() {
   }
 
   return {
-    rec, textFits, isOption, optionRef, jsShape, isPlainJs, holdsPlainJs, unequal, uninspectable, unfold, widenEnum, widenLet, baseOf, isSubclass,
+    rec, recOf, links, fieldsOf, textFits,
+ isOption, optionRef, jsShape, isPlainJs, holdsPlainJs, unequal, uninspectable, unfold, widenEnum, widenLet, baseOf, isSubclass,
     isCopy, holdsMut, holdsPart, holdsHandle, interiorMutable, holdsInterior, elementsOf, isTuple, field, fieldPath, allFields, derives,
     openThrows, patternType, holdsPattern, sameLowered, interiorType, sharedType, dynType, callableOf, uncrossable, jsUntyped, jsOptional, jsUncalled,
-    setJsError, jsView, timerCallback, callableType, sameCallable, stored, heldArgument, jsConverts, keptByJs, jsTakes, jsRead, blockType, leafOf,
+    setJsError, jsView, timerCallback, callableType, callableFrom, sameCallable, stored, heldArgument, jsConverts, keptByJs, jsTakes, jsRead, blockType, leafOf,
     leafFuture, handleType, joinedType, futureType, combinedOf, settledType, settledParts, combinedFuture, promiseInterface, borrowing, lentPromise, sharesDyn,
     promiseElement, regexType, recursiveType, blockFor, holdsBlock, lowersRecursive, partOfItself, unjson, unfolded, pointerType, classType,
     interfaceType, generatorType, nextResult, generatorInterface, asyncGeneratorInterface, yieldsOf, generatorElement, functionType, closureType, genericFunctionType,

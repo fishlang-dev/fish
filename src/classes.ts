@@ -115,7 +115,7 @@ export type ClassInfo = {
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
 export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
-  const { genericStatics, ids, rust, typing: { classType } } = tables;
+  const { genericStatics, ids, rust, typing: { classType, rec } } = tables;
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   // A template is copied into each concrete class by the abstract class's one declaration, which a
   // generic class doesn't have.
@@ -131,7 +131,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
   const type = classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
-  if (node.abstract) type.abstract = true;
+  if (node.abstract) rec(type).abstract = true;
   const abstracts: AbstractMember[] = [];
   const methods = new Map<string, Body>();
   // A generic class's statics can't use its type parameters, so every instance shares one set.
@@ -411,7 +411,7 @@ function rustOf(rust: RustTables, m: ClassMember): { foreign?: true; rust?: Rust
 export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (name: string) => Type) {
   const { defaulted, prologues, ids, typing: { rec } } = tables;
   c.base = base;
-  c.type.base = base.type;
+  rec(c.type).base = base.type;
   for (let b: ClassInfo | undefined = base; b; b = b.base) {
     const redeclared = c.fields.find((f) => b.fields.some((g) => g.name === f.name));
     if (redeclared) {

@@ -72,7 +72,7 @@ export function literalShape(typing: Typing, e: Expr, to: Type, types: NodeMap<E
     // A literal's value takes the literal type wanted, alone or in a union of them.
     const w = typeof want === "string" ? undefined : rec(want);
     const choices = w?.kind === "union" ? w.members : [want];
-    const literal = value && choices.map((c) => (typeof c === "string" ? undefined : rec(c))).find((c): c is LiteralType => c?.kind === "literal" && !c.owner && literalValue(value) === c.value);
+    const literal = value && choices.find((c): c is LiteralType => { const r = typeof c === "string" ? undefined : rec(c); return r?.kind === "literal" && !r.owner && literalValue(value) === r.value; });
     const nested = value && !literal && !fits(have, want) ? literalShape(typing, value, want, types) : undefined;
     if (!literal && !nested && !fits(have, want)) return undefined;
     fields.push({ name, type: literal ? literal : nested ? nested.type : have });
@@ -111,8 +111,8 @@ export function intoMember({ rec, show }: Typing, target: Expr, types: NodeMap<E
 
 // A field every member of a union has, read without narrowing first: its type is the union
 // of the members' field types. This is how a discriminant like `x.kind` is read.
-export function unionField({ field, unionType }: Typing, union: UnionType, name: string, at: Span): Type | undefined {
-  const found = union.members.map((m) => (typeof m === "string" ? undefined : field(m, name)));
+export function unionField({ field, rec, unionType }: Typing, union: UnionType, name: string, at: Span): Type | undefined {
+  const found = rec(union).members.map((m) => (typeof m === "string" ? undefined : field(m, name)));
   if (found.some((f) => !f || (f.access ?? "public") !== "public")) return undefined;
   return unionType(found.map((f) => f!.type));
 }
@@ -143,7 +143,7 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
   const instances = c || !name ? [] : [...new TypeSet(members.flatMap((m) => {
     if (typeof m === "string") return [];
     const r = rec(m);
-    for (let x: ClassType | undefined = r.kind === "class" ? r : undefined; x; x = x.base) if (x.generic?.name === name) return [x];
+    for (let x: ClassType | undefined = r.kind === "class" ? (m as ClassType) : undefined; x; x = rec(x).base) if (rec(x).generic?.name === name) return [x];
     return [];
   }))];
   if (instances.length > 1) throw new CompileError(`'${name}' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart; test a field that says which`, e.right.start, e.right.end);
@@ -156,19 +156,19 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
 // The number types a union holds. In an instance, a union holding a type parameter is read as
 // the union it flattens into, so a literal meeting `T | 0` with T = `i32 | string` is an i32 as
 // it is meeting `i32 | string | 0`.
-export function numberMembers(typing: Typing, t: Type, members: (u: UnionType) => Type[] = (u) => u.members): Type[] {
+export function numberMembers(typing: Typing, t: Type, members: (u: UnionType) => Type[] = (u) => typing.rec(u).members): Type[] {
   const { lower, rec } = typing;
   if (typeof t === "string") return [];
   const r = rec(t);
   if (r.kind !== "union") return [];
-  const flat = holdsArgument(typing, r) ? lower(t) : t;
+  const flat = holdsArgument(typing, t as UnionType) ? lower(t) : t;
   const f = typeof flat === "string" ? undefined : rec(flat);
-  return (f?.kind === "union" ? members(f) : [flat]).filter(isNumeric);
+  return (f?.kind === "union" ? members(flat as UnionType) : [flat]).filter(isNumeric);
 }
 
 // Whether an instance's union holds a type parameter, which stands for its type argument there.
 export function holdsArgument({ rec }: Typing, t: UnionType): boolean {
-  return t.members.some((m) => {
+  return rec(t).members.some((m) => {
     const r = typeof m === "string" ? undefined : rec(m);
     return r?.kind === "param" && r.concrete !== undefined;
   });
@@ -197,7 +197,7 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
   const kindOf = (t: Type) => (typeof t === "string" ? undefined : rec(t).kind);
   // A literal goes into the one number type a union holds.
   const numbers = numberMembers(typing, to);
-  if (!to.members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
+  if (!rec(to).members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
   // In an instance, a type parameter no member takes goes in as the members its type argument has.
   const unionMembers = (t: Type) => {
     const r = typeof t === "string" ? undefined : rec(t);
@@ -215,23 +215,23 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
     if (source === "never") continue;
     const value = literalValue(e);
     // A plain literal expression never becomes an enum's member.
-    const literal = to.members.find((m) => {
+    const literal = rec(to).members.find((m) => {
       const r = typeof m === "string" ? undefined : rec(m);
       return r?.kind === "literal" && !r.owner && r.value === value;
     });
     const r = literal === undefined || typeof literal === "string" ? undefined : rec(literal);
-    if (literal && r?.kind === "literal" && sources.length === 1 && baseOf(r) === type) {
+    if (literal && r?.kind === "literal" && sources.length === 1 && baseOf(literal as LiteralType) === type) {
       types.set(e, literal);
       break;
     }
     let into = membersFor(source, to);
     // A fresh object literal may fit a member through its literal fields, as `{ ok: true }`
     // fits `{ ok: true }`; when exactly one member takes it that way, it becomes that shape.
-    const shapes = into.length === 0 && sources.length === 1 ? to.members.map((m) => literalShape(typing, e, m, types)) : [];
+    const shapes = into.length === 0 && sources.length === 1 ? rec(to).members.map((m) => literalShape(typing, e, m, types)) : [];
     if (shapes.filter((s) => s).length === 1) {
       const shape = shapes.find((s) => s)!;
       shape.apply(coercions);
-      into = [to.members[shapes.indexOf(shape)]!];
+      into = [rec(to).members[shapes.indexOf(shape)]!];
     }
     if (into.length === 0) throw new CompileError(message, e.start, e.end);
     if (into.length > 1) {
@@ -270,7 +270,7 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing, 
   // A union of strings and patterns is a string once lowered, compared as one.
   const union = (t: Type) => {
     const r = typeof t === "string" ? undefined : rec(t);
-    return r?.kind === "union" ? r : undefined;
+    return r?.kind === "union" ? (t as UnionType) : undefined;
   };
   const isUnion = (t: Type) => union(t) !== undefined && lower(t) !== "string";
   // In an instance, a union holding a type parameter is the union its type argument flattens into.
@@ -328,10 +328,7 @@ export function comparable(typing: Typing, a: Type, b: Type): boolean {
     const r = typeof t === "string" ? undefined : rec(t);
     return r?.kind === "literal" ? r : undefined;
   };
-  const base = (t: Type) => {
-    const l = literal(t);
-    return l ? (typing.baseOf(l) ?? t) : typeof t !== "string" && rec(t).kind === "pattern" ? "string" : t;
-  };
+  const base = (t: Type) => (literal(t) ? (typing.baseOf(t as LiteralType) ?? t) : typeof t !== "string" && rec(t).kind === "pattern" ? "string" : t);
   return members(a).some((x) => members(b).some((y) => {
     const [lx, ly] = [literal(x), literal(y)];
     if (lx && ly) return lx.value === ly.value;

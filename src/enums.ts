@@ -87,7 +87,7 @@ class Unsettled extends Map<string, LiteralType> {
 const innermost = ({ enumInits }: Compilation, node: EnumNode): [usize, usize, string] => enumInits.at(-1) ?? [node.start, node.end, node.name];
 
 function settle(compilation: Compilation, node: EnumNode, id: usize, members: Map<string, LiteralType>, evaluate: Evaluate): EnumInfo {
-  const { literalType, unionType } = compilation.typing;
+  const { literalType, unionType, rec } = compilation.typing;
   let next: bigint | undefined = 0n;
   for (const m of node.members) {
     let value: bigint | string | undefined = m.init ? literal(m.init) : next;
@@ -100,7 +100,7 @@ function settle(compilation: Compilation, node: EnumNode, id: usize, members: Ma
     next = typeof value === "bigint" ? value + 1n : undefined;
   }
   const type = unionType([...members.values()], node.name);
-  for (const member of members.values()) member.owner!.of = type;
+  for (const member of members.values()) rec(member).owner!.of = type;
   return { type, members: new Map(members) };
 }
 
