@@ -506,3 +506,66 @@ async function main(): Promise<void> throws IoError | AbortError {
   await get(found.port.load(), "/g/a");
   await get(found.port.load(), "/ok");
 }
+// case: router_groups_edges
+// expect: GET /admin/secret 401 denied
+// expect: GET /admin/secret/ 404 Not Found
+// expect: GET /admin//secret 404 Not Found
+// expect: GET //admin/secret 404 Not Found
+// expect: GET /Admin/secret 404 Not Found
+// expect: GET /admin/%73ecret 401 denied
+// expect: GET /admin 401 denied
+// expect: GET /admin/ 404 Not Found
+// expect: GET /admin/zzz 401 denied
+// expect: GET /admin/../admin/secret 401 denied
+// expect: HEAD /admin/secret 401 denied
+// expect: DELETE /admin/foo 401 denied
+// expect: OPTIONS /admin/secret 401 denied
+// expect: token GET /admin/secret 200 SECRET
+// expect: token GET /admin 200 ROOT
+// expect: token GET /admin/%73ecret 200 ALL secret
+// expect: token DELETE /admin/foo 200 ALL foo
+// expect: token OPTIONS /admin/secret 200 ALL secret
+// expect: GET /users/1/2 200 child id 2
+// expect: GET /e 200 E
+// expect: GET /s 200 S
+// A group's middleware runs for every path its routes take, encoded, dotted, or through an 'all'
+// route; paths differing by a slash or by case are the parent's 404; routers mount under "" and
+// "/" alike; and a child's :param named like the prefix's gives the child's value.
+async function show(app: Ref<Router>, method: string, path: string, token: boolean): Promise<void> {
+  let headers = new Headers();
+  if (token) headers.set("authorization", "Bearer x");
+  const res = await app.handle(new Request("http://h" + path, { method: method, headers: headers }));
+  const body = await res.text();
+  console.log((token ? "token " : "") + method, path, res.status, body.trim());
+}
+
+async function main(): Promise<void> {
+  let admin = new Router();
+  admin.use(async (req, next) => {
+    if (!req.headers.has("authorization")) return new Response("denied", { status: 401 });
+    const res = await next(req);
+    return res;
+  });
+  admin.get("/secret", async (_req) => new Response("SECRET"));
+  admin.get("/", async (_req) => new Response("ROOT"));
+  admin.all("/:x", async (req) => new Response("ALL " + req.param("x")));
+  let users = new Router();
+  users.get("/:id", async (req) => new Response("child id " + req.param("id")));
+  let empty = new Router();
+  empty.get("/e", async (_req) => new Response("E"));
+  let slash = new Router();
+  slash.get("/s", async (_req) => new Response("S"));
+  let app = new Router();
+  app.route("/admin", admin);
+  app.route("/users/:id", users);
+  app.route("", empty);
+  app.route("/", slash);
+  for (const p of ["/admin/secret", "/admin/secret/", "/admin//secret", "//admin/secret", "/Admin/secret", "/admin/%73ecret", "/admin", "/admin/", "/admin/zzz", "/admin/../admin/secret"]) await show(app, "GET", p, false);
+  await show(app, "HEAD", "/admin/secret", false);
+  await show(app, "DELETE", "/admin/foo", false);
+  await show(app, "OPTIONS", "/admin/secret", false);
+  for (const p of ["/admin/secret", "/admin", "/admin/%73ecret"]) await show(app, "GET", p, true);
+  await show(app, "DELETE", "/admin/foo", true);
+  await show(app, "OPTIONS", "/admin/secret", true);
+  for (const p of ["/users/1/2", "/e", "/s"]) await show(app, "GET", p, false);
+}
