@@ -1,3 +1,4 @@
+import type { LocalId } from "./arenas.ts";
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
@@ -123,8 +124,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
     dynMembers, boxedMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
     fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, typing, regex: regexTables,
-    joinCalls, integerCalls,
+    joinCalls, integerCalls, arenas,
   } = noted;
+  const localOf = (id: LocalId): Local => arenas.localOf(id);
   const { rec, allFields, elementsOf, field, fieldPath, holdsPart, isCopy, isOption, isPlainJs, isTuple, jsShape, optionRef, unfold,
     tiedBy, show, lower, unionType, arrayType, leafOf, blockType, callableOf, promiseElement, keyOf, described, sharesDyn, stored: storedType, lentPromise,
     interiorType, nextResult, leafFuture, tupleType, handleType, combinedOf, settledParts, regexType, matchType,
@@ -174,6 +176,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // The instance being emitted, and the tables its checking produced.
   let current = instances[0]!;
   let { types, locals, calls, setters, coercions, jumps } = current;
+  const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
   // The class of the constructor or method being emitted, whose instance `%this` points to.
   let self: ClassType | undefined;
   // In a closure, where each variable it captures lives, loaded from its environment.
@@ -339,7 +342,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         if (f.self.owned) field("%this", 1);
         else allocas.push(`  %this.at = getelementptr ${resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
       }
-      for (const [local, i] of instance.frame!.locals) field(slot(local), i);
+      for (const [local, i] of instance.frame!.locals) field(slot(localOf(local)), i);
       // A `for await` loop's third field is the future it awaits.
       for (const [s, i] of instance.frame!.loops) [i, i + 1, ...((s as { await?: boolean }).await ? [i + 2] : [])].forEach((j) => field(`%loop${j}`, j));
       for (const i of instance.frame!.awaits.values()) field(`%await${i}`, i);
@@ -370,12 +373,12 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const line = `${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`;
       if (resuming) allocas.push(`  ${line}`);
       else emit(line);
-      if (!isRef(rec(instance.closure!).fields[i]!.type)) return captured.set(alias, at);
+      if (!isRef(rec(instance.closure!).fields[i]!.type)) return captured.set(localOf(alias), at);
       const pointer = from === "this" ? "%this" : temp();
       const load = `${pointer} = load ptr, ptr ${at}`;
       if (resuming) allocas.push(`  ${load}`);
       else emit(load);
-      captured.set(alias, pointer);
+      captured.set(localOf(alias), pointer);
     });
     if (f.closure) self = selfOf(f)?.type;
     f.body.forEach(statement);
@@ -2869,7 +2872,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   function resolved(node: Expr | Stmt | Param | ObjectProp): Local {
-    const local = locals.get(node);
+    const local = localAt(node);
     if (!local) throw new Error("internal error: unresolved name");
     return local;
   }
@@ -3296,7 +3299,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A pipe over a value: the value lives in the topic's slot while the right side runs, and is
   // dropped after it unless the right side moved it out.
   function lowerPipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): string | undefined {
-    const local = locals.get(e)!;
+    const local = localAt(e)!;
     scopes.push(passing([]));
     reserve(local);
     own(slot(local), local.type);
@@ -6921,7 +6924,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
     for (const p of target.body.params.slice(args.length)) {
-      const type = target.locals.get(p)!.type;
+      const type = localOf(target.locals.get(p)!).type;
       values.push(`${llvm(type)} ${p.rest ? "zeroinitializer" : convert("zeroinitializer", "null", type)}`);
     }
     return values;
@@ -7222,7 +7225,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // A nested function's environment built for one call, in a slot of its own.
-  function envFor(target: Instance, env: Local[]): string {
+  function envFor(target: Instance, env: LocalId[]): string {
     const at = alloca(llvm(target.closure!));
     emit(`store ${llvm(target.closure!)} ${environment(target, env)}, ptr ${at}`);
     return at;
@@ -7230,9 +7233,10 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
 
   // A closure's environment, from the bindings standing here for what it captures, in order:
   // where each lives, or a copy, or the value moved in.
-  function environment(inner: Instance, froms: (Local | "this")[]): string {
+  function environment(inner: Instance, froms: (LocalId | "this")[]): string {
     let result = "undef";
-    froms.forEach((from, i) => {
+    froms.forEach((id, i) => {
+      const from = id === "this" ? id : localOf(id);
       const type = rec(inner.closure!).fields[i]!.type;
       let part = from === "this" ? "%this" : slot(from);
       // A closure holding a variable's value holds a copy, or moves it in, emptying it.
@@ -8515,7 +8519,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A C function under an export's name, calling it. A panic can't unwind into C, so one that
   // reaches here aborts, its message already printed.
   function exported(i: Instance): string[] {
-    const params = i.body.params.map((p, n) => [i.locals.get(p)!.type, `%a${n}`] as const);
+    const params = i.body.params.map((p, n) => [localOf(i.locals.get(p)!).type, `%a${n}`] as const);
     // A library's panics all unwind, the runtime's default, whichever way the build chose: the
     // abort happens here, before C sees the unwind.
     const call = `${i.returns === "void" ? "" : "%r = "}invoke ${llvm(i.returns)} ${symbol(i)}(${params.map(([t, a]) => `${llvm(t)} ${a}`).join(", ")})`;
@@ -8720,7 +8724,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         return at;
       }
       // A variable narrowed to fewer members still holds its value in its own union's payload.
-      const local = object.kind === "ident" ? locals.get(object) : undefined;
+      const local = object.kind === "ident" ? localAt(object) : undefined;
       const whole = local?.type;
       const union = recOf(whole);
       if (local && union?.kind === "union" && union.members.includes(held)) {
@@ -9380,7 +9384,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (e.kind === "index") return indexes(valueType(e.object));
     // A JsValue read out of JS lives nowhere until the read makes it.
     if (current.copiesOut.has(e)) return false;
-    const local = e.kind === "ident" ? locals.get(e) : undefined;
+    const local = e.kind === "ident" ? localAt(e) : undefined;
     const type = types.get(e);
     return local !== undefined && (type === local.type || recOf(type)?.kind !== "union");
   }

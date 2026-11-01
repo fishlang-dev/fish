@@ -263,14 +263,14 @@ const OBJECT_KEYED = [
 ];
 
 // Fish's Map and Set key on strings and integers, so every table the checker keeps does: by a
-// string, an integer, a string-literal union, or through NodeMap, TypeMap and their kin, which key
-// by id. Type parameters, `K` and `T`, are a generic table's own.
+// string, an integer, an arena id, a string-literal union, or through NodeMap, TypeMap and their
+// kin, which key by id. Type parameters, `K` and `T`, are a generic table's own.
 test("no Map, WeakMap, Set or WeakSet in the checker is keyed by anything but strings or integers", () => {
   const offenders: string[] = [];
   for (const f of CHECKER.map((name) => `${name}.ts`)) {
     const text = readFileSync(join(src, f), "utf8");
     for (const m of text.matchAll(/\b(?:Weak)?(?:Map|Set)<\s*([A-Za-z_][\w.]*(?:\[\])?|"[^"]*")/g)) {
-      if (/^(?:string|usize|isize|[iu](?:8|16|32|64|128)|f32|f64|number|bigint|boolean|BinaryOp|[KT]|"[^"]*")$/.test(m[1]!)) continue;
+      if (/^(?:string|usize|isize|[iu](?:8|16|32|64|128)|f32|f64|number|bigint|boolean|BinaryOp|(?:Instance|Body|Local|Class)Id|[KT]|"[^"]*")$/.test(m[1]!)) continue;
       const at = `${f}: ${m[0]}`;
       if (!OBJECT_KEYED.includes(at)) offenders.push(at);
     }

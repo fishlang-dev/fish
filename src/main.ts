@@ -152,7 +152,7 @@ function header(name: string, exports: Instance[]): string {
   const guard = `${/^[A-Za-z]/.test(name) ? "" : "FISH_"}${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
   const lines = exports.map((i) => {
     const params = i.body.params.map((p) => {
-      const { type, name } = i.locals.get(p)!;
+      const { type, name } = i.tables.arenas.localOf(i.locals.get(p)!);
       const c = cType(i.tables.typing.rec, type);
       const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
       return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;

@@ -25,8 +25,10 @@ export class Arenas {
     return this.bodies[id - 1]!;
   }
 
-  localOf(id: LocalId): Local {
-    return this.locals[id - 1]!;
+  localOf(id: LocalId): Local;
+  localOf(id: LocalId | undefined): Local | undefined;
+  localOf(id: LocalId | undefined): Local | undefined {
+    return id === undefined ? undefined : this.locals[id - 1];
   }
 
   classOf(id: ClassId): ClassInfo {

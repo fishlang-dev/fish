@@ -21,6 +21,7 @@ import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
 import { holdsNull } from "./defaults.ts";
+import type { LocalId } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
@@ -63,7 +64,7 @@ function holdsFloat(typing: Typing, t: Type, seen: TypeSet<Type> = new TypeSet<T
 export type Context = {
   tables: Tables;
   types: NodeMap<Expr, Type>;
-  locals: NodeMap<Expr | Stmt | Param | ObjectProp, Local>;
+  locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
   coercions: NodeMap<Expr, Type>;
   calls: NodeMap<Expr, Instance>;
   setters: NodeMap<Expr, Instance>;
@@ -276,7 +277,7 @@ export function expressions(ctx: Context) {
     ofElements, packed, pairs, parsedArgs, parses, presetParams, presetTypes, printCalls, printed,
     promiseVariants, quotes, regexCalls, regexNews, regexStringCalls, stringBuilds, substituted,
     syncFileCalls, tagCalls, timerCalls, timerNames, timerSets, timerWrappers, tupleLiterals,
-    unusedDefaults, restStarts, upcasts, typing, ids, regex, files
+    unusedDefaults, restStarts, upcasts, typing, ids, regex, files, arenas
   } = ctx.tables;
   const { rec, fieldsOf, callableFrom, allFields, baseOf, derives, elementsOf, field, holdsHandle, holdsInterior, holdsMut, holdsPart, interiorMutable, isCopy, isOption, isPlainJs, isTuple, jsShape, optionRef, unequal, unfold, uninspectable, widenEnum, widenLet,
     show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, pointerType, handleType, leafFuture,
@@ -311,6 +312,7 @@ export function expressions(ctx: Context) {
   const holdsFuture = (t: Type): boolean => typeof t !== "string" && (rec(t).kind === "future" || promiseElement(t) !== undefined);
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
+  const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new NodeMap<Expr, FunctionType>();
   // The type each generic enum's member is expected to have, by the member expression.
@@ -1588,7 +1590,7 @@ export function expressions(ctx: Context) {
       const local = lookup(callee.name);
       if (!local) return undefined;
       held = local.type;
-      locals.set(callee, local);
+      locals.set(callee, local.localId);
     } else if (callee.kind === "member" && pure(callee) && receiver !== undefined && (recOf(receiver)?.kind === "class" || recOf(receiver)?.kind === "object")) {
       if (rec(receiver as ClassType).kind === "class" && inherited(classOf(receiver as ClassType as ClassType), "methods", callee.name)) return undefined;
       held = field(receiver as ObjectType | ClassType as ClassType | ObjectType, callee.name)?.type;
@@ -1678,9 +1680,10 @@ export function expressions(ctx: Context) {
   // each changing where the function changes it.
   function nestedEnv(e: Expr, local: Local, at: Extract<Expr, { kind: "ident" }>) {
     const called = closureBody(lower(local.type) as ClosureType);
-    ctx.envOf(e, called, [...called.captures!.entries()].map(([alias, from]) => {
+    ctx.envOf(e, called, [...called.captures!.entries()].map(([alias, id]) => {
       // A closure captures it here, where the variable is named only through the function.
-      const mine = ctx.reach(from as Local, { id: nextId(ids), kind: "ident", name: (from as Local).name, start: at.start, end: at.end });
+      const from = arenas.localOf(id as LocalId);
+      const mine = ctx.reach(from, { id: nextId(ids), kind: "ident", name: from.name, start: at.start, end: at.end });
       if (called.changed?.has(alias)) changesLocal(mine, "", "change", at, false);
       return mine;
     }));
@@ -4358,7 +4361,7 @@ export function expressions(ctx: Context) {
         if (!reachable(local)) {
           throw new CompileError(`'${e.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, e.start, e.end);
         }
-        locals.set(e, local);
+        locals.set(e, local.localId);
         const lr = recOf(local.type);
         const held = lr?.kind === "ref" ? lr.to : local.type;
         if (ctx.sharing && local.param && !objects.has(e) && interiorMutable(held)) {
@@ -4770,7 +4773,7 @@ export function expressions(ctx: Context) {
           // What JS is given is JS's to keep, so nothing is left to be the assignment's value.
           if (keptByJs(target) && statementAssign !== e) throw new CompileError(`a callback or a Promise written to property '${(place as { name: string }).name}' goes to JS, so the assignment has no value to use; write it as a statement of its own`, e.start, e.end);
         }
-        const local = place.kind === "ident" ? locals.get(place) : undefined;
+        const local = place.kind === "ident" ? localAt(place) : undefined;
         if (local && typeof local.type !== "string" && rec(local.type).kind === "ref" && !coercions.has(place)) rebind(local, e.value);
         const narrow = local && narrowed(local);
         if (local && op === "=" && coercions.has(place) && narrow && isRefType(narrow) && !fits(type, rec(narrow).to)) rewritten(local, e);
@@ -5006,7 +5009,7 @@ export function expressions(ctx: Context) {
   // empty value can't tell apart.
   function jsEmpty(e: Extract<Expr, { kind: "binary" }>): Type | undefined {
     for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
-      if (!isEmpty(other, locals as NodeMap<Expr, Local>)) continue;
+      if (!isEmpty(other, locals as NodeMap<Expr, LocalId>)) continue;
       const t = value(subject);
       once.add(subject);
       if (!isPlainJs(isRefType(t) ? rec(t).to : t)) return undefined;
@@ -5370,7 +5373,7 @@ export function expressions(ctx: Context) {
   // exactly that type, and isn't a variable narrowed to part of a union.
   function inPlace(e: Expr, to: RefType): boolean {
     const type = types.get(e)!;
-    const local = e.kind === "ident" ? locals.get(e) : undefined;
+    const local = e.kind === "ident" ? localAt(e) : undefined;
     const ref = recOf(type);
     const held = ref?.kind === "ref" ? ref.to : type;
     if (local && local.type !== type && recOf(held)?.kind === "union") return false;
@@ -5398,7 +5401,7 @@ export function expressions(ctx: Context) {
     }
     let root: Expr = e;
     while (root.kind === "member" && !calls.has(root)) root = root.object;
-    const local = root.kind === "ident" ? locals.get(root) : undefined;
+    const local = root.kind === "ident" ? localAt(root) : undefined;
     const lives = root.kind === "this" || (local !== undefined && depthOf(local) <= depthOf(target));
     if (!lives || !place(e) || !inPlace(e, to)) {
       throw new CompileError(`'${target.name}' can only be pointed at a variable, or a field of one, declared in its own scope or an enclosing one, so that it lives as long as '${target.name}'`, e.start, e.end);
@@ -5416,7 +5419,7 @@ export function expressions(ctx: Context) {
       if (p.kind === "property") coerce(p.value, types.get(p.value)!, want, message);
       else if (p.kind === "shorthand") {
         // A shorthand lends its variable where it lives, so only as exactly what it holds.
-        const local = locals.get(p)!;
+        const local = localAt(p)!;
         const wr = recOf(want);
         if (wr?.kind !== "ref" || wr.mutable || lower(local.type) !== lower(wr.to)) {
           throw new CompileError(`${message}: write '${p.name}: ${p.name}' to lend '${p.name}' here`, p.start, p.end);
@@ -5614,7 +5617,7 @@ export function expressions(ctx: Context) {
     if (!reachable(local)) {
       throw new CompileError(`'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
     }
-    locals.set(p, local);
+    locals.set(p, local.localId);
     const js = jsRead(local.type, narrowed(local));
     if (js === "one") throw new CompileError(`'${p.name}' is read out of JS as a '${show(narrowed(local)!)}' here; write '${p.name}: ${p.name}'`, p.start, p.end);
     if (js === "several") return { name: p.name, type: stillJs(local.type) };
@@ -5712,7 +5715,7 @@ export function expressions(ctx: Context) {
       // A whole value assigned to a mutable reference is written through it, to what it was
       // declared to point to, whatever a check narrowed it to. An update like `+=` keeps the
       // member, so it goes through the narrowed reference.
-      const declared = target.kind === "ident" && !reads ? locals.get(target)!.type : read;
+      const declared = target.kind === "ident" && !reads ? localAt(target)!.type : read;
       // A constructor's assignment to a field of `this` sets the field rather than writing through it.
       const initialises = target.kind === "member" && target.object.kind === "this" && self?.constructor && rec(self.type).fields.some((f) => f.name === target.name);
       if ((target.kind === "ident" || target.kind === "member") && !initialises && isRefType(declared) && rec(declared).mutable) {
@@ -5721,7 +5724,7 @@ export function expressions(ctx: Context) {
           throw new CompileError(`can't assign a whole value through '${placeText(target)}', which may point to a wider value; assign its fields instead`, target.start, target.end);
         }
         if (target.kind === "member") changeable(target, "assign to");
-        else if (captured(locals.get(target)!)) changesCapture(locals.get(target)!, "", "assign to", target, true);
+        else if (captured(localAt(target)!)) changesCapture(localAt(target)!, "", "assign to", target, true);
         types.set(target, declared);
         coercions.set(target, rec(declared).to);
         return rec(declared).to;
@@ -5827,7 +5830,7 @@ export function expressions(ctx: Context) {
       }
     }
     if (root.kind === "this" || root.kind === "super") return changesThis(path, action, target);
-    changesLocal(locals.get(root)!, path, action, target, throughMut);
+    changesLocal(localAt(root)!, path, action, target, throughMut);
   }
 
   // A value moved into a new `Dyn`: its type implements the interface, and owns everything and
@@ -5906,7 +5909,7 @@ export function expressions(ctx: Context) {
     const borrowed = c.fields.find((f) => isRefType(f.type));
     if (borrowed) throw new CompileError(`this closure borrows ${capture(borrowed.name)}, but a stored callable owns what it captures; write the closure where it is stored, so it captures by move, or as 'move (...) => ...'`, e.start, e.end);
     if (c.once) throw new CompileError(`this closure moves ${capture(c.once)} out of what it captures, so it can run only once, but a stored callable may run any number of times; clone ${capture(c.once)} inside it instead`, e.start, e.end);
-    const changed = [...(body.changed ?? [])][0];
+    const changed = arenas.localOf([...(body.changed ?? [])][0]);
     if (changed) throw new CompileError(`this closure changes ${capture(changed.name)}, which it captures, but a stored callable can't change what it captures; keep that state in an 'Atomic' or a 'Lock'`, e.start, e.end);
     // Each call of an async callable runs on its own copy of what it captures, which would split
     // an Atomic's or a Lock's state in two.
@@ -6054,7 +6057,7 @@ export function expressions(ctx: Context) {
   // Whether a place is inside the value a callback is passed: its parameter, or a field of it.
   function isParamPath(e: Expr): boolean {
     while (e.kind === "member" || e.kind === "index") e = e.object;
-    return e.kind === "ident" && locals.get(e)?.param === true;
+    return e.kind === "ident" && localAt(e)?.param === true;
   }
 
   // Whether `this` may change here. A closure changing it changes it where it was made.

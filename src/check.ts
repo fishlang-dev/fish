@@ -71,7 +71,7 @@ export type Instance = {
   spelled?: NodeMap<Expr, Type>;
   // The binding each name use, declaration, parameter and shorthand property refers to,
   // after shadowing.
-  locals: NodeMap<Expr | Stmt | Param | ObjectProp, Local>;
+  locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
   // The function each call of a user function or method runs, and the getter each read of
   // an accessor runs.
   calls: NodeMap<Expr, Instance>;
@@ -101,20 +101,20 @@ export type Instance = {
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
-  captures?: NodeMap<Local, Local | "this">;
-  captureUses?: NodeMap<Local, Expr | ObjectProp>;
+  captures?: Map<LocalId, LocalId | "this">;
+  captureUses?: Map<LocalId, Expr | ObjectProp>;
   // The captures it changes, which it captures mutably, and those it moves out of itself.
-  changed?: NodeSet<Local>;
-  moved?: NodeSet<Local>;
+  changed?: Set<LocalId>;
+  moved?: Set<LocalId>;
   // Each call or use as a value of a nested function by name, the function, and this body's
   // bindings for what it captures, in its environment's order, from which the call or the
   // value builds it.
-  envs?: NodeMap<Expr, { of: Instance; env: Local[] }>;
+  envs?: NodeMap<Expr, { of: Instance; env: LocalId[] }>;
   // What each value boxed into a Dyn runs for the interface's members.
   dyns?: NodeMap<Expr, DynTable>;
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
-  made?: NodeMap<Expr, { of: Instance; env: Local[] }[]>;
+  made?: NodeMap<Expr, { of: Instance; env: LocalId[] }[]>;
   // Each call of a type predicate that narrows its argument: the predicate's type, and whether
   // its true and its false answers narrow, which codegen checks against the argument's tag.
   predicates?: NodeMap<Expr, { index: usize; type: Type; yes: boolean; no: boolean }>;
@@ -127,7 +127,7 @@ export type Instance = {
   // A generator's own type, which calling it gives, and where each variable and each
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
-  frame?: { locals: NodeMap<Local, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
+  frame?: { locals: Map<LocalId, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -259,25 +259,25 @@ function madeBy<T extends ClosureType | FutureType | GeneratorType>(t: T, instan
 }
 
 function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
-  const { typing } = instance.tables;
+  const { typing, arenas } = instance.tables;
   const { leafFuture, lower, lentPromise, nextResult, yieldsOf, promiseInterface, rec } = typing;
   const fields: Field[] = [{ name: "state", type: "i32" }];
-  const locals = new NodeMap<Local, usize>();
+  const locals = new Map<LocalId, usize>();
   const loops = new NodeMap<Stmt, usize>();
   // Each `await` keeps the future it awaits in the frame while it is pending.
   const awaits = new NodeMap<Expr, usize>();
   const add = (l: Local) => {
-    if (locals.has(l)) return;
-    locals.set(l, fields.length);
+    if (locals.has(l.localId)) return;
+    locals.set(l.localId, fields.length);
     fields.push({ name: `${l.name}.${l.id}`, type: l.type });
   };
   // An async arrow's frame holds what it captured, first, and an async method's its object.
   if (instance.body.closure) fields.push({ name: "env", type: "void" });
   const self = instance.body.self;
   if (self && !self.constructor) fields.push(receiverField(typing, self, (t) => (instance.concrete ? typing.lower(t) : t)));
-  instance.body.params.forEach((p) => add(instance.locals.get(p)!));
+  instance.body.params.forEach((p) => add(arenas.localOf(instance.locals.get(p)!)));
   // A local generic function's name holds nothing.
-  [...new NodeSet(instance.locals.values())].filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
+  [...new Set(instance.locals.values())].map((l) => arenas.localOf(l)).filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
   walk("stmt", instance.body.body, ({ of, node }) => {
     if (of === "expr" && node.kind === "arrow") return false;
     const s = node as Stmt;
@@ -408,6 +408,7 @@ export function check(compilation: Compilation, written: Stmt[], library = false
 
 function checkAll(compilation: Compilation, written: Stmt[], library: boolean, macros: boolean, module: boolean): Checked {
   const { arenas, counts, ids, rust: { names: rustNames, classNodes: rustClassNodes } } = compilation;
+  const localOf = (id: LocalId): Local => arenas.localOf(id);
   const tables = newTables(compilation);
   const { typing } = tables;
   const { allFields, elementsOf, field, holdsPart, interiorMutable, isCopy, isTuple, optionRef, widenLet,
@@ -968,7 +969,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
     instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: lower(p.type) }));
     if (instance.throws) instance.throws = lower(instance.throws);
-    for (const local of new NodeSet(instance.locals.values())) local.type = lower(local.type);
+    for (const local of new Set(instance.locals.values())) arenas.localOf(local).type = lower(arenas.localOf(local).type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
     instance.returns = lower(instance.returns);
   }
@@ -1007,7 +1008,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     f.params.forEach((p) => {
       if (defaulted.has(p)) throw new CompileError("an exported function's parameter can't have a default in a library, since C callers pass every argument", p.start, p.end);
-      const t = instance.locals.get(p)!.type;
+      const t = arenas.localOf(instance.locals.get(p)!).type;
       if (!crosses(t)) throw new CompileError(`an exported function's parameter can't be a '${show(t)}' in a library; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
     });
     if (instance.returns !== "void" && !crosses(instance.returns)) {
@@ -1339,7 +1340,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // How many statements with a `finally` enclose the code being checked: a generator dropped
     // at a `yield` there would never run the `finally`.
     let finalizing = 0;
-    const scopes: Map<string, Local>[] = [new Map()];
+    const scopes: Map<string, LocalId>[] = [new Map()];
     // Every type written from here on, in annotations, casts and closures, sees these names.
     const named = (p: Param, name: string) => p.pattern.kind === "ident" && p.pattern.name === name;
     // Only a type written inside the body sees them: one written elsewhere, a class's field or
@@ -1365,7 +1366,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const assigned = assignedNames(f.body);
     // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
     // A capture narrows as a variable of the closure's would.
-    const narrowable = (l: Local) => (captures?.has(l) ? !assigned.has(l.name) : l.param || !l.mutable || !assigned.has(l.name)) || (isRef(l.type) && rec(l.type).mutable);
+    const narrowable = (l: Local) => (captures?.has(l.localId) ? !assigned.has(l.name) : l.param || !l.mutable || !assigned.has(l.name)) || (isRef(l.type) && rec(l.type).mutable);
     // How many scopes enclose each binding's declaration.
     const depths = new NodeMap<Local, usize>();
     // Bindings declared directly in a switch case body whose checking has finished.
@@ -1379,7 +1380,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const type = withScope(target.bindings, () => resolveType(p.type!));
       return { index, type, narrows: (yes: boolean, no: boolean) => void ((yes || no) && (instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no })) };
     };
-    const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
+    const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, LocalId>, narrowable, predicate);
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
     // the target of an assignment to one of them, and the constructor can't return.
@@ -1408,7 +1409,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
       classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
       asWritten: () => asWritten(instance),
-      envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of, env }),
+      envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of, env: env.map((l) => l.localId) }),
       dynOf: (e, table) => void (instance.dyns ??= new NodeMap()).set(e, table),
       nestedLocal,
       owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
@@ -1437,10 +1438,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       },
       bind: (name, type, node) => {
         declare(name, type, false, false, node);
-        return locals.get(node)!;
+        return localOf(locals.get(node)!);
       },
       narrowed,
-      captured: (l) => captures?.has(l) ?? false,
+      captured: (l) => captures?.has(l.localId) ?? false,
       raise,
       comptime: <T>(check: () => T): T => {
         comptimeDepth++;
@@ -1479,10 +1480,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // A closure's capture stands for the variable it captures. The first demand decides,
       // and a different one is the usual mismatch once it applies.
       infer: (e, to) => {
-        let local = e.kind === "ident" ? locals.get(e) : undefined;
-        for (let at: Instance | undefined = instance; local && at?.captures?.has(local); at = at.body.closure?.parent) {
-          const from = at.captures.get(local)!;
-          local = from === "this" ? undefined : from;
+        let local = e.kind === "ident" ? arenas.localOf(locals.get(e)) : undefined;
+        for (let at: Instance | undefined = instance; local && at?.captures?.has(local.localId); at = at.body.closure?.parent) {
+          const from = at.captures.get(local.localId)!;
+          local = from === "this" ? undefined : localOf(from);
         }
         const s = local && candidates.get(local);
         if (!s || !isInteger(to) || to === "i64") return false;
@@ -1608,7 +1609,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const required = f.params.filter((p) => !p.optional && !p.rest).length;
       if (e.args.length < required || e.args.length > f.params.length) throw new CompileError(`expected ${required === f.params.length ? required : `${required}-${f.params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
       e.args.forEach((a, i) => {
-        const to = locals.get(f.params[i]!)!.type;
+        const to = localOf(locals.get(f.params[i]!)!).type;
         expect(a, to);
         const t = value(a);
         coerce(a, t, to, `argument of type '${show(t)}' is not assignable to parameter of type '${show(to)}'`);
@@ -1844,7 +1845,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         const held = patternText(pattern);
         Object.assign(d, { target: { id: nextId(ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
         statement(s);
-        type = locals.get(s)!.type;
+        type = localOf(locals.get(s)!).type;
         from = (at) => ({ id: nextId(ids), kind: "ident", name: held, start: at.start, end: at.end });
       }
       const destructuring: Type = type!;
@@ -2002,8 +2003,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // end of each narrowing scope it is read as declared. A loop inside such a scope could come
     // back to reads already checked as narrowed.
     function rewritten(l: Local, at: Expr) {
-      const outside = captures?.get(l);
-      if (outside && outside !== "this" && outer!.narrowed(outside)) {
+      const outside = captures?.get(l.localId);
+      if (outside && outside !== "this" && outer!.narrowed(localOf(outside))) {
         throw new CompileError(`can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
       }
       const from = facts.findIndex((f) => f.has(l));
@@ -2048,24 +2049,26 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
         types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       });
-      inner.captures = new NodeMap();
-      inner.captureUses = new NodeMap();
-      inner.changed = new NodeSet();
-      inner.moved = new NodeSet();
+      inner.captures = new Map();
+      inner.captureUses = new Map();
+      inner.changed = new Set();
+      inner.moved = new Set();
       closures.push(inner);
       withSight(inSight, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
+      const captured = [...inner.captures].map(([alias, from]): [Local, Local | "this"] => [localOf(alias), from === "this" ? from : localOf(from)]);
+      const moved = [...inner.moved].map(localOf);
       // A closure owning what it captures holds a nested function it uses as made here, so it
       // borrows what that function uses, as this body has it.
       if (e.async || inner.body.closure!.move) {
-        for (const [, from] of inner.captures) {
+        for (const [, from] of captured) {
           if (from === "this" || !nestedLocal(from)) continue;
           const of = closureBodies.get(lower(from.type) as ClosureType)!;
           const env = [...of.captures!].map(([alias, x]) => {
-            const mine = reach(x as Local, e);
+            const mine = reach(localOf(x as LocalId), e);
             if (of.changed?.has(alias)) changesLocal(mine, "", "change", e, false);
-            return mine;
+            return mine.localId;
           });
           (instance.made ??= new NodeMap()).set(e, [...(instance.made.get(e) ?? []), { of, env }]);
         }
@@ -2073,22 +2076,22 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // A nested function runs whenever it is called, so it can't take over what it uses.
       const nested = nestedFunctions.get(e);
       if (nested !== undefined) {
-        const self = [...inner.captures].find(([, from]) => from === "this");
-        if (self) throw new CompileError(`'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses!.get(self[0]) ?? e).start, (inner.captureUses!.get(self[0]) ?? e).end);
+        const self = captured.find(([, from]) => from === "this");
+        if (self) throw new CompileError(`'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses.get(self[0].localId) ?? e).start, (inner.captureUses.get(self[0].localId) ?? e).end);
         // An async one takes its own copy of what it uses when it is made, which a later change
         // to a `let` wouldn't reach, as it would in JavaScript.
-        const changing = e.async ? [...inner.captures].find(([, from]) => from !== "this" && from.mutable) : undefined;
-        if (changing) throw new CompileError(`the async nested function '${nested}' takes its own copy of '${changing[0].name}' when it is made, so a later change to it wouldn't reach the function; pass '${changing[0].name}' as a parameter, or make it a 'const'`, (inner.captureUses!.get(changing[0]) ?? e).start, (inner.captureUses!.get(changing[0]) ?? e).end);
-        const moved = [...inner.moved!][0];
-        if (moved) throw new CompileError(`the nested function '${nested}' moves '${moved.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses!.get(moved) ?? e).start, (inner.captureUses!.get(moved) ?? e).end);
+        const changing = e.async ? captured.find(([, from]) => from !== "this" && from.mutable) : undefined;
+        if (changing) throw new CompileError(`the async nested function '${nested}' takes its own copy of '${changing[0].name}' when it is made, so a later change to it wouldn't reach the function; pass '${changing[0].name}' as a parameter, or make it a 'const'`, (inner.captureUses.get(changing[0].localId) ?? e).start, (inner.captureUses.get(changing[0].localId) ?? e).end);
+        const first = moved[0];
+        if (first) throw new CompileError(`the nested function '${nested}' moves '${first.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses.get(first.localId) ?? e).start, (inner.captureUses.get(first.localId) ?? e).end);
       }
       // A shared value's `update` callback lends its parameter only through its fields.
       if (f.closure?.expected && sharedCallbacks.has(f.closure.expected)) {
-        for (const [alias, from] of inner.captures!) {
+        for (const [alias, from] of captured) {
           const ref = from === "this" ? undefined : recOf(from.type);
           const held = from === "this" ? undefined : ref?.kind === "ref" ? ref.to : from.type;
           if (from !== "this" && from.param && held !== undefined && interiorMutable(held)) {
-            const at = inner.captureUses!.get(alias) ?? e;
+            const at = inner.captureUses.get(alias.localId) ?? e;
             throw new CompileError(`a closure inside a shared value's 'update' can't capture '${alias.name}': other tasks borrow its interior-mutable parts without the lock`, at.start, at.end);
           }
         }
@@ -2097,14 +2100,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // is a reference either way.
       // In an instance, what a type parameter stands for is laid out.
       const laid = (t: Type) => (inner.concrete ? lower(t) : t);
-      const fields = [...inner.captures].map(([alias, from]) => ({
+      const fields = captured.map(([alias, from]) => ({
         name: alias.name,
-        type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
+        type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias.localId)) : e.move || owning || inner.moved!.has(alias.localId) ? from.type : refType(from.type, inner.changed!.has(alias.localId))),
       }));
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
       // An async arrow's call only makes its future, which carries what it throws.
       const throws = inner.future ? undefined : inner.throws && laid(inner.throws);
-      const type = madeBy(closureType(e.params.map((p) => writtenName(tables, p)), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete, throws), inner);
+      const type = madeBy(closureType(e.params.map((p) => writtenName(tables, p)), e.params.map((p) => localOf(inner.locals.get(p)!).type), inner.future ?? inner.returns, fields, moved[0]?.name, inner.concrete, throws), inner);
       // One throwing what the function type it is given as doesn't take can't be given as it.
       const given = expected && rec(expected);
       if (expected && given && throws && e.throws && !openThrows.has(expected) && !(given.throws && fits(throws, given.throws))) {
@@ -2118,9 +2121,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         throw new CompileError(`this async closure throws '${show(failing)}', but it is given as '${show(expected)}', whose Promise throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
       }
       // Each call's future works on its own copy of the captures, so a change would be lost.
-      const changed = e.async ? [...inner.changed!][0] : undefined;
+      const changed = e.async && inner.changed.size > 0 ? localOf([...inner.changed][0]!) : undefined;
       if (changed) {
-        const at = inner.captureUses!.get(changed) ?? e;
+        const at = inner.captureUses.get(changed.localId) ?? e;
         if (timerWrappers.has(e)) throw new CompileError(`a timer's function owns what it captures, so changing '${changed.name}' would change only its own copy; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
         throw new CompileError(`this async arrow changes '${changed.name}', which it captured, but each call's future works on its own copy, so the change would be lost; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
       }
@@ -2241,7 +2244,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // So does a regex given as a 'RegExp', which keeps its pattern's captures.
           const describes = annotated && (isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
           declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
-          if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(locals.get(s)!, s);
+          if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(localOf(locals.get(s)!), s);
           // A nested function's declaration, met as this `const` again when a body is checked anew.
           if (nestedFunctions.has(d.init)) nestedBindings.add(locals.get(s)!);
           return;
@@ -2298,7 +2301,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const lifted = liftedFunctions.get(s);
           if (lifted) {
             declare(lifted.name, "void", false, false, s);
-            locals.get(s)!.generic = lifted.fn;
+            localOf(locals.get(s)!).generic = lifted.fn;
           }
           return;
         }
@@ -2405,14 +2408,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // The case bodies share one scope, as in JavaScript, but any case may be entered
           // directly, skipping the bodies before it, so a binding one case declares is usable
           // only in that case.
-          const shared = new Map<string, Local>();
+          const shared = new Map<string, LocalId>();
           scopes.push(shared);
           within({ stmt: s, kind: "switch" }, () => {
             // A case narrows a union for its body, and so do the cases that fall through into it.
             // `falling` is what holds for a body the previous one falls into, or null when it leaves.
             let falling: Facts | null = null;
             for (const c of s.cases) {
-              const before = new NodeSet(shared.values());
+              const before = new Set(shared.values());
               let test = c.test && value(c.test);
               // A literal case takes the discriminant's type, or its union's one number type.
               const numbers = union ? numberMembers(tables.typing, union) : [type];
@@ -2427,7 +2430,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
               const reaching: Facts = falling ? either(tables.typing, falling, tested) : tested;
               const mark = changed.length;
               assume(reaching, () => statements(c.body));
-              for (const local of shared.values()) if (!before.has(local)) caseOnly.add(local);
+              for (const local of shared.values()) if (!before.has(local)) caseOnly.add(localOf(local));
               falling = leaves(c.body) ? null : current(reaching, mark);
             }
           });
@@ -2637,15 +2640,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (scope.has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
       const local = arenas.addLocal({ name, type, mutable, param, id: nextLocal++ });
       depths.set(local, scopes.length);
-      scope.set(name, local);
-      locals.set(node, local);
+      scope.set(name, local.localId);
+      locals.set(node, local.localId);
       declarations.add(node);
     }
 
     function lookup(name: string, at?: Expr | ObjectProp): Local | undefined {
       for (let i = scopes.length - 1; i >= (hidden ? 1 : 0); i--) {
         const local = scopes[i]!.get(name);
-        if (local) return local;
+        if (local) return localOf(local);
       }
       const outside = outer?.lookup(name, at);
       // A local generic function holds nothing to capture.
@@ -2657,14 +2660,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     function nestedLocal(l: Local): boolean {
       const type = lower(l.type);
       const closure = recOf(type);
-      if (!nestedBindings.has(l) || closure?.kind !== "closure") return false;
+      if (!nestedBindings.has(l.localId) || closure?.kind !== "closure") return false;
       return closureBodies.get(type as ClosureType)?.body.async !== true;
     }
 
     function peek(name: string): Local | undefined {
       for (let i = scopes.length - 1; i >= (hidden ? 1 : 0); i--) {
         const local = scopes[i]!.get(name);
-        if (local) return local;
+        if (local) return localOf(local);
       }
       return outer?.peek(name);
     }
@@ -2675,7 +2678,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
     // By the binding itself, not its name, which a body in between may have taken for another.
     function reach(l: Local, at?: Expr | ObjectProp): Local {
-      if (captures?.has(l) || scopes.some((scope) => [...scope.values()].includes(l))) return l;
+      if (captures?.has(l.localId) || scopes.some((scope) => [...scope.values()].includes(l.localId))) return l;
       return capture(outer!.reach(l, at), at);
     }
 
@@ -2738,9 +2741,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A closure changing what it captures captures it mutably, if it may change where the
     // closure is made.
     function changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean) {
-      const alias = l ?? [...captures!].find(([, from]) => from === "this")![0];
-      const from = captures!.get(alias)!;
+      const alias = l?.localId ?? [...captures!].find(([, from]) => from === "this")![0];
+      const held = captures!.get(alias)!;
       instance.changed!.add(alias);
+      const from = held === "this" ? held : localOf(held);
       if (from === "this") outer!.changesThis(path, action, target);
       // What a `move` closure holds is its own to change, unless the change goes through a
       // mutable reference it holds a copy of; as in Rust, only a copy of a `let` may change.
@@ -2757,8 +2761,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
 
     function constant(l: Local): boolean {
-      const from = captures?.get(l);
-      if (from && from !== "this") return outer!.constant(from);
+      const from = captures?.get(l.localId);
+      if (from && from !== "this") return outer!.constant(localOf(from));
       return !l.mutable || l.param;
     }
 
@@ -2815,8 +2819,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     function noteThis(e: Expr) {
       if (!captures || [...captures.values()].includes("this")) return;
       const alias = arenas.addLocal({ name: "this", type: self!.type, mutable: false, param: false, id: nextLocal++ });
-      captures.set(alias, "this");
-      instance.captureUses!.set(alias, e);
+      captures.set(alias.localId, "this");
+      instance.captureUses!.set(alias.localId, e);
       outer!.noteThis(e);
     }
 
@@ -2830,21 +2834,22 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A variable's type where something narrowed it: a captured one as it was where the closure
     // was made.
     function narrowed(l: Local): Type | undefined {
-      const outside = captures?.get(l);
-      return facts.findLast((f) => f.has(l))?.get(l) ?? (outside && outside !== "this" ? outer!.narrowed(outside) : undefined);
+      const outside = captures?.get(l.localId);
+      return facts.findLast((f) => f.has(l))?.get(l) ?? (outside && outside !== "this" ? outer!.narrowed(localOf(outside)) : undefined);
     }
 
     // A closure's body reads a variable it captures through a binding of its own, standing
     // for it.
     function capture(from: Local, at?: Expr | ObjectProp): Local {
-      let alias = [...captures!].find(([, l]) => l === from)?.[0];
+      const found = [...captures!].find(([, l]) => l === from.localId)?.[0];
+      let alias = found === undefined ? undefined : localOf(found);
       if (!alias) {
         alias = arenas.addLocal({ name: from.name, type: from.type, mutable: false, param: false, id: nextLocal++ });
         depths.set(alias, 0);
-        captures!.set(alias, from);
-        if (nestedBindings.has(from)) nestedBindings.add(alias);
+        captures!.set(alias.localId, from.localId);
+        if (nestedBindings.has(from.localId)) nestedBindings.add(alias.localId);
       }
-      if (at && !instance.captureUses!.has(alias)) instance.captureUses!.set(alias, at);
+      if (at && !instance.captureUses!.has(alias.localId)) instance.captureUses!.set(alias.localId, at);
       return alias;
     }
   }

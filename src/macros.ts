@@ -400,7 +400,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const param = macro.params[0]!;
   const returns = instance.returns;
   if (typeof returns === "string" || instance.tables.typing.rec(returns).kind === "literal") throw new CompileError(`a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${instance.tables.typing.show(returns)}'`, macro.start, macro.end);
-  const input = instance.locals.get(param)!.type;
+  const input = instance.tables.arenas.localOf(instance.locals.get(param)!).type;
   const { bare, restore } = stripped(ids, decl, pending);
   const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
   let value: Value;
@@ -427,7 +427,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
   // Computed in the macro's hygiene, so a quote in an argument or a default means its file's names.
   const values = () => ready.args.map((a, i) => {
-    const t = instance.locals.get(macro.params[i + before]!)!.type;
+    const t = instance.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
     if (a.none) return null;
     if (!a.syntax) return comptimeBody(checked.instances.find((c) => c.body.name === `const ${a.name}`)!);
     return built<Value>(checked.tables, { tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));

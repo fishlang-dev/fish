@@ -1,3 +1,4 @@
+import type { LocalId } from "./arenas.ts";
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
 import type { Tables } from "./compilation.ts";
@@ -58,7 +59,7 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // `narrows` hears whether its true and its false answers narrow, which codegen then checks.
 export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usize; type: Type; narrows(yes: boolean, no: boolean): void } | undefined;
 
-export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
+export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, LocalId>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const { kindTests, typing } = tables;
   const { fieldsOf, holdsPlainJs, isSubclass, rec, unfold, fits, refType, unionType } = typing;
   const nothing: Guard = { yes: new NodeMap(), no: new NodeMap() };
@@ -91,7 +92,7 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
   const test = typeofTest(e);
   if (test) {
     const name = test.name.kind === "string" ? test.name.value : undefined;
-    const local = test.operand.kind === "ident" ? locals.get(test.operand) : undefined;
+    const local = test.operand.kind === "ident" ? tables.arenas.localOf(locals.get(test.operand)) : undefined;
     // A JsValue that is a string, number or boolean is read as a Fish one where that is known.
     const read = name && JS_READS[name];
     const tested = types.get(test.operand);
@@ -133,7 +134,7 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
 
   // Splits a narrowable variable's members by whether a check holds for them.
   function split(subject: Expr, check: (m: Type) => "yes" | "no" | "both", positive: boolean): Guard {
-    const local = subject.kind === "ident" ? locals.get(subject) : undefined;
+    const local = subject.kind === "ident" ? tables.arenas.localOf(locals.get(subject)) : undefined;
     const type = types.get(subject);
     if (!local || !type || !narrowable(local)) return nothing;
     // A reference narrows to a reference to fewer members; a mutable one only to a single
@@ -164,7 +165,7 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
 }
 
 // `null`, or `undefined` where no variable takes the name.
-export const isEmpty = (e: Expr, locals: NodeMap<Expr, Local>) => e.kind === "null" || (e.kind === "ident" && e.name === "undefined" && !locals.has(e));
+export const isEmpty = (e: Expr, locals: NodeMap<Expr, LocalId>) => e.kind === "null" || (e.kind === "ident" && e.name === "undefined" && !locals.has(e));
 
 
 // A variable either of two branches narrowed has, after them, whichever type it had.

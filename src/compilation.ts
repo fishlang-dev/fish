@@ -1,5 +1,5 @@
-import { Arenas } from "./arenas.ts";
-import type { Instance, Local } from "./check.ts";
+import { Arenas, type LocalId } from "./arenas.ts";
+import type { Instance } from "./check.ts";
 import type { Value } from "./comptime.ts";
 import type { Body } from "./classes.ts";
 import type { Names } from "./diag.ts";
@@ -96,7 +96,7 @@ export type Tables = {
   // per call.
   nestedFunctions: WeakNodeMap<Expr, string>;
   // The bindings nested function declarations make, and closures' captures of them.
-  nestedBindings: WeakNodeSet<Local>;
+  nestedBindings: Set<LocalId>;
   // The generic functions written inside bodies, each lifted to a function of its own, by the
   // statement that declared it, or the generic arrow written as a value.
   liftedFunctions: WeakNodeMap<Stmt | Expr, { name: string; fn: Declared & { body: Stmt[] } }>;
@@ -314,7 +314,7 @@ export function newTables({ typing, arenas, upcasts, ids, counts, regex, files, 
     declarations: new WeakNodeSet<Expr | Stmt | Param | ObjectProp>(),
     loopParts: new WeakNodeSet<Declarator>(),
     nestedFunctions: new WeakNodeMap<Expr, string>(),
-    nestedBindings: new WeakNodeSet<Local>(),
+    nestedBindings: new Set<LocalId>(),
     liftedFunctions: new WeakNodeMap<Stmt | Expr, { name: string; fn: Declared & { body: Stmt[] } }>(),
     getterNames: new Set<string>(),
     destructuredParts: new WeakNodeMap<Stmt, Expr>(),

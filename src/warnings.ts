@@ -1,7 +1,8 @@
-import type { Body, Instance, Local } from "./check.ts";
+import type { LocalId } from "./arenas.ts";
+import type { Body, Instance } from "./check.ts";
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
-import { NodeSet, type Id } from "./nodes.ts";
+import type { Id } from "./nodes.ts";
 import type { Param, Pattern, Stmt } from "./parser.ts";
 import { STD_BASE } from "./std.ts";
 
@@ -21,8 +22,8 @@ export function markGenerated(generated: Tables["generated"], node: unknown, see
 // are a signature's to decide, as an export's, an override's or an interface method's are.
 // `declarations` are the `let` statements and parameters that declare a name, as the checker met
 // them; every other node an instance's `locals` holds is a use of one.
-export function warnings({ declarations, generated, prologues }: Tables, instances: Instance[], required: (b: Body) => boolean): CompileError[] {
-  const used = new NodeSet<Local>();
+export function warnings({ arenas, declarations, generated, prologues }: Tables, instances: Instance[], required: (b: Body) => boolean): CompileError[] {
+  const used = new Set<LocalId>();
   for (const i of instances) {
     for (const [node, l] of i.locals) if (!declarations.has(node)) used.add(l);
     for (const from of i.captures?.values() ?? []) if (from !== "this") used.add(from);
@@ -33,8 +34,9 @@ export function warnings({ declarations, generated, prologues }: Tables, instanc
   const found = new Map<usize, { warning: CompileError; used: boolean }>();
   for (const i of instances) {
     if (i.body.start >= STD_BASE || generated.has(i.body)) continue;
-    for (const [node, l] of i.locals) {
+    for (const [node, id] of i.locals) {
       if (!declarations.has(node)) continue;
+      const l = arenas.localOf(id);
       // A parameter with a default is bound by the body's first statements, under its name.
       const param = l.param || prologues.has(node as Stmt);
       if (param && required(i.body)) continue;
@@ -42,7 +44,7 @@ export function warnings({ declarations, generated, prologues }: Tables, instanc
       if (!at || at.kind !== "ident" || generated.has(at) || generated.has(node) || !warnable(at.name)) continue;
       const what = param ? "parameter" : "variable";
       const entry = found.get(at.start) ?? { warning: new CompileError(`unused ${what} '${at.name}'; if it's intentional, name it '_${at.name}'`, at.start, at.start + at.name.length), used: false };
-      entry.used ||= used.has(l);
+      entry.used ||= used.has(id);
       found.set(at.start, entry);
     }
   }
