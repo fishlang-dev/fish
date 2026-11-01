@@ -13,9 +13,9 @@ function main() {
   console.log(d > 0, p >= 0.0);
 }
 // case: date_other_members
-// error: 'Date.parse' isn't supported yet; 'Date.now()' is
+// error: 'Date.UTC' isn't supported yet; 'Date.now()' is
 function main() {
-  console.log(Date.parse("x"));
+  console.log(Date.UTC(2026, 10));
 }
 // case: clock_arguments
 // error: 'Date.now' takes no arguments

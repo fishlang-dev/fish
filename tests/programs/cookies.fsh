@@ -248,14 +248,34 @@ function main() {
   jar.set("b", "", { domain: "" });
   console.log(jar.toSetCookieHeaders()[1]);
 }
+// case: cookies_expires_date
+// expect: s=1; Path=/; Expires=Sun, 01 Nov 2026 12:29:41 GMT; SameSite=Lax
+// expect: s=2; Path=/; Expires=Fri, 31 Dec 9999 23:59:59 GMT; SameSite=Lax
+// expect: 1793536181000
+// A Date or its milliseconds, and the Date is still the caller's after.
+function main() {
+  let jar = new CookieMap();
+  const at = new Date(1793536181000);
+  jar.set("s", "1", { expires: at.clone() });
+  console.log(jar.toSetCookieHeaders()[0]);
+  jar.set("s", "2", { expires: new Date(253402300799999) });
+  console.log(jar.toSetCookieHeaders()[0]);
+  console.log(at.getTime());
+}
+// case: cookies_expires_date_too_late
+// panic: cookie 'a' can't expire at 253402300800000; give a time within the years 0000 to 9999
+function main() {
+  let jar = new CookieMap();
+  jar.set("a", "", { expires: new Date(253402300800000) });
+}
 // case: cookies_expires_too_late
-// panic: cookie 'a' can't expire at 253402300800000; give milliseconds since the epoch within the years 0000 to 9999
+// panic: cookie 'a' can't expire at 253402300800000; give a time within the years 0000 to 9999
 function main() {
   let jar = new CookieMap();
   jar.set("a", "", { expires: 253402300800000 });
 }
 // case: cookies_expires_too_early
-// panic: cookie 'a' can't expire at -62167219200001; give milliseconds since the epoch within the years 0000 to 9999
+// panic: cookie 'a' can't expire at -62167219200001; give a time within the years 0000 to 9999
 function main() {
   let jar = new CookieMap();
   jar.set("a", "", { expires: -62167219200001 });

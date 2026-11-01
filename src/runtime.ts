@@ -265,6 +265,7 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_insp_u64(i64)",
   "declare ptr @fsh_rt_insp_f64(double, i32)",
   "declare ptr @fsh_rt_insp_string(ptr)",
+  "declare ptr @fsh_rt_insp_raw(ptr)",
   "declare ptr @fsh_rt_insp_object(ptr)",
   "declare ptr @fsh_rt_insp_error(ptr, ptr, ptr)",
   "declare void @fsh_rt_insp_field(ptr, ptr, ptr)",

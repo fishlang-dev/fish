@@ -3032,6 +3032,13 @@ fsh_insp *fsh_rt_insp_string(fsh_str *s) {
   return fsh_insp_new(FSH_INSP_STRING, s->bytes, s->length);
 }
 
+// Text printed as it is, unquoted, which it takes over.
+fsh_insp *fsh_rt_insp_raw(fsh_str *s) {
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, s->bytes, s->length);
+  fsh_rt_str_release(s);
+  return v;
+}
+
 fsh_insp *fsh_rt_insp_object(const char *name) {
   return fsh_insp_new(FSH_INSP_OBJECT, name, strlen(name));
 }
