@@ -77,3 +77,42 @@ function twice(): void {}
 function main(): void {
   console.log(missing);
 }
+// case: errors_after_calling_failed_function
+// A call of a function whose body failed is typed by its written signature, so the caller's own
+// errors are reported too, whichever is declared first.
+// errors: 2
+// error: error[E0101]: type '"no"' is not assignable to return type 'i64'
+// error: error[E0101]: type 'i64' is not assignable to type 'string'
+function f1(): i64 {
+  return "no";
+}
+function main(): void {
+  console.log(f1());
+  const s: string = 5;
+  console.log(s);
+}
+// case: errors_calling_failed_function_declared_after
+// errors: 2
+// error: error[E0101]: type 'i64' is not assignable to type 'string'
+// error: error[E0101]: type '"no"' is not assignable to return type 'i64'
+function main(): void {
+  console.log(f1());
+  const s: string = 5;
+  console.log(s);
+}
+function f1(): i64 {
+  return "no";
+}
+// case: errors_move_after_calling_failed_function
+// errors: 2
+// error: errors_move_after_calling_failed_function.fsh:6:59: error[E0201]: 'b.v' can't be used here because 'b' was moved
+// error: errors_move_after_calling_failed_function.fsh:10:15: error[E0201]: 'b.v' can't be used here because 'b' was moved
+class Box { v: i64 = 0; constructor() {} }
+function take(b: Box): i64 { return b.v; }
+function f1(): i64 { const b = new Box(); take(b); return b.v; }
+function main() {
+  const b = new Box();
+  take(b);
+  console.log(b.v);
+  console.log(f1());
+}

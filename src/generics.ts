@@ -433,9 +433,11 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // The instance a call runs: a generic function's type arguments come from the call, or are
   // inferred from its arguments, and must satisfy their bounds.
   function instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span & Id): Instance {
-    // A call of a body whose check failed would report the same mistake again, in other words.
+    // A call of a body whose signature failed, or whose result only its body could tell, would
+    // report the same mistake again in other words; one with a written signature is typed by it.
     const failed = failure(f);
-    if (failed) throw failed;
+    const signature = { start: f.start, end: f.body[0]?.start ?? f.end };
+    if (failed && (f.returnType === undefined || (failed.start >= signature.start && failed.end <= signature.end))) throw failed;
     const params = typeParamsOf(f);
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
       throw new CompileError("E0106", `expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
