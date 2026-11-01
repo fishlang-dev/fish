@@ -142,7 +142,7 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
 
 // The number types a union holds, a type parameter's counted as the one it stands for in an
 // instance, so a literal meeting `T | 0` with T = i32 is an i32 as it is meeting `i32 | 0`.
-export function numberMembers(lower: Typing["lower"], t: Type, members = (u: UnionType) => u.members): Type[] {
+export function numberMembers(lower: Typing["lower"], t: Type, members: (u: UnionType) => Type[] = (u) => u.members): Type[] {
   if (typeof t === "string" || t.kind !== "union") return [];
   return members(t).map((m) => (typeof m !== "string" && m.kind === "param" && m.concrete ? lower(m) : m)).filter(isNumeric);
 }
