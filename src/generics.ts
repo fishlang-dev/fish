@@ -4,10 +4,10 @@ import { CompileError } from "./diag.ts";
 import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
-import type { ClassNode, Expr, Id, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
 import { digest, unfold, elementsOf, field, holdsPart, widenLet, type FunctionType, isTuple, widenEnum, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
-import { NodeMap, NodeSet } from "./nodes.ts";
+import { forEachChild, NodeMap, NodeSet, type AnyNode } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -90,7 +90,7 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
   const option = node.kind === "ref" && node.name === "Option" && node.args.length === 1 && !names.has(node.name);
   const members = node.kind === "union" ? node.types : option ? node.args : undefined;
   if (members) {
-    const open = members.filter((n) => holdsNode(n, (x) => x.kind === "ref" && names.has(x.name as string)));
+    const open = members.filter((n) => holdsNode("typeNode", n, (x) => x.kind === "ref" && names.has(x.name as string)));
     if (open.length !== 1) return;
     const covers = (n: TypeNode, m: Type) =>
       (n.kind === "ref" && n.args.length === 0 && (m === "null" ? n.name === "null" || n.name === "undefined" : n.name === show(m) || n.name === show(widenLet(m)))) ||
@@ -629,7 +629,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       // when no bound names the class's parameters, so 'map<U>(): Box<U>' makes one 'Box<U>'.
       const own = typeParamsOf(f);
       const outer = classParams(f).map((p) => p.name);
-      const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode(p.constraint, (n) => n.kind === "ref" && outer.includes(n.name as string)));
+      const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode("typeNode", p.constraint, (n) => n.kind === "ref" && outer.includes(n.name as string)));
       made = shared ? sharedPlaceholders.get(f.typeParams!) : undefined;
       // A bound may name the class's own parameters, as this instance holds them.
       if (!made) made = placeholders(typing, own, (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)));
@@ -742,20 +742,18 @@ function lacks(from: Type, to: Type, path = ""): string | undefined {
 function repeats(f: Body, name: string): boolean {
   let calls = 0;
   let again = false;
-  const walk = (node: unknown, repeated: boolean): void => {
-    if (typeof node !== "object" || node === null) return;
-    if (Array.isArray(node)) return node.forEach((n) => walk(n, repeated));
-    const n = node as Expr | Stmt;
-    if (n.kind === "call" && n.callee.kind === "ident" && n.callee.name === name) {
+  const visit = (n: AnyNode, repeated: boolean): void => {
+    if (n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && n.node.callee.name === name) {
       calls++;
       if (repeated) again = true;
-      return walk(n.args, repeated);
+      return n.node.args.forEach((a) => visit({ of: "expr", node: a }, repeated));
     }
-    if (n.kind === "ident" && n.name === name) again = true;
-    const loops = n.kind === "while" || n.kind === "doWhile" || n.kind === "for" || n.kind === "forOf" || n.kind === "forIn" || n.kind === "arrow";
-    for (const v of Object.values(node)) if (typeof v === "object") walk(v, repeated || loops);
+    if ((n.of === "expr" || n.of === "pattern") && n.node.kind === "ident" && n.node.name === name) again = true;
+    const kind = n.of === "stmt" || n.of === "expr" ? n.node.kind : undefined;
+    const loops = kind === "while" || kind === "doWhile" || kind === "for" || kind === "forOf" || kind === "forIn" || kind === "arrow";
+    forEachChild(n, (c) => visit(c, repeated || loops));
   };
-  walk(f.body, false);
+  f.body.forEach((s) => visit({ of: "stmt", node: s }, false));
   return again || calls > 1;
 }
 
@@ -775,11 +773,12 @@ type ClassChecker = {
 // in `Box<T>`, `Lock<T>` or `T[]`; a reference, a pointer or an Option to T doesn't hold one.
 function heldInArgument(f: Body, name: string): boolean {
   const isT = (n: { kind?: unknown; name?: unknown }) => n.kind === "ref" && n.name === name && (n as { args: unknown[] }).args.length === 0;
-  return holdsNode([f.params.map((p) => p.type), f.returnType, f.body], (n) => {
+  const holds = (n: { kind?: unknown; name?: unknown }) => {
     const t = n as TypeNode;
-    if (t.kind === "array") return holdsNode(t.element, isT);
-    return t.kind === "ref" && t.args.length > 0 && !["Ref", "Mut", "Ptr", "MutPtr", "Option"].includes(t.name) && holdsNode(t.args, isT);
-  });
+    if (t.kind === "array") return holdsNode("typeNode", t.element, isT);
+    return t.kind === "ref" && t.args.length > 0 && !["Ref", "Mut", "Ptr", "MutPtr", "Option"].includes(t.name) && holdsNode("typeNode", t.args, isT);
+  };
+  return holdsNode("typeNode", f.params.flatMap((p) => p.type ?? []), holds) || holdsNode("typeNode", f.returnType, holds) || holdsNode("stmt", f.body, holds);
 }
 
 // Generic classes: each set of type arguments declares the class again, on first use.

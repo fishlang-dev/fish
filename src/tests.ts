@@ -3,7 +3,7 @@ import { relative } from "node:path";
 import type { Compilation } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
-import { nextId, type Ids } from "./nodes.ts";
+import { nextId, walk, type Ids } from "./nodes.ts";
 import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
 
 // Top-level `test("name", () => { ... })` blocks: left out of a build, lifted into functions of
@@ -61,11 +61,8 @@ function lifted(ids: Ids, name: string, body: Body, at: Span): Func {
 }
 
 // Gives every node of a made tree the span `at`, where its parts are written.
-function placed(v: unknown, at: Span) {
-  if (Array.isArray(v)) return v.forEach((x) => placed(x, at));
-  if (typeof v !== "object" || v === null) return;
-  Object.assign(v, { start: at.start, end: at.end });
-  Object.values(v).forEach((x) => placed(x, at));
+function placed(made: Func, at: Span) {
+  walk("func", made, ({ node }) => void Object.assign(node, { start: at.start, end: at.end }));
 }
 
 // The harness's text before its tests are known: an import of each of the package's files, so
@@ -92,14 +89,9 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 `;
   const made = parse(text, ids);
   const named = new Map(tests.map((t) => [call(t), `test ${JSON.stringify(t.name)}-fsh${modules.indexOf(t.module)}`]));
-  const rename = (v: unknown) => {
-    if (Array.isArray(v)) return v.forEach(rename);
-    if (typeof v !== "object" || v === null) return;
-    const node = v as { kind?: string; name?: string };
-    if (node.kind === "ident" && named.has(node.name!)) node.name = named.get(node.name!);
-    Object.values(node).forEach(rename);
-  };
-  rename(made);
+  walk("stmt", made, ({ of, node }) => {
+    if ((of === "expr" || of === "pattern") && node.kind === "ident" && named.has(node.name)) node.name = named.get(node.name)!;
+  });
   return made;
 }
 

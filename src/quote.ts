@@ -3,7 +3,7 @@ import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
-import { nextId, renumber, type Ids } from "./nodes.ts";
+import { nextId, renumber, walk as walkTree, type Ids } from "./nodes.ts";
 import { field, unfold, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the
@@ -13,6 +13,7 @@ import { field, unfold, type ObjectType, type Type, type UnionType, type Typing 
 const SPLICE = "__fishSplice";
 
 export type Category = "AstExpr" | "AstStmt" | "AstType";
+const OF = { AstExpr: "expr", AstStmt: "stmt", AstType: "typeNode" } as const;
 // `asExpressions` are the splices written as statements that are expressions, each the
 // expression of its statement, as `e;` is; `names` are those where a name goes, each taking an
 // identifier's name.
@@ -229,8 +230,8 @@ const VARIANTS = new Set(["None"]);
 // spliced into to bind.
 export type Free = Map<string, string>;
 
-function hygienic(ids: Ids, tree: unknown, h: Hygiene, file: usize, bound: Map<string, string>, free: Free): unknown {
-  const copy = renumber(structuredClone(tree), () => nextId(ids));
+function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode", h: Hygiene, file: usize, bound: Map<string, string>, free: Free): unknown {
+  const copy = renumber(of, structuredClone(tree), () => nextId(ids));
   const names = h.namesIn(file);
   const bind = (name: unknown) => {
     if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, h.fresh(name));
@@ -245,21 +246,17 @@ function hygienic(ids: Ids, tree: unknown, h: Hygiene, file: usize, bound: Map<s
     for (const x of [...(n.elements ?? []), ...(n.args ?? []), ...(n.patterns ?? [])]) pattern(x, inMatch);
     pattern(n.rest, inMatch);
   };
-  const collect = (node: unknown) => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) return node.forEach(collect);
+  walkTree(of, copy, ({ node }) => {
     const n = node as Record<string, unknown> & { kind?: string };
     // A C function's name, and its parameters', are C's.
-    if (n.kind === "declare") return;
+    if (n.kind === "declare") return false;
     if (DECLARATIONS.has(n.kind!) || n.kind === "infer" || n.kind === "mapped") bind(n.name);
     if (n.kind === "let") for (const d of n.declarations as { target: unknown }[]) pattern(d.target);
     if (Array.isArray(n.params)) for (const p of n.params as { pattern: unknown }[]) pattern(p.pattern);
     if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: unknown }[]) bind(p.name);
     if (n.kind === "try") pattern(n.param);
     if (Array.isArray(n.arms)) for (const a of n.arms as { pattern: unknown }[]) pattern(a.pattern, true);
-    Object.values(n).forEach(collect);
-  };
-  collect(copy);
+  });
   const renamed = (name: string): string | undefined => {
     const [head, ...rest] = name.split(".");
     const to = bound.get(head!) ?? h.declared.get(head!);
@@ -273,11 +270,9 @@ function hygienic(ids: Ids, tree: unknown, h: Hygiene, file: usize, bound: Map<s
     free.set(head!, pinned);
     return [pinned, ...rest].join(".");
   };
-  const rename = (node: unknown) => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) return node.forEach(rename);
+  walkTree(of, copy, ({ node }) => {
     const n = node as Record<string, unknown> & { kind?: string };
-    if (n.kind === "declare") return;
+    if (n.kind === "declare") return false;
     if (NAMED.has(n.kind!) && typeof n.name === "string") n.name = renamed(n.name) ?? n.name;
     // `{ x }` naming a renamed variable is `{ x: x@m0 }`.
     if (n.kind === "shorthand" && typeof n.name === "string" && renamed(n.name)) {
@@ -287,9 +282,7 @@ function hygienic(ids: Ids, tree: unknown, h: Hygiene, file: usize, bound: Map<s
       Object.assign(n, { kind: "property", key, value, start: value.start, end: value.end });
     }
     if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) p.name = bound.get(p.name) ?? p.name;
-    Object.values(n).forEach(rename);
-  };
-  rename(copy);
+  });
   return copy;
 }
 
@@ -323,7 +316,7 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
     }
     return b.record(t, fields);
   };
-  return make(at && hygiene ? hygienic(ids, q.tree, hygiene, Math.floor(at.start / FILE_SPAN), scope, free) : q.tree, types[q.category]);
+  return make(at && hygiene ? hygienic(ids, q.tree, OF[q.category], hygiene, Math.floor(at.start / FILE_SPAN), scope, free) : q.tree, types[q.category]);
 }
 
 // An integer an Ast holds, as an `i64` until big integers.

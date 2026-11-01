@@ -10,6 +10,7 @@ import { MAX_ENTRIES, tar, untar } from "./tar.ts";
 import { CompileError, locate } from "./diag.ts";
 import { resolveSpecifier, specifierOf } from "./modules.ts";
 import { parse, type Stmt } from "./parser.ts";
+import { walk } from "./nodes.ts";
 import { cacheDir } from "./mathlib.ts";
 import { openIndex, registryUrl, resolveVersions, versions, type IndexEntry } from "./registry_index.ts";
 
@@ -126,19 +127,14 @@ export function unsafeUses(files: { path: string; text: string }[]): UnsafeUse[]
       const { line, col } = locate(text, node.start);
       uses.push({ file: path, line, col, what });
     };
-    const walk = (node: unknown): void => {
-      if (Array.isArray(node)) return node.forEach(walk);
-      if (typeof node !== "object" || node === null) return;
-      const n = node as { kind?: unknown; start?: usize; body?: unknown; expr?: unknown };
-      if (n.kind === "unsafe" && typeof n.start === "number") note(n as { start: usize }, "body" in n ? "unsafe block" : "unsafe expression");
-      if (n.kind === "declare" && typeof n.start === "number") {
-        const body = n.body as { kind?: string; name?: string } | undefined;
-        note(n as { start: usize }, body?.kind === "function" ? `C declaration of '${body.name}'` : "C declaration");
-        return;
+    walk("stmt", program, ({ of, node: n }) => {
+      if (of === "stmt" && n.kind === "unsafe") note(n, "unsafe block");
+      if (of === "expr" && n.kind === "unsafe") note(n, "unsafe expression");
+      if (of === "stmt" && n.kind === "declare") {
+        note(n, n.body.kind === "function" ? `C declaration of '${n.body.name}'` : "C declaration");
+        return false;
       }
-      for (const value of Object.values(node)) walk(value);
-    };
-    walk(program);
+    });
   }
   return uses.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line || a.col - b.col));
 }

@@ -628,7 +628,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         else for (const index of indexes(target)) expr(index);
         // A place inside a variable is found before the value runs, so a nested function the
         // value calls can't replace the variable from under it.
-        const nested = instance.envs !== undefined && holdsNode(e.value, (n) => instance.envs!.has(n as Expr));
+        const nested = instance.envs !== undefined && holdsNode("expr", e.value, (n) => instance.envs!.has(n as Expr));
         const root = nested && (target.kind === "member" || target.kind === "index") ? rootOf(target) : undefined;
         const held = root && key(root);
         const hold = -(target.start + 0.75);

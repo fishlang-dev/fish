@@ -6,7 +6,7 @@ import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AST } from "./ast.ts";
 import { cacheDir, partial } from "./mathlib.ts";
-import { nextId, renumber, shiftSpans } from "./nodes.ts";
+import { nextId, renumber, shiftSpans, someNode, walk } from "./nodes.ts";
 import { parse, type Pattern, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
@@ -3706,7 +3706,7 @@ function stdBytes({ std }: Session): Uint8Array {
     std.parses++;
     // Ids are each compilation's own, so the cached tree holds zeros, and each copy is numbered
     // as it is loaded.
-    bytes = new Uint8Array(serialize(renumber(parse(STD_SOURCE, { last: 0 }), () => 0)));
+    bytes = new Uint8Array(serialize(renumber("stmt", parse(STD_SOURCE, { last: 0 }), () => 0)));
     if (path !== null) {
       try {
         const temp = partial(path);
@@ -3722,8 +3722,8 @@ function stdBytes({ std }: Session): Uint8Array {
 // The std statements a program is checked with, their spans moved past its own.
 export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // Each call takes its own copy, since the passes below change the tree.
-  const all: Stmt[] = renumber(deserialize(stdBytes(session)), () => nextId(ids));
-  shiftSpans(all, STD_BASE);
+  const all: Stmt[] = renumber("stmt", deserialize(stdBytes(session)), () => nextId(ids));
+  shiftSpans("stmt", all, STD_BASE);
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.
   hideHelpers(all);
@@ -3779,36 +3779,33 @@ function encodes(n: Record<string, unknown>): boolean {
 
 // The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which
 // no program can write.
-function hideHelpers(nodes: unknown) {
-  if (Array.isArray(nodes)) return nodes.forEach(hideHelpers);
-  if (typeof nodes !== "object" || nodes === null) return;
-  const node = nodes as Record<string, unknown>;
-  const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
-  if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url)/.test(node.name)) {
-    node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
-  }
-  Object.values(node).forEach(hideHelpers);
+function hideHelpers(statements: Stmt[]) {
+  walk("stmt", statements, ({ node: n }) => {
+    const node = n as Record<string, unknown>;
+    const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
+    if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url)/.test(node.name)) {
+      node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
+    }
+  });
 }
 
 // Renames std's classes a program declares its own of to names no program can write.
-function hideNames(nodes: unknown, names: Set<string>) {
-  if (Array.isArray(nodes)) return nodes.forEach((n) => hideNames(n, names));
-  if (typeof nodes !== "object" || nodes === null) return;
-  const node = nodes as Record<string, unknown>;
-  if ((node.kind === "class" || node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && names.has(node.name)) node.name = `std ${node.name}`;
-  Object.values(node).forEach((n) => hideNames(n, names));
+function hideNames(statements: Stmt[], names: Set<string>) {
+  walk("stmt", statements, ({ node: n }) => {
+    const node = n as Record<string, unknown>;
+    if ((node.kind === "class" || node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && names.has(node.name)) node.name = `std ${node.name}`;
+  });
 }
 
 // Gives the std's JSON value alias its unwritable name, shown as `Json` in messages.
-function renameValue(nodes: unknown) {
-  if (Array.isArray(nodes)) return nodes.forEach(renameValue);
-  if (typeof nodes !== "object" || nodes === null) return;
-  const node = nodes as Record<string, unknown>;
-  if ((node.kind === "ref" || node.kind === "typeAlias") && node.name === "JsonValue") {
-    node.name = JSON_VALUE_NAME;
-    if (node.kind === "typeAlias") node.shown = "Json";
-  }
-  Object.values(node).forEach(renameValue);
+function renameValue(statements: Stmt[]) {
+  walk("stmt", statements, ({ node: n }) => {
+    const node = n as Record<string, unknown>;
+    if ((node.kind === "ref" || node.kind === "typeAlias") && node.name === "JsonValue") {
+      node.name = JSON_VALUE_NAME;
+      if (node.kind === "typeAlias") node.shown = "Json";
+    }
+  });
 }
 
 // A program that refers to a library by one of its names gets it, unless it declares one of the
@@ -3861,9 +3858,6 @@ function boundNames(p: Pattern | undefined): string[] {
 }
 
 // Whether a node in a tree is one the test picks.
-function mentions(v: unknown, test: (node: Record<string, unknown>) => boolean): boolean {
-  if (Array.isArray(v)) return v.some((n) => mentions(n, test));
-  if (typeof v !== "object" || v === null) return false;
-  const node = v as Record<string, unknown>;
-  return test(node) || Object.values(node).some((n) => mentions(n, test));
+function mentions(statements: Stmt[], test: (node: Record<string, unknown>) => boolean): boolean {
+  return someNode("stmt", statements, ({ node }) => test(node as Record<string, unknown>));
 }

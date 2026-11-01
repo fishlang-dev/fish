@@ -1,5 +1,5 @@
 import type { Expr, Stmt } from "./parser.ts";
-import { NodeSet } from "./nodes.ts";
+import { NodeSet, walk } from "./nodes.ts";
 
 // Whether control never reaches the end of these statements. A loop whose condition is
 // always true never finishes unless a `break` leaves it.
@@ -39,18 +39,15 @@ export function alwaysReturns(stmts: Stmt[], broken: NodeSet<Stmt>, continued: N
 const isTrue = (e: Expr) => e.kind === "bool" && e.value;
 
 // The names any assignment, `++` or `--` in these statements writes to.
-export function assignedNames(node: unknown, names: Set<string> = new Set<string>()): Set<string> {
-  if (typeof node !== "object" || node === null) return names;
-  if (Array.isArray(node)) {
-    node.forEach((n) => assignedNames(n, names));
-    return names;
-  }
-  const n = node as { kind?: string; target?: { kind?: string; name?: string }; operand?: { kind?: string; name?: string } };
-  const target = n.kind === "assign" ? n.target : n.kind === "update" ? n.operand : undefined;
-  if (target?.kind === "ident") names.add(target.name!);
-  // A destructuring assignment assigns each name its pattern holds.
-  if (n.kind === "destructure") for (const name of patternNames((n as { pattern: unknown }).pattern)) names.add(name);
-  Object.values(node).forEach((v) => assignedNames(v, names));
+export function assignedNames(body: Stmt[] | undefined): Set<string> {
+  const names = new Set<string>();
+  walk("stmt", body, ({ of, node: n }) => {
+    if (of !== "expr") return;
+    const target = n.kind === "assign" ? n.target : n.kind === "update" ? n.operand : undefined;
+    if (target?.kind === "ident") names.add(target.name);
+    // A destructuring assignment assigns each name its pattern holds.
+    if (n.kind === "destructure") for (const name of patternNames(n.pattern)) names.add(name);
+  });
   return names;
 }
 

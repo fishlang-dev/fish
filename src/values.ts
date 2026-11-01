@@ -4,7 +4,7 @@ import { rustClassOf, type RustClass } from "./rust.ts";
 import { abstractIn, copyFor, inherited, shownName, isLifetime, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import type { Direct, Narrowing } from "./overloads.ts";
+import type { Direct } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
@@ -24,7 +24,7 @@ import { holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
-import { nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber } from "./nodes.ts";
+import { forEachChild, nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -529,14 +529,11 @@ export function expressions(ctx: Context) {
   function armValues(body: Expr | Stmt): Expr[] {
     if (body.kind !== "block") return [body as Expr];
     const found: Expr[] = [];
-    const visit = (node: unknown) => {
-      if (!node || typeof node !== "object") return;
+    walk("stmt", body, ({ node }) => {
       const n = node as { kind?: string; value?: Expr };
-      if (n.kind === "arrow" || n.kind === "function" || n.kind === "match") return;
+      if (n.kind === "arrow" || n.kind === "function" || n.kind === "match") return false;
       if (n.kind === "return" && n.value) found.push(n.value);
-      Object.values(node).forEach(visit);
-    };
-    visit(body);
+    });
     return found;
   }
 
@@ -631,7 +628,7 @@ export function expressions(ctx: Context) {
     }
     const place = e.value;
     const body = topics(e.body, (at) => {
-      const copy = spanned(renumber(structuredClone(place), () => nextId(ids)), at);
+      const copy = spanned(renumber("expr", structuredClone(place), () => nextId(ids)), at);
       for (let m: Expr = copy; m.kind === "member" || m.kind === "index"; m = m.object) if (m.kind === "member") substituted.add(m);
       return copy;
     });
@@ -670,13 +667,7 @@ export function expressions(ctx: Context) {
       if (p.length === 1 && names.has(p[0]!)) return true;
       return own.slice(0, Math.min(own.length, p.length)).every((s, i) => s === p[i]);
     };
-    const visit = (node: unknown): boolean => {
-      if (!node || typeof node !== "object") return false;
-      const e = node as Expr;
-      if ((e.kind === "assign" && overlaps(e.target)) || (e.kind === "update" && overlaps(e.operand))) return true;
-      return Object.values(node).some(visit);
-    };
-    return visit(body);
+    return someNode("expr", body, ({ of, node: e }) => of === "expr" && ((e.kind === "assign" && overlaps(e.target)) || (e.kind === "update" && overlaps(e.operand))));
   }
 
   // A binding the right side declares with a name the place reads, which would capture the
@@ -685,28 +676,28 @@ export function expressions(ctx: Context) {
     const root = path(place)![0]!;
     const names = new Set([...indexNames(place), ...(root === "this" ? [] : [root])]);
     let found: Expr | undefined;
-    const topical = (node: unknown): boolean => !!node && typeof node === "object" && ((node as Expr).kind === "topic" || Object.values(node).some(topical));
-    const declared = (node: unknown) => {
-      if (found || !node || typeof node !== "object") return;
-      const e = node as Expr;
-      if (e.kind === "ident" && names.has(e.name)) found = e;
-      Object.values(node).forEach(declared);
-    };
+    const topical = (n: AnyNode) => n.of !== "stmts" && someNode(n.of, n.node as never, ({ of, node }) => of === "expr" && node.kind === "topic");
+    // A name a pattern binds, or one its defaults read.
+    const declared = (p: Pattern) => walk("pattern", p, ({ of, node }) => {
+      if (found) return false;
+      if ((of === "pattern" || of === "expr") && node.kind === "ident" && names.has(node.name)) found = node as Expr;
+    });
     // A declaration's scope is the closest arrow, match arm, block, loop or `try` around it; it
     // captures the place only where a `%` is inside that scope.
-    const visit = (node: unknown, scope: unknown) => {
-      if (found || !node || typeof node !== "object") return;
-      const n = node as Record<string, unknown>;
-      const opens = ["arrow", "block", "for", "forOf", "forIn", "try"].includes(n.kind as string) || ("guard" in n && "pattern" in n);
-      const within = opens ? node : scope;
-      for (const [key, child] of Object.entries(node)) {
-        // Parameters, `let` declarators, match patterns and catch parameters declare names.
-        const declares = key === "pattern" || key === "param" || (key === "target" && !("kind" in node));
-        if (declares && topical(within)) declared(child);
-        else if (!declares) visit(child, within);
-      }
+    const visit = (n: AnyNode, scope: AnyNode) => {
+      if (found) return;
+      const kind = n.of === "stmt" || n.of === "expr" ? n.node.kind : undefined;
+      const opens = n.of === "matchArm" || (n.of === "expr" && kind === "arrow") || (n.of === "stmt" && ["block", "for", "forOf", "forIn", "try"].includes(kind!));
+      const within = opens ? n : scope;
+      // Parameters, `let` declarators, match patterns, catch parameters and destructuring declare names.
+      const declares = n.of === "param" || n.of === "matchArm" || n.of === "declarator" || (n.of === "stmt" && kind === "try") || (n.of === "expr" && kind === "destructure");
+      forEachChild(n, (c) => {
+        if (declares && c.of === "pattern") {
+          if (topical(within)) declared(c.node);
+        } else visit(c, within);
+      });
     };
-    visit(body, body);
+    visit({ of: "expr", node: body }, { of: "expr", node: body });
     return found;
   }
 
@@ -750,11 +741,7 @@ export function expressions(ctx: Context) {
 
   // A copy of an expression standing where `at` was, for messages and for keys by position.
   function spanned(e: Expr, at: Expr): Expr {
-    const visit = (node: Record<string, unknown>) => {
-      if ("start" in node && "end" in node) [node.start, node.end] = [at.start, at.end];
-      for (const child of Object.values(node)) if (child && typeof child === "object") visit(child as Record<string, unknown>);
-    };
-    visit(e as unknown as Record<string, unknown>);
+    walk("expr", e, ({ node }) => void Object.assign(node, { start: at.start, end: at.end }));
     return e;
   }
 
@@ -4192,7 +4179,7 @@ export function expressions(ctx: Context) {
       // `x!` is what an Option holds; it panics when there is nothing. On a value that can't be
       // empty, as `xs[i]!` written for TypeScript's unchecked indexes, it is that value itself.
       case "nonNull": {
-        const narrows = (e as Narrowing).narrows;
+        const narrows = e.narrows;
         if (narrows) return narrowedReturn(e.expr, narrows);
         const given = value(e.expr);
         if (redundant(e, given)) return given;
@@ -5407,15 +5394,11 @@ export function expressions(ctx: Context) {
   // The values a match arm's block gives, through its own `return`s, not those of functions in it.
   function armReturns(block: Stmt): Expr[] {
     const found: Expr[] = [];
-    const walk = (n: unknown) => {
-      if (!n || typeof n !== "object") return;
-      if (Array.isArray(n)) return n.forEach(walk);
-      const s = n as Stmt | Expr;
-      if (s.kind === "arrow" || s.kind === "function") return;
+    walk("stmt", block, ({ node }) => {
+      const s = node as { kind?: string; value?: Expr };
+      if (s.kind === "arrow" || s.kind === "function") return false;
       if (s.kind === "return" && s.value) found.push(s.value);
-      Object.values(n).forEach(walk);
-    };
-    walk(block);
+    });
     return found;
   }
 
