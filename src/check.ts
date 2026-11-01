@@ -30,7 +30,7 @@ import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
-import { expressions, stringLike, type DynTable } from "./values.ts";
+import { Expressions, stringLike, type DynTable } from "./values.ts";
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 
 export type { Type } from "./typing.ts";
@@ -1417,7 +1417,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
-    const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
+    const exprs = new Expressions({
       tables, types, locals, coercions, calls, setters, byName, classes, enums, enumInstance: (info, given, at) => resolver.enumInstance(info, given, at), patterns: instance.patterns, copiesOut: instance.copiesOut, construct: (name, typeArgs, argTypes, at) => genericClasses.construct(name, typeArgs, argTypes, at), members,
       templateParams, definedClass: (name) => genericClasses.definedClass(name), returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf: (t) => registry.classOf(t), instanceOf: (f, bindings) => instancing.instanceOf(f, bindings), instantiate: (f, typeArgs, args, argTypes, at) => instancing.instantiate(f, typeArgs, args, argTypes, at as Span & Id), paramTypes: (instance) => instancing.paramTypes(instance), lookup, peek, reach,
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
@@ -1536,7 +1536,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (assigned || (s.kind === "expr" && s.expr === superCall)) built = true;
       return after;
     });
-    finish();
+    exprs.finish();
     // An inferred error is every one the body lets out, widened as a `let` is.
     if (inferring && inferring.length > 0) {
       errorType = typing.unionType(inferring.map(([, t]) => typing.widenLet(t)));
@@ -1627,9 +1627,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (e.args.length < required || e.args.length > f.params.length) throw new CompileError(`expected ${required === f.params.length ? required : `${required}-${f.params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
       e.args.forEach((a, i) => {
         const to = localOf(locals.get(f.params[i]!)!).type;
-        expect(a, to);
-        const t = value(a);
-        coerce(a, t, to, `argument of type '${typing.show(t)}' is not assignable to parameter of type '${typing.show(to)}'`);
+        exprs.expect(a, to);
+        const t = exprs.value(a);
+        exprs.coerce(a, t, to, `argument of type '${typing.show(t)}' is not assignable to parameter of type '${typing.show(to)}'`);
       });
       selfCalls.add(e);
       calls.set(e, instance.id);
@@ -1772,7 +1772,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (target.kind === "member" && target.object.kind === "this" && f.self) return typing.allFields(f.self.type as ClassType).find((x) => x.name === target.name)?.type;
       // A target with only a setter can't be read for its type; its part keeps its own.
       try {
-        const t = value(renumber("expr", structuredClone(target), () => nextId(ids)));
+        const t = exprs.value(renumber("expr", structuredClone(target), () => nextId(ids)));
         return recOf(t)?.kind === "ref" ? undefined : t;
       } catch (err) {
         if (err instanceof CompileError) return undefined;
@@ -1832,7 +1832,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const read = (e: Expr): boolean => e.kind === "ident" || e.kind === "this" || ((e.kind === "member" || e.kind === "index") && !e.optional && read(e.object));
       // A getter along the path runs each time the path is read, so its result is kept once.
       const computed = (e: Expr): boolean => (e.kind === "member" && calls.has(e)) || ((e.kind === "member" || e.kind === "index") && computed(e.object));
-      let type = read(init) && !d.type ? value(init) : undefined;
+      let type = read(init) && !d.type ? exprs.value(init) : undefined;
       const inPlace = type !== undefined && !computed(init);
       let from: (at: Span) => Expr;
       // An index that isn't a number written in place runs once, into a variable of its own, in
@@ -2002,16 +2002,16 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     function loopPart(s: Extract<Stmt, { kind: "let" }>, d: Declarator): undefined {
       const init = d.init!;
       const object = init.kind === "index" || init.kind === "member" ? init.object : init;
-      const whole = value(object);
+      const whole = exprs.value(object);
       const element = isRef(whole) ? typing.rec(whole).to : whole;
       if (init.kind === "index" && !typing.isTuple(element)) throw new CompileError(`only tuples, like '[i64, string]', can be destructured so far, not '${typing.show(element)}'`, d.start, d.end);
-      const type = value(init);
+      const type = exprs.value(init);
       const name = (d.target as Extract<Pattern, { kind: "ident" }>).name;
       // A `let` part may change, or be pointed elsewhere when it is borrowed, as a `let` loop
       // variable may.
       if (isRef(whole) && !typing.isCopy(type)) {
         const lent = typing.refType(type, false);
-        coerce(init, type, lent, "");
+        exprs.coerce(init, type, lent, "");
         declare(name, lent, s.keyword === "let", false, s);
       } else declare(name, type, s.keyword === "let", false, s);
       return undefined;
@@ -2072,7 +2072,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       inner.changed = new Set();
       inner.moved = new Set();
       closures.push(inner.id);
-      resolver.withSight({ inSight }, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
+      resolver.withSight({ inSight }, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal: (l, path, action, target, throughMut) => exprs.changesLocal(l, path, action, target, throughMut), changesThis: (path, action, target) => exprs.changesThis(path, action, target), constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
       const captured = [...inner.captures].map(([alias, from]): [Local, Local | "this"] => [localOf(alias), from === "this" ? from : localOf(from)]);
@@ -2086,7 +2086,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const nested = arenas.instanceOf(of);
           const env = [...nested.captures!].map(([alias, x]) => {
             const mine = reach(localOf(x as LocalId), e);
-            if (nested.changed?.has(alias)) changesLocal(mine, "", "change", e, false);
+            if (nested.changed?.has(alias)) exprs.changesLocal(mine, "", "change", e, false);
             return mine.localId;
           });
           (instance.made ??= new NodeMap()).set(e, [...(instance.made.get(e) ?? []), { of, env }]);
@@ -2207,7 +2207,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             }
             awaiting(s.expr.value);
           }
-          effect(s.expr);
+          exprs.effect(s.expr);
           // A promise runs only when awaited, so one made and dropped would silently do nothing.
           const pausing = s.expr.kind === "call" && s.expr.callee.kind === "ident" && ["yieldNow", "sleep"].includes(s.expr.callee.name) && !byName.has(s.expr.callee.name);
           const made = pausing ? YIELD_NOW : types.get(s.expr) ?? arenas.instanceOf(calls.get(s.expr))?.returns;
@@ -2246,15 +2246,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const named = recOf(declared);
           const family = named?.kind === "function" && named.generic ? declared : undefined;
           const annotated = family ? undefined : declared;
-          if (annotated) expect(d.init, annotated);
-          const type = value(d.init);
-          if (annotated) coerce(d.init, type, annotated, `type '${typing.show(type)}' is not assignable to type '${typing.show(annotated)}'`);
+          if (annotated) exprs.expect(d.init, annotated);
+          const type = exprs.value(d.init);
+          if (annotated) exprs.coerce(d.init, type, annotated, `type '${typing.show(type)}' is not assignable to type '${typing.show(annotated)}'`);
           const closure = recOf(type);
           if (family && !(closure?.kind === "closure" && closure.generic)) throw new CompileError(`type '${typing.show(type)}' is not assignable to type '${typing.show(family)}': it takes a generic function, one that works for every type`, d.init.start, d.init.end);
           // An interface describes the value, which keeps its own concrete type.
           // A `let` may later hold another member of an enum, so it holds the enum.
           const widened = s.keyword === "let" && !annotated ? typing.widenLet(type) : type;
-          if (widened !== type) coerce(d.init, type, widened, "");
+          if (widened !== type) exprs.coerce(d.init, type, widened, "");
           const array = recOf(widened);
           if (!annotated && array?.kind === "array" && array.element === "never") {
             throw new CompileError(`an empty array needs a type to say what it will hold, like 'let ${d.target.name}: string[] = []'`, d.init.start, d.init.end);
@@ -2262,13 +2262,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // So does a regex given as a 'RegExp', which keeps its pattern's captures.
           const describes = annotated && (isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
           declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
-          if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(locals.get(s)!, s);
+          if (s.keyword === "let" && !annotated && type === "i64" && exprs.literalOnly(d.init, false)) candidates.set(locals.get(s)!, s);
           // A nested function's declaration, met as this `const` again when a body is checked anew.
           if (nestedFunctions.has(d.init)) nestedBindings.add(locals.get(s)!);
           return;
         }
         case "if": {
-          condition(s.cond);
+          exprs.condition(s.cond);
           const proven = proves(s.cond);
           assume(proven.yes, () => scoped(s.then));
           if (s.else) assume(proven.no, () => scoped(s.else!));
@@ -2279,7 +2279,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           return undefined;
         }
         case "while":
-          condition(s.cond);
+          exprs.condition(s.cond);
           within({ stmt: s, kind: "loop" }, () => assume(proves(s.cond).yes, () => scoped(s.body)));
           return;
         // A nested function is a closure under its name, lending what it uses per call.
@@ -2309,7 +2309,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           scoped(s.body);
           return;
         case "unsafe":
-          unsafely(() => scoped(s.body));
+          exprs.unsafely(() => scoped(s.body));
           return;
         case "debugger":
           throw unsupported("'debugger' statements", s);
@@ -2326,8 +2326,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // A name declared in the head is scoped to the loop.
           scopes.push(new Map());
           if (s.init) statement(s.init);
-          if (s.test) condition(s.test);
-          if (s.update) effect(s.update);
+          if (s.test) exprs.condition(s.test);
+          if (s.update) exprs.effect(s.update);
           within({ stmt: s, kind: "loop" }, () => scoped(s.body));
           scopes.pop();
           return;
@@ -2346,7 +2346,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) return statement(loopPattern(s, d, d.target));
           if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
-          const through = value(s.right);
+          const through = exprs.value(s.right);
           const object = isRef(through) ? typing.rec(through).to : through;
           const o = recOf(object);
           if (s.await) {
@@ -2413,10 +2413,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         }
         case "doWhile":
           within({ stmt: s, kind: "loop" }, () => scoped(s.body));
-          condition(s.cond);
+          exprs.condition(s.cond);
           return;
         case "switch": {
-          const type = read(s.discriminant);
+          const type = exprs.read(s.discriminant);
           const r = recOf(type);
           const union = r?.kind === "union" ? (type as UnionType) : undefined;
           if (r && !union && r.kind !== "literal") throw unsupported("comparisons of objects", s.discriminant);
@@ -2433,12 +2433,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             let falling: Facts | null = null;
             for (const c of s.cases) {
               const before = new Set(shared.values());
-              let test = c.test && value(c.test);
+              let test = c.test && exprs.value(c.test);
               // A literal case takes the discriminant's type, or its union's one number type.
               const numbers = union ? numberMembers(tables.typing, union) : [type];
-              if (test && test !== type && numbers.length === 1 && adapt(c.test!, numbers[0]!)) test = numbers[0]!;
+              if (test && test !== type && numbers.length === 1 && exprs.adapt(c.test!, numbers[0]!)) test = numbers[0]!;
               // A discriminant whose type is still open takes an integer case's.
-              if (test && test !== type && isInteger(test) && !literalOnly(s.discriminant, false) && adapt(s.discriminant, test)) test = type;
+              if (test && test !== type && isInteger(test) && !exprs.literalOnly(s.discriminant, false) && exprs.adapt(s.discriminant, test)) test = type;
               if (test && objectsMeet(tables.typing, type, test)) throw unsupported("comparisons of objects", c.test!);
               if (test && test !== type && !comparable(tables.typing, tables.typing.lower(type), test)) {
                 throw new CompileError(`type '${typing.show(test)}' is not comparable to type '${typing.show(type)}'`, c.test!.start, c.test!.end);
@@ -2522,7 +2522,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             if (!arm.wanted && s.value) {
               throw new CompileError("this match's value isn't used, so a 'return' in its arm can't give one, and it never leaves the function; return after the match instead", s.start, s.end);
             }
-            if (s.value) arm.gives!.push([s.value, arm.wanted ? value(s.value) : result(s.value)]);
+            if (s.value) arm.gives!.push([s.value, arm.wanted ? exprs.value(s.value) : exprs.result(s.value)]);
             return;
           }
           if (generator) {
@@ -2532,9 +2532,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           if (s.value && isAwait(s.value)) awaiting(s.value);
           if (f.self?.constructor && s.value) throw new CompileError("a constructor can't return a value", s.start, s.end);
           if (unset.size > 0) throw new CompileError("a constructor can't return before every field is assigned", s.start, s.end);
-          if (declared && s.value) expect(s.value, declared);
+          if (declared && s.value) exprs.expect(s.value, declared);
           // An arrow's expression body may be a call returning nothing.
-          const type = !s.value ? "void" : s.value === f.closure?.value && (s.value.kind === "call" || s.value.kind === "tagged") ? result(s.value) : value(s.value);
+          const type = !s.value ? "void" : s.value === f.closure?.value && (s.value.kind === "call" || s.value.kind === "tagged") ? exprs.result(s.value) : exprs.value(s.value);
           // A closure returned is boxed into the callable the function declares.
           // A generic function value is returned as it is, capturing nothing.
           const r = recOf(type);
@@ -2543,7 +2543,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           if (!declared && recOf(inferred)?.kind === "regex" && r?.kind === "regex" && inferred !== type) inferred = ANY_REGEX;
           const expected = declared ?? inferred;
           const message = `type '${typing.show(type)}' is not assignable to return type '${typing.show(expected ?? type)}'`;
-          if (expected && s.value) coerce(s.value, type, expected, message);
+          if (expected && s.value) exprs.coerce(s.value, type, expected, message);
           else if (expected && type !== expected) throw new CompileError(message, s.start, s.end);
           const bound = r?.kind === "param" ? recOf(r.bound) : undefined;
           const passedOn = bound?.kind === "function" && bound.generic !== undefined;
@@ -2582,11 +2582,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (finalizing > 0) throw unsupported("'yield' statements in a 'try' with a 'finally'", e);
       if (e.delegate) throw unsupported("'yield*'", e);
       if (!e.value) throw new CompileError("a generator's 'yield' gives a value, like 'yield x;'", e.start, e.end);
-      if (yielded) expect(e.value, yielded);
-      const t = value(e.value);
+      if (yielded) exprs.expect(e.value, yielded);
+      const t = exprs.value(e.value);
       if (!yielded) yielded = typing.widenLet(t);
       if (typing.holdsRef(yielded)) throw unsupported("generators yielding references", e.value);
-      coerce(e.value, t, yielded, `type '${typing.show(t)}' is not assignable to the generator's '${generatorName}<${typing.show(yielded)}>'`);
+      exprs.coerce(e.value, t, yielded, `type '${typing.show(t)}' is not assignable to the generator's '${generatorName}<${typing.show(yielded)}>'`);
     }
 
     // An `await` written as a statement of its own, or as all of a declaration's initializer,
@@ -2785,9 +2785,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // `throw` returns an error of the type the function declares, or goes to a catch. A value
     // the error type takes is converted to it; another may be wrapped.
     function thrown(at: Expr | Stmt, thrownValue: Expr) {
-      const type = value(thrownValue);
-      const into = errorType && handlers.length === 0 && (typing.fits(type, errorType) || adapt(thrownValue, errorType));
-      if (into) coerce(thrownValue, type, errorType!, `type '${typing.show(type)}' can't be thrown here: ${who()} throws '${typing.show(errorType!)}'`);
+      const type = exprs.value(thrownValue);
+      const into = errorType && handlers.length === 0 && (typing.fits(type, errorType) || exprs.adapt(thrownValue, errorType));
+      if (into) exprs.coerce(thrownValue, type, errorType!, `type '${typing.show(type)}' can't be thrown here: ${who()} throws '${typing.show(errorType!)}'`);
       raise(at, into ? errorType! : types.get(thrownValue)!, "'throw'");
     }
 
