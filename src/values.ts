@@ -968,8 +968,8 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
       return signalStatic(e, callee);
     }
-    if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream") && !lookup(callee.object.name) && !classes.has(callee.object.name)) {
-      return tcpStatic(e, callee, callee.object.name);
+    if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream" || callee.object.name === "UnixListener" || callee.object.name === "UnixStream") && !lookup(callee.object.name) && !classes.has(callee.object.name)) {
+      return socketStatic(e, callee, callee.object.name);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !lookup("Array") && !classes.has("Array")) return arrayStatic(e, callee);
@@ -2873,11 +2873,11 @@ export function expressions(ctx: Context) {
     const sockets = ["accept", "read", "write"].includes(callee.name);
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
     const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
-      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" ? { accept: 0 } : t.which === "TcpStream" ? { read: 1, write: 1 } : {};
+      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" || t.which === "UnixListener" ? { accept: 0 } : t.which === "TcpStream" || t.which === "UnixStream" ? { read: 1, write: 1 } : {};
     if (!(callee.name in methods)) {
       const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
         : t.which === "AbortController" ? "it has 'abort' and 'signal'" : t.which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
-        : t.which === "TcpListener" ? "it has 'accept' and 'port'" : t.which === "TcpStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
+        : t.which === "TcpListener" ? "it has 'accept' and 'port'" : t.which === "UnixListener" ? "it has 'accept', and dropping it stops listening but leaves its socket file" : t.which === "TcpStream" || t.which === "UnixStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
       throw new CompileError("E0502", `'${show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported(`optional chains calling '${t.which}' methods`, callee);
@@ -2892,7 +2892,7 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
-    if (callee.name === "accept") return { type: leafFuture("accept", "void", socketError(signalled), signalled), what: "'accept'" };
+    if (callee.name === "accept") return { type: leafFuture("accept", t.which === "UnixListener" ? blockType("UnixStream") : "void", socketError(signalled), signalled), what: "'accept'" };
     // `read(max)` gives at most max bytes, and `write(bytes)` takes its bytes to send them all.
     if (callee.name === "read" || callee.name === "write") {
       const want = callee.name === "read" ? "i64" : arrayType("u8");
@@ -2942,24 +2942,35 @@ export function expressions(ctx: Context) {
     return { type: signal, what: "'AbortSignal.any'" };
   }
 
-  // `TcpListener.bind(host, port)` and `TcpStream.connect(host, port)`: futures the async
-  // runtime's reactor completes, throwing an `IoError` when the system says no.
-  function tcpStatic(e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream"): { type: Type; what: string } {
-    const method = which === "TcpListener" ? "bind" : "connect";
-    if (callee.name !== method) throw new CompileError("E0502", `'${which}' has no static method '${callee.name}'; it has '${method}'`, callee.start, callee.end);
-    if (!ctx.runtime && e.start < STD_BASE) throw new CompileError("E0301", `'${which}.${method}' works only when 'main' is an async function, whose runtime waits on sockets`, e.start, e.end);
+  // `TcpListener.bind(host, port)` and `TcpStream.connect(host, port)`, and the Unix ones taking a
+  // socket path: futures the async runtime's reactor completes, throwing an `IoError` when the
+  // system says no. std's own `TcpListener.unix(path)` and `TcpStream.unix(path)` give a socket on a
+  // path typed as TCP's, so serve and fetch share their HTTP code.
+  function socketStatic(e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream"): { type: Type; what: string } {
+    const listens = which === "TcpListener" || which === "UnixListener";
+    const internal = e.start >= STD_BASE && (which === "TcpListener" || which === "TcpStream") && callee.name === "unix";
+    const unix = internal || which === "UnixListener" || which === "UnixStream";
+    const method = listens ? "bind" : "connect";
+    if (callee.name !== method && !internal) throw new CompileError("E0502", `'${which}' has no static method '${callee.name}'; it has '${method}'`, callee.start, callee.end);
+    const name = `'${which}.${callee.name}'`;
+    if (!ctx.runtime && e.start < STD_BASE) throw new CompileError("E0301", `${name} works only when 'main' is an async function, whose runtime waits on sockets`, e.start, e.end);
     // Connecting waits, so it may take an AbortSignal; binding doesn't.
-    const signalled = method === "connect" && e.args.length === 3;
-    if (e.args.length !== 2 && !signalled) throw new CompileError("E0504", `'${which}.${method}' takes a host address and a port, like '${which}.${method}("127.0.0.1", 8080)'${method === "connect" ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
-    if (signalled) signalArgument(e.args[2]!, `'${which}.${method}'`);
-    const [host, port] = e.args as [Expr, Expr];
+    const most = unix ? 1 : 2;
+    const signalled = method === "connect" && e.args.length === most + 1;
+    const example = unix ? `like '${which}.${method}("/tmp/app.sock")'` : `like '${which}.${method}("127.0.0.1", 8080)'`;
+    if (e.args.length !== most && !signalled) throw new CompileError("E0504", `${name} takes ${unix ? "a socket path" : "a host address and a port"}, ${example}${method === "connect" ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
+    if (signalled) signalArgument(e.args[most]!, name);
+    const host = e.args[0]!;
     expect(host, "string");
     const h = value(host);
-    coerce(host, h, "string", `the host is a 'string' like "127.0.0.1", not '${show(h)}'`);
-    expect(port, "i64");
-    const p = value(port);
-    coerce(port, p, "i64", `the port is an 'i64', not '${show(p)}'`);
-    return { type: leafFuture(method, "void", socketError(signalled), signalled), what: `'${which}.${method}'` };
+    coerce(host, h, "string", unix ? `the socket path is a 'string' like "/tmp/app.sock", not '${show(h)}'` : `the host is a 'string' like "127.0.0.1", not '${show(h)}'`);
+    if (!unix) {
+      const port = e.args[1]!;
+      expect(port, "i64");
+      const p = value(port);
+      coerce(port, p, "i64", `the port is an 'i64', not '${show(p)}'`);
+    }
+    return { type: leafFuture(method, unix ? blockType(which) : "void", socketError(signalled), signalled), what: name };
   }
 
   // The std `IoError` class, which failed socket calls throw.

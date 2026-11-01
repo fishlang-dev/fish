@@ -3683,7 +3683,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${from} ]`);
       }
     } else if (type.kind === "block") {
-      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release", JsValue: "fsh_rt_js_release" }[type.which];
+      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", UnixListener: "fsh_rt_socket_release", UnixStream: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release", JsValue: "fsh_rt_js_release" }[type.which];
       emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (type.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
@@ -6745,13 +6745,15 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         if (!types.has(e)) pending.push({ v: made, type: valueType(e) });
         return made;
       }
-      // `TcpListener.bind` and `TcpStream.connect` make a future holding the address; connect's
-      // frame also keeps the socket while it connects.
-      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && (e.callee.object.name === "TcpListener" || e.callee.object.name === "TcpStream") && !types.has(e.callee.object)) {
+      // `TcpListener.bind` and `TcpStream.connect` make a future holding the address, and the Unix
+      // ones the path in the host's place; connect's frame also keeps the socket while it connects.
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && ["TcpListener", "TcpStream", "UnixListener", "UnixStream"].includes(e.callee.object.name) && !types.has(e.callee.object)) {
         const future = types.get(e) as FutureType;
-        const first = e.callee.object.name === "TcpStream" ? 2 : 1;
-        const [host, port, made, frame] = [owned(e.args[0]!), value(e.args[1]!), temp(), temp()];
+        const first = leafOf.get(future)!.method === "connect" ? 2 : 1;
+        const [host, made] = [owned(e.args[0]!), temp()];
         emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, ptr ${host}, ${first}`);
+        if (leafOf.get(future)!.of !== "void") return signalled(e, future, made);
+        const [port, frame] = [value(e.args[1]!), temp()];
         emit(`${frame} = insertvalue ${llvm(future)} ${made}, i64 ${port}, ${first + 1}`);
         return signalled(e, future, frame);
       }
@@ -8305,7 +8307,9 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
           const [portAt, port] = field(first + 1);
           emit(`${host} = load ptr, ptr ${hostAt}`);
           emit(`${port} = load i64, ptr ${portAt}`);
-          if (leaf.method === "bind") emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
+          if (leaf.method === "bind" && leaf.of !== "void") emit(`${outcome} = call i32 @fsh_rt_unix_bind(ptr ${host}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.method === "bind") emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.of !== "void") emit(`${outcome} = call i32 @fsh_rt_unix_connect(ptr ${slot}, ptr ${host}, ptr %cx, ptr ${made}, ptr ${reason})`);
           else emit(`${outcome} = call i32 @fsh_rt_tcp_connect(ptr ${slot}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${made}, ptr ${reason})`);
         }
         if (leaf.method !== "write") {

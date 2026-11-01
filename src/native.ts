@@ -43,6 +43,7 @@ export const NATIVE = String.raw`
 #include <poll.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -6222,6 +6223,7 @@ int64_t fsh_rt_tcp_port(fsh_socket *s) {
   struct sockaddr_storage at;
   socklen_t size = sizeof at;
   if (getsockname(s->fd, (struct sockaddr *)&at, &size) < 0) return -1;
+  if (at.ss_family != AF_INET && at.ss_family != AF_INET6) return 0;
   return ntohs(at.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&at)->sin6_port : ((struct sockaddr_in *)&at)->sin_port);
 }
 
@@ -6437,6 +6439,97 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
   *out = s;
   *socket_at = NULL;
   return 1;
+}
+
+// A socket call's failure on a path, which the IoError names.
+static int32_t fsh_unix_failed(fsh_str **message, const char *doing, const char *syscall, const char *path) {
+  int32_t failed = fsh_io_failed(message, doing, syscall);
+  message[3] = fsh_rt_str_from_cstring(path);
+  return failed;
+}
+
+// A socket path as an address, or NULL with the reason in message. Abstract names start with a
+// NUL byte, so they are refused with every other path holding one.
+static char *fsh_unix_address(fsh_str *path, struct sockaddr_un *at, const char *syscall, fsh_str **message) {
+  char *text = fsh_rt_str_cstring(path);
+  char reason[160];
+  reason[0] = 0;
+  if (!text) snprintf(reason, sizeof reason, "a socket path can't hold a NUL byte; abstract socket names aren't supported");
+  else if (!text[0]) snprintf(reason, sizeof reason, "the socket path is empty");
+  else if (strlen(text) >= sizeof at->sun_path) snprintf(reason, sizeof reason, "the socket path is %zu bytes, but the system takes at most %zu", strlen(text), sizeof at->sun_path - 1);
+  if (reason[0]) {
+    fsh_io_parts(message, reason, text && text[0] ? "ENAMETOOLONG" : "EINVAL", syscall, text);
+    fsh_rt_free(text);
+    return NULL;
+  }
+  memset(at, 0, sizeof *at);
+  at->sun_family = AF_UNIX;
+  memcpy(at->sun_path, text, strlen(text));
+  return text;
+}
+
+// 'UnixListener.bind(path)': listening at once, or 5 with the reason. A file already at the path
+// is the system's EADDRINUSE: it is never removed to make room.
+int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
+  struct sockaddr_un at;
+  char *text = fsh_unix_address(path, &at, "listen", message);
+  if (!text) return 5;
+  int fd = socket(AF_UNIX, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
+  int32_t failed = 0;
+  if (fd < 0) failed = fsh_unix_failed(message, "can't make a socket", "socket", text);
+  else if (bind(fd, (struct sockaddr *)&at, sizeof at) < 0 || listen(fd, 128) < 0) {
+    failed = fsh_unix_failed(message, "can't listen there", "listen", text);
+    close(fd);
+  }
+  fsh_rt_free(text);
+  if (failed) return failed;
+  *out = fsh_socket_new(fd);
+  return 1;
+}
+
+// Polls 'UnixStream.connect(path)': the frame keeps the socket while it connects. A listener with
+// a full backlog is the system's EAGAIN on Linux, given as is, as Node does.
+int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  fsh_socket *s = *socket_at;
+  struct sockaddr_un at;
+  char *text = fsh_unix_address(path, &at, "connect", message);
+  if (!text) return 5;
+  int32_t failed = 0;
+  if (!s) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
+    if (fd < 0) failed = fsh_unix_failed(message, "can't make a socket", "socket", text);
+    else {
+      s = *socket_at = fsh_socket_new(fd);
+      if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0) {
+        if (errno == EINPROGRESS || errno == EINTR) {
+          fsh_io_wait(fd, 1, task);
+          fsh_rt_free(text);
+          return 0;
+        }
+        failed = fsh_unix_failed(message, "can't connect", "connect", text);
+      }
+    }
+  } else {
+    int error = 0;
+    socklen_t size = sizeof error;
+    getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size);
+    if (error) {
+      errno = error;
+      failed = fsh_unix_failed(message, "can't connect", "connect", text);
+    }
+  }
+  fsh_rt_free(text);
+  if (failed) return failed;
+  *out = s;
+  *socket_at = NULL;
+  return 1;
+}
+
+// serve's socket file, removed once it stops listening.
+void fsh_rt_unix_unlink(fsh_str *path) {
+  char *text = fsh_rt_str_cstring(path);
+  if (text) unlink(text);
+  fsh_rt_free(text);
 }
 
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
