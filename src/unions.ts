@@ -140,6 +140,13 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
   return "boolean";
 }
 
+// The number types a union holds, a type parameter's counted as the one it stands for in an
+// instance, so a literal meeting `T | 0` with T = i32 is an i32 as it is meeting `i32 | 0`.
+export function numberMembers(lower: Typing["lower"], t: Type, members = (u: UnionType) => u.members): Type[] {
+  if (typeof t === "string" || t.kind !== "union") return [];
+  return members(t).map((m) => (typeof m !== "string" && m.kind === "param" && m.concrete ? lower(m) : m)).filter(isNumeric);
+}
+
 // A `?:` whose sides have different types makes the union of both, as in TypeScript.
 export function bothSides({ show, unionType }: Typing, e: Extract<Expr, { kind: "conditional" }>, then: Type, otherwise: Type, coerce: Coerce): Type {
   const both = [then, otherwise];
@@ -160,7 +167,7 @@ type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
 export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { typing, types, coercions, excess, adapt }: Union) {
   const { membersFor, show, lower } = typing;
   // A literal goes into the one number type a union holds.
-  const numbers = to.members.filter(isNumeric);
+  const numbers = numberMembers(typing.lower, to);
   if (!to.members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
   // In an instance, a type parameter no member takes goes in as the members its type argument has.
   const parts = (s: Type): Type[] => {
@@ -217,7 +224,7 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
 export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing: { lower, show }, value, coercions }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
   let [left, right] = [value(e.left), value(e.right)];
   // A literal compared with a union holding one number type takes that type.
-  const number = (t: Type) => (typeof t !== "string" && t.kind === "union" ? opened(t).filter(isNumeric) : []);
+  const number = (t: Type) => numberMembers(lower, t, opened);
   if (number(left).length === 1 && adapt(e.right, number(left)[0]!)) right = number(left)[0]!;
   if (number(right).length === 1 && adapt(e.left, number(right)[0]!)) left = number(right)[0]!;
   // A union of strings and patterns is a string once lowered, compared as one.

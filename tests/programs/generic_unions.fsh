@@ -387,3 +387,77 @@ function main(): void {
   console.log(bad<i64>(1));
 }
 // error: type 'string' is not assignable to return type 'T'
+// case: generic_unions_number_literal
+function h<T>(x: T | 0): boolean {
+  return x === 0;
+}
+
+function sw<T>(x: T | 0 | 1): string {
+  switch (x) {
+    case 0:
+      return "zero";
+    case 1:
+      return "one";
+    default:
+      return "T";
+  }
+}
+
+const folded = comptime h<i32>(0);
+
+function main(): void {
+  // A literal meeting `T | 0` with T a number type is that number, as with `i32 | 0`.
+  console.log(h<f64>(0), h<u8>(0), h<i32>(0), h<i64>(0), h<i32>(7 as i32), h<string>("x"));
+  console.log(sw<i64>(0), sw<i64>(1), sw<i64>(2), sw<i32>(0), sw<i32>(1 as i32), sw<i32>(5 as i32), sw<string>(0), sw<string>("x"));
+  console.log(folded);
+}
+// expect: true true true true false false
+// expect: zero one T zero one T zero T
+// expect: true
+// case: generic_unions_number_literal_release
+// mode: release
+function h<T>(x: T | 0): boolean {
+  return x === 0;
+}
+
+function main(): void {
+  console.log(h<f64>(0), h<u8>(0), h<i32>(0), h<i64>(0), h<u8>(3 as u8));
+}
+// expect: true true true true false
+// case: generic_unions_awaited
+async function get<T>(x: T, ok: boolean): Promise<T | null> {
+  if (ok) return x;
+  return null;
+}
+
+async function chain<T>(x: T | null, d: T): Promise<T> {
+  const r = await get<T | null>(x, true);
+  if (r === null) return d;
+  return r;
+}
+
+async function main(): Promise<void> {
+  const a = await chain<string>(null, `d${0}`);
+  const b = await chain<string>(`s${1}`, "d");
+  const c = await chain<string | null>(null, `e${0}`);
+  const d = await chain<string | null>(null, null);
+  console.log(a, b);
+  console.log(c ?? "N", d ?? "N");
+}
+// expect: d0 s1
+// expect: e0 N
+// case: generic_unions_compare_placeholder
+function same<T>(x: T | null, y: T): boolean {
+  return x === y;
+}
+
+function zero<T>(x: T | 0, y: T): boolean {
+  return x === y;
+}
+
+function main(): void {
+  console.log(same<string>("a", "a"), same<string>("a", "b"), same<i64>(null, 1), same<string | null>(null, null), same<i64 | string>(2, "2"));
+  console.log(zero<string>(0, "x"), zero<i64>(0, 0));
+}
+// expect: true false false true false
+// expect: false true

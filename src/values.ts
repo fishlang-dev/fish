@@ -4913,8 +4913,12 @@ export function expressions(ctx: Context) {
     }
     // A comparison over type parameters is checked again in each instance, once they're concrete.
     if (openParam(typing, l, true) || openParam(typing, r, true)) return "boolean";
-    // A type parameter is compared as the type it stands for in this instance.
-    const concrete = (t: Type): Type => (typeof t !== "string" && t.kind === "param" && t.concrete ? concrete(t.concrete) : t);
+    // A type parameter is compared as the type it stands for in this instance, and a union
+    // holding one as the union that flattens into.
+    const concrete = (t: Type): Type => {
+      if (typeof t !== "string" && t.kind === "param" && t.concrete) return concrete(t.concrete);
+      return typeof t !== "string" && t.kind === "union" && t.members.some((m) => typeof m !== "string" && m.kind === "param" && m.concrete) ? lower(t) : t;
+    };
     const [cl, cr] = [concrete(l), concrete(r)];
     const common = fits(cl, cr) ? cr : fits(cr, cl) ? cl : undefined;
     // Two unions that share a member compare as unions do, member by member.
@@ -5093,6 +5097,13 @@ export function expressions(ctx: Context) {
       }
       coercions.set(e, type.to);
       coerce(e, type.to, to, message);
+      return;
+    }
+    // In an instance, a member of the union a type parameter stands for goes into that union, as
+    // a value awaited from a promise of `T | null` does once narrowed.
+    const argument = typeof to !== "string" && to.kind === "param" && to.concrete && !fits(type, to) ? lower(to) : undefined;
+    if (typeof argument !== "string" && argument?.kind === "union") {
+      intoUnion(e, type, argument, message, unions);
       return;
     }
     if (typeof to !== "string" && to.kind === "union") {
