@@ -6532,6 +6532,104 @@ void fsh_rt_unix_unlink(fsh_str *path) {
   fsh_rt_free(text);
 }
 
+// A datagram's address, as fsh_address reads it, with the failing call named; an IPv4 address
+// meant for a socket bound to IPv6 is mapped, as "::" takes IPv4 peers too.
+static int fsh_udp_address(fsh_socket *s, fsh_str *host, int64_t port, struct sockaddr_storage *at, const char *syscall, fsh_str **message) {
+  if (!fsh_address(host, port, at, message)) {
+    fsh_rt_str_release(message[2]);
+    message[2] = fsh_rt_str_from_cstring(syscall);
+    return 0;
+  }
+  struct sockaddr_storage own;
+  socklen_t size = sizeof own;
+  if (!s || at->ss_family != AF_INET || getsockname(s->fd, (struct sockaddr *)&own, &size) < 0 || own.ss_family != AF_INET6) return 1;
+  struct sockaddr_in v4 = *(struct sockaddr_in *)at;
+  struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)at;
+  memset(at, 0, sizeof *at);
+  v6->sin6_family = AF_INET6;
+  v6->sin6_port = v4.sin_port;
+  v6->sin6_addr.s6_addr[10] = v6->sin6_addr.s6_addr[11] = 0xff;
+  memcpy(&v6->sin6_addr.s6_addr[12], &v4.sin_addr, 4);
+  return 1;
+}
+
+// 'UdpSocket.bind(host, port)': bound at once, or 5 with the reason.
+int32_t fsh_rt_udp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
+  struct sockaddr_storage at;
+  if (!fsh_udp_address(NULL, host, port, &at, "bind", message)) return 5;
+  int fd = socket(at.ss_family, SOCK_DGRAM | FSH_SOCK_CLOEXEC, 0);
+  if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
+  int off = 0, room = 0, most = 65536;
+  if (at.ss_family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
+  // macOS sends no datagram larger than its send buffer, which starts at 9216 bytes: raised so any
+  // UDP payload goes, as on Linux.
+  socklen_t size = sizeof room;
+  if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &room, &size) == 0 && room < most) setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &most, sizeof most);
+  if (bind(fd, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) < 0) {
+    int32_t failed = fsh_io_failed(message, "can't bind there", "bind");
+    close(fd);
+    return failed;
+  }
+  *out = fsh_socket_new(fd);
+  return 1;
+}
+
+// 'socket.connect(host, port)': only the peer is set, so it never waits.
+int32_t fsh_rt_udp_connect(fsh_socket *s, fsh_str *host, int64_t port, fsh_str **message) {
+  struct sockaddr_storage at;
+  if (!fsh_udp_address(s, host, port, &at, "connect", message)) return 5;
+  if (connect(s->fd, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) < 0) return fsh_io_failed(message, "can't connect", "connect");
+  return 1;
+}
+
+// Polls 'sendTo(bytes, host, port)', or 'send(bytes)' to the connected peer when host is NULL. A
+// datagram goes whole or not at all, so there is no partial send to resume.
+int32_t fsh_rt_udp_send(fsh_socket *s, fsh_array *bytes, fsh_str *host, int64_t port, fsh_task *task, fsh_str **message) {
+  struct sockaddr_storage at;
+  if (host && !fsh_udp_address(s, host, port, &at, "send", message)) return 5;
+  for (;;) {
+    ssize_t n = host ? sendto(s->fd, bytes->data, (size_t)bytes->length, 0, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) : send(s->fd, bytes->data, (size_t)bytes->length, 0);
+    if (n >= 0) return 1;
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      fsh_io_wait(s->fd, 1, task);
+      return 0;
+    }
+    return fsh_io_failed(message, "can't send", "send");
+  }
+}
+
+// Polls 'receiveFrom()' and 'receive()': one datagram's bytes, exactly, and with host not NULL
+// the sender's address, unbracketed.
+int32_t fsh_rt_udp_receive(fsh_socket *s, fsh_task *task, fsh_array *out, fsh_str **host, int64_t *port, fsh_str **message) {
+  // 65536 bytes hold the largest UDP payload, so no datagram is cut short.
+  char buffer[65536];
+  struct sockaddr_storage from;
+  for (;;) {
+    socklen_t size = sizeof from;
+    ssize_t n = recvfrom(s->fd, buffer, sizeof buffer, 0, (struct sockaddr *)&from, &size);
+    if (n >= 0) {
+      char *data = n ? fsh_rt_alloc(n) : NULL;
+      if (n) memcpy(data, buffer, n);
+      *out = (fsh_array){data, n, n};
+      if (host) {
+        char text[INET6_ADDRSTRLEN] = "";
+        int v6 = from.ss_family == AF_INET6;
+        inet_ntop(from.ss_family, v6 ? (void *)&((struct sockaddr_in6 *)&from)->sin6_addr : (void *)&((struct sockaddr_in *)&from)->sin_addr, text, sizeof text);
+        *host = fsh_rt_str_from_cstring(text);
+        *port = ntohs(v6 ? ((struct sockaddr_in6 *)&from)->sin6_port : ((struct sockaddr_in *)&from)->sin_port);
+      }
+      return 1;
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      fsh_io_wait(s->fd, 0, task);
+      return 0;
+    }
+    return fsh_io_failed(message, "can't receive", "recvfrom");
+  }
+}
+
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
 void fsh_rt_handle_retain(fsh_task *t) {
   if (t) __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);

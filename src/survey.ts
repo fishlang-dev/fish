@@ -193,7 +193,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
   // `buffer` is more than the base64 and hex std has: `Buffer` is a typed array with endian reads.
   // `crypto` is more than the random functions std has: an import of only those is portable.
-  ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", PLANNED("UDP sockets")],
+  ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
   ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
 ]);

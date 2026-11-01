@@ -968,7 +968,7 @@ export function expressions(ctx: Context) {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !lookup("AbortSignal") && !classes.has("AbortSignal")) {
       return signalStatic(e, callee);
     }
-    if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream" || callee.object.name === "UnixListener" || callee.object.name === "UnixStream") && !lookup(callee.object.name) && !classes.has(callee.object.name)) {
+    if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream" || callee.object.name === "UnixListener" || callee.object.name === "UnixStream" || callee.object.name === "UdpSocket") && !lookup(callee.object.name) && !classes.has(callee.object.name)) {
       return socketStatic(e, callee, callee.object.name);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !lookup("FixedArray") && !classes.has("FixedArray")) return filled(e, callee);
@@ -2874,6 +2874,7 @@ export function expressions(ctx: Context) {
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
     if (t.which === "JsValue") return jsMethodCall(e, callee, t);
+    if (t.which === "UdpSocket") return udpCall(e, callee);
     // A wait may also take an AbortSignal, as its last argument.
     const sockets = ["accept", "read", "write"].includes(callee.name);
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
@@ -2915,6 +2916,34 @@ export function expressions(ctx: Context) {
     return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError() : undefined, signalled), what: `'${callee.name}'` };
   }
 
+  // A UdpSocket's `sendTo(bytes, host, port)`, `receiveFrom()`, `connect(host, port)`, `send(bytes)`
+  // and `receive()`. Each but connect, which never waits, may take an AbortSignal last.
+  function udpCall(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    const methods: Record<string, number> = { sendTo: 3, receiveFrom: 0, connect: 2, send: 1, receive: 0 };
+    const what = `'${callee.name}'`;
+    if (!(callee.name in methods)) throw new CompileError("E0502", `'UdpSocket' has no method '${callee.name}'; it has 'sendTo', 'receiveFrom', 'connect', 'send', 'receive', 'clone' and 'port', and dropping it closes it`, callee.start, callee.end);
+    if (linked(callee)) throw unsupported("optional chains calling 'UdpSocket' methods", callee);
+    const count = methods[callee.name]!;
+    const signalled = callee.name !== "connect" && e.args.length === count + 1;
+    const usage = { sendTo: "the bytes, a host address and a port, like 'sendTo(bytes, \"127.0.0.1\", 8080)'", connect: "a host address and a port, like 'connect(\"127.0.0.1\", 8080)'", send: "the bytes to send" }[callee.name];
+    if (e.args.length !== count && !signalled) throw new CompileError("E0504", `${what} takes ${usage ?? "no arguments"}${callee.name === "connect" ? "" : ", and may take an AbortSignal"}`, e.start, e.end);
+    if (signalled) signalArgument(e.args.at(-1)!, what);
+    const take = (arg: Expr, want: Type, say: (given: Type) => string) => {
+      expect(arg, want);
+      const given = value(arg);
+      coerce(arg, given, want, say(given));
+    };
+    const sends = callee.name === "sendTo" || callee.name === "send";
+    if (sends) take(e.args[0]!, arrayType("u8"), (given) => `${what} takes the bytes to send as a 'u8[]', like 'new TextEncoder().encode(text)', not '${show(given)}'`);
+    if (callee.name === "sendTo" || callee.name === "connect") {
+      const [host, port] = callee.name === "sendTo" ? [e.args[1]!, e.args[2]!] : [e.args[0]!, e.args[1]!];
+      take(host, "string", (given) => `the host is a 'string' like "127.0.0.1", not '${show(given)}'`);
+      take(port, "i64", (given) => `the port is an 'i64', not '${show(given)}'`);
+    }
+    const method = sends ? "sendTo" : callee.name === "connect" ? "udpConnect" : "receiveFrom";
+    return { type: leafFuture(method, callee.name === "receive" ? arrayType("u8") : "void", socketError(signalled), signalled), what };
+  }
+
   // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds. And
   // `AbortSignal.any(signals)`: one that aborts with the first of them, each lent to it.
   function signalStatic(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
@@ -2951,8 +2980,8 @@ export function expressions(ctx: Context) {
   // socket path: futures the async runtime's reactor completes, throwing an `IoError` when the
   // system says no. std's own `TcpListener.unix(path)` and `TcpStream.unix(path)` give a socket on a
   // path typed as TCP's, so serve and fetch share their HTTP code.
-  function socketStatic(e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream"): { type: Type; what: string } {
-    const listens = which === "TcpListener" || which === "UnixListener";
+  function socketStatic(e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket"): { type: Type; what: string } {
+    const listens = which === "TcpListener" || which === "UnixListener" || which === "UdpSocket";
     const internal = e.start >= STD_BASE && (which === "TcpListener" || which === "TcpStream") && callee.name === "unix";
     const unix = internal || which === "UnixListener" || which === "UnixStream";
     const method = listens ? "bind" : "connect";
@@ -2975,7 +3004,7 @@ export function expressions(ctx: Context) {
       const p = value(port);
       coerce(port, p, "i64", `the port is an 'i64', not '${show(p)}'`);
     }
-    return { type: leafFuture(method, unix ? blockType(which) : "void", socketError(signalled), signalled), what: name };
+    return { type: leafFuture(method, unix || which === "UdpSocket" ? blockType(which) : "void", socketError(signalled), signalled), what: name };
   }
 
   // The std `IoError` class, which failed socket calls throw.
@@ -3568,7 +3597,7 @@ export function expressions(ctx: Context) {
     if (t.which === "JsValue") return jsProperty(e, t);
     if (t.which === "AbortController" && e.name === "signal") return blockType("AbortSignal");
     if (t.which === "AbortSignal" && e.name === "aborted") return "boolean";
-    if (t.which === "TcpListener" && e.name === "port") return "i64";
+    if ((t.which === "TcpListener" || t.which === "UdpSocket") && e.name === "port") return "i64";
     throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
