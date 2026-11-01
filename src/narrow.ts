@@ -59,8 +59,9 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // `narrows` hears whether its true and its false answers narrow, which codegen then checks.
 export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usize; type: Type; narrows(yes: boolean, no: boolean): void } | undefined;
 
-export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, LocalId>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
-  const { kindTests, typing } = tables;
+export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, LocalId>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
+  const { kindTests, typing, rewrites } = tables;
+  const e = rewrites.current(written);
   const { fieldsOf, holdsPlainJs, isSubclass, rec, unfold, fits, refType, unionType } = typing;
   const nothing: Guard = { yes: new Map(), no: new Map() };
   const of = (x: Expr) => guard(tables, x, types, locals, narrowable, predicate);

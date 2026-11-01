@@ -2736,7 +2736,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         const symbol = lifted.fn.name;
         holdsNode("stmt", fn.body, (n) => {
           const c = n as Expr;
-          if (c.kind === "call" && c.callee.kind === "ident" && c.callee.name === name) c.callee.name = symbol;
+          if (c.kind === "call" && c.callee.kind === "ident" && c.callee.name === name) rewrites.replace(c.callee, { ...c.callee, name: symbol });
           return false;
         });
         liftedFunctions.set(key, lifted);
