@@ -620,6 +620,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
+  // The error each failed body's check gave, which a call of it gives again rather than another.
   const failed = new Map<Body, CompileError>();
   // Each Rust function's types, by its shim symbol, as first declared.
   const rustTypes = new Map<string, string>();
@@ -791,15 +792,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       jsUncalled.set(f, e);
     }
   });
-  // Once a body has failed, a generic body's or class's instances aren't checked: their definitions
-  // were, and an instance's error then is most often one a refused call already reported.
+  // Once a body has failed, a generic class's instances aren't settled: their definitions were
+  // checked, and an instance's error then is most often one a refused call already reported.
   while (!unending && (unsettled.length > 0 || pending.length > 0)) {
     if (errors.length > 0) {
-      pending.length = 0;
       const kept = unsettled.filter((c) => declaredClasses.has(c));
       unsettled.length = 0;
       unsettled.push(...kept);
-      if (kept.length === 0) break;
     }
     try {
       if (unsettled.length > 0) settle(unsettled.shift()!, (run) => {
@@ -1250,10 +1249,6 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // Checks an instance with its type arguments in scope.
   function checkBody(instance: Instance) {
     if (done.has(instance)) return;
-    // A body that failed fails the same way for each body that needs it, and isn't checked again,
-    // from the partial tables its first check left or as another instance of a generic body.
-    const failure = failed.get(instance.body);
-    if (failure) throw failure;
     const outer = checking;
     const outerDemanded = demanded;
     checking = instance;
