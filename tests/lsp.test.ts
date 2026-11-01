@@ -172,6 +172,20 @@ test("a document's error is published at its place, and cleared when fixed or cl
   expect(await s.proc.exited).toBe(0);
 }, 20_000);
 
+test("each function's error in a document is published, in source order", async () => {
+  const src = 'function a(): i64 {\n  return "x";\n}\nfunction main() {\n  const _n: i64 = true;\n  console.log(a());\n}\n';
+  const uri = Bun.pathToFileURL(file("several.fsh", src)).href;
+  const s = await started();
+  s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text: src } });
+  expect(diagnostics(await s.next(published(uri))).map((d) => [d.severity, d.code, d.range.start])).toEqual([
+    [1, "E0101", { line: 1, character: 9 }],
+    [1, "E0101", { line: 4, character: 18 }],
+  ]);
+  s.request("shutdown");
+  s.notify("exit");
+  expect(await s.proc.exited).toBe(0);
+}, 20_000);
+
 test("a document's warnings are published with warning severity, and an error replaces them", async () => {
   const src = "function main() {\n  const unused = 1;\n  return;\n  print(2);\n}\n";
   const uri = Bun.pathToFileURL(file("warned.fsh", src)).href;

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Checked } from "./check.ts";
 import { newSession, type Session } from "./compilation.ts";
-import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
+import { CompileError, errorsOf, locate, shown, sourceOf, written, type Source } from "./diag.ts";
 import { analyze } from "./main.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
@@ -67,17 +67,23 @@ function diagnose(session: Session, path: string, text: string, read: (path: str
     return { diagnostics: warnings, checked };
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
-    const uri = pathToFileURL(path).href;
-    const at = located(path, text, e.sources, e.start, e.end);
-    const note = e.note && located(path, text, e.sources, e.note.start, e.note.end);
-    const related = [...(note ? [{ location: note, message: shown(e.note!.message, e.names) }] : [])];
-    if (at?.uri === uri) return { diagnostics: [{ range: at.range, severity: 1, code: e.code, source: "fish", message: shown(e.message, e.names), ...(related.length > 0 && { relatedInformation: related }) }] };
-    const elsewhere = sourceOf(text, path, e.start, e.sources);
-    const { line, col } = locate(elsewhere.src, Math.min(elsewhere.offset, elsewhere.src.length));
-    if (at) related.unshift({ location: at, message: shown(e.message, e.names) });
-    const start = { line: 0, character: 0 };
-    return { diagnostics: [{ range: { start, end: start }, severity: 1, code: e.code, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message, e.names)}`, ...(related.length > 0 && { relatedInformation: related }) }] };
+    return { diagnostics: errorsOf(e).map((x) => diagnostic(x, path, text)) };
   }
+}
+
+// An error as a diagnostic of the document at `path`; one in another file is shown at its start,
+// naming where it is.
+function diagnostic(e: CompileError, path: string, text: string) {
+  const uri = pathToFileURL(path).href;
+  const at = located(path, text, e.sources, e.start, e.end);
+  const note = e.note && located(path, text, e.sources, e.note.start, e.note.end);
+  const related = [...(note ? [{ location: note, message: shown(e.note!.message, e.names) }] : [])];
+  if (at?.uri === uri) return { range: at.range, severity: 1, code: e.code, source: "fish", message: shown(e.message, e.names), ...(related.length > 0 && { relatedInformation: related }) };
+  const elsewhere = sourceOf(text, path, e.start, e.sources);
+  const { line, col } = locate(elsewhere.src, Math.min(elsewhere.offset, elsewhere.src.length));
+  if (at) related.unshift({ location: at, message: shown(e.message, e.names) });
+  const start = { line: 0, character: 0 };
+  return { range: { start, end: start }, severity: 1, code: e.code, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message, e.names)}`, ...(related.length > 0 && { relatedInformation: related }) };
 }
 
 const before = (a: Position, b: Position) => a.line < b.line || (a.line === b.line && a.character <= b.character);
