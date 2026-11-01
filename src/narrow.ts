@@ -8,7 +8,7 @@ import { NodeMap } from "./nodes.ts";
 // narrows to the members a check leaves, and reading the variable there gives that narrower
 // type, which codegen takes out of the union. Only a variable that never changes can narrow.
 
-export type Facts = Map<Local, Type>;
+export type Facts = NodeMap<Local, Type>;
 export type Guard = { yes: Facts; no: Facts };
 
 // What `typeof` says for a value of each type. Every sized number is "number", as in
@@ -59,7 +59,7 @@ export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usiz
 export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const { kindTests, typing } = tables;
   const { fits, refType, unionType } = typing;
-  const nothing: Guard = { yes: new Map(), no: new Map() };
+  const nothing: Guard = { yes: new NodeMap(), no: new NodeMap() };
   const of = (x: Expr) => guard(tables, x, types, locals, narrowable, predicate);
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
   const proved = e.kind === "call" && predicate ? predicate(e) : undefined;
@@ -78,7 +78,7 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
   if (e.op === "&&" || e.op === "||") {
     const [a, b] = [of(e.left), of(e.right)];
     // `a && b` is true when both are, and false when either is; `||` the other way round.
-    const both = (x: Facts, y: Facts) => new Map([...x, ...y]);
+    const both = (x: Facts, y: Facts) => new NodeMap([...x, ...y]);
     return e.op === "&&" ? { yes: both(a.yes, b.yes), no: either(typing, a.no, b.no) } : { yes: either(typing, a.yes, b.yes), no: both(a.no, b.no) };
   }
   if (e.op === "instanceof") {
@@ -94,7 +94,7 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
     const read = name && JS_READS[name];
     const tested = types.get(test.operand);
     if (local && read && tested && holdsPlainJs(tested) && narrowable(local)) {
-      const facts: Guard = { yes: new Map([[local, read]]), no: new Map() };
+      const facts: Guard = { yes: new NodeMap([[local, read]]), no: new NodeMap() };
       return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
     }
     if (local && tested && holdsPlainJs(tested)) return nothing;
@@ -140,10 +140,10 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
     });
     const facts = (keep: string): Facts => {
       const left = members.filter((m) => check(m) !== keep);
-      if (left.length === 0) return new Map();
+      if (left.length === 0) return new NodeMap();
       // A mutable reference can point at one member inside the union, but to several only
       // through a shared copy.
-      return new Map([[local, ref ? refType(unionType(left), ref.mutable && left.length === 1) : unionType(left)]]);
+      return new NodeMap([[local, ref ? refType(unionType(left), ref.mutable && left.length === 1) : unionType(left)]]);
     };
     const [yes, no] = [facts("no"), facts("yes")];
     return positive ? { yes, no } : { yes: no, no: yes };
@@ -157,7 +157,7 @@ const is = (t: Type, value: unknown) => typeof t !== "string" && t.kind === "lit
 
 // A variable either of two branches narrowed has, after them, whichever type it had.
 export function either({ unionType }: Typing, x: Facts, y: Facts): Facts {
-  const out: Facts = new Map();
+  const out: Facts = new NodeMap();
   for (const [local, t] of x) {
     const other = y.get(local);
     if (other) out.set(local, unionType([t, other]));

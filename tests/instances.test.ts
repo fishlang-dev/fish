@@ -6,7 +6,7 @@ import { newSession } from "../src/compilation.ts";
 import { unreached, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
 import { NodeMap } from "../src/nodes.ts";
-import { newTyping, type ClassType, type Type } from "../src/typing.ts";
+import { newTyping, TypeMap, type ClassType, type Type } from "../src/typing.ts";
 
 const session = newSession();
 
@@ -45,7 +45,7 @@ test("a comparison can't reach an equals that isn't compiled", () => {
   const shape = classType("Shape");
   shape.abstract = true;
   const equals = { body: { name: "Shape.equals", owner: shape }, bindings: new Map() } as unknown as Instance;
-  const equalities = new WeakMap<ClassType, Instance>([[shape, equals]]);
+  const equalities = new TypeMap<ClassType, Instance>([[shape, equals]]);
   const at = { start: 10, end: 20 };
   const [left, right] = [{ id: 1, kind: "ident", name: "a", ...at }, { id: 2, kind: "ident", name: "b", ...at }] as Expr[];
   const compare = { id: 3, kind: "binary", op: "===", left, right, ...at } as Expr;

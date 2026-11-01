@@ -1,6 +1,6 @@
 import { inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
-import { field, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
+import { TypeMap, field, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
 
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
@@ -41,8 +41,8 @@ export function familyMismatch(f: Body, family: FunctionType, members: Members, 
 
 // The type parameters named `names` found in `types`, each mapped to the one at its place in `to`:
 // a method's own placeholders may be met as more than one object, so they are found by name.
-function byName(types: Type[], names: string[], to: Type[]): Map<Type, Type> {
-  const swap = new Map<Type, Type>();
+function byName(types: Type[], names: string[], to: Type[]): TypeMap<Type, Type> {
+  const swap = new TypeMap<Type, Type>();
   const seen = new Set<unknown>();
   const walk = (v: unknown) => {
     if (typeof v !== "object" || v === null || seen.has(v)) return;
@@ -139,7 +139,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     const found = typeof type !== "string" && type.kind === "interface" ? type.methods.find((x) => x.name === m.name) : undefined;
     if (found) {
       // Generic methods are compared with their type parameters standing for each other.
-      let swap = new Map<Type, Type>();
+      let swap = new TypeMap<Type, Type>();
       if (m.generic || found.generic) {
         if (found.generic?.names.length !== m.generic?.names.length) return `types of method '${m.name}' are incompatible`;
         swap = byName([...found.params, found.returns], found.generic!.names, m.generic!.own);
@@ -158,7 +158,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     if (method.throws) return `method '${m.name}' can throw, and an interface's methods can't declare errors yet`;
     // A generic method stands in for one with as many type parameters, compared with them
     // standing for the interface's.
-    let swap = new Map<Type, Type>();
+    let swap = new TypeMap<Type, Type>();
     const written = members.paramTypesOf(method).map(implicitBound);
     const given = members.returnOf(method, at);
     if (m.generic) {

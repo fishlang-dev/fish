@@ -6,11 +6,13 @@ import { check } from "../src/check.ts";
 import { newCompilation, newSession } from "../src/compilation.ts";
 import { CompileError } from "../src/diag.ts";
 import { expandMacros } from "../src/macros.ts";
+import { analyze } from "../src/main.ts";
 import { flatten, load } from "../src/modules.ts";
 import { NodeMap, NodeSet, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
 import { parse, type Stmt } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
+import { TypeMap, TypeSet, type ArrayType, type Type, type Typing } from "../src/typing.ts";
 
 const src = join(import.meta.dir, "..", "src");
 const programs = join(import.meta.dir, "programs");
@@ -94,6 +96,52 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
   expect(problems.slice(0, 20)).toEqual([]);
 }, 120_000);
 
+// Every type reachable from `roots`, through the types it links to, is the arena's under its own
+// `typeId`, and no two share one. AST nodes a type links to, as a generic function type's, end
+// the walk.
+function auditTypes(roots: unknown[], typing: Typing, where: string): string[] {
+  const problems: string[] = [];
+  const visited = new Set<object>();
+  const ids = new Map<number, object>();
+  const visit = (v: unknown) => {
+    if (typeof v !== "object" || v === null || visited.has(v)) return;
+    visited.add(v);
+    if (Array.isArray(v)) return v.forEach(visit);
+    if (v instanceof Map) return [...v.values()].forEach(visit);
+    const n = v as Record<string, unknown>;
+    if (typeof n.start === "number" && typeof n.end === "number") return;
+    if (typeof n.kind === "string" && Array.isArray(n.fields)) {
+      const at = `${where}: a ${n.kind} type`;
+      if (typeof n.typeId !== "number") problems.push(`${at} has no typeId`);
+      else if (ids.has(n.typeId) && ids.get(n.typeId) !== n) problems.push(`${at} shares typeId ${n.typeId}`);
+      else if (typing.typeOf(n.typeId) !== n) problems.push(`${at} isn't the arena's type ${n.typeId}`);
+      else ids.set(n.typeId, n);
+    }
+    Object.values(n).forEach(visit);
+  };
+  roots.forEach(visit);
+  return problems;
+}
+
+test("every type of the checked test programs is in its arena under an id of its own", () => {
+  const session = newSession();
+  const problems: string[] = [];
+  let types = 0;
+  for (const p of corpus()) {
+    if (p.src.includes("// mode: parse")) continue;
+    try {
+      const { checked } = analyze(session, p.src, p.file);
+      const roots: Type[] = checked.instances.flatMap((i) => [...i.types.values(), ...i.coercions.values(), ...i.bindings.values(), i.returns, ...(i.throws ? [i.throws] : [])]);
+      types += roots.length;
+      problems.push(...auditTypes(roots, checked.compilation.typing, p.name));
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  expect(types).toBeGreaterThan(100_000);
+  expect(problems.slice(0, 20)).toEqual([]);
+}, 240_000);
+
 test("a node table refuses a second node with an id already in use", () => {
   const a = { id: 1, kind: "a" };
   const b = { id: 1, kind: "b" };
@@ -126,6 +174,50 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by an AST node", () => {
     for (const m of text.matchAll(alias)) names.push(m[1] ?? m[2]!);
     const keyed = new RegExp(`\\b(?:Weak)?(?:Map|Set)<\\s*(?:(?:Extract|Exclude)<\\s*)?(?:${names.join("|")}|Span)\\b(?!\\[)`, "g");
     for (const m of text.matchAll(keyed)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
+
+test("a type table keys primitives and records by id, and refuses a second record with an id in use", () => {
+  const a = { kind: "array", typeId: 30, element: "i64", fields: [] } as ArrayType;
+  const b = { kind: "array", typeId: 30, element: "u8", fields: [] } as ArrayType;
+  const map = new TypeMap<Type, string>([["i64", "int"], [a, "a"]]);
+  expect([map.get("i64"), map.get("string"), map.get(a)]).toEqual(["int", undefined, "a"]);
+  expect(() => map.get(b)).toThrow("internal error: two types share typeId 30");
+  expect(() => new TypeSet<Type>([a, "bigint"]).add(b)).toThrow("internal error: two types share typeId 30");
+  expect([...new TypeSet<Type>(["bigint", a, "bigint"])]).toEqual(["bigint", a]);
+});
+
+// The type kinds a table may not be keyed by: `Type`, every record type in src/typing.ts, `Bound`,
+// and any alias a file gives one, as `type Shape = ObjectType | UnionType`. They key by id
+// through TypeMap and TypeSet instead.
+test("no Map, WeakMap, Set or WeakSet in src is keyed by a type", () => {
+  const typing = readFileSync(join(src, "typing.ts"), "utf8");
+  const kinds = [...typing.matchAll(/^export type (\w+) = \{\s*kind: "\w+"; typeId: usize;/gm)].map((m) => m[1]!);
+  expect(kinds).toContain("ObjectType");
+  expect(kinds.length).toBe(24);
+  const types = ["Type", "Bound", ...kinds];
+  const offenders: string[] = [];
+  for (const f of readdirSync(src).filter((f) => f.endsWith(".ts"))) {
+    const text = readFileSync(join(src, f), "utf8");
+    const names = [...types];
+    const alias = new RegExp(`\\btype (\\w+) = (?:(?:Extract|Exclude)<(?:${names.join("|")})\\b|(?:${names.join("|")})(?: [&|]|;))`, "g");
+    for (const m of text.matchAll(alias)) names.push(m[1]!);
+    const keyed = new RegExp(`\\b(?:Weak)?(?:Map|Set)<\\s*(?:(?:Extract|Exclude)<\\s*)?(?:${names.join("|")})\\b(?![\\[.])`, "g");
+    for (const m of text.matchAll(keyed)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
+
+
+// The checker's other records a table may not be keyed by: an Instance, a Body, a Local and a
+// ClassInfo, and a list of type parameters. Instances, bodies and locals key by their ids, a class
+// by its type's, and a list by its first parameter.
+test("no Map, WeakMap, Set or WeakSet in src is keyed by an instance, body, local, class or type parameter list", () => {
+  const offenders: string[] = [];
+  for (const f of readdirSync(src).filter((f) => f.endsWith(".ts"))) {
+    const text = readFileSync(join(src, f), "utf8");
+    for (const m of text.matchAll(/\b(?:Weak)?(?:Map|Set)<\s*(?:Instance|Body|Local|ClassInfo|TypeParam\[\])(?![\w.])/g)) offenders.push(`${f}: ${m[0]}`);
   }
   expect(offenders).toEqual([]);
 });

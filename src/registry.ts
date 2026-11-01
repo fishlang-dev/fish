@@ -1,6 +1,6 @@
 import { checkOverrides, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
 import type { Tables } from "./compilation.ts";
-import { nextId } from "./nodes.ts";
+import { nextId, NodeSet } from "./nodes.ts";
 import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
@@ -9,7 +9,7 @@ import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { widenEnum, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { TypeMap, TypeSet, widenEnum, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -34,12 +34,13 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   const { typing, ids } = tables;
   const { optionalField, holdsPattern, fits, show, blockFor } = typing;
   // Every class by its type, and those not yet laid out and checked.
-  const infoOf = new Map<ClassType, ClassInfo>();
+  const infoOf = new TypeMap<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];
-  const linked = new Set<ClassInfo>();
-  const laidOut = new Set<ClassInfo>();
-  const laying = new Set<ClassInfo>();
-  const wrapped = new Set<ClassInfo>();
+  // Each class's progress, keyed by its type.
+  const linked = new TypeSet<ClassType>();
+  const laidOut = new TypeSet<ClassType>();
+  const laying = new TypeMap<ClassType, ClassInfo>();
+  const wrapped = new TypeSet<ClassType>();
   return { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
 
   function register(c: ClassInfo) {
@@ -55,29 +56,29 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   }
 
   function bodiesOf(c: ClassInfo): Body[] {
-    return [...new Set([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])];
+    return [...new NodeSet([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])];
   }
 
   // Bases are linked first, since a derived constructor may take its base's parameters. An abstract
   // class's templates are marked, and a concrete class's copies made, before overrides are checked.
-  function link(c: ClassInfo, path: Set<ClassInfo>) {
-    if (linked.has(c)) return;
+  function link(c: ClassInfo, path: TypeSet<ClassType>) {
+    if (linked.has(c.type)) return;
     if (c.baseName === undefined) {
       implementAbstracts(ids, c);
-      linked.add(c);
+      linked.add(c.type);
       return;
     }
-    if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
+    if (path.has(c.type)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
     const base = baseOf(c, c.baseName);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
     const rust = rustClassOf(base.type);
     if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
-    link(base, path.add(c));
+    link(base, path.add(c.type));
     const at = c.node.extends!;
     extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: nextId(ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
     implementAbstracts(ids, c);
     checkOverrides(c);
-    linked.add(c);
+    linked.add(c.type);
   }
 
   // The class `extends` names, a generic one made from the type arguments it is written with,
@@ -97,11 +98,11 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   // is checked as the body of a function that returns it, so it may use other classes.
   // Whether its fields are known, which they aren't yet while its own fields are being resolved.
   function layout(c: ClassInfo): boolean {
-    if (laidOut.has(c)) return !laying.has(c) && (!c.base || layout(c.base));
+    if (laidOut.has(c.type)) return !laying.has(c.type) && (!c.base || layout(c.base));
     // A generic class's instance is made after the declared classes are linked.
-    link(c, new Set());
-    laidOut.add(c);
-    laying.add(c);
+    link(c, new TypeSet());
+    laidOut.add(c.type);
+    laying.set(c.type, c);
     if (c.base) layout(c.base);
     c.type.fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
@@ -124,9 +125,9 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     // from a generic class's type argument goes when the class is made from the lowered argument.
     const patterned = c.type.fields.findIndex((f) => holdsPattern(f.type));
     if (patterned >= 0 && !c.type.generic?.args.some(holdsPattern)) throw unsupported("template literal pattern types in class fields", c.fields[patterned]!);
-    laying.delete(c);
+    laying.delete(c.type);
     // Before any body reads its fields, a class that contains itself holds itself in a block.
-    if (contains(c.type, c.type, new Set())) holdItself(c.type);
+    if (contains(c.type, c.type, new TypeSet())) holdItself(c.type);
     return true;
   }
 
@@ -148,8 +149,8 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   // raised where the class is thrown. Worked out when first asked, since a function raising
   // one may be checked before the class is settled.
   function wrapsOf(c: ClassInfo): ClassInfo["wraps"] {
-    if (wrapped.has(c)) return c.wraps;
-    wrapped.add(c);
+    if (wrapped.has(c.type)) return c.wraps;
+    wrapped.add(c.type);
     for (const node of c.node.implements) {
       if (node.kind !== "ref" || node.name !== "From") continue;
       if (node.args.length !== 1) throw new CompileError("'From' takes the type it wraps, like 'From<DbError>'", node.start, node.end);
@@ -172,7 +173,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   // does.
   function holdItself(c: ClassType) {
     const back = blockFor(c, c.generic?.args ?? []);
-    const holders = new Set<ClassType | VariantType>();
+    const holders = new TypeSet<ClassType | VariantType>();
     const reach = (t: Type) => {
       if (typeof t === "string") return;
       if (t.kind === "class" || t.kind === "variant") {
@@ -187,7 +188,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     for (const h of holders) for (const f of h.fields) f.type = swapped(typing, f.type, c, back);
   }
 
-  function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
+  function contains(t: Type, inner: ClassType, seen: TypeSet<Type>): boolean {
     if (typeof t === "string" || seen.has(t)) return false;
     seen.add(t);
     const parts = [...t.fields.map((f) => f.type), ...(t.kind === "class" && t.base ? [t.base] : []), ...(t.kind === "union" ? t.members : [])];

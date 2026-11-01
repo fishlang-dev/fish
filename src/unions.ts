@@ -3,7 +3,7 @@ import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
 import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { baseOf, field, isNumeric, isPlainJs, unfold } from "./typing.ts";
+import { TypeSet, baseOf, field, isNumeric, isPlainJs, unfold } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, Typing, UnionType } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
@@ -129,7 +129,7 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
   const name = e.right.kind === "ident" ? e.right.name : undefined;
   const members = typeof held !== "string" && held.kind === "union" ? held.members : [held];
   // A member may be one through its base, as `Words extends List<string>` is a `List`.
-  const instances = c || !name ? [] : [...new Set(members.flatMap((m) => {
+  const instances = c || !name ? [] : [...new TypeSet(members.flatMap((m) => {
     for (let x: Type | undefined = m; typeof x !== "string" && x?.kind === "class"; x = x.base) if (x.generic?.name === name) return [x];
     return [];
   }))];

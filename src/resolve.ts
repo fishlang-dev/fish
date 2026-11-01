@@ -6,7 +6,7 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { ANY_REGEX, familyHeld, jsShape, type RecursiveType, field, isFloat, splitTemplate, textFits, holdsHandle, holdsPart, type BlockType, isInteger, type MapType, type ArrayType, optionRef, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { TypeMap, ANY_REGEX, familyHeld, jsShape, type RecursiveType, field, isFloat, splitTemplate, textFits, holdsHandle, holdsPart, type BlockType, isInteger, type MapType, type ArrayType, optionRef, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -85,7 +85,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   const resolving = new Set<string>();
   // Where an alias instance leads back to itself, by its key, and the alias each is made from.
   const recursives = new Map<string, RecursiveType>();
-  const recursiveAliases = new Map<RecursiveType, TypeAlias>();
+  const recursiveAliases = new TypeMap<RecursiveType, TypeAlias>();
   const traits = new NodeMap<Stmt, Map<string, InterfaceType>>();
   // Each combined interface `A & B`, by its sides.
   const combined = new Map<string, InterfaceType>();
@@ -293,7 +293,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   function resolveType(t: TypeNode): Type {
     const preset = presetTypes.get(t);
     if (preset !== undefined) {
-      const swap = new Map<Type, Type>();
+      const swap = new TypeMap<Type, Type>();
       holdsPart(preset, (u) => {
         const bound = typeof u !== "string" && u.kind === "param" ? scope.get(u.name) : undefined;
         if (bound !== undefined && bound !== u) swap.set(u, bound);

@@ -6,8 +6,8 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
-import { digest, unfold, elementsOf, field, holdsPart, widenLet, type FunctionType, isTuple, widenEnum, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
-import { NodeMap, NodeSet } from "./nodes.ts";
+import { TypeSet, TypeMap, digest, unfold, elementsOf, field, holdsPart, widenLet, type FunctionType, isTuple, widenEnum, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { WeakNodeMap, NodeMap, NodeSet } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
@@ -34,10 +34,13 @@ export function placeholders({ show, wrapped, typeParameter }: Typing, params: T
 }
 
 // A generic class's placeholders, one set shared by its definition check and its members,
-// since each new set would name another instance of the class.
+// since each new set would name another instance of the class. They are kept by the class's
+// first type parameter, which only its own list holds; a list of none has nothing to share.
 function classPlaceholders({ typing, classScopes }: Tables, params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type): Map<string, Type> {
-  let found = classScopes.get(params);
-  if (!found) classScopes.set(params, found = placeholders(typing, params, resolve));
+  const first = params[0];
+  if (first === undefined) return placeholders(typing, params, resolve);
+  let found = classScopes.get(first);
+  if (!found) classScopes.set(first, found = placeholders(typing, params, resolve));
   return found;
 }
 
@@ -219,9 +222,9 @@ export function checkBound(type: Type, bound: Type, members: Members, at: Span) 
 // answer is kept, since its fields never change: walking nested types afresh at every level
 // would take time exponential in their depth. Each variant's answer is kept too.
 function concreteness({ tiedBy }: Typing): (t: Type) => boolean {
-  const concreteVariants = new WeakMap<VariantType, boolean>();
-  const concreteObjects = new WeakMap<ObjectType, boolean>();
-  const visiting = new Set<ClassType>();
+  const concreteVariants = new TypeMap<VariantType, boolean>();
+  const concreteObjects = new TypeMap<ObjectType, boolean>();
+  const visiting = new TypeSet<ClassType>();
   return concrete;
 
   function concrete(t: Type): boolean {
@@ -289,13 +292,14 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   const { typing } = tables;
   const { callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, promiseInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
   const concrete = concreteness(typing);
-  const explicit = new WeakMap<Body, Map<string, Type>>();
-  const instances = new Map<Body, Map<string, Instance>>();
-  const sharedPlaceholders = new Map<TypeParam[], Map<string, Type>>();
-  const implicits = new Map<Body, Map<usize, Bound>>();
+  const explicit = new WeakNodeMap<Body, Map<string, Type>>();
+  const instances = new NodeMap<Body, Map<string, Instance>>();
+  // By the method's first type parameter, which only its own list holds.
+  const sharedPlaceholders = new NodeMap<TypeParam, Map<string, Type>>();
+  const implicits = new NodeMap<Body, Map<usize, Bound>>();
   // Which implicit parameters are references to their type, and how.
-  const lent = new Map<Body, Map<usize, RefType>>();
-  const definitions = new Map<Body, Instance>();
+  const lent = new NodeMap<Body, Map<usize, RefType>>();
+  const definitions = new NodeMap<Body, Instance>();
   // Instances still to check.
   const pending: Instance[] = [];
   const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
@@ -438,7 +442,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       const isConcrete = complete && [...bindings.values()].every(concrete);
       const generic = bindings.size > 0;
       found = {
-        tables, body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
+        id: ++tables.counts.instances, tables, body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
         depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
         types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       };
@@ -491,7 +495,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     // A type parameter only an arrow's own parameters decided is still the definition's
     // placeholder, which the arrow was typed with; a body calling itself passes its placeholder
     // on in an argument of its own.
-    const open = new Set(explicitPlaceholders(f).values());
+    const open = new TypeSet(explicitPlaceholders(f).values());
     // A placeholder an argument holds, directly or in a function-typed parameter's bound.
     const holds = (given: Type, t: Type): boolean => holdsPart(given, (u) => u === t || (typeof u !== "string" && u.kind === "param" && u.bound?.kind === "function" && [...u.bound.params, u.bound.returns].some((b) => holds(b, t))), true);
     for (const p of typeArgs.length > 0 ? [] : params) {
@@ -508,7 +512,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     // So does a function type's, and the class's own parameters stand for what this class
     // instance gives them.
     const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
-    const decided = new Map([
+    const decided = new TypeMap([
       ...[...explicitPlaceholders(f)].flatMap(([name, held]): [Type, Type][] => (bindings.has(name) ? [[held, bindings.get(name)!]] : [])),
       ...[...outer].flatMap(([name, held]): [Type, Type][] => (f.scope?.has(name) ? [[held, f.scope.get(name)!]] : [])),
     ]);
@@ -565,14 +569,14 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     // A generic class's instance gives its parameters what they stand for there, in an implicit
     // parameter's bound too, as a call decides the function's own.
     const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
-    const decided = new Map([...outer].flatMap(([name, held]): [Type, Type][] => (scope.has(name) && scope.get(name) !== held ? [[held, scope.get(name)!]] : [])));
+    const decided = new TypeMap([...outer].flatMap(([name, held]): [Type, Type][] => (scope.has(name) && scope.get(name) !== held ? [[held, scope.get(name)!]] : [])));
     return signing(f, () => withScope(scope, () => f.params.map((p, i) =>
       lentAs(f, i, scope.get(`#${i}`) ?? (implicit.has(i) ? rebound(implicit.get(i)!, decided) : undefined)) ?? paramType(p, f.self?.constructor))));
   }
 
   // An implicit parameter's bound with the type parameters a call or a class instance decided
   // replaced by what they stand for.
-  function rebound(bound: Bound, decided: Map<Type, Type>): Bound {
+  function rebound(bound: Bound, decided: TypeMap<Type, Type>): Bound {
     if (decided.size === 0) return bound;
     const [element, asyncElement, promised] = [generatorElement(bound), generatorElement(bound, true), promiseElement(bound)];
     if (element !== undefined) return generatorInterface(replaced(element, decided));
@@ -630,10 +634,10 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       const own = typeParamsOf(f);
       const outer = classParams(f).map((p) => p.name);
       const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode(p.constraint, (n) => n.kind === "ref" && outer.includes(n.name as string)));
-      made = shared ? sharedPlaceholders.get(f.typeParams!) : undefined;
+      made = shared ? sharedPlaceholders.get(f.typeParams![0]!) : undefined;
       // A bound may name the class's own parameters, as this instance holds them.
       if (!made) made = placeholders(typing, own, (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)));
-      if (shared) sharedPlaceholders.set(f.typeParams!, made);
+      if (shared) sharedPlaceholders.set(f.typeParams![0]!, made);
       explicit.set(f, made);
     }
     return new Map(made);
@@ -787,7 +791,7 @@ export function genericClasses({ tables, classes, templates, register, layout, m
   const { typing } = tables;
   const { heldArgument, keyOf, shapeKey, show } = typing;
   // Where each instance was first used, and each template's instances by their arguments.
-  const uses = new Map<ClassInfo, Span>();
+  const uses = new TypeMap<ClassType, { c: ClassInfo; at: Span }>();
   const instancesOf = new NodeMap<ClassNode, Map<string, ClassInfo>>();
   const shapesOf = new NodeMap<ClassNode, Set<string>>();
   // An instance made while the resolver is still being built waits for `start` to check its
@@ -799,7 +803,7 @@ export function genericClasses({ tables, classes, templates, register, layout, m
 
   function start() {
     ready = true;
-    uses.forEach((_, c) => bounded(c));
+    uses.forEach(({ c }) => bounded(c));
   }
 
   // A generic class, like a generic body, is checked once at its definition with
@@ -842,14 +846,14 @@ export function genericClasses({ tables, classes, templates, register, layout, m
     byKey.set(key, c);
     shapes.add(shape);
     register(c);
-    uses.set(c, at);
+    uses.set(c.type, { c, at });
     if (ready) bounded(c);
     return c;
   }
 
   // A generic class's type arguments must satisfy their bounds, checked where it is first used.
   function bounded(c: ClassInfo) {
-    const at = uses.get(c)!;
+    const { at } = uses.get(c.type)!;
     withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, resolveType(p.constraint), members, at)));
     layout(c);
   }

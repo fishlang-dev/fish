@@ -7,7 +7,7 @@ import { rustClassOf } from "./rust.ts";
 import { indexText, restText, MAP_CHANGES } from "./values.ts";
 import { holdsNode } from "./check.ts";
 import { field, holdsHandle, holdsPart, holdsMut, optionRef, redundantBang, bare, isCopy, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
-import { nextId, NodeMap } from "./nodes.ts";
+import { NodeSet, nextId, NodeMap } from "./nodes.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
 // returning it hands it over, and the place it came from can't be used until it is assigned
@@ -23,7 +23,7 @@ type Move = { start: usize; end: usize; note: string; passes: NodeMap<Stmt, usiz
 // A place lent to references: shared or mutable, where it was lent, and who holds it, the
 // reference variables or, for an argument or receiver, the call it was lent to.
 // A `for...of` loop lends its array for as long as it runs, as a call lends for its duration.
-type Loan = { place: string; mutable: boolean; start: usize; end: usize; holders: Set<Local>; call?: string; callAt?: Expr; loop?: boolean; guard?: boolean };
+type Loan = { place: string; mutable: boolean; start: usize; end: usize; holders: NodeSet<Local>; call?: string; callAt?: Expr; loop?: boolean; guard?: boolean };
 
 // The places moved, and the loans made, on the way here, or null where control can't reach.
 // Loans are keyed by where they were made.
@@ -89,7 +89,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A reference parameter holds a borrow its caller made, of something outside this function.
   f.params.forEach((p, i) => {
     const local = locals.get(p);
-    if (local && holdsRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: isRef(local.type) && local.type.mutable, start: p.start, end: p.end, holders: new Set([local]) });
+    if (local && holdsRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: isRef(local.type) && local.type.mutable, start: p.start, end: p.end, holders: new NodeSet([local]) });
   });
   statements(body);
 
@@ -132,13 +132,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // the list, and used after it, would point at a dropped value.
   function ended(list: Stmt[]) {
     const tail = list.at(-1);
-    if (tail) dropped(new Set(list.flatMap((s) => (s.kind === "let" ? [locals.get(s)!] : []))), tail.end);
+    if (tail) dropped(new NodeSet(list.flatMap((s) => (s.kind === "let" ? [locals.get(s)!] : []))), tail.end);
   }
 
   // Checks that no borrow of a variable that has gone out of scope by `end` is still held by a
   // variable from outside, and used after. A variable that is itself a reference only copies a
   // pointer to what it borrows, whose own loans are checked where that ends.
-  function dropped(gone: Set<Local>, end: usize) {
+  function dropped(gone: NodeSet<Local>, end: usize) {
     if (!state || gone.size === 0) return;
     const ids = new Map([...gone].map((l) => [String(l.id), l]));
     for (const loan of state.loans.values()) {
@@ -234,11 +234,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const after = state;
           state = handler.acc;
           // A raise left the block wherever it was, its variables gone by the catch.
-          dropped(new Set(s.block.flatMap(scoped)), s.block.at(-1)?.end ?? s.start);
+          dropped(new NodeSet(s.block.flatMap(scoped)), s.block.at(-1)?.end ?? s.start);
           const caught = s.param && locals.get(s);
           if (caught) revive(String(caught.id));
           statements(s.handler);
-          if (caught) dropped(new Set([caught]), s.handler.at(-1)?.end ?? s.start);
+          if (caught) dropped(new NodeSet([caught]), s.handler.at(-1)?.end ?? s.start);
           state = join(after, state);
         } else statements(s.block);
         if (!fin) return;
@@ -252,7 +252,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (known) return known[1];
           state = from;
           // Whichever way control left the try and its catch, their variables are gone.
-          dropped(new Set([...s.block.flatMap(scoped), ...(s.param && locals.get(s) ? [locals.get(s)!] : []), ...(s.handler ?? []).flatMap(scoped)]), [...s.block, ...(s.handler ?? [])].at(-1)?.end ?? s.start);
+          dropped(new NodeSet([...s.block.flatMap(scoped), ...(s.param && locals.get(s) ? [locals.get(s)!] : []), ...(s.handler ?? []).flatMap(scoped)]), [...s.block, ...(s.handler ?? [])].at(-1)?.end ?? s.start);
           statements(s.finalizer!);
           ends.push([from, state]);
           return state;
@@ -303,8 +303,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const text = (coercions.get(s.right) ?? types.get(s.right)) === "string";
         if (place !== undefined && state && !text) {
           free(place, s.right, "lend");
-          state.loans.set(s.right.start, { place, mutable: false, start: s.right.start, end: s.right.end, holders: new Set(), call: "the loop", loop: true });
-          if (holdsRef(each.type)) state.loans.set(-s.start - 1, { place: `${place}.[]`, mutable: false, start: s.right.start, end: s.right.end, holders: new Set([each]) });
+          state.loans.set(s.right.start, { place, mutable: false, start: s.right.start, end: s.right.end, holders: new NodeSet(), call: "the loop", loop: true });
+          if (holdsRef(each.type)) state.loans.set(-s.start - 1, { place: `${place}.[]`, mutable: false, start: s.right.start, end: s.right.end, holders: new NodeSet([each]) });
           // An array reached through a reference keeps what that reference borrows lent until
           // the loop ends, and an element that is a reference holds it too.
           // One holder per loop, so passes over it reach the same state and the check settles.
@@ -327,7 +327,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         exits.set(s, null);
         statement(s.body);
         state = join(state, exits.get(s)!);
-        dropped(new Set(scoped(s.body)), s.end);
+        dropped(new NodeSet(scoped(s.body)), s.end);
         return;
       }
       case "switch": {
@@ -342,7 +342,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           falling = state;
         }
         state = join(join(falling, exits.get(s)!), s.cases.some((c) => !c.test) ? null : entry);
-        dropped(new Set(scoped(s)), s.end);
+        dropped(new NodeSet(scoped(s)), s.end);
         return;
       }
       case "break":
@@ -401,7 +401,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       state = join(state, nexts.get(s)!);
       // However a pass ended, `continue` included, its body's variables are gone, and a holder
       // used anywhere in the loop is used again on the next pass.
-      dropped(new Set(s.kind === "for" ? s.body.flatMap(scoped) : scoped(s)), s.end - 1);
+      dropped(new NodeSet(s.kind === "for" ? s.body.flatMap(scoped) : scoped(s)), s.end - 1);
       // References declared in the body are gone by the time the loop comes round or ends,
       // however it left the body; a `for` loop's initializer outlives every pass.
       for (const local of s.kind === "for" ? s.body.flatMap(inside) : inside(s)) release(local);
@@ -411,7 +411,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const after = state;
       state = leaving;
       // However the loop ended, `break` included, its variables are gone.
-      dropped(new Set(scoped(s)), s.end);
+      dropped(new NodeSet(scoped(s)), s.end);
       for (const local of inside(s)) release(local);
       leaving = state;
       state = after;
@@ -671,13 +671,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           for (const local of bound) revive(String(local.id));
           const borrowing = bound.filter((l) => isRef(l.type));
           for (const holder of borrowing) {
-            if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holder]) });
+            if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new NodeSet([holder]) });
             // Through a reference, the binding holds what that reference borrows.
             inherit(holder, subject);
           }
           if (arm.guard) {
             const at = -arm.guard.start - 1;
-            if (place !== undefined && state) state.loans.set(at, { place, mutable: false, start: arm.guard.start, end: arm.guard.end, holders: new Set(), guard: true });
+            if (place !== undefined && state) state.loans.set(at, { place, mutable: false, start: arm.guard.start, end: arm.guard.end, holders: new NodeSet(), guard: true });
             guarding.add(arm.guard.start);
             expr(arm.guard);
             guarding.delete(arm.guard.start);
@@ -693,10 +693,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             exits.set(arm.body, null);
             statement(arm.body);
             state = join(state, exits.get(arm.body)!);
-            dropped(new Set([...scoped(arm.body), ...bound]), arm.body.end);
+            dropped(new NodeSet([...scoped(arm.body), ...bound]), arm.body.end);
           } else {
             expr(arm.body, consume, discarded);
-            dropped(new Set(bound), arm.body.end);
+            dropped(new NodeSet(bound), arm.body.end);
           }
           for (const holder of borrowing) release(holder);
           after = join(after, state);
@@ -971,7 +971,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at: usize = e.start, key: f64 = e.start as f64) {
     free(place, e, mutable ? "lend mutably" : "lend", at);
     if (!state) return;
-    state.loans.set(key, { place, mutable, start: e.start, end: e.end, holders: new Set(holder ? [holder] : []), call, callAt });
+    state.loans.set(key, { place, mutable, start: e.start, end: e.end, holders: new NodeSet(holder ? [holder] : []), call, callAt });
   }
 
   // A reference variable given a value holds what it borrows: a place lent to it, or what
@@ -1053,7 +1053,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   function inheritFrom(holder: Local, root: Local) {
     if (!state || root === holder) return;
-    for (const [at, loan] of state.loans) if (loan.holders.has(root)) state.loans.set(at, { ...loan, holders: new Set([...loan.holders, holder]) });
+    for (const [at, loan] of state.loans) if (loan.holders.has(root)) state.loans.set(at, { ...loan, holders: new NodeSet([...loan.holders, holder]) });
   }
 
   // Whether an argument lends a value made for the statement, rather than a place or a
@@ -1079,7 +1079,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A reference to a temporary or a copy holds that, so it is never returned.
   function temporary(holder: Local, e: Expr) {
     // Keyed beside any loan made at the same place, which it must not replace.
-    state?.loans.set(e.start + 0.5, { place: TEMPORARY, mutable: false, start: e.start, end: e.end, holders: new Set([holder]) });
+    state?.loans.set(e.start + 0.5, { place: TEMPORARY, mutable: false, start: e.start, end: e.end, holders: new NodeSet([holder]) });
   }
 
   // Whether a reference made from `e` points where `e` lives, rather than at a copy: a place
@@ -1218,10 +1218,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     release(local);
     for (const [at, loan] of state.loans) {
       if (!loan.holders.has(gathering)) continue;
-      const holders = new Set([...loan.holders].filter((h) => h !== gathering));
+      const holders = new NodeSet([...loan.holders].filter((h) => h !== gathering));
       // Nothing holds a loan of itself.
       if (loan.place.split(".")[0] === String(local.id) && holders.size === 0) state.loans.delete(at);
-      else state.loans.set(at, { ...loan, holders: new Set([...holders, local]) });
+      else state.loans.set(at, { ...loan, holders: new NodeSet([...holders, local]) });
     }
   }
 
@@ -1230,7 +1230,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (!state) return;
     for (const [at, loan] of state.loans) {
       if (!loan.holders.has(holder)) continue;
-      const holders = new Set([...loan.holders].filter((h) => h !== holder));
+      const holders = new NodeSet([...loan.holders].filter((h) => h !== holder));
       if (holders.size === 0 && !loan.call) state.loans.delete(at);
       else state.loans.set(at, { ...loan, holders });
     }
@@ -1499,7 +1499,7 @@ function overlaps(a: string, b: string): boolean {
 // Where each reference variable is used last: a use as an argument or receiver lasts until
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
-function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, tables }: Instance): Map<Local, f64> {
+function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, tables }: Instance): NodeMap<Local, f64> {
   const { holdsRef } = tables.typing;
   // An argument lent to the call, as a reference or a value holding references, is in use
   // until the call ends.
@@ -1507,9 +1507,9 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, t
     const t = coercions.get(a) ?? types.get(a);
     return t !== undefined && holdsRef(t);
   };
-  const last = new Map<Local, f64>();
+  const last = new NodeMap<Local, f64>();
   const loops: Stmt[] = [];
-  const declared = new Map<Local, Stmt[]>();
+  const declared = new NodeMap<Local, Stmt[]>();
   const used = (local: Local | undefined, at: usize) => {
     if (!local || !holdsRef(local.type)) return;
     const outer = loops.find((l) => !(declared.get(local) ?? []).includes(l));
@@ -1680,7 +1680,7 @@ function join(a: State, b: State): State {
   const loans = new Map(a.loans);
   for (const [k, v] of b.loans) {
     const mine = loans.get(k);
-    loans.set(k, mine ? { ...mine, holders: new Set([...mine.holders, ...v.holders]) } : v);
+    loans.set(k, mine ? { ...mine, holders: new NodeSet([...mine.holders, ...v.holders]) } : v);
   }
   return { moves, loans };
 }

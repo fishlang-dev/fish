@@ -1,12 +1,12 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { allFields, isNumeric, type ClassType, type Field, type Hole, type ParamType, type Type, type Typing } from "./typing.ts";
+import { TypeSet, allFields, isNumeric, type ClassType, type Field, type Hole, type ParamType, type Type, type Typing } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
 
 // The type parameter `t` is, or with `deep` the first anywhere in it, standing for no type yet.
-export function openParam(typing: Typing, t: Type, deep: boolean, seen: Set<Type> = new Set<Type>()): ParamType | undefined {
+export function openParam(typing: Typing, t: Type, deep: boolean, seen: TypeSet<Type> = new TypeSet<Type>()): ParamType | undefined {
   // A type holding itself is looked into once.
   if (typeof t === "string" || seen.has(t)) return undefined;
   seen.add(t);

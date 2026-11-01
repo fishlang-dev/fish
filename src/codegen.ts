@@ -12,8 +12,8 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, redundantBang, bare, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
-import { NodeMap } from "./nodes.ts";
+import { TypeMap, TypeSet, allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, redundantBang, bare, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
+import { NodeSet, NodeMap } from "./nodes.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -167,7 +167,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   let labels = 0;
   // Each variable's number in the function being emitted, which tells apart two of one name.
   // Counted per function, so a function's IR doesn't change with the program around it.
-  let numbered = new Map<Local, usize>();
+  let numbered = new NodeMap<Local, usize>();
   // The label of the block being emitted into, which a phi names as its predecessor.
   let block = "entry";
   // The instance being emitted, and the tables its checking produced.
@@ -176,7 +176,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // The class of the constructor or method being emitted, whose instance `%this` points to.
   let self: ClassType | undefined;
   // In a closure, where each variable it captures lives, loaded from its environment.
-  let captured = new Map<Local, string>();
+  let captured = new NodeMap<Local, string>();
   // The value of an Option an optional chain's link has already evaluated, to read through.
   const known = new NodeMap<Expr, string>();
   // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
@@ -215,28 +215,28 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   const cStrings = new Map<string, string>();
   const tables = new Set<string>();
   // The function dropping, or copying, what a value of each type owns, made once.
-  const glue = { drop: new Map<Type, string>(), copy: new Map<Type, string>() };
+  const glue = { drop: new TypeMap<Type, string>(), copy: new TypeMap<Type, string>() };
   // The function comparing two values of each compound type, made once.
-  const comparers = new Map<Type, string>();
-  const jsonWriters = new Map<Type, string>();
-  const jsonReaders = new Map<Type, string>();
-  const inspectors = new Map<Type, string>();
+  const comparers = new TypeMap<Type, string>();
+  const jsonWriters = new TypeMap<Type, string>();
+  const jsonReaders = new TypeMap<Type, string>();
+  const inspectors = new TypeMap<Type, string>();
   // Each async instance's awaits, by the state it is paused in at each: the frame field the
   // awaited future is in, and its type, for cancelling it there.
-  const awaitsOf = new Map<Instance, { state: usize; field: usize; type: Type }[]>();
+  const awaitsOf = new NodeMap<Instance, { state: usize; field: usize; type: Type }[]>();
   // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
   // cancel function is wanted for.
-  const combinePolls = new Map<FutureType, string>();
-  const cancelled = new Set<Instance>();
+  const combinePolls = new TypeMap<FutureType, string>();
+  const cancelled = new NodeSet<Instance>();
   // The functions writing String(x) of a value with parts, by its type.
-  const stringers = new Map<Type, string>();
+  const stringers = new TypeMap<Type, string>();
   // The global each top-level const holding an aggregate lives in.
-  const constantGlobals = new Map<Instance, string>();
+  const constantGlobals = new NodeMap<Instance, string>();
   // The thunks copying a Dyn that can't be copied that are made, by the Rust type they name or
   // "" for the general one, and whether the one dropping a settled JS promise's output is.
   const uncopyable = new Set<string>();
   let settledOutput = false;
-  const elementDrops = new Map<Type, string>();
+  const elementDrops = new TypeMap<Type, string>();
   // The functions JS calls a Fish callback through, by its type and where it was given, and the
   // tasks settling the JS promises Fish futures are given to JS as.
   const callbacks = new Map<string, string>();
@@ -259,13 +259,13 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   const { convert, test, equals, unionField, holds, holdsWhere, eachMember } = conversions(builder, kindTests);
 
   // The instance each generator type resumes, and each future type polls.
-  const generatorOf = new Map(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
-  const futureOf = new Map(instances.flatMap((i) => (i.future ? [[i.future, i] as const] : [])));
+  const generatorOf = new TypeMap(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
+  const futureOf = new TypeMap(instances.flatMap((i) => (i.future ? [[i.future, i] as const] : [])));
   // Each generated name in each family and what it stands for, so two things described alike
   // are never given one name.
   const taken = new Map<string, unknown>();
   // The future types whose task glue is made.
-  const glued = new Set<FutureType>();
+  const glued = new TypeSet<FutureType>();
 
   // Top-level consts and comptime blocks run while compiling, every one of them, so one that
   // fails is reported even when nothing reads it; none is compiled.
@@ -303,7 +303,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     body = [];
     temps = 0;
     labels = 0;
-    numbered = new Map();
+    numbered = new NodeMap();
     block = "entry";
     pending = [];
     floor = 0;
@@ -361,7 +361,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (f.closure) params.unshift("ptr %env");
     // A method owning its object drops it, unless the object moves out first.
     if (f.self?.owned) own("%this", f.self.type, false);
-    captured = new Map();
+    captured = new NodeMap();
     // A capture the closure holds lives in its environment; a borrowed one, where it points.
     [...(instance.captures ?? [])].forEach(([alias, from], i) => {
       const at = temp();
@@ -401,7 +401,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   framing = undefined;
   if (frames) globals.push("@fsh_rt_frames = external thread_local global ptr");
   // A cancel function wanted while making one may want another.
-  for (const done = new Set<Instance>(); done.size < cancelled.size;) {
+  for (const done = new NodeSet<Instance>(); done.size < cancelled.size;) {
     for (const i of [...cancelled]) {
       if (done.has(i)) continue;
       done.add(i);

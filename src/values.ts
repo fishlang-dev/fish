@@ -12,7 +12,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { allFields, unequal, uninspectable, unfold, elementsOf, isTuple, baseOf, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, isOption, redundantBang, bare, type Bang, range, derives, field, holdsHandle, holdsPart, type DynType, type HandleType, type BlockType, holdsInterior, interiorMutable, type SharedType, holdsMut, INTERIORS, type InteriorType, optionRef, isCopy, widenEnum, widenLet, isPlainJs, jsShape, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { TypeSet, allFields, unequal, uninspectable, unfold, elementsOf, isTuple, baseOf, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, isOption, redundantBang, bare, type Bang, range, derives, field, holdsHandle, holdsPart, type DynType, type HandleType, type BlockType, holdsInterior, interiorMutable, type SharedType, holdsMut, INTERIORS, type InteriorType, optionRef, isCopy, widenEnum, widenLet, isPlainJs, jsShape, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -49,7 +49,7 @@ export const printStream = (callee: Expr): 1 | 2 => (callee.kind === "member" &&
 const isRefType = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
 // Whether a value of the type can hold a float anywhere inside it.
-function holdsFloat(t: Type, seen: Set<Type> = new Set<Type>()): boolean {
+function holdsFloat(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): boolean {
   if (typeof t === "string") return isFloat(t);
   if (seen.has(t)) return false;
   seen.add(t);
@@ -1474,7 +1474,7 @@ export function expressions(ctx: Context) {
   // A call through a generic function type, in a body checked before it knows the function: its
   // type parameters are inferred from the arguments, or written, and its signature resolved
   // with them.
-  function familyCall(e: Call, type: FunctionType, name: string): { type: Type; what: string } {
+  function familyCall(e: Call, type: Pick<FunctionType, "generic">, name: string): { type: Type; what: string } {
     const { names, node, scope } = type.generic!;
     const written = node as Extract<TypeNode, { kind: "function" }>;
     if (e.args.length !== written.params.length) throw new CompileError(`expected ${written.params.length} argument${written.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
@@ -3210,7 +3210,7 @@ export function expressions(ctx: Context) {
       while (e.args.length < method.params.length && isOption(method.params[e.args.length]!)) e.args.push({ id: nextId(ids), kind: "null", start: e.end, end: e.end });
       jsCrossings.add(e);
       jsOptionalOf.set(e, method.optional ?? []);
-      const typed = familyCall(e, { kind: "function", name: method.name, names: [], params: method.params, returns: method.returns, fields: [], generic: method.generic }, `'${callee.name}'`);
+      const typed = familyCall(e, { generic: method.generic }, `'${callee.name}'`);
       e.args.forEach((a) => crossing(types.get(a) ?? "void", `'${callee.name}' of '${show(t)}' is given a`, a));
       return { type: crossing(typed.type === "void" ? "void" : jsView(typed.type), `'${callee.name}' of '${show(t)}' gives a`, e), what: typed.what };
     }
@@ -3583,7 +3583,7 @@ export function expressions(ctx: Context) {
 
   // What keeps a value from moving to another thread: a reference, which borrows from the
   // thread that made it, a raw pointer, which nothing checks, or a Cell, which changes unlocked.
-  function unsent(t: Type, seen: Set<Type> = new Set<Type>()): Type | undefined {
+  function unsent(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
     // A type holding itself is looked into once.
     if (typeof t === "string" || seen.has(t)) return undefined;
     seen.add(t);
@@ -3867,7 +3867,7 @@ export function expressions(ctx: Context) {
     const stored = receiver.kind === "param" ? receiver.concrete : undefined;
     // A generic method's call infers its types, then in an instance runs the concrete method's.
     if (found.generic) {
-      const { type } = familyCall(e, { kind: "function", name: found.name, names: [], params: found.params, returns: found.returns, fields: [], generic: found.generic }, `'${callee.name}'`);
+      const { type } = familyCall(e, { generic: found.generic }, `'${callee.name}'`);
       if (typeof stored !== "string" && stored?.kind === "class") return { type: concreteMethod(e, callee, stored, type), what: `'${callee.name}'` };
       return { type, what: `'${callee.name}'` };
     }
@@ -5440,7 +5440,8 @@ export function expressions(ctx: Context) {
     }
     // With no type to say which, a sync arrow is stored as a callable of its own signature.
     if (typeof field.type !== "string" && field.type.kind === "closure" && p.kind === "property" && !(typeof field.type.returns !== "string" && field.type.returns.kind === "future")) {
-      const own = storedType({ kind: "function", name: field.type.name, names: field.type.params.map((_, i) => `p${i}`), params: field.type.params, returns: field.type.returns, ...(field.type.throws && { throws: field.type.throws }), fields: [] });
+      // A signature read once to make the callable, never kept, so it isn't in the arena.
+      const own = storedType({ kind: "function", typeId: 0, name: field.type.name, names: field.type.params.map((_, i) => `p${i}`), params: field.type.params, returns: field.type.returns, ...(field.type.throws && { throws: field.type.throws }), fields: [] });
       coerce(p.value, field.type, own, `type '${show(field.type)}' is not assignable to type '${show(own)}'`);
       return { ...field, type: own };
     }

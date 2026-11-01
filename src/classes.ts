@@ -5,7 +5,7 @@ import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeN
 import type { Access, ClassType, FunctionType, Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
-import { nextId, NodeSet, type Ids } from "./nodes.ts";
+import { NodeMap, nextId, NodeSet, type Ids } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
@@ -82,7 +82,7 @@ export type ClassInfo = {
   type: ClassType;
   abstracts: AbstractMember[];
   // For a concrete class, its copy of each template it runs, by the template.
-  copies: Map<Body, Body>;
+  copies: NodeMap<Body, Body>;
   fields: FieldDecl[];
   // Its body starts by assigning the field initializers, then the parameter properties.
   constructor: Body;
@@ -225,7 +225,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   const required = new Set(fields.map((f) => f.name));
   const named = node.extends?.kind === "instantiation" ? node.extends.expr : node.extends;
   const baseName = named?.kind === "ident" ? named.name : undefined;
-  return { type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] };
+  return { type, abstracts, copies: new NodeMap(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] };
 
   // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
   function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {

@@ -1,7 +1,7 @@
 import type { Body, Instance, Local } from "./check.ts";
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
-import type { Id } from "./nodes.ts";
+import { NodeSet, type Id } from "./nodes.ts";
 import type { Param, Pattern, Stmt } from "./parser.ts";
 import { STD_BASE } from "./std.ts";
 
@@ -22,7 +22,7 @@ export function markGenerated(generated: Tables["generated"], node: unknown, see
 // `declarations` are the `let` statements and parameters that declare a name, as the checker met
 // them; every other node an instance's `locals` holds is a use of one.
 export function warnings({ declarations, generated, prologues }: Tables, instances: Instance[], required: (b: Body) => boolean): CompileError[] {
-  const used = new Set<Local>();
+  const used = new NodeSet<Local>();
   for (const i of instances) {
     for (const [node, l] of i.locals) if (!declarations.has(node)) used.add(l);
     for (const from of i.captures?.values() ?? []) if (from !== "this") used.add(from);

@@ -21,7 +21,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
-import { ANY_REGEX, allFields, holdsPart, isPlainJs, elementsOf, isTuple, type ObjectType, field, interiorMutable, YIELD_NOW, type FutureType, optionRef, isCopy, type Field, type GeneratorType, widenLet, isInteger, isNumeric, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing } from "./typing.ts";
+import { TypeSet, TypeMap, ANY_REGEX, allFields, holdsPart, isPlainJs, elementsOf, isTuple, type ObjectType, field, interiorMutable, YIELD_NOW, type FutureType, optionRef, isCopy, type Field, type GeneratorType, widenLet, isInteger, isNumeric, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { lowerOverloads } from "./overloads.ts";
@@ -49,6 +49,8 @@ export type Checked = { instances: Instance[]; tables: Tables; compilation: Comp
 // One compiled function: a body checked with concrete types, and the tables codegen reads
 // to lower it. `symbol` names it in the IR.
 export type Instance = {
+  // Unique in its compilation, which tables of instances key on.
+  id: usize;
   body: Body;
   symbol: string;
   // The tables of the check that made it.
@@ -97,11 +99,11 @@ export type Instance = {
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
-  captures?: Map<Local, Local | "this">;
-  captureUses?: Map<Local, Expr | ObjectProp>;
+  captures?: NodeMap<Local, Local | "this">;
+  captureUses?: NodeMap<Local, Expr | ObjectProp>;
   // The captures it changes, which it captures mutably, and those it moves out of itself.
-  changed?: Set<Local>;
-  moved?: Set<Local>;
+  changed?: NodeSet<Local>;
+  moved?: NodeSet<Local>;
   // Each call or use as a value of a nested function by name, the function, and this body's
   // bindings for what it captures, in its environment's order, from which the call or the
   // value builds it.
@@ -123,7 +125,7 @@ export type Instance = {
   // A generator's own type, which calling it gives, and where each variable and each
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
-  frame?: { locals: Map<Local, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
+  frame?: { locals: NodeMap<Local, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -256,7 +258,7 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   const { typing } = instance.tables;
   const { leafFuture, lower, lentPromise, nextResult, yieldsOf, promiseInterface } = typing;
   const fields: Field[] = [{ name: "state", type: "i32" }];
-  const locals = new Map<Local, usize>();
+  const locals = new NodeMap<Local, usize>();
   const loops = new NodeMap<Stmt, usize>();
   // Each `await` keeps the future it awaits in the frame while it is pending.
   const awaits = new NodeMap<Expr, usize>();
@@ -271,7 +273,7 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   if (self && !self.constructor) fields.push(receiverField(typing, self, (t) => (instance.concrete ? typing.lower(t) : t)));
   instance.body.params.forEach((p) => add(instance.locals.get(p)!));
   // A local generic function's name holds nothing.
-  [...new Set(instance.locals.values())].filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
+  [...new NodeSet(instance.locals.values())].filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
   const visit = (node: unknown) => {
     if (!node || typeof node !== "object" || (node as Expr).kind === "arrow") return;
     const s = node as Stmt;
@@ -593,7 +595,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   lowersClasses((c, args) => classNamed(c.generic!.name, args, checking?.body ?? { start: 0, end: 0 })!);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
-  const done = new Set<Instance>();
+  const done = new NodeSet<Instance>();
   // Each Rust function's types, by its shim symbol, as first declared.
   const rustTypes = new Map<string, string>();
   // Comptime runs a function only once the checker has been through it.
@@ -603,11 +605,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     return true;
   });
   // Each concrete instance's return type as its own body saw it, before lowering.
-  const views = new Map<Instance, Type>();
+  const views = new NodeMap<Instance, Type>();
   // Each unannotated `let` of integer literals a use needs as another integer type, as Rust
   // infers it, and the variables still open to that in the pass being checked.
   const demands = new NodeMap<Stmt, Integer>();
-  const candidates = new Map<Local, Stmt>();
+  const candidates = new NodeMap<Local, Stmt>();
   // How many new demands the body being checked made itself, not counting its callees'.
   let demanded = 0;
   const { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
@@ -653,7 +655,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
   // A result worked out from a body may need the class being laid out, whose fields aren't known.
   function unlaid(name: string, at: Span) {
-    const [mid] = laying;
+    const [mid] = laying.values();
     if (mid) throw new CompileError(`'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${mid.type.name}' are being worked out; write ${name}'s return type`, at.start, at.end);
   }
 
@@ -715,11 +717,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new NodeSet<Stmt>();
   const continued = new NodeSet<Stmt>();
-  const inProgress = new Set<Instance>();
+  const inProgress = new NodeSet<Instance>();
   let nextLocal = 0;
   // Every closure's instance, and the instance each closure type calls.
   const closures: Instance[] = [];
-  const closureBodies = new Map<ClosureType, Instance>();
+  const closureBodies = new TypeMap<ClosureType, Instance>();
 
   // A generic class's constructor parameters, its base's when it declares no constructor.
   function templateParams(name: string, seen: Set<string> = new Set<string>()): Param[] | undefined {
@@ -732,7 +734,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     return templateParams(named.name, seen.add(name)) ?? classes.get(named.name)?.constructor.params;
   }
 
-  classes.forEach((c) => link(c, new Set()));
+  classes.forEach((c) => link(c, new TypeSet()));
   setJsError(classes.get("JsError")?.type);
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
@@ -767,7 +769,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
   // An abstract member and a template are checked but never compiled; each concrete class's copy is.
-  const compiled = new Set([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf).filter((f) => !f.abstract && !f.template)]);
+  const compiled = new NodeSet([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf).filter((f) => !f.abstract && !f.template)]);
   // So is an instance made for an abstract class, which only a template's check makes.
   const checkedOnly = (i: Instance): boolean => i.body.template === true || [...i.bindings.values()].some(abstractPart) || (i.body.closure !== undefined && checkedOnly(i.body.closure.parent));
   const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js && !checkedOnly(i)), ...closures.filter((i) => i.concrete && !checkedOnly(i))];
@@ -935,7 +937,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
     instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: lower(p.type) }));
     if (instance.throws) instance.throws = lower(instance.throws);
-    for (const local of new Set(instance.locals.values())) local.type = lower(local.type);
+    for (const local of new NodeSet(instance.locals.values())) local.type = lower(local.type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
     instance.returns = lower(instance.returns);
   }
@@ -1115,7 +1117,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const declared = returnTypeOf(f, new Map([...instance.bindings, ...site]));
     if (declared && !describes(declared)) return declared;
     const own = scopeOf(instance);
-    return replaced(views.get(instance) ?? returns, new Map([...site].map(([name, t]) => [own.get(name)!, t])));
+    return replaced(views.get(instance) ?? returns, new TypeMap([...site].map(([name, t]) => [own.get(name)!, t])));
   }
 
   // Each member a class writes that implements an abstract member takes what the declaration
@@ -1330,9 +1332,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A capture narrows as a variable of the closure's would.
     const narrowable = (l: Local) => (captures?.has(l) ? !assigned.has(l.name) : l.param || !l.mutable || !assigned.has(l.name)) || (isRef(l.type) && l.type.mutable);
     // How many scopes enclose each binding's declaration.
-    const depths = new Map<Local, usize>();
+    const depths = new NodeMap<Local, usize>();
     // Bindings declared directly in a switch case body whose checking has finished.
-    const caseOnly = new Set<Local>();
+    const caseOnly = new NodeSet<Local>();
     // A call of a function whose result is `x is T` narrows its argument for x to T.
     const predicate = (call: Extract<Expr, { kind: "call" }>) => {
       const target = calls.get(call);
@@ -1975,13 +1977,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (targets.some((t) => t.kind === "loop" && t.facts! > from)) {
         throw new CompileError(`can't give '${l.name}' another member inside a loop here: a check outside the loop narrowed it; assign its fields instead, or check it inside the loop`, at.start, at.end);
       }
-      for (let i = from; i < facts.length; i++) facts[i] = new Map(facts[i]).set(l, l.type);
+      for (let i = from; i < facts.length; i++) facts[i] = new NodeMap(facts[i]).set(l, l.type);
     }
 
     // Facts proven before a statement that carry past it, less any it gave another member.
     function current(proven: Facts, mark: usize): Facts {
       const gone = changed.slice(mark);
-      return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => !gone.includes(l)));
+      return gone.length === 0 ? proven : new NodeMap([...proven].filter(([l]) => !gone.includes(l)));
     }
 
     function assume<T>(proven: Facts, check: () => T): T {
@@ -2003,14 +2005,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         body: value ? [{ id: nextId(ids), kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       };
       const inner: Instance = {
-        tables, body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
+        id: ++counts.instances, tables, body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
         types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       };
-      inner.captures = new Map();
-      inner.captureUses = new Map();
-      inner.changed = new Set();
-      inner.moved = new Set();
+      inner.captures = new NodeMap();
+      inner.captureUses = new NodeMap();
+      inner.changed = new NodeSet();
+      inner.moved = new NodeSet();
       closures.push(inner);
       withSight(inSight, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
@@ -2360,7 +2362,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             // `falling` is what holds for a body the previous one falls into, or null when it leaves.
             let falling: Facts | null = null;
             for (const c of s.cases) {
-              const before = new Set(shared.values());
+              const before = new NodeSet(shared.values());
               let test = c.test && value(c.test);
               // A literal case takes the discriminant's type, or its union's one number type.
               const numbers = union ? numberMembers(tables.typing.lower, union) : [type];
@@ -2371,7 +2373,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
               if (test && test !== type && !comparable(tables.typing.lower(type), test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
-              const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
+              const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new NodeMap();
               const reaching: Facts = falling ? either(tables.typing, falling, tested) : tested;
               const mark = changed.length;
               assume(reaching, () => statements(c.body));
@@ -2814,7 +2816,7 @@ const hasBody = (f: Declared): f is Func => f.body !== undefined;
 
 // An abstract class a type holds as a value, not one embedded as a concrete class's base.
 function abstractPart(t: Type): ClassType | undefined {
-  const bases = new Set<Type>();
+  const bases = new TypeSet<Type>();
   let found: ClassType | undefined;
   holdsPart(t, (u) => {
     if (typeof u === "string" || u.kind !== "class") return false;
@@ -2854,7 +2856,7 @@ export function unreached(equalities: Tables["equalities"], compiled: Instance[]
 
 // Each `equals` a comparison of two values runs, as codegen finds them: a class's own stops the
 // search, and otherwise its base and fields, an object's fields and a union's members compare.
-function comparedBy(equalities: Tables["equalities"], t: Type | undefined, seen: Set<Type> = new Set<Type>()): Instance[] {
+function comparedBy(equalities: Tables["equalities"], t: Type | undefined, seen: TypeSet<Type> = new TypeSet<Type>()): Instance[] {
   if (t === undefined || typeof t === "string" || seen.has(t)) return [];
   seen.add(t);
   if (t.kind === "ref") return comparedBy(equalities, t.to, seen);
