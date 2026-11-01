@@ -735,3 +735,27 @@ function f(r: Ref<void>): i64 {
 
 function main() {}
 // error: there is no 'void' value to borrow
+// case: ref_lent_to_method_of_holder_without_refs
+// A method that changes its object keeps nothing lent to it when the object holds no references.
+type Token = { start: usize; text: string }
+class Lexer {
+  scanned = 0
+  again(this: Mut<this>, from: Ref<Token>): Token {
+    this.scanned++
+    return { start: from.start + 1, text: from.text }
+  }
+}
+class Cursor {
+  lex = new Lexer()
+  tokens: Token[] = []
+  rescan(this: Mut<this>) {
+    const slash: Token = { start: 1, text: "/" }
+    this.tokens.push(this.lex.again(slash))
+  }
+}
+function main() {
+  let c = new Cursor()
+  c.rescan()
+  print(c.tokens.length, c.tokens[0]!.start, c.lex.scanned)
+}
+// expect: 1 2 1
