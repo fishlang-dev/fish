@@ -1,5 +1,5 @@
 import type { Tables } from "./compilation.ts";
-import { nextId, type Ids } from "./nodes.ts";
+import { nextId, walk, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
 import type { Type } from "./typing.ts";
@@ -9,15 +9,12 @@ import type { Type } from "./typing.ts";
 // so the default runs in the callee each time the argument is left out, after the parameters
 // before it, which it may read. The checker holds calls and defaults to `T` itself.
 
-export function lowerDefaults(tables: Tables, node: unknown) {
-  if (!node || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    for (const x of node) lowerDefaults(tables, x);
-    return;
-  }
-  const f = node as { kind?: string; params?: unknown; body?: unknown };
-  if (Array.isArray(f.params) && f.body !== undefined) lowered(tables, f as { kind?: string; params: Param[]; body: Expr | Stmt[] });
-  for (const value of Object.values(node)) lowerDefaults(tables, value);
+export function lowerDefaults(tables: Tables, program: Stmt[]) {
+  // Whatever has parameters and a body: functions, arrows, methods, accessors and constructors.
+  walk("stmt", program, ({ node }) => {
+    const f = node as { kind?: string; params?: unknown; body?: unknown };
+    if (Array.isArray(f.params) && f.body !== undefined) lowered(tables, f as { kind?: string; params: Param[]; body: Expr | Stmt[] });
+  });
 }
 
 function lowered(tables: Tables, f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {

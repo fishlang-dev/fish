@@ -1,5 +1,4 @@
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
-import type { Narrowing } from "./overloads.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
@@ -13,7 +12,7 @@ import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { TypeMap, TypeSet, allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, redundantBang, bare, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
-import { NodeSet, NodeMap } from "./nodes.ts";
+import { NodeSet, NodeMap, walk } from "./nodes.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
 
@@ -807,18 +806,16 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A loop's condition and update run again after its body, which may leave first: each C
   // string they make gets its slot in the loop's scope up front, so every way out drops it.
   function reserveC(e: Expr | undefined) {
-    const visit = (node: unknown) => {
-      if (!node || typeof node !== "object" || (node as Expr).kind === "arrow") return;
-      const call = node as Expr;
+    walk("expr", e, ({ of, node: call }) => {
+      if (of !== "expr") return;
+      if (call.kind === "arrow") return false;
       if (call.kind === "call" && call.callee.kind === "ident" && call.callee.name === "cString" && !calls.has(call) && !reserved.has(call)) {
         const held = alloca(ARRAY);
         allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
         scopes.at(-1)!.push({ slot: held, type: arrayType("u8") });
         reserved.set(call, held);
       }
-      Object.values(node).forEach(visit);
-    };
-    visit(e);
+    });
   }
 
   // A scope a match or a pipe opens for itself, which ends with the expression.
@@ -6307,14 +6304,16 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   // Whether running an expression might change a place: it assigns, updates or calls.
-  function writes(node: unknown): boolean {
-    if (typeof node !== "object" || node === null) return false;
-    if (Array.isArray(node)) return node.some(writes);
-    const kind = (node as { kind?: string }).kind;
-    if (kind === "arrow") return false;
-    if (kind === "assign" || kind === "update" || kind === "call" || kind === "new") return true;
-    if (kind === "member" && calls.has(node as Expr)) return true;
-    return Object.values(node).some(writes);
+  function writes(e: Expr): boolean {
+    let found = false;
+    walk("expr", e, ({ node }) => {
+      // A call signature in a type, as in `as { (): T }`, counts too.
+      const kind = (node as { kind?: string }).kind;
+      if (found || kind === "arrow") return false;
+      if (kind === "assign" || kind === "update" || kind === "call" || kind === "new") found = true;
+      if (kind === "member" && calls.has(node as Expr)) found = true;
+    });
+    return found;
   }
 
   // Owned values handed to something not yet called or built: dropped if an error leaves before
@@ -8837,7 +8836,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       }
       case "nonNull": {
         // An overload's body narrows the implementation's value to the signature's return type.
-        if ((e as Narrowing).narrows) {
+        if (e.narrows) {
           const [from, to] = [valueType(e.expr), types.get(e)!];
           const v = value(e.expr);
           if (from === to) return v;

@@ -5,7 +5,7 @@ import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeN
 import type { Access, ClassType, FunctionType, Type } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
-import { NodeMap, nextId, NodeSet, type Ids } from "./nodes.ts";
+import { NodeMap, nextId, NodeSet, type Ids, childrenOf, walk, type AnyNode, type NodeOf, type RootKind } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
@@ -337,28 +337,27 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   function classParamIn(m: Extract<ClassMember, { kind: "method" }>) {
     const outer = new Set(node.typeParams.map((p) => p.name));
     // A function inside declaring its own type parameter of that name hides the class's.
-    const find = (t: unknown, hidden: Set<string>): Span | undefined => {
-      if (!t || typeof t !== "object") return undefined;
-      if (Array.isArray(t)) return t.map((x) => find(x, hidden)).find((x) => x);
-      const n = t as { kind?: string; name?: string; args?: unknown[]; typeParams?: TypeParam[] } & Span;
-      if (n.kind === "ref" && n.args?.length === 0 && outer.has(n.name!) && !hidden.has(n.name!)) return n;
-      const inner = n.typeParams?.length ? new Set([...hidden, ...n.typeParams.map((p) => p.name)]) : hidden;
-      return Object.values(n).map((x) => find(x, inner)).find((x) => x);
+    const find = (n: AnyNode, hidden: Set<string>): (Span & { name: string }) | undefined => {
+      if (n.of === "typeNode" && n.node.kind === "ref" && n.node.args.length === 0 && outer.has(n.node.name) && !hidden.has(n.node.name)) return n.node;
+      const typeParams = (n.node as { typeParams?: TypeParam[] }).typeParams;
+      const inner = typeParams?.length ? new Set([...hidden, ...typeParams.map((p) => p.name)]) : hidden;
+      for (const c of childrenOf(n)) {
+        const found = find(c, inner);
+        if (found) return found;
+      }
+      return undefined;
     };
-    const used = find(m, new Set()) as (Span & { name: string }) | undefined;
+    const used = find({ of: "classMember", node: m }, new Set());
     if (used) throw new CompileError(`a static method can't use the class's type parameter '${used.name}'; give the method its own, as in 'static ${m.name as string}<${used.name}>(...)'`, used.start, used.end);
   }
 
   // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
-  function namesClass(t: unknown) {
-    if (!t || typeof t !== "object") return;
-    if (Array.isArray(t)) return t.forEach(namesClass);
-    const n = t as { kind?: string; name?: string; args?: unknown[] };
-    if (n.kind === "ref" && n.name === "this" && n.args?.length === 0) {
+  function namesClass(t: TypeNode) {
+    walk("typeNode", t, ({ of, node: n }) => {
+      if (of !== "typeNode" || n.kind !== "ref" || n.name !== "this" || n.args.length !== 0) return;
       Object.assign(n, { name: node.name, args: node.typeParams.map((p) => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
-      return;
-    }
-    Object.values(n).forEach(namesClass);
+      return false;
+    });
   }
 
   function add(f: FieldDecl): FieldDecl {
@@ -389,12 +388,12 @@ export function separatePrivateNames(nodes: (ClassNode & { name: string })[]) {
   }
 }
 
-function renamePrivate(node: unknown, from: string, to: string) {
-  if (typeof node !== "object" || node === null) return;
-  if (Array.isArray(node)) return node.forEach((n) => renamePrivate(n, from, to));
-  const n = node as { name?: unknown };
-  if (n.name === from) n.name = to;
-  Object.values(node).forEach((v) => renamePrivate(v, from, to));
+// Any name spelled `from` is the private member's: a member's, or one reached through `.`.
+function renamePrivate(members: ClassMember[], from: string, to: string) {
+  walk("classMember", members, ({ node }) => {
+    const n = node as { name?: unknown };
+    if (n.name === from) n.name = to;
+  });
 }
 
 // A private name as written, without the class a subclass's own copy of it is renamed for.
@@ -457,11 +456,12 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
 }
 
 // The names a type refers to without type arguments.
-function refNames(t: unknown): string[] {
-  if (Array.isArray(t)) return t.flatMap(refNames);
-  if (!t || typeof t !== "object") return [];
-  const n = t as { kind?: string; name?: string; args?: unknown[] };
-  return [...(n.kind === "ref" && n.args?.length === 0 ? [n.name!] : []), ...Object.values(t).flatMap(refNames)];
+function refNames(t: TypeNode | undefined): string[] {
+  const found: string[] = [];
+  walk("typeNode", t, ({ of, node }) => {
+    if (of === "typeNode" && node.kind === "ref" && node.args.length === 0) found.push(node.name);
+  });
+  return found;
 }
 
 // A copy of a type with the type parameters `names` maps renamed.
@@ -500,14 +500,14 @@ export function checkOverrides(c: ClassInfo) {
       for (let grew = true; grew;) {
         grew = false;
         for (const [t, f] of templates) {
-          if (through.has(t) || ![...through].some((n) => usesOnThis(f.body, n))) continue;
+          if (through.has(t) || ![...through].some((n) => usesOnThis("stmt", f.body, n))) continue;
           through.add(t);
           grew = true;
         }
       }
       const bodies = new Set([...b.methods.values(), ...b.getters.values(), ...b.setters.values()].filter((f) => f.template).map((f) => f.body));
       const members = b.node.members.filter((m) => !("body" in m && m.body && bodies.has(m.body)));
-      const via = [...through].find((n) => usesOnThis(members, n));
+      const via = [...through].find((n) => usesOnThis("classMember", members, n));
       if (via === name) {
         throw new CompileError(
           `overriding '${name}' is an error here: '${b.type.name}' reaches it through 'this', and with 'extends' as embedding that would still run '${b.type.name}.${name}'; extract an interface instead`,
@@ -578,7 +578,7 @@ function markTemplates(c: ClassInfo) {
         // `this` handed on as a value has the abstract class's type, which only a template's own
         // check may ever give a value: every instance made for an abstract class comes from
         // checking a template or a signature, and none is compiled.
-        if (f.template || !([...names].some((n) => usesOnThis(f.body, n, true)) || thisEscapes(f.body))) continue;
+        if (f.template || !([...names].some((n) => usesOnThis("stmt", f.body, n, true)) || thisEscapes(f.body))) continue;
         f.template = true;
         names.add(name);
         grew = true;
@@ -587,7 +587,7 @@ function markTemplates(c: ClassInfo) {
   }
   // While the base is built, the subclass that implements its abstract members isn't yet. A
   // constructor has no copies, so `this` there would be the abstract class's own value.
-  const early = [...names].find((n) => usesOnThis(c.constructor.body, n, true));
+  const early = [...names].find((n) => usesOnThis("stmt", c.constructor.body, n, true));
   if (early !== undefined) {
     throw new CompileError(`'${c.type.name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, c.constructor.start, c.constructor.end);
   }
@@ -603,24 +603,30 @@ export function abstractIn(c: ClassInfo, name: string): boolean {
 }
 
 // Whether `this` appears as a value rather than only as the object of `this.member`.
-function thisEscapes(node: unknown): boolean {
-  if (typeof node !== "object" || node === null) return false;
-  if (Array.isArray(node)) return node.some(thisEscapes);
-  const n = node as { kind?: string; object?: { kind?: string } };
-  if (n.kind === "this") return true;
-  return Object.entries(node).some(([key, v]) => !(key === "object" && n.kind === "member" && n.object?.kind === "this") && thisEscapes(v));
+function thisEscapes(body: Stmt[] | undefined): boolean {
+  let escapes = false;
+  walk("stmt", body, ({ of, node }) => {
+    if (escapes || (of === "expr" && node.kind === "member" && node.object.kind === "this")) return false;
+    if (of === "expr" && node.kind === "this") escapes = true;
+  });
+  return escapes;
 }
 
 // Whether any node under `node` is `this.name`, or with `viaSuper`, `super.name` too.
-function usesOnThis(node: unknown, name: string, viaSuper = false): boolean {
-  if (typeof node !== "object" || node === null) return false;
-  if (Array.isArray(node)) return node.some((n) => usesOnThis(n, name, viaSuper));
-  const n = node as { kind?: string; object?: { kind?: string }; name?: unknown; implementation?: true; args?: unknown };
-  // An overload signature's call of its own class's implementation is the signature's, which an
-  // override replaces along with it.
-  if (n.implementation) return usesOnThis(n.args, name, viaSuper);
-  if (n.kind === "member" && (n.object?.kind === "this" || (viaSuper && n.object?.kind === "super")) && n.name === name) return true;
-  return Object.values(node).some((v) => usesOnThis(v, name, viaSuper));
+function usesOnThis<K extends RootKind>(of: K, roots: NodeOf<K>[] | undefined, name: string, viaSuper = false): boolean {
+  let used = false;
+  walk(of, roots, ({ of, node }) => {
+    if (used) return false;
+    if (of !== "expr") return;
+    // An overload signature's call of its own class's implementation is the signature's, which an
+    // override replaces along with it.
+    if (node.kind === "call" && (node as { implementation?: true }).implementation) {
+      used = usesOnThis("expr", node.args, name, viaSuper);
+      return false;
+    }
+    if (node.kind === "member" && (node.object.kind === "this" || (viaSuper && node.object.kind === "super")) && node.name === name) used = true;
+  });
+  return used;
 }
 
 // `this: Mut<this>` mutates the instance; `this: Ref<this>` only reads it, as the default does.

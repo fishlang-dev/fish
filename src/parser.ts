@@ -70,7 +70,9 @@ export type Expr = Span & Id & (
   | { kind: "meta"; name: "import.meta" | "new.target" }
   // `import(specifier, options?)`
   | { kind: "import"; args: Expr[] }
-  | { kind: "nonNull"; expr: Expr }
+  // `narrows`, in an overload signature's body, is the signature's return type, which the
+  // implementation's value is narrowed to.
+  | { kind: "nonNull"; expr: Expr; narrows?: TypeNode }
   // `throw` as an expression, which never gives a value.
   | { kind: "throw"; value: Expr }
   | (ClassNode & { kind: "class" })

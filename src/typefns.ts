@@ -86,12 +86,26 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
       if (isNumeric(k)) return t.element;
       throw new CompileError(`an array type is indexed by 'number', which gives its element type, here '${show(t.element)}'`, keyAt.start, keyAt.end);
     }
+    const names = keysOf(k, "an indexed access type", keyAt);
+    // As in TypeScript, a union gives the union of each member's field, which every member must have.
+    if (typeof t !== "string" && t.kind === "union") {
+      return unionType(t.members.flatMap((m) => {
+        if (typeof m === "string" || (m.kind !== "object" && m.kind !== "class" && m.kind !== "param")) {
+          throw new CompileError(`an indexed access type of a union takes object types or classes, but '${show(t)}' has the member '${show(m)}'`, at.start, at.end);
+        }
+        return fieldTypes(m, names, at, keyAt, t);
+      }));
+    }
+    return unionType(fieldTypes(t, names, at, keyAt));
+  }
+  // The types of the fields `names` of t, which is a member of the union `whole` if given.
+  function fieldTypes(t: Type, names: string[], at: Span, keyAt: Span, whole?: Type): Type[] {
     const fields = fieldsOf(t, "an indexed access type", at);
-    return unionType(keysOf(k, "an indexed access type", keyAt).map((name) => {
+    return names.map((name) => {
       const found = fields.find((f) => f.name === name);
-      if (!found) throw new CompileError(`'${name}' isn't a field of '${show(t)}'`, keyAt.start, keyAt.end);
+      if (!found) throw new CompileError(`'${name}' isn't a field of '${show(t)}'${whole ? `, a member of '${show(whole)}'` : ""}`, keyAt.start, keyAt.end);
       return found.type;
-    }));
+    });
   }
 
   // `Record<K, V>`: an object type with a field of type V for each key K names.

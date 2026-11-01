@@ -197,6 +197,74 @@ function main() { const c: C = null; }
 // `infer` only means something where a conditional type matches a pattern.
 type U2 = (infer U)[];
 function main() {}
+// case: types_indexed_union
+// expect: num add 2
+// expect: 3 -3 9
+// expect: i64 add
+// Indexed access on a union gives the union of each member's field: a tagged union's `kind` is a
+// union of literals, narrowed and switched over, and a field every member has with a different type
+// gives the union of those types. A union of keys reads every key from every member.
+type Shape = { kind: "num"; n: i64; size: i64 } | { kind: "add"; left: i64; right: i64; size: string };
+type Kind = Shape["kind"];
+type Size = Shape["size"];
+type Both = Shape["kind" | "size"];
+function name(k: Kind): string {
+  switch (k) {
+    case "num": return "num";
+  }
+  return k;
+}
+function width(s: Size): i64 {
+  if (typeof s === "string") return s.length as i64;
+  return s;
+}
+function show(b: Both): string {
+  if (typeof b === "string") return b;
+  return "i64";
+}
+function main() {
+  const k: Kind = "add";
+  console.log(name("num"), name(k), width("ab"));
+  const s: Size = 3;
+  const t: Size = "abc";
+  const n: Kind = "num";
+  console.log(width(s), n === "num" ? -width(t) : 0, width(9));
+  console.log(show(1), show("add"));
+}
+// case: types_indexed_union_missing
+// error: 'n' isn't a field of '{ kind: "add"; left: i64 }', a member of
+type Shape = { kind: "num"; n: i64 } | { kind: "add"; left: i64 };
+type N = Shape["n"];
+function main() {}
+// case: types_indexed_union_null
+// error: an indexed access type of a union takes object types or classes, but 'null | { n: i64 }' has the member 'null'
+type Maybe = { n: i64 } | null;
+type N = Maybe["n"];
+function main() {}
+// case: types_indexed_union_recursive
+// expect: num add neg
+// expect: 2 1
+// A recursive tagged union written as an intersection with a union, like the compiler's own
+// syntax trees: its `kind`, and a field of one member picked out with Extract.
+type Span = { start: i64; end: i64 };
+type Expr = Span & (
+  | { kind: "num"; n: i64 }
+  | { kind: "add"; left: Expr; right: Expr }
+  | { kind: "neg"; of: Expr }
+);
+type Kind = Expr["kind"];
+type Left = Extract<Expr, { kind: "add" }>["left"];
+type Start = Expr["start"];
+function name(k: Kind): string {
+  return match (k) { case "num" => "num", case "add" => "add", case "neg" => "neg" };
+}
+function start(l: Left): Start { return l.start; }
+function main() {
+  const one: Expr = { start: 1, end: 2, kind: "num", n: 1 };
+  const sum: Expr = { start: 0, end: 4, kind: "add", left: { start: 2, end: 3, kind: "num", n: 2 }, right: one };
+  console.log(name("num"), name(sum.kind), name("neg"));
+  if (sum.kind === "add") console.log(start(sum.left), start(sum.right));
+}
 // case: types_infer_rest
 // error: rest parameters other than '...args: any[]' in an 'infer' pattern, which need tuple types, are not supported yet
 type Params<F> = F extends (...args: infer P) => i64 ? P : never;

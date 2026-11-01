@@ -274,7 +274,7 @@ function captures(program: Stmt[]): usize[] {
   const found: usize[] = [];
   try {
     const ids = { last: 0 };
-    hoistLocals({ names: { local: new Set(), madeUp: new Map() }, ids }, renumber(structuredClone(program), () => nextId(ids)), (local) => found.push(local.start));
+    hoistLocals({ names: { local: new Set(), madeUp: new Map() }, ids }, renumber("stmt", structuredClone(program), () => nextId(ids)), (local) => found.push(local.start));
   } catch {
     return [];
   }

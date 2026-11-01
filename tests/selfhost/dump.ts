@@ -1434,6 +1434,10 @@ export function dumpExpr_nonNull(indent: string, label: string, n: Ref<Extract<E
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   dumpExpr(indent + "  ", "expr", n.expr);
+  if (n.narrows === undefined) console.log(indent + "  " + "narrows" + " undefined");
+  else {
+    dumpTypeNode(indent + "  ", "narrows", n.narrows!);
+  }
 }
 
 export function dumpExpr_throw(indent: string, label: string, n: Ref<Extract<Expr, { kind: "throw" }>>): void {

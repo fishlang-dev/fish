@@ -7,7 +7,7 @@ import { parse, type ClassMember, type Expr, type Func, type Stmt } from "./pars
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
-import { nextId, NodeMap, NodeSet, renumber, type Ids } from "./nodes.ts";
+import { nextId, NodeMap, NodeSet, renumber, walk, type Ids } from "./nodes.ts";
 import { markGenerated } from "./warnings.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on
@@ -146,13 +146,12 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
 }
 
 // Gives every node of a tree one span, as code a decorator made.
-function respan(node: unknown, at: { start: usize; end: usize }) {
-  if (!node || typeof node !== "object") return;
-  if (Array.isArray(node)) return node.forEach((x) => respan(x, at));
-  const n = node as Record<string, unknown>;
-  if (typeof n.start === "number") n.start = at.start;
-  if (typeof n.end === "number") n.end = at.end;
-  Object.values(n).forEach((x) => respan(x, at));
+function respan(member: ClassMember, at: { start: usize; end: usize }) {
+  walk("classMember", member, ({ node }) => {
+    const n = node as Partial<{ start: usize; end: usize }>;
+    if (typeof n.start === "number") n.start = at.start;
+    if (typeof n.end === "number") n.end = at.end;
+  });
 }
 
 // Each decorator a declaration holds, with where it is written, in the order `allDecorators`
@@ -170,7 +169,7 @@ function copied(ids: Ids, loaded: Loaded): { loaded: Loaded; of: NodeMap<Stmt, S
   const copies = new Map<Module, Module>();
   const of = new NodeMap<Stmt, Stmt>();
   for (const m of loaded.modules) {
-    const statements = renumber(structuredClone(m.statements), () => nextId(ids));
+    const statements = renumber("stmt", structuredClone(m.statements), () => nextId(ids));
     m.statements.forEach((s, i) => of.set(s, statements[i]!));
     copies.set(m, { ...m, statements, targets: new NodeMap() });
   }
@@ -326,19 +325,17 @@ function freeNames(s: Stmt): Set<string> {
     for (const x of n.elements ?? []) binding(x);
     binding(n.rest);
   };
-  const visit = (node: unknown, top: boolean) => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) return node.forEach((x) => visit(x, false));
+  const top = s.kind === "export" ? s.body : s;
+  walk("stmt", top, ({ node }) => {
     const n = node as Record<string, unknown> & { kind?: string };
+    const inner = node !== top;
     if ((n.kind === "ident" || n.kind === "ref" || n.kind === "variant") && typeof n.name === "string") used.add(n.name.split(".")[0]!);
-    if (!top && ["function", "class", "typeAlias", "interface", "enum"].includes(n.kind!) && typeof n.name === "string") bound.add(n.name);
-    if (n.kind === "let" && !top) for (const d of n.declarations as { target: unknown }[]) binding(d.target);
+    if (inner && ["function", "class", "typeAlias", "interface", "enum"].includes(n.kind!) && typeof n.name === "string") bound.add(n.name);
+    if (n.kind === "let" && inner) for (const d of n.declarations as { target: unknown }[]) binding(d.target);
     if (Array.isArray(n.params)) for (const p of n.params as { pattern: unknown }[]) binding(p.pattern);
     if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) bound.add(p.name);
     if (n.kind === "try") binding(n.param);
-    for (const v of Object.values(n)) visit(v, false);
-  };
-  visit(s.kind === "export" ? s.body : s, true);
+  });
   for (const b of bound) used.delete(b);
   return used;
 }
@@ -375,20 +372,14 @@ function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: NodeSet
 // The top-level declarations a program's quotes make.
 function quoteDeclarations(tables: Tables, s: Stmt): string[] {
   const found: string[] = [];
-  const visit = (node: unknown) => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) return node.forEach(visit);
-    const n = node as Expr;
-    if (n.kind === "tagged" && n.tag.kind === "ident" && (n.tag.name === "quote" || n.tag.name === "quoteType")) {
-      try {
-        found.push(...declaredBy(quoted(tables, n, n.tag.name === "quoteType")));
-      } catch {
-        // A quote that doesn't parse is reported when the macro is checked.
-      }
+  walk("stmt", s, ({ of, node: n }) => {
+    if (of !== "expr" || n.kind !== "tagged" || n.tag.kind !== "ident" || (n.tag.name !== "quote" && n.tag.name !== "quoteType")) return;
+    try {
+      found.push(...declaredBy(quoted(tables, n, n.tag.name === "quoteType")));
+    } catch {
+      // A quote that doesn't parse is reported when the macro is checked.
     }
-    Object.values(n).forEach(visit);
-  };
-  visit(s);
+  });
   return found;
 }
 

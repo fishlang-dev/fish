@@ -21,7 +21,9 @@ type Form =
   | { form: "union"; members: TypeNode[] }
   | { form: "object"; fields: Field[] };
 
-export function dumperSource(parserSource: string): string {
+// The parser's AST types read from its source: the aliases a tree is made of, the object shapes
+// each is the union of, and how a value of each type is held.
+export function nodeTypes(parserSource: string) {
   const aliases = new Map<string, TypeNode>();
   for (const s of parse(parserSource, { last: 0 })) {
     const t = s.kind === "export" ? s.body : s;
@@ -88,14 +90,6 @@ export function dumperSource(parserSource: string): string {
     if (isNode(t.name)) return { form: "node", name: t.name };
     throw new Error(`the dumper has no form for '${t.name}'`);
   };
-  const text = (f: Form, v: string) => (f.form === "json" ? `JSON.stringify(${v})` : f.form === "bigint" ? `\`\${${v}}n\`` : `\`\${${v}}\``);
-
-  const unions = new Map<string, { name: string; members: TypeNode[] }>();
-  const unionName = (members: TypeNode[]) => {
-    const key = members.map(show).join(" | ");
-    if (!unions.has(key)) unions.set(key, { name: `dumpUnion${unions.size}`, members });
-    return unions.get(key)!.name;
-  };
   const show = (t: TypeNode): string => {
     if (t.kind === "ref") return t.args.length ? `${t.name}<${t.args.map(show).join(", ")}>` : t.name;
     if (t.kind === "array") return `${t.element.kind === "union" ? `(${show(t.element)})` : show(t.element)}[]`;
@@ -105,6 +99,19 @@ export function dumperSource(parserSource: string): string {
     throw new Error(`the dumper can't write a '${t.kind}' type`);
   };
 
+  return { aliases, isNode, isWord, membersOf, ref, shapes, formOf, show, field };
+}
+
+export function dumperSource(parserSource: string): string {
+  const { aliases, isNode, isWord, membersOf, ref, shapes, formOf, show, field } = nodeTypes(parserSource);
+  const text = (f: Form, v: string) => (f.form === "json" ? `JSON.stringify(${v})` : f.form === "bigint" ? `\`\${${v}}n\`` : `\`\${${v}}\``);
+
+  const unions = new Map<string, { name: string; members: TypeNode[] }>();
+  const unionName = (members: TypeNode[]) => {
+    const key = members.map(show).join(" | ");
+    if (!unions.has(key)) unions.set(key, { name: `dumpUnion${unions.size}`, members });
+    return unions.get(key)!.name;
+  };
   let loops = 0;
   // Statements printing `v`, of type `t`, under `label` at `indent`, both expressions.
   const value = (t: TypeNode, v: string, indent: string, label: string): string[] => {

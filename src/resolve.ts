@@ -3,7 +3,7 @@ import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { nextId, NodeMap } from "./nodes.ts";
+import { nextId, NodeMap, walk } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { TypeMap, ANY_REGEX, familyHeld, jsShape, type RecursiveType, field, isFloat, splitTemplate, textFits, holdsHandle, holdsPart, type BlockType, isInteger, type MapType, type ArrayType, optionRef, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
@@ -909,11 +909,13 @@ function inferredText(typing: Typing, text: string, bound: Type): Type | undefin
 }
 
 // The names a type pattern declares with `infer`.
-function inferNames(n: unknown, names: Set<string> = new Set<string>()): Set<string> {
-  if (!n || typeof n !== "object") return names;
-  if (Array.isArray(n)) n.forEach((m) => inferNames(m, names));
-  else if ((n as { kind?: string }).kind === "infer") names.add((n as { name: string }).name);
-  else Object.values(n).forEach((m) => inferNames(m, names));
+function inferNames(t: TypeNode): Set<string> {
+  const names = new Set<string>();
+  walk("typeNode", t, ({ of, node }) => {
+    if (of !== "typeNode" || node.kind !== "infer") return;
+    names.add(node.name);
+    return false;
+  });
   return names;
 }
 
