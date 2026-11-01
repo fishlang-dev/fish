@@ -622,6 +622,16 @@ test("cookie and cookie-parser are replaced by std's cookies", () => {
   });
 });
 
+test("static file packages are replaced by Router.static", () => {
+  project({
+    "package.json": JSON.stringify({ dependencies: { "serve-static": "1", "@fastify/static": "1", "koa-static": "1", sirv: "1" } }),
+  }, (dir) => {
+    expect(Object.fromEntries(dependencies(dir)!.list.map((x) => [x.name, [x.group, x.equivalent?.name]]))).toEqual({
+      "@fastify/static": ["std", "Router.static"], "koa-static": ["std", "Router.static"], "serve-static": ["std", "Router.static"], sirv: ["std", "Router.static"],
+    });
+  });
+});
+
 test("randomBytes waits on typed arrays, since Node's gives a Buffer and std's a u8[]", () => {
   project({
     "a.ts": "import { randomBytes } from \"node:crypto\";\nexport const t = randomBytes(16).toString(\"hex\");\n",

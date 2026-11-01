@@ -1193,7 +1193,7 @@ export function expressions(ctx: Context) {
     }
     // `fileRead(path)` and `fileWrite(path, bytes)`: the futures node:fs/promises is written over,
     // each a job on the runtime's blocking pool.
-    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && fileAt(files, e.start).startsWith("node:")) {
+    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && (inStd || fileAt(files, e.start).startsWith("node:"))) {
       const reading = callee.name === "fileRead";
       if (e.args.length !== (reading ? 1 : 2)) throw new CompileError("E0504", `'${callee.name}' takes ${reading ? "a path" : "a path and the bytes"}`, e.start, e.end);
       const path = value(e.args[0]!);
@@ -1207,7 +1207,7 @@ export function expressions(ctx: Context) {
     }
     // The blocking calls node:fs is written over, as `fileReadSync(path)`, run on the calling
     // thread.
-    const sync = callee.kind === "ident" && fileAt(files, e.start).startsWith("node:") ? syncFileSignatures(typing)[callee.name] : undefined;
+    const sync = callee.kind === "ident" && (inStd || fileAt(files, e.start).startsWith("node:")) ? syncFileSignatures(typing)[callee.name] : undefined;
     if (sync) {
       const [params, returns, throws] = sync;
       const name = (callee as Extract<Expr, { kind: "ident" }>).name;
