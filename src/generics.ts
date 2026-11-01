@@ -285,7 +285,8 @@ export interface InstancingHost {
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
   // Resolves a body's own signature, where its parameter names shadow top-level ones.
   signing<T>(f: Body, run: () => T): T;
-  members: Members;
+  members(this: Mut<this>): Members;
+  instancingState: InstancingState;
   // The instance being checked, which new instantiations count their depth from.
   checking(): Instance | undefined;
   // The type parameters of the generic class a body belongs to, if any.
@@ -301,34 +302,41 @@ export function comptimeName(p: Param): string {
   return `comptime ${paramName(p)}`;
 }
 
+// The instances made so far and what making them worked out, kept by the host between uses.
+export class InstancingState {
+  concreteness: Concreteness;
+  explicit = new Map<BodyId, Map<string, Type>>();
+  instances = new Map<BodyId, Map<string, InstanceId>>();
+  // By the method's first type parameter, which only its own list holds.
+  sharedPlaceholders = new NodeMap<TypeParam, Map<string, Type>>();
+  implicits = new Map<BodyId, Map<usize, Bound>>();
+  // Which implicit parameters are references to their type, and how.
+  lent = new Map<BodyId, Map<usize, RefType>>();
+  definitions = new Map<BodyId, InstanceId>();
+  // Instances still to check.
+  pending: InstanceId[] = [];
+  // What a call made inside an instance passed for each type parameter, where that was one of
+  // the instance's own.
+  sites = new NodeMap<Span & Id, Map<string, Type>>();
+
+  constructor(typing: Typing) {
+    this.concreteness = new Concreteness(typing);
+  }
+}
+
 export class Instancing {
   host: InstancingHost;
 
   constructor(host: InstancingHost) {
     this.host = host;
     this.typing = this.host.tables.typing;
-    this.concreteness = new Concreteness(this.typing);
   }
   private typing: Typing;
-  private concreteness: Concreteness;
-  private explicit = new Map<BodyId, Map<string, Type>>();
-  private instances = new Map<BodyId, Map<string, InstanceId>>();
-  // By the method's first type parameter, which only its own list holds.
-  private sharedPlaceholders = new NodeMap<TypeParam, Map<string, Type>>();
-  private implicits = new Map<BodyId, Map<usize, Bound>>();
-  // Which implicit parameters are references to their type, and how.
-  private lent = new Map<BodyId, Map<usize, RefType>>();
-  private definitions = new Map<BodyId, InstanceId>();
-  // Instances still to check.
-  pending: InstanceId[] = [];
   all() {
-    return [...this.instances.values()].flatMap((m) => [...m.values()].map((i) => this.host.tables.arenas.instanceOf(i)));
+    return [...this.host.instancingState.instances.values()].flatMap((m) => [...m.values()].map((i) => this.host.tables.arenas.instanceOf(i)));
   }
-  // What a call made inside an instance passed for each type parameter, where that was one of
-  // the instance's own.
-  private sites = new NodeMap<Span & Id, Map<string, Type>>();
   siteOf(at: Span & Id) {
-    return this.sites.get(at);
+    return this.host.instancingState.sites.get(at);
   }
 
   // The type an arrow given as a generic body's argument is checked against: its parameter's
@@ -414,13 +422,13 @@ export class Instancing {
     // Only the one parameter the result borrows from, by its lifetime or by elision.
     const implicit = this.implicitOf(f);
     const refs = f.params.flatMap((p, i) => {
-      const type = this.lent.get(f.bodyId)?.get(i) ?? (p.type && this.host.withScope(scope, () => this.host.resolveType(p.type!)));
+      const type = this.host.instancingState.lent.get(f.bodyId)?.get(i) ?? (p.type && this.host.withScope(scope, () => this.host.resolveType(p.type!)));
       const r = type && typeof type !== "string" ? this.typing.rec(type) : undefined;
       return r?.kind === "ref" && (!t.life || r.life === t.life) ? [i] : [];
     });
     const [i] = refs;
     const bound = i !== undefined && refs.length === 1 && !(f.self && !f.self.constructor && !t.life) ? implicit.get(i) : undefined;
-    return bound && this.lent.get(f.bodyId)?.has(i!) && this.typing.lower(t.to) === this.typing.lower(bound) ? this.typing.refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life) : returned;
+    return bound && this.host.instancingState.lent.get(f.bodyId)?.has(i!) && this.typing.lower(t.to) === this.typing.lower(bound) ? this.typing.refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life) : returned;
   }
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
@@ -432,7 +440,7 @@ export class Instancing {
 
   // An implicit parameter's type, borrowed when the parameter is a reference to it.
   private lentAs(f: Body, i: usize, t: Type | undefined): Type | undefined {
-    const ref = this.lent.get(f.bodyId)?.get(i);
+    const ref = this.host.instancingState.lent.get(f.bodyId)?.get(i);
     if (!t || !ref) return t;
     const { mutable, life } = this.typing.rec(ref);
     return this.typing.refType(t, mutable, life);
@@ -443,14 +451,14 @@ export class Instancing {
   // It is made once per body: fresh placeholders would make a new instance each time.
   definition(this: Mut<this>, f: Body): Instance {
     if (!this.generic(f)) return this.instanceOf(f);
-    const known = this.definitions.get(f.bodyId);
+    const known = this.host.instancingState.definitions.get(f.bodyId);
     if (known) return this.host.tables.arenas.instanceOf(known);
     const scope = this.explicitPlaceholders(f);
     for (const [i, bound] of this.implicitOf(f)) scope.set(`#${i}`, this.typing.typeParameter(this.typing.show(bound), this.sameParams(f, i, bound, new Map([...(f.scope ?? []), ...scope]))));
     // A comptime parameter's value is known only at each call; the definition has a placeholder.
     for (const p of f.params) if (p.comptime) scope.set(comptimeName(p), this.typing.typeParameter(comptimeName(p), undefined));
     const found = this.instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
-    this.definitions.set(f.bodyId, found.id);
+    this.host.instancingState.definitions.set(f.bodyId, found.id);
     return found;
   }
 
@@ -467,13 +475,13 @@ export class Instancing {
   // A member of a generic class's instance runs with the class's type arguments in scope.
   instanceOf(this: Mut<this>, f: Body, bindings: Map<string, Type> = f.scope ?? new Map<string, Type>()): Instance {
     const key = [...bindings.values()].map((t) => this.typing.keyOf(t)).join(",");
-    let byKey = this.instances.get(f.bodyId);
-    if (!byKey) this.instances.set(f.bodyId, byKey = new Map());
+    let byKey = this.host.instancingState.instances.get(f.bodyId);
+    if (!byKey) this.host.instancingState.instances.set(f.bodyId, byKey = new Map());
     const known = byKey.get(key);
     if (known) return this.host.tables.arenas.instanceOf(known);
     // Every type parameter, implicit ones included, needs a concrete binding to compile.
     const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...this.implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
-    const isConcrete = complete && [...bindings.values()].every((t) => this.concreteness.concrete(t));
+    const isConcrete = complete && [...bindings.values()].every((t) => this.host.instancingState.concreteness.concrete(t));
     const generic = bindings.size > 0;
     const found = this.host.tables.arenas.addInstance({
       tables: this.host.tables, body: this.host.tables.arenas.addBody(f).bodyId, symbol: generic && isConcrete ? this.instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
@@ -481,7 +489,7 @@ export class Instancing {
       types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
     });
     byKey.set(key, found.id);
-    this.pending.push(found.id);
+    this.host.instancingState.pending.push(found.id);
     return found;
   }
 
@@ -525,7 +533,7 @@ export class Instancing {
       if ((r?.kind === "closure" || r?.kind === "function") && heldInArgument(f, p.name)) bindings.set(p.name, this.typing.heldArgument(type));
     }
     // A bound may name the class's parameters too, as this instance of it holds them.
-    this.host.withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, this.host.resolveType(p.constraint), this.host.members, at)));
+    this.host.withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, this.host.resolveType(p.constraint), this.host.members(), at)));
     // A type parameter only an arrow's own parameters decided is still the definition's
     // placeholder, which the arrow was typed with; a body calling itself passes its placeholder
     // on in an argument of its own.
@@ -557,11 +565,11 @@ export class Instancing {
     ]);
     for (const [i, bound] of this.implicitOf(f)) {
       const meant = this.rebound(bound, decided);
-      own.set(`#${i}`, this.implicitArgument(args[i]!, argTypes[i]!, meant, this.lent.get(f.bodyId)!.has(i)));
+      own.set(`#${i}`, this.implicitArgument(args[i]!, argTypes[i]!, meant, this.host.instancingState.lent.get(f.bodyId)!.has(i)));
       const given = argTypes[i]!;
       const r = typeof given === "string" ? undefined : this.typing.rec(given);
       const held = r?.kind === "ref" ? r.to : given;
-      const ref = this.lent.get(f.bodyId)!.get(i);
+      const ref = this.host.instancingState.lent.get(f.bodyId)!.get(i);
       const unlocked = ref && this.typing.rec(ref).mutable ? this.typing.unlocks(held, bound) : undefined;
       if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${this.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
       if (r?.kind === "closure" && r.once && repeats(f, paramName(f.params[i]!))) {
@@ -573,10 +581,10 @@ export class Instancing {
     // A type argument holding a pattern keeps it, so the instance's parameters still ask for it;
     // one holding no type parameter keeps how its fields were spelled, which printing and JSON
     // read.
-    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, this.typing.holdsPattern(t) || this.concreteness.concrete(t) ? t : this.typing.lower(t)]));
+    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, this.typing.holdsPattern(t) || this.host.instancingState.concreteness.concrete(t) ? t : this.typing.lower(t)]));
     // Every instance of the calling body shares the call's node, so each call resets it.
-    if ([...own].some(([name, t]) => lowered.get(name) !== t)) this.sites.set(at, own);
-    else this.sites.delete(at);
+    if ([...own].some(([name, t]) => lowered.get(name) !== t)) this.host.instancingState.sites.set(at, own);
+    else this.host.instancingState.sites.delete(at);
     const instance = this.instanceOf(f, new Map([...(f.scope ?? []), ...lowered]));
     if (instance.depth > 64) {
       const comptime = f.params.some((p) => p.comptime);
@@ -633,7 +641,7 @@ export class Instancing {
   // concrete type for codegen.
   scopeOf(this: Mut<this>, instance: Instance): Map<string, Type> {
     const f = bodyOf(instance);
-    const known = (names: string[]) => names.every((n) => instance.bindings.has(n) && this.concreteness.concrete(instance.bindings.get(n)!));
+    const known = (names: string[]) => names.every((n) => instance.bindings.has(n) && this.host.instancingState.concreteness.concrete(instance.bindings.get(n)!));
     const stands = (name: string) => instance.bindings.get(name)!;
     const outer = this.host.classParams(f);
     const scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(this.typing, outer, (t, s) => this.host.withScope(s, () => this.host.resolveType(t)), stands) : new Map(f.scope);
@@ -671,18 +679,18 @@ export class Instancing {
   // One set of placeholders per body, so a parameter's type and the body name the same `T`;
   // callers get a copy they may add to.
   private explicitPlaceholders(this: Mut<this>, f: Body): Map<string, Type> {
-    let made = this.explicit.get(f.bodyId);
+    let made = this.host.instancingState.explicit.get(f.bodyId);
     if (!made) {
       // A generic method's own parameters are one placeholder for every instance of its class
       // when no bound names the class's parameters, so 'map<U>(): Box<U>' makes one 'Box<U>'.
       const own = typeParamsOf(f);
       const outer = this.host.classParams(f).map((p) => p.name);
       const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode("typeNode", p.constraint, (n) => n.kind === "ref" && outer.includes(n.name as string)));
-      made = shared ? this.sharedPlaceholders.get(f.typeParams![0]!) : undefined;
+      made = shared ? this.host.instancingState.sharedPlaceholders.get(f.typeParams![0]!) : undefined;
       // A bound may name the class's own parameters, as this instance holds them.
       if (!made) made = placeholders(this.typing, own, (t, scope) => this.host.withScope(new Map([...(f.scope ?? []), ...scope]), () => this.host.resolveType(t)));
-      if (shared) this.sharedPlaceholders.set(f.typeParams![0]!, made);
-      this.explicit.set(f.bodyId, made);
+      if (shared) this.host.instancingState.sharedPlaceholders.set(f.typeParams![0]!, made);
+      this.host.instancingState.explicit.set(f.bodyId, made);
     }
     return new Map(made);
   }
@@ -691,16 +699,16 @@ export class Instancing {
   // each concrete argument type gets its own instance instead of being copied down. A
   // parameter property and a setter's parameter keep their type, since it is a field's.
   implicitOf(this: Mut<this>, f: Body): Map<usize, Bound> {
-    let found = this.implicits.get(f.bodyId);
+    let found = this.host.instancingState.implicits.get(f.bodyId);
     if (found) return found;
     found = new Map();
-    this.implicits.set(f.bodyId, found);
+    this.host.instancingState.implicits.set(f.bodyId, found);
     // A generic class's member decides this as its definition does: a parameter of the class's
     // type parameter is one in every instance, whatever that parameter stands for.
     const outer = classPlaceholders(this.host.tables, this.host.classParams(f), (t, s) => this.host.withScope(s, () => this.host.resolveType(t)));
     const scope = new Map([...(f.scope ?? []), ...outer, ...this.explicitPlaceholders(f)]);
     const borrows = new Map<usize, RefType>();
-    this.lent.set(f.bodyId, borrows);
+    this.host.instancingState.lent.set(f.bodyId, borrows);
     this.host.withScope(scope, () => f.params.forEach((p, i) => {
       const written = p.type && this.host.resolveType(p.type);
       // A reference to an interface or object type is one over what it borrows.
@@ -715,7 +723,7 @@ export class Instancing {
       // A tuple's elements are inferred like any other type's parts, so it is no bound of its own.
       // A package's function or object parameter is a callback JS keeps or a JS object, its type
       // the same for every call, not a bound.
-      if (!f.accessor && ((t.kind === "interface" && !(f.js && this.typing.promiseElement(type) !== undefined)) || (t.kind === "function" && !f.js) || (t.kind === "regex" && t.any) || (t.kind === "object" && !t.tuple && this.concreteness.concrete(type) && !f.js))) {
+      if (!f.accessor && ((t.kind === "interface" && !(f.js && this.typing.promiseElement(type) !== undefined)) || (t.kind === "function" && !f.js) || (t.kind === "regex" && t.any) || (t.kind === "object" && !t.tuple && this.host.instancingState.concreteness.concrete(type) && !f.js))) {
         found!.set(i, type as FunctionType | InterfaceType | ObjectType | RegexType);
         if (written !== type) borrows.set(i, written as RefType);
       }
@@ -749,8 +757,8 @@ export class Instancing {
       const fam = family === undefined || typeof family === "string" ? undefined : this.typing.rec(family);
       if (fam?.kind === "function" && fam.generic && fam.name === b.name) return type;
       if (h?.kind === "closure" && h.generic) {
-        const f = this.host.members.bodyNamed(h.generic);
-        const reason = f && familyMismatch(f, bound as FunctionType, this.host.members, arg);
+        const f = this.host.members().bodyNamed(h.generic);
+        const reason = f && familyMismatch(f, bound as FunctionType, this.host.members(), arg);
         if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
         return type;
       }
@@ -761,7 +769,7 @@ export class Instancing {
       return type;
     }
     if (b.kind === "interface") {
-      const reason = unsatisfied(t?.kind === "param" && t.concrete ? this.typing.lower(type) : type, bound as InterfaceType, this.host.members, arg);
+      const reason = unsatisfied(t?.kind === "param" && t.concrete ? this.typing.lower(type) : type, bound as InterfaceType, this.host.members(), arg);
       if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
       return type;
     }
@@ -820,7 +828,8 @@ export interface GenericClassesHost {
   templates: Map<string, ClassNode & { name: string }>;
   register(c: ClassInfo): void;
   layout(c: ClassInfo): void;
-  members: Members;
+  members(this: Mut<this>): Members;
+  genericClassesState: GenericClassesState;
   resolveType(t: TypeNode): Type;
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
 }
@@ -837,6 +846,19 @@ function heldInArgument(f: Body, name: string): boolean {
   return holdsNode("typeNode", f.params.flatMap((p) => p.type ?? []), holds) || holdsNode("typeNode", f.returnType, holds) || holdsNode("stmt", f.body, holds);
 }
 
+// The generic classes' instances so far, kept by the host between uses.
+export class GenericClassesState {
+  // Where each instance was first used, and each template's instances by their arguments.
+  uses = new TypeMap<ClassType, { c: ClassId; at: Span }>();
+  instancesOf = new NodeMap<ClassNode, Map<string, ClassId>>();
+  shapesOf = new NodeMap<ClassNode, Set<string>>();
+  // An instance made while the resolver is still being built waits for `start` to check its
+  // bounds and lay it out, since both need the resolver.
+  ready = false;
+  // Each generic class as its definition is checked, which holds the statics every instance shares.
+  defined = new Map<string, ClassId>();
+}
+
 // Generic classes: each set of type arguments declares the class again, on first use.
 export class GenericClasses {
   host: GenericClassesHost;
@@ -848,28 +870,19 @@ export class GenericClasses {
   }
   private typing: Typing;
   private arenas: Arenas;
-  // Where each instance was first used, and each template's instances by their arguments.
-  private uses = new TypeMap<ClassType, { c: ClassId; at: Span }>();
-  private instancesOf = new NodeMap<ClassNode, Map<string, ClassId>>();
-  private shapesOf = new NodeMap<ClassNode, Set<string>>();
-  // An instance made while the resolver is still being built waits for `start` to check its
-  // bounds and lay it out, since both need the resolver.
-  private ready = false;
-  // Each generic class as its definition is checked, which holds the statics every instance shares.
-  private defined = new Map<string, ClassId>();
   definedClass(name: string) {
-    return this.arenas.classOf(this.defined.get(name));
+    return this.arenas.classOf(this.host.genericClassesState.defined.get(name));
   }
 
   start(this: Mut<this>) {
-    this.ready = true;
-    this.uses.forEach(({ c }) => this.bounded(this.arenas.classOf(c)));
+    this.host.genericClassesState.ready = true;
+    this.host.genericClassesState.uses.forEach(({ c }) => this.bounded(this.arenas.classOf(c)));
   }
 
   // A generic class, like a generic body, is checked once at its definition with
   // placeholders for its type parameters, whether or not anything instantiates it.
   define(this: Mut<this>) {
-    this.host.templates.forEach((t) => this.defined.set(t.name, this.classInstance(t, [...classPlaceholders(this.host.tables, t.typeParams, (n, s) => this.host.withScope(s, () => this.host.resolveType(n))).values()], t).classId));
+    this.host.templates.forEach((t) => this.host.genericClassesState.defined.set(t.name, this.classInstance(t, [...classPlaceholders(this.host.tables, t.typeParams, (n, s) => this.host.withScope(s, () => this.host.resolveType(n))).values()], t).classId));
   }
 
   classNamed(this: Mut<this>, name: string, args: Type[], at: Span): ClassType | undefined {
@@ -893,14 +906,14 @@ export class GenericClasses {
     if (args.length !== params.length) {
       throw new CompileError(`type '${template.name}' expects ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
-    let byKey = this.instancesOf.get(template);
-    if (!byKey) this.instancesOf.set(template, byKey = new Map());
+    let byKey = this.host.genericClassesState.instancesOf.get(template);
+    if (!byKey) this.host.genericClassesState.instancesOf.set(template, byKey = new Map());
     const key = args.map((t) => this.typing.keyOf(t)).join(",");
     const found = byKey.get(key);
     if (found !== undefined) return this.arenas.classOf(found);
     // Spellings of one value shape, like `{ a?: T }` and `{ a: T | null }`, count once.
-    let shapes = this.shapesOf.get(template);
-    if (!shapes) this.shapesOf.set(template, shapes = new Set());
+    let shapes = this.host.genericClassesState.shapesOf.get(template);
+    if (!shapes) this.host.genericClassesState.shapesOf.set(template, shapes = new Set());
     const shape = args.map((t) => this.typing.shapeKey(t)).join(",");
     if (!shapes.has(shape) && shapes.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && this.typing.rec(a).kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
@@ -909,15 +922,15 @@ export class GenericClasses {
     byKey.set(key, c.classId);
     shapes.add(shape);
     this.host.register(c);
-    this.uses.set(c.type, { c: c.classId, at });
-    if (this.ready) this.bounded(c);
+    this.host.genericClassesState.uses.set(c.type, { c: c.classId, at });
+    if (this.host.genericClassesState.ready) this.bounded(c);
     return c;
   }
 
   // A generic class's type arguments must satisfy their bounds, checked where it is first used.
   private bounded(c: ClassInfo) {
-    const { at } = this.uses.get(c.type)!;
-    this.host.withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, this.host.resolveType(p.constraint), this.host.members, at)));
+    const { at } = this.host.genericClassesState.uses.get(c.type)!;
+    this.host.withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, this.host.resolveType(p.constraint), this.host.members(), at)));
     this.host.layout(c);
   }
 

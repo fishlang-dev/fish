@@ -62,6 +62,11 @@ export function storable(typing: Typing, written: Type, at: Span): Type {
 // type of a value `typeof` names; whether a type fits another as `extends` asks; and the type
 // names in sight at an offset, for suggestions.
 export interface ResolverHost {
+  tables: Tables;
+  interfaces: Map<string, Interface>;
+  enums: Map<string, EnumInfo>;
+  slots: Map<string, boolean[]>;
+  resolverState: ResolverState;
   classNamed(this: Mut<this>, name: string, args: Type[], at: Span): ClassType | undefined;
   fieldsLaid(this: Mut<this>, c: ClassType): boolean;
   valueType(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type;
@@ -74,6 +79,34 @@ export interface Sight {
   inSight(name: string, at: Span): boolean;
 }
 
+// What resolving has made and where it is, kept by the host between uses.
+export class ResolverState {
+  // What was being resolved as each class layout under way began: an alias met again inside one
+  // reads the fields of a class whose own field types need it.
+  layouts: Set<string>[] = [];
+  resolved = new Map<string, Type>();
+  resolving = new Set<string>();
+  // Where an alias instance leads back to itself, by its key, and the alias each is made from.
+  recursives = new Map<string, RecursiveType>();
+  recursiveAliases = new TypeMap<RecursiveType, TypeAlias>();
+  traits = new NodeMap<Stmt, Map<string, InterfaceType>>();
+  // Each combined interface `A & B`, by its sides.
+  combined = new Map<string, InterfaceType>();
+  // The type parameters in scope, bound to what they stand for in the body being checked.
+  scope = new Map<string, Type>();
+  // Above zero while a generic alias is checked with placeholders, before any use.
+  deferring = 0;
+  // How many alias instances computing the outermost type has needed, against the budget.
+  computed = 0;
+  // Whether a name is a local or parameter where a type written at `at` sits, which `typeof`
+  // can't name yet; unset where only top-level names are in sight.
+  sight: Sight | undefined;
+  // The data-carrying enums being made, to catch one that holds itself.
+  making = new NodeMap<DataEnum, string>();
+  // Where a data-carrying enum instance holds itself, by enum and type arguments.
+  enumBlocks = new Map<string, RecursiveType>();
+}
+
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
 export class Resolver implements TypeFunctionsHost, RecursiveMaker {
@@ -84,19 +117,18 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   slots: Map<string, boolean[]>;
   host: ResolverHost;
 
-  constructor(tables: Tables, aliases: Map<string, TypeAlias>, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, host: ResolverHost) {
-    this.tables = tables;
-    this.aliases = aliases;
-    this.interfaces = interfaces;
-    this.enums = enums;
-    this.slots = slots;
+  constructor(host: ResolverHost) {
     this.host = host;
+    this.tables = this.host.tables;
+    this.aliases = this.tables.aliases;
+    this.interfaces = this.host.interfaces;
+    this.enums = this.host.enums;
+    this.slots = this.host.slots;
     this.declaredTypes = this.tables.declaredTypes;
     this.defaulted = this.tables.defaulted;
     this.presetTypes = this.tables.presetTypes;
     this.ids = this.tables.ids;
     this.typing = this.tables.typing;
-    this.typing.lowersRecursive(this);
   }
   private declaredTypes: Tables["declaredTypes"];
   private defaulted: Tables["defaulted"];
@@ -106,20 +138,17 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   private recOf<T extends Type>(t: T | undefined) {
     return t === undefined || typeof t === "string" ? undefined : this.typing.rec(t as Exclude<T, string>);
   }
-  // What was being resolved as each class layout under way began: an alias met again inside one
-  // reads the fields of a class whose own field types need it.
-  private layouts: Set<string>[] = [];
   // A class laid out for a type-level function, with no names in sight.
   fieldsKnown(this: Mut<this>, c: ClassType): boolean {
-    this.layouts.push(new Set(this.resolving));
+    this.host.resolverState.layouts.push(new Set(this.host.resolverState.resolving));
     try {
       return this.withSight(undefined, () => this.host.fieldsLaid(c));
     } finally {
-      this.layouts.pop();
+      this.host.resolverState.layouts.pop();
     }
   }
   isDeferring(): boolean {
-    return this.deferring > 0;
+    return this.host.resolverState.deferring > 0;
   }
   conforms(from: Type, to: Type, at: Span): boolean {
     return this.host.conforms(from, to, at);
@@ -127,54 +156,33 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   private typeFns(): TypeFunctions {
     return new TypeFunctions(this.typing, this);
   }
-  private resolved = new Map<string, Type>();
-  private resolving = new Set<string>();
-  // Where an alias instance leads back to itself, by its key, and the alias each is made from.
-  private recursives = new Map<string, RecursiveType>();
-  private recursiveAliases = new TypeMap<RecursiveType, TypeAlias>();
-  private traits = new NodeMap<Stmt, Map<string, InterfaceType>>();
-  // Each combined interface `A & B`, by its sides.
-  private combined = new Map<string, InterfaceType>();
-  // The type parameters in scope, bound to what they stand for in the body being checked.
-  private scope = new Map<string, Type>();
-  // Above zero while a generic alias is checked with placeholders, before any use.
-  private deferring = 0;
-  // How many alias instances computing the outermost type has needed, against the budget.
-  private computed = 0;
-  // Whether a name is a local or parameter where a type written at `at` sits, which `typeof`
-  // can't name yet; unset where only top-level names are in sight.
-  private sight: Sight | undefined;
   setSight(this: Mut<this>, names: Sight | undefined) {
-    this.sight = names;
+    this.host.resolverState.sight = names;
   }
   withSight<T>(this: Mut<this>, names: Sight | undefined, f: () => T): T {
-    const outer = this.sight;
-    this.sight = names;
+    const outer = this.host.resolverState.sight;
+    this.host.resolverState.sight = names;
     try {
       return f();
     } finally {
-      this.sight = outer;
+      this.host.resolverState.sight = outer;
     }
   }
-  // The data-carrying enums being made, to catch one that holds itself.
-  private making = new NodeMap<DataEnum, string>();
-  // Where a data-carrying enum instance holds itself, by enum and type arguments.
-  private enumBlocks = new Map<string, RecursiveType>();
   // The instance of a generic interface for other type arguments.
   interfaceInstance(this: Mut<this>, t: InterfaceType, args: Type[]) {
     return this.interfaceOf(this.interfaces.get(this.typing.rec(t).generic!.name)!, args);
   }
   // A recursive alias's type made again with other type arguments.
   remakeRecursive(this: Mut<this>, t: RecursiveType, args: Type[]): RecursiveType {
-    const a = this.recursiveAliases.get(t);
+    const a = this.host.resolverState.recursiveAliases.get(t);
     if (!a) return t;
     const key = `${a.name}<${args.map((t) => this.typing.keyOf(t)).join(",")}>`;
     const of = this.aliasType(a, args, a);
-    let back = this.recursives.get(key);
+    let back = this.host.resolverState.recursives.get(key);
     if (!back) {
-      this.recursives.set(key, back = this.typing.recursiveType(`${a.name}<${args.map((t) => this.typing.show(t)).join(", ")}>`, args));
+      this.host.resolverState.recursives.set(key, back = this.typing.recursiveType(`${a.name}<${args.map((t) => this.typing.show(t)).join(", ")}>`, args));
       this.typing.standsFor(back, of);
-      this.recursiveAliases.set(back, a);
+      this.host.resolverState.recursiveAliases.set(back, a);
     }
     return back;
   }
@@ -184,11 +192,11 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   validate(this: Mut<this>) {
     this.aliases.forEach((a) => {
       const scope = placeholders(this.typing, a.typeParams, (t, s) => this.withScope(s, () => this.resolveType(t)));
-      if (a.typeParams.length > 0) this.deferring++;
+      if (a.typeParams.length > 0) this.host.resolverState.deferring++;
       try {
         this.aliasType(a, [...scope.values()], a);
       } finally {
-        if (a.typeParams.length > 0) this.deferring--;
+        if (a.typeParams.length > 0) this.host.resolverState.deferring--;
       }
     });
     // A generic interface is checked once with placeholders for its parameters.
@@ -211,13 +219,13 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (made) return made;
     const shown = args.length > 0 ? `${data.name}<${args.map((t) => this.typing.show(t)).join(", ")}>` : data.name;
     // Met again while its members are made, it holds itself there, in a block.
-    if (this.making.get(data) === key) {
-      let back = this.enumBlocks.get(`${data.id} ${key}`);
-      if (!back) this.enumBlocks.set(`${data.id} ${key}`, back = this.typing.recursiveType(shown, args));
+    if (this.host.resolverState.making.get(data) === key) {
+      let back = this.host.resolverState.enumBlocks.get(`${data.id} ${key}`);
+      if (!back) this.host.resolverState.enumBlocks.set(`${data.id} ${key}`, back = this.typing.recursiveType(shown, args));
       return { type: back, variants: new Map() };
     }
-    if (this.making.has(data)) throw new CompileError(`enum '${data.name}' holds itself with other type arguments, which would make it infinitely large`, at.start, at.end);
-    this.making.set(data, key);
+    if (this.host.resolverState.making.has(data)) throw new CompileError(`enum '${data.name}' holds itself with other type arguments, which would make it infinitely large`, at.start, at.end);
+    this.host.resolverState.making.set(data, key);
     try {
       const bindings = new Map(data.params.map((p, i) => [p, args[i]!]));
       const variants = new Map(data.members.map((m) => {
@@ -234,7 +242,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       }));
       const type = this.typing.unionType([...variants.values()], shown);
       for (const v of variants.values()) this.typing.rec(v).of = type;
-      const back = this.enumBlocks.get(`${data.id} ${key}`);
+      const back = this.host.resolverState.enumBlocks.get(`${data.id} ${key}`);
       const union = this.recOf(type);
       if (back && union?.kind === "union") {
         this.typing.standsFor(back, type);
@@ -244,17 +252,17 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       data.instances.set(key, instance);
       return instance;
     } finally {
-      this.making.delete(data);
+      this.host.resolverState.making.delete(data);
     }
   }
 
   withScope<T>(this: Mut<this>, bindings: Map<string, Type>, f: () => T): T {
-    const outer = this.scope;
-    this.scope = bindings;
+    const outer = this.host.resolverState.scope;
+    this.host.resolverState.scope = bindings;
     try {
       return f();
     } finally {
-      this.scope = outer;
+      this.host.resolverState.scope = outer;
     }
   }
 
@@ -352,7 +360,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const swap = new TypeMap<Type, Type>();
       this.typing.holdsPart(preset, (u) => {
         const r = this.recOf(u);
-        const bound = r?.kind === "param" ? this.scope.get(r.name) : undefined;
+        const bound = r?.kind === "param" ? this.host.resolverState.scope.get(r.name) : undefined;
         if (bound !== undefined && bound !== u) swap.set(u, bound);
         return false;
       }, true);
@@ -367,7 +375,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (t.kind === "mapped") return this.mapped(t);
     if (t.kind === "template") {
       const holes = t.types.map((t) => this.resolveType(t));
-      return standIn(this.typing, holes, "a template literal type", t, false, () => this.deferring > 0) ?? this.typeFns().templateType(t.quasis, holes, t, t.types);
+      return standIn(this.typing, holes, "a template literal type", t, false, () => this.host.resolverState.deferring > 0) ?? this.typeFns().templateType(t.quasis, holes, t, t.types);
     }
     if (t.kind === "infer") throw new CompileError(`'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
@@ -377,7 +385,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       // A generic one is shown and compared with its own parameters standing for themselves.
       if (t.typeParams.length > 0) {
         if (t.throws) throw unsupported("generic function types that throw", t.throws);
-        const around = new Map(this.scope);
+        const around = new Map(this.host.resolverState.scope);
         const own = placeholders(this.typing, t.typeParams, (n, s) => this.withScope(new Map([...around, ...s]), () => this.resolveType(n)));
         const fn = this.withScope(new Map([...around, ...own]), () => this.typing.functionType(t.params.map(paramName), t.params.map((p) => this.callbackParam(p)), this.resolveType(t.returns)));
         this.typing.rec(fn).name = `<${t.typeParams.map((p) => p.name).join(", ")}>${this.typing.rec(fn).name}`;
@@ -410,10 +418,10 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // `typeof f` or `typeof X`: a top-level function's or const's type.
     if (t.kind === "query") {
       if (t.target.kind !== "ref" || t.target.args.length > 0 || t.target.name.includes(".")) throw unsupported("'typeof' types other than of a top-level function or const", t);
-      return this.host.valueType(t.target.name, t, this.sight?.inSight(t.target.name, t) === true);
+      return this.host.valueType(t.target.name, t, this.host.resolverState.sight?.inSight(t.target.name, t) === true);
     }
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
-    const bound = this.scope.get(t.name);
+    const bound = this.host.resolverState.scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
     if (Object.hasOwn(INTEGERS, t.name) || ["boolean", "void", "number", "f32", "f64", "string", "bigint"].includes(t.name)) {
       if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
@@ -532,7 +540,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       }
       return apply(args, t, t.args);
     }
-    throw new CompileError(`cannot find type '${t.name}'${didYouMean(t.name, [...this.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
+    throw new CompileError(`cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
   }
 
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
@@ -604,9 +612,9 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const fields = sides.map((s) => this.typing.objectType(this.typing.rec(s).fields)).reduce((a, b) => merged(this.typing, a, b, from, to));
     if (sides.every((s) => this.typing.rec(s).kind === "object")) return fields;
     const key = sides.map((t) => this.typing.keyOf(t)).join(" & ");
-    let found = this.combined.get(key);
+    let found = this.host.resolverState.combined.get(key);
     if (found) return found;
-    this.combined.set(key, found = this.typing.interfaceType(sides.map((t) => this.typing.show(t)).join(" & ")));
+    this.host.resolverState.combined.set(key, found = this.typing.interfaceType(sides.map((t) => this.typing.show(t)).join(" & ")));
     this.typing.rec(found).fields.push(...this.typing.rec(fields).fields.map((f) => ({ ...f })));
     for (const m of sides.flatMap((s) => { const r = this.typing.rec(s); return r.kind === "interface" ? r.methods : []; })) {
       const same = this.typing.rec(found).methods.find((x) => x.name === m.name);
@@ -626,8 +634,8 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     }
     // Every copy of a package's interface, one per import of it, is one type.
     const owner = i.jsSource ?? i;
-    let byArgs = this.traits.get(owner);
-    if (!byArgs) this.traits.set(owner, byArgs = new Map());
+    let byArgs = this.host.resolverState.traits.get(owner);
+    if (!byArgs) this.host.resolverState.traits.set(owner, byArgs = new Map());
     const key = args.map((t) => this.typing.keyOf(t)).join(",");
     const found = byArgs.get(key);
     if (found) return found;
@@ -697,7 +705,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
         const rest = m.params.find((p) => p.rest);
         if (rest) throw unsupported("rest parameters in interface methods", rest);
         // A generic method's own type parameters stand for themselves in its signature.
-        const around = new Map(this.scope);
+        const around = new Map(this.host.resolverState.scope);
         const own = m.typeParams.length > 0 ? placeholders(this.typing, m.typeParams, (n, s) => this.withScope(new Map([...around, ...s]), () => this.resolveType(n))) : new Map<string, Type>();
         const returns = m.returns;
         const [params, result] = this.withScope(new Map([...around, ...own]), () => [(self ? m.params.slice(1) : m.params).map((p) => this.paramType(p)), this.resolveType(returns)] as const);
@@ -722,36 +730,36 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       throw new CompileError(`type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     const key = `${a.name}<${args.map((t) => this.typing.keyOf(t)).join(",")}>`;
-    const done = this.resolved.get(key);
+    const done = this.host.resolverState.resolved.get(key);
     if (done) return done;
     // Inside a generic alias checked before any use, another alias given its placeholders is only
     // checked for its arguments: following it could recurse without end.
-    const open = this.deferring > 0 && this.resolving.size > 0 ? args.map((t) => openParam(this.typing, t, true)).find((t) => t) : undefined;
+    const open = this.host.resolverState.deferring > 0 && this.host.resolverState.resolving.size > 0 ? args.map((t) => openParam(this.typing, t, true)).find((t) => t) : undefined;
     if (open) return open;
-    if (this.layouts.some((s) => s.has(key))) {
+    if (this.host.resolverState.layouts.some((s) => s.has(key))) {
       throw new CompileError(`type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
     }
-    if (this.resolving.has(key)) {
-      let back = this.recursives.get(key);
+    if (this.host.resolverState.resolving.has(key)) {
+      let back = this.host.resolverState.recursives.get(key);
       // A std alias may be shown by another name than the one it is linked under.
       const name = (a as { shown?: string }).shown ?? a.name;
-      if (!back) this.recursives.set(key, back = this.typing.recursiveType(args.length > 0 ? `${name}<${args.map((t) => this.typing.show(t)).join(", ")}>` : name, args));
+      if (!back) this.host.resolverState.recursives.set(key, back = this.typing.recursiveType(args.length > 0 ? `${name}<${args.map((t) => this.typing.show(t)).join(", ")}>` : name, args));
       return back;
     }
     // A type that branches as it recurses grows exponentially, so the whole program's type
     // evaluation has a budget, as TypeScript caps instantiations.
-    if (this.resolving.size === 0) this.computed = 0;
-    if (++this.computed > 20_000) throw new CompileError(`computing type '${a.name}' needed more than 20000 alias instances; a type that branches as it recurses grows exponentially`, at.start, at.end);
-    if (this.resolving.size > 64) throw new CompileError(`type '${a.name}' is nested more than 64 alias instances deep while being computed; a type that uses itself must reach a branch that stops sooner`, at.start, at.end);
-    this.resolving.add(key);
+    if (this.host.resolverState.resolving.size === 0) this.host.resolverState.computed = 0;
+    if (++this.host.resolverState.computed > 20_000) throw new CompileError(`computing type '${a.name}' needed more than 20000 alias instances; a type that branches as it recurses grows exponentially`, at.start, at.end);
+    if (this.host.resolverState.resolving.size > 64) throw new CompileError(`type '${a.name}' is nested more than 64 alias instances deep while being computed; a type that uses itself must reach a branch that stops sooner`, at.start, at.end);
+    this.host.resolverState.resolving.add(key);
     let type: Type;
     try {
       // An alias's body sees the names where it is declared, not where it is used.
       type = this.withSight(undefined, () => this.withScope(new Map(a.typeParams.map((p, i) => [p.name, args[i]!])), () => this.resolveType(a.type)));
     } finally {
-      this.resolving.delete(key);
+      this.host.resolverState.resolving.delete(key);
     }
-    const back = this.recursives.get(key);
+    const back = this.host.resolverState.recursives.get(key);
     // Only a structure can hold a type again: `type A = B | null` with `type B = A` would be a
     // name for nothing but itself.
     const r = this.recOf(type);
@@ -760,9 +768,9 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     }
     if (back) {
       this.typing.standsFor(back, type);
-      this.recursiveAliases.set(back, a);
+      this.host.resolverState.recursiveAliases.set(back, a);
     }
-    this.resolved.set(key, type);
+    this.host.resolverState.resolved.set(key, type);
     return type;
   }
 
@@ -773,15 +781,15 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const homomorphic = t.constraint.kind === "operator" && t.constraint.op === "keyof" ? this.resolveType(t.constraint.type) : undefined;
     const keys = this.resolveType(t.constraint);
     if (!t.type) throw new CompileError(`a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
-    const held = standIn(this.typing, homomorphic ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, () => this.deferring > 0);
+    const held = standIn(this.typing, homomorphic ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, () => this.host.resolverState.deferring > 0);
     if (held) {
-      this.withScope(new Map([...this.scope, [t.name, held]]), () => (t.as && this.resolveType(t.as), this.resolveType(t.type!)));
+      this.withScope(new Map([...this.host.resolverState.scope, [t.name, held]]), () => (t.as && this.resolveType(t.as), this.resolveType(t.type!)));
       return held;
     }
     const source = homomorphic ? this.typeFns().fieldsOf(homomorphic, "a mapped type", t.constraint) : [];
     const fields: Field[] = [];
     for (const key of keys === "never" ? [] : this.typeFns().keysOf(keys, "a mapped type", t.constraint)) {
-      const bound = new Map([...this.scope, [t.name, this.typing.literalType(key)]]);
+      const bound = new Map([...this.host.resolverState.scope, [t.name, this.typing.literalType(key)]]);
       const renamed = t.as ? this.withScope(bound, () => this.resolveType(t.as!)) : this.typing.literalType(key);
       const names = renamed === "never" ? [] : this.typeFns().keysOf(renamed, "a mapped type's 'as' clause", t.as ?? t);
       const value = storable(this.typing, this.withScope(bound, () => this.resolveType(t.type!)), t.type);
@@ -811,17 +819,17 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // parameter distributes over the union it stands for, each member checked on its own, as in
   // TypeScript.
   private conditional(this: Mut<this>, t: Extract<TypeNode, { kind: "conditional" }>): Type {
-    const naked = t.check.kind === "ref" && t.check.args.length === 0 && this.scope.has(t.check.name) ? t.check.name : undefined;
+    const naked = t.check.kind === "ref" && t.check.args.length === 0 && this.host.resolverState.scope.has(t.check.name) ? t.check.name : undefined;
     let check = this.resolveType(t.check);
     const c = this.recOf(check);
     if (c?.kind === "param" && c.concrete) check = c.concrete;
-    const held = standIn(this.typing, [check], "a conditional type", t.check, true, () => this.deferring > 0);
+    const held = standIn(this.typing, [check], "a conditional type", t.check, true, () => this.host.resolverState.deferring > 0);
     if (held) return this.branches(t, held);
     try {
       if (naked && check === "never") return "never";
       const r = this.recOf(check);
       if (naked && r?.kind === "union") {
-        return this.typing.unionType(r.members.map((m) => this.withScope(new Map([...this.scope, [naked, m]]), () => this.decide(t, m))));
+        return this.typing.unionType(r.members.map((m) => this.withScope(new Map([...this.host.resolverState.scope, [naked, m]]), () => this.decide(t, m))));
       }
       return this.decide(t, check);
     } catch (e) {
@@ -835,7 +843,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // placeholder stands in for the result.
   private branches(this: Mut<this>, t: Extract<TypeNode, { kind: "conditional" }>, held: Type): Type {
     const names = new Map([...inferNames(t.extends)].map((n): [string, Type] => [n, this.typing.typeParameter(n, undefined)]));
-    this.withScope(new Map([...this.scope, ...names]), () => this.resolveType(t.then));
+    this.withScope(new Map([...this.host.resolverState.scope, ...names]), () => this.resolveType(t.then));
     this.resolveType(t.else);
     return held;
   }
@@ -850,14 +858,14 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     for (const name of names) {
       if (!found.has(name)) throw new CompileError(`'infer ${name}' matched nothing in '${this.typing.show(check)}', since the optional field holding it is missing; TypeScript would give 'unknown', which Fish doesn't have`, t.extends.start, t.extends.end);
     }
-    return this.withScope(new Map([...this.scope, ...found]), () => this.resolveType(t.then));
+    return this.withScope(new Map([...this.host.resolverState.scope, ...found]), () => this.resolveType(t.then));
   }
 
   // A type a conditional compares against, which can't hold a type parameter of generic code,
   // since fitting it would be decided once for every instance.
   private comparable(type: Type, at: Span): Type {
     const open = openParam(this.typing, type, true);
-    if (open && this.deferring > 0) throw new Open(open);
+    if (open && this.host.resolverState.deferring > 0) throw new Open(open);
     standIn(this.typing, [type], "a conditional type", at, true, () => false);
     return type;
   }

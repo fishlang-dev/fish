@@ -12,6 +12,8 @@ const parsed = CHECKER.map((name) => {
 });
 const lineOf = (text: string, at: number) => text.slice(0, at).split("\n").length;
 const declared = (s: Stmt): Stmt => (s.kind === "export" ? s.body : s);
+// A class declaration is a statement; a class expression is a class node.
+const classAt = ({ of, node }: { of: string; node: unknown }) => (of === "classNode" || (of === "stmt" && (node as Stmt).kind === "class") ? (node as { name: string | undefined }) : undefined);
 
 // A module is a class whose methods take `this`, not a function returning its inner functions,
 // since Fish has no methods as values to hand such a bag out with.
@@ -51,9 +53,9 @@ test("no code in the checker destructures a method out of a module class's insta
       const own = new Set(members.flatMap((m) => (m.kind === "method" && typeof m.name === "string" ? [m.name] : [])));
       if (own.size > 0) methods.set((s as { name: string }).name, own);
     }
-    walk("stmt", program, ({ of, node }) => {
-      if (of !== "classNode") return;
-      const c = node as { name: string | undefined; members: { kind: string; name?: unknown; type?: TypeNode }[] };
+    walk("stmt", program, (n) => {
+      const c = classAt(n) as { name: string | undefined; members: { kind: string; name?: unknown; type?: TypeNode }[] } | undefined;
+      if (!c) return;
       if (!c.name) return;
       const own = new Set<string>();
       for (const m of c.members) {
@@ -101,5 +103,47 @@ test("no code in the checker destructures a method out of a module class's insta
       }
     });
   }
+  expect(offenders).toEqual([]);
+});
+
+// A module that calls back into its host is made where it is used, over that host, and keeps
+// its lasting state in data the host owns. Owned as a field, its methods would run on the
+// field while the host is lent to them, which Fish refuses.
+test("no class in the checker holds, as a field, a module that calls back into its host", () => {
+  type Member = { kind: string; name?: unknown; type?: TypeNode; init?: Expr };
+  const classes = new Map<string, Member[]>();
+  const callable = new Set<string>();
+  for (const { program } of parsed) {
+    for (const s of program.map(declared)) {
+      const members = s.kind === "interface" ? s.members : s.kind === "typeAlias" && s.type.kind === "object" ? s.type.members : [];
+      if (members.some((m) => m.kind === "method")) callable.add((s as { name: string }).name);
+    }
+    walk("stmt", program, (n) => {
+      const c = classAt(n) as { name: string | undefined; members: Member[] } | undefined;
+      if (!c) return;
+      if (c.name) classes.set(c.name, c.members);
+    });
+  }
+  const unwrapped = (t: TypeNode | undefined): TypeNode | undefined => (t?.kind === "ref" && (t.name === "Mut" || t.name === "Ref") ? t.args[0] : t);
+  // A host is a field typed as an interface with methods, or lent mutably as a class.
+  const hosted = new Set([...classes].flatMap(([name, members]) => (members.some((m) => {
+    if (m.kind !== "field") return false;
+    const t = unwrapped(m.type);
+    return t?.kind === "ref" && (callable.has(t.name) || (t !== m.type && classes.has(t.name)));
+  }) ? [name] : [])));
+  const offenders: string[] = [];
+  for (const { name, text, program } of parsed) {
+    walk("stmt", program, (n) => {
+      const c = classAt(n) as { name: string | undefined; members: (Member & { start: number })[] } | undefined;
+      if (!c) return;
+      for (const m of c.members) {
+        if (m.kind !== "field") continue;
+        // Lent as `Mut<Host>`, it is the host a view is made over, not owned.
+        const held = m.type?.kind === "ref" && m.type === unwrapped(m.type) ? m.type.name : m.init?.kind === "new" && m.init.callee.kind === "ident" ? m.init.callee.name : undefined;
+        if (held && hosted.has(held)) offenders.push(`${name}.ts:${lineOf(text, m.start)}: ${c.name}.${String(m.name)} holds ${held}`);
+      }
+    });
+  }
+  expect(hosted.size).toBeGreaterThan(0);
   expect(offenders).toEqual([]);
 });

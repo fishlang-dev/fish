@@ -21,7 +21,8 @@ export interface RegistryHost {
   tables: Tables;
   classes: Map<string, ClassId>;
   templates: Map<string, ClassNode>;
-  members: Members;
+  members(this: Mut<this>): Members;
+  registryState: RegistryState;
   resolveType(t: TypeNode): Type;
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
   instanceOf(f: Body): Instance;
@@ -29,6 +30,18 @@ export interface RegistryHost {
   checkBody(i: Instance): void;
   // The names of the classes a use at `at` reaches, for suggesting one.
   classNames(at: usize): string[];
+}
+
+// The classes the registry has seen and how far each has got, kept by its host between uses.
+export class RegistryState {
+  // Every class by its type, and those not yet laid out and checked.
+  infoOf = new TypeMap<ClassType, ClassId>();
+  unsettled: ClassId[] = [];
+  // Each class's progress, keyed by its type.
+  linked = new TypeSet<ClassType>();
+  laidOut = new TypeSet<ClassType>();
+  laying = new TypeMap<ClassType, ClassId>();
+  wrapped = new TypeSet<ClassType>();
 }
 
 export class Registry {
@@ -43,18 +56,10 @@ export class Registry {
   private typing: Typing;
   private ids: Tables["ids"];
   private arenas: Arenas;
-  // Every class by its type, and those not yet laid out and checked.
-  infoOf = new TypeMap<ClassType, ClassId>();
-  unsettled: ClassId[] = [];
-  // Each class's progress, keyed by its type.
-  private linked = new TypeSet<ClassType>();
-  private laidOut = new TypeSet<ClassType>();
-  laying = new TypeMap<ClassType, ClassId>();
-  private wrapped = new TypeSet<ClassType>();
 
   register(this: Mut<this>, c: ClassInfo) {
-    this.infoOf.set(c.type, c.classId);
-    this.unsettled.push(c.classId);
+    this.host.registryState.infoOf.set(c.type, c.classId);
+    this.host.registryState.unsettled.push(c.classId);
   }
 
   // Lays out a class, checks what it claims, and checks each of its members at its definition.
@@ -71,10 +76,10 @@ export class Registry {
   // Bases are linked first, since a derived constructor may take its base's parameters. An abstract
   // class's templates are marked, and a concrete class's copies made, before overrides are checked.
   link(this: Mut<this>, c: ClassInfo, path: TypeSet<ClassType>) {
-    if (this.linked.has(c.type)) return;
+    if (this.host.registryState.linked.has(c.type)) return;
     if (c.baseName === undefined) {
       implementAbstracts(this.host.tables, c);
-      this.linked.add(c.type);
+      this.host.registryState.linked.add(c.type);
       return;
     }
     if (path.has(c.type)) throw new CompileError(`class '${this.typing.rec(c.type).name}' embeds itself through 'extends'`, c.node.start, c.node.end);
@@ -87,7 +92,7 @@ export class Registry {
     extend(this.host.tables, c, base, (name) => this.host.withScope(new Map(), () => this.host.resolveType({ id: nextId(this.ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
     implementAbstracts(this.host.tables, c);
     checkOverrides(this.arenas, this.typing, c);
-    this.linked.add(c.type);
+    this.host.registryState.linked.add(c.type);
   }
 
   // The class `extends` names, a generic one made from the type arguments it is written with,
@@ -100,7 +105,7 @@ export class Registry {
     const declared = at.kind === "instantiation" ? undefined : this.arenas.classOf(this.host.classes.get(name));
     if (declared) return declared;
     const type = this.host.withScope(c.scope, () => this.host.resolveType({ id: nextId(this.ids), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
-    return this.arenas.classOf(this.infoOf.get(type)!);
+    return this.arenas.classOf(this.host.registryState.infoOf.get(type)!);
   }
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
@@ -108,11 +113,11 @@ export class Registry {
   // Whether its fields are known, which they aren't yet while its own fields are being resolved.
   layout(this: Mut<this>, c: ClassInfo): boolean {
     const base = this.arenas.classOf(c.base);
-    if (this.laidOut.has(c.type)) return !this.laying.has(c.type) && (!base || this.layout(base));
+    if (this.host.registryState.laidOut.has(c.type)) return !this.host.registryState.laying.has(c.type) && (!base || this.layout(base));
     // A generic class's instance is made after the declared classes are linked.
     this.link(c, new TypeSet());
-    this.laidOut.add(c.type);
-    this.laying.set(c.type, c.classId);
+    this.host.registryState.laidOut.add(c.type);
+    this.host.registryState.laying.set(c.type, c.classId);
     if (c.base !== undefined) this.layout(this.arenas.classOf(c.base));
     this.typing.rec(c.type).fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
@@ -136,7 +141,7 @@ export class Registry {
     const laid = this.typing.rec(c.type);
     const patterned = laid.fields.findIndex((f) => this.typing.holdsPattern(f.type));
     if (patterned >= 0 && !laid.generic?.args.some((t) => this.typing.holdsPattern(t))) throw unsupported("template literal pattern types in class fields", c.fields[patterned]!);
-    this.laying.delete(c.type);
+    this.host.registryState.laying.delete(c.type);
     // Before any body reads its fields, a class that contains itself holds itself in a block.
     if (this.contains(c.type, c.type, new TypeSet())) this.holdItself(c.type);
     return true;
@@ -152,7 +157,7 @@ export class Registry {
       const trait = this.host.withScope(c.scope, () => this.host.resolveType(node));
       const named = typeof trait === "string" ? undefined : this.typing.rec(trait);
       const name = this.typing.rec(c.type).name;
-      const reason = named?.kind === "interface" ? unsatisfied(c.type, trait as InterfaceType, this.host.members, node)
+      const reason = named?.kind === "interface" ? unsatisfied(c.type, trait as InterfaceType, this.host.members(), node)
         : this.typing.fits(c.type, trait) ? undefined : `type '${name}' doesn't fit '${this.typing.show(trait)}'`;
       if (reason) throw new CompileError(`class '${name}' incorrectly implements '${this.typing.show(trait)}': ${reason}`, node.start, node.end);
     }
@@ -162,8 +167,8 @@ export class Registry {
   // raised where the class is thrown. Worked out when first asked, since a function raising
   // one may be checked before the class is settled.
   wrapsOf(this: Mut<this>, c: ClassInfo): ClassInfo["wraps"] {
-    if (this.wrapped.has(c.type)) return c.wraps;
-    this.wrapped.add(c.type);
+    if (this.host.registryState.wrapped.has(c.type)) return c.wraps;
+    this.host.registryState.wrapped.add(c.type);
     for (const node of c.node.implements) {
       if (node.kind !== "ref" || node.name !== "From") continue;
       if (node.args.length !== 1) throw new CompileError("'From' takes the type it wraps, like 'From<DbError>'", node.start, node.end);
@@ -211,7 +216,7 @@ export class Registry {
   }
 
   classOf(this: Mut<this>, t: ClassType): ClassInfo {
-    const c = this.arenas.classOf(this.infoOf.get(t)!);
+    const c = this.arenas.classOf(this.host.registryState.infoOf.get(t)!);
     this.layout(c);
     return c;
   }
