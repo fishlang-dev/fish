@@ -9,7 +9,8 @@ import { CompileError } from "../src/diag.ts";
 import { expandMacros } from "../src/macros.ts";
 import { analyze } from "../src/main.ts";
 import { flatten, load } from "../src/modules.ts";
-import { NodeMap, NodeSet, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
+import type { Id } from "../src/ids.ts";
+import { latest, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
 import { parse, type Stmt } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
@@ -31,7 +32,8 @@ function audit(roots: unknown, ids: Map<number, object>, where: string): string[
     if (typeof n.start === "number" && typeof n.end === "number") {
       const at = `${where}: a ${String(n.kind ?? "node")} at ${n.start}`;
       if (typeof n.id !== "number") problems.push(`${at} has no id`);
-      else if (ids.has(n.id) && ids.get(n.id) !== n) problems.push(`${at} shares id ${n.id} with another node`);
+      // A replacement takes the id of the node it replaces.
+      else if (ids.has(n.id) && latest(ids.get(n.id) as Id) !== latest(n as Id)) problems.push(`${at} shares id ${n.id} with another node`);
       else ids.set(n.id, n);
     }
     Object.values(n).forEach(visit);
@@ -91,7 +93,7 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
     } catch (e) {
       if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
     }
-    // Checking rewrites parts of the tree in place, and those parts need ids too.
+    // Checking replaces parts of the tree, and the replacements need ids too.
     problems.push(...audit(written, ids, `${p.name}, checked`));
   }
   expect(problems.slice(0, 20)).toEqual([]);
@@ -312,3 +314,39 @@ test("no Map, WeakMap, Set or WeakSet in the checker is keyed by anything but st
   expect(offenders).toEqual([]);
 });
 
+
+// The passes that lower the tree, before checking and while it runs.
+const LOWERING = ["check", "values", "narrow", "classes", "generics", "overloads", "defaults", "modules", "js", "locals", "macros", "quote", "tests", "parseargs"];
+// Fields that hold a node's children, as the generated rebuild writes them; a `name` holds a node
+// only when computed, and a rename writes a string.
+const CHILDREN = [...new Set([...readFileSync(join(src, "rebuild.ts"), "utf8").matchAll(/^\s+m\.(\w+)/gm)].map((m) => m[1]!))].filter((f) => f !== "name").join("|");
+// What may still change in place, each for its reason:
+const IN_PLACE = [
+  // the spans of nodes just made, before any tree holds them;
+  "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
+  // a Body's overloads, given as ids, an enum's record and a Body's template mark, which are no nodes;
+  "check.ts: for (const f of funcs) if (f.overloads) f.overloads =", "check.ts: for (const e of enums.values())", "classes.ts: f.template = true",
+  // the rebuild itself, putting replacements in place once a body is checked;
+  "check.ts: for (let i = 0; i < f.params.length; i++) f.params[i] = rebuiltParam",
+  // lists of statements, which have no id to key a replacement by: a statement that becomes
+  // several, nested functions hoisted, a local declaration hoisted out, and an export a library
+  // lists, each where the list is read next.
+  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(ids), kind: \"block\"", "check.ts: place.list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
+  "modules.ts: l.body[at] =", "macros.ts: statements.splice(",
+];
+
+// Lowering records a replacement in a rewrite table, which a rebuild puts in place, rather than
+// changing a node's kind or children where it is, as Fish can't through a shared reference.
+test("no lowering pass changes a node's kind or children in place", () => {
+  const writes = new RegExp(`\\b(?:e|s|d|p|n|node|x|c|call|callee|loop|impl|decl|main|f|arrow|same|at|made|given|local|m|t)(?:\\.\\w+)*\\.(?:${CHILDREN})(?:\\[[^\\]]*\\])?!? (?:=|\\?\\?=) |\\b(?:e|s|d|p|n|node|x|c|f|decl)\\.(?:${CHILDREN})\\.(?:push|splice|unshift)\\(`);
+  const lists = /\b(?:list|stmts|statements|place\.list|l\.body)(?:\.splice\(|\[[^\]]+\] = )/;
+  const offenders: string[] = [];
+  for (const f of LOWERING.map((name) => `${name}.ts`)) {
+    for (const line of readFileSync(join(src, f), "utf8").split("\n")) {
+      const text = `${f}: ${line.trim()}`;
+      const found = /Object\.assign\((?!\{|<)/.test(line) || /\bdelete \(/.test(line) || writes.test(line) || lists.test(line);
+      if (found && !IN_PLACE.some((allowed) => text.startsWith(allowed))) offenders.push(text);
+    }
+  }
+  expect(offenders).toEqual([]);
+});

@@ -1,12 +1,23 @@
 // Writes `src/walk.ts`, which visits the child nodes of every node kind, from the parser's own AST
 // types in `src/parser.ts`, so the compiler can walk a tree without reading arbitrary objects'
 // fields, which Fish can't. A visitor has a method for each of the parser's node types; Fish has
-// no unions holding references yet, so one callback can't take a node of any type.
-// `tests/walk.test.ts` fails when the file is stale.
+// no unions holding references yet, so one callback can't take a node of any type. Beside it,
+// `src/rebuild.ts` puts the replacements a rewrite table holds in place in a tree, by the same
+// fields; it is a file of its own, as Fish can't yet move a node out of a list to rebuild it.
+// `tests/walk.test.ts` fails when either file is stale.
 import type { TypeNode } from "../src/parser.ts";
 import { nodeTypes } from "./dumpgen.ts";
 
+// The walkers, `src/walk.ts`, and the rebuild, `src/rebuild.ts`, from the parser's source.
 export function walkerSource(parserSource: string): string {
+  return sources(parserSource).walk;
+}
+
+export function rebuildSource(parserSource: string): string {
+  return sources(parserSource).rebuild;
+}
+
+function sources(parserSource: string): { walk: string; rebuild: string } {
   const { aliases, isNode, isWord, membersOf, ref, shapes, formOf, show } = nodeTypes(parserSource);
   const nodes = [...aliases.keys()].filter(isNode);
   const method = (name: string) => name[0]!.toLowerCase() + name.slice(1);
@@ -172,15 +183,15 @@ export function walkerSource(parserSource: string): string {
   const rebuilt: string[] = [];
   for (const name of nodes) {
     rebuilt.push(
-      `export function rebuilt${name}(n: ${name}, ${"r"}: Ref<Rewrites>): ${name} {`,
-      `  const m = ${hasId(name) ? "r.current(n)" : "n"};`,
+      `export function rebuilt${name}(n: ${name}, r: Ref<Replacements>): ${name} {`,
+      `  let m = ${hasId(name) ? "r.current(n)" : "n"};`,
       ...rebuildChildren(name).map((l) => `  ${l}`),
       `  return m;`,
       `}`,
       ``,
     );
   }
-  rebuilt.push(`export function rebuiltStmts(n: Stmt[], r: Ref<Rewrites>): Stmt[] {`, `  for (let i = 0; i < n.length; i++) {`, `    n[i] = rebuiltStmt(n[i]!, r);`, `  }`, `  return n;`, `}`, ``);
+  rebuilt.push(`export function rebuiltStmts(n: Stmt[], r: Ref<Replacements>): Stmt[] {`, `  for (let i = 0; i < n.length; i++) {`, `    n[i] = rebuiltStmt(n[i]!, r);`, `  }`, `  return n;`, `}`, ``);
   for (let i = 0; i < unions.size; i++) {
     const [, { name, members }] = [...unions][i]!;
     const type = members.map(show).join(" | ");
@@ -204,7 +215,7 @@ export function walkerSource(parserSource: string): string {
       }
       body.push(`}`, `return n;`);
     }
-    rebuilt.push(`// ${type}`, `export function rebuilt${name.slice("visit".length)}(n: ${type}, r: Ref<Rewrites>): ${type} {`, ...body.map((l) => `  ${l}`), `}`, ``);
+    rebuilt.push(`// ${type}`, `export function rebuilt${name.slice("visit".length)}(n: ${type}, r: Ref<Replacements>): ${type} {`, ...body.map((l) => `  ${l}`), `}`, ``);
   }
 
   const visitor = [
@@ -217,24 +228,35 @@ export function walkerSource(parserSource: string): string {
     `}`,
     ``,
   ];
-  const imports = [...aliases.keys()].filter((name) => [...out, ...rebuilt].some((l) => new RegExp(`\\b${name}\\b`).test(l)));
-  return [
+  const importsOf = (lines: string[]) => [...aliases.keys()].filter((name) => lines.some((l) => new RegExp(`\\b${name}\\b`).test(l)));
+  const walk = [
     `// Generated from the parser's AST types by \`bun scripts/walkgen.ts\`; a test fails when it is stale.`,
     `// Each \`childrenOf\` function hands each node a node holds to the visitor, in the order its type`,
-    `// lists the fields. Each \`rebuilt\` function gives a node as the rewrite table has it, with each`,
-    `// node under it put in place the same way.`,
-    `import type { Rewrites } from "./ids.ts";`,
-    `import type { ${imports.join(", ")} } from "./parser.ts";`,
+    `// lists the fields.`,
+    `import type { ${importsOf(out).join(", ")} } from "./parser.ts";`,
     ``,
     ...visitor,
     ...out,
+  ];
+  const rebuild = [
+    `// Generated from the parser's AST types by \`bun scripts/walkgen.ts\`; a test fails when it is stale.`,
+    `// Each \`rebuilt\` function gives a node as the rewrite table has it, each node under it put in`,
+    `// place the same way, writing the slots that held replaced nodes.`,
+    `import type { Replacements } from "./ids.ts";`,
+    `import type { ${importsOf(rebuilt).join(", ")} } from "./parser.ts";`,
+    ``,
     ...rebuilt,
-  ].join("\n").trimEnd() + "\n";
+  ];
+  const text = (lines: string[]) => lines.join("\n").trimEnd() + "\n";
+  return { walk: text(walk), rebuild: text(rebuild) };
 }
 
 export const WALK = new URL("../src/walk.ts", import.meta.url);
+export const REBUILD = new URL("../src/rebuild.ts", import.meta.url);
 
 if (import.meta.main) {
   const { readFileSync, writeFileSync } = await import("node:fs");
-  writeFileSync(WALK, walkerSource(readFileSync(new URL("../src/parser.ts", import.meta.url), "utf8")));
+  const { walk, rebuild } = sources(readFileSync(new URL("../src/parser.ts", import.meta.url), "utf8"));
+  writeFileSync(WALK, walk);
+  writeFileSync(REBUILD, rebuild);
 }

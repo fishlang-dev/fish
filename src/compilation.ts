@@ -2,8 +2,7 @@ import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.ts"
 import type { Value } from "./comptime.ts";
 import type { Names } from "./diag.ts";
 import type { Kind } from "./narrow.ts";
-import { Rewrites } from "./ids.ts";
-import { WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
+import { Rewrites, WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";

@@ -8,9 +8,8 @@ import { FILE_SPAN } from "./modules.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
-import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
-import { rebuiltParam, rebuiltStmts } from "./walk.ts";
-import { Rewrites } from "./ids.ts";
+import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, Rewrites, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
+import { rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";

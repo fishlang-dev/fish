@@ -8,9 +8,9 @@ import { parse, type ClassMember, type Expr, type Func, type Param, type Stmt } 
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
-import { Rewrites, type Id } from "./ids.ts";
-import { nextId, NodeMap, NodeSet, renumber, walk, type Ids } from "./nodes.ts";
-import { rebuiltStmts } from "./walk.ts";
+import type { Id } from "./ids.ts";
+import { nextId, NodeMap, NodeSet, renumber, Rewrites, walk, type Ids } from "./nodes.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 import { markGenerated } from "./warnings.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on

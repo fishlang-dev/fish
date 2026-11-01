@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { walkerSource, WALK } from "../scripts/walkgen.ts";
-import { Rewrites } from "../src/ids.ts";
-import { childrenOf, walk } from "../src/nodes.ts";
+import { rebuildSource, REBUILD, walkerSource, WALK } from "../scripts/walkgen.ts";
+import { childrenOf, Rewrites, walk } from "../src/nodes.ts";
 import { parse, parseExpression, type Expr } from "../src/parser.ts";
-import { rebuiltExpr } from "../src/walk.ts";
+import { rebuiltExpr } from "../src/rebuild.ts";
 
 const ROOT = join(import.meta.dir, "..");
 
-test("the walkers are generated from the parser's current AST types; run 'bun scripts/walkgen.ts' when they aren't", () => {
+test("the walkers and the rebuild are generated from the parser's current AST types; run 'bun scripts/walkgen.ts' when they aren't", () => {
   expect(readFileSync(WALK, "utf8")).toBe(walkerSource(readFileSync(join(ROOT, "src", "parser.ts"), "utf8")));
+  expect(readFileSync(REBUILD, "utf8")).toBe(rebuildSource(readFileSync(join(ROOT, "src", "parser.ts"), "utf8")));
 });
 
 // Every object with an id under `roots`, found by reading every field, as a walk once did.

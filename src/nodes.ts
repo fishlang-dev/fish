@@ -2,8 +2,8 @@
 // Node ids, and the tables keyed by them. Fish's `Map` and `Set` key on strings and integers,
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
-import { latest, type Id } from "./ids.ts";
-import type { Span } from "./parser.ts";
+import type { Id } from "./ids.ts";
+import type { ClassMember, Declarator, Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
 import { childrenOfClassMember, childrenOfClassNode, childrenOfDeclarator, childrenOfEnumMember, childrenOfExpr, childrenOfFunc, childrenOfInterface, childrenOfJsName, childrenOfMatchArm, childrenOfObjectProp, childrenOfParam, childrenOfPattern, childrenOfPatternProp, childrenOfSpecifier, childrenOfStmt, childrenOfStmts, childrenOfSwitchCase, childrenOfTupleElement, childrenOfTypeAlias, childrenOfTypeMember, childrenOfTypeNode, childrenOfTypeParam, type Visitor } from "./walk.ts";
 
 export { nextId, type Id, type Ids } from "./ids.ts";
@@ -241,4 +241,39 @@ export class WeakNodeSet<K extends Id> {
   delete(node: K): boolean {
     return this.table.delete(idOf(node, this.table.get(node.id)?.deref()));
   }
+}
+
+// The kinds of node lowering replaces.
+type Replacement = Expr | Stmt | Declarator | Param | Pattern | TypeNode | ObjectProp | ClassMember;
+
+// The nodes lowering replaced, each under the id of the node it replaced, which the replacement
+// takes, so every table keyed by node reads the same entry for either. A tree reads a replacement
+// through `current` until a rebuild puts it in place: after a body's check, or at the end of a
+// pass that lowers the tree before checking.
+export class Rewrites {
+  private table = new Map<usize, Id>();
+
+  // Records `by`, a node made for the purpose, as `node`'s replacement, and gives it.
+  replace<T extends Replacement>(node: Ref<Id>, by: T): T {
+    const was = this.current(node);
+    if (was === by) return by;
+    // Seen only by the node tables' check that two nodes don't share an id, kept off the tree.
+    Object.defineProperty(was, REPLACED_BY, { value: by, configurable: true });
+    by.id = node.id;
+    this.table.set(node.id, by);
+    return by;
+  }
+
+  current<T extends Id>(node: T): T {
+    return (this.table.get(node.id) as T | undefined) ?? node;
+  }
+}
+
+const REPLACED_BY = "replaced by";
+
+// What `node` is now: the last of its replacements, or itself.
+export function latest<T extends Id>(node: T): T {
+  let n = node as Id & { [REPLACED_BY]?: Id };
+  while (n[REPLACED_BY] !== undefined) n = n[REPLACED_BY] as typeof n;
+  return n as T;
 }

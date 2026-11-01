@@ -3,9 +3,8 @@ import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
-import { Rewrites } from "./ids.ts";
-import { nextId, renumber, walk as walkTree, type Ids } from "./nodes.ts";
-import { rebuiltExpr, rebuiltStmt, rebuiltTypeNode } from "./walk.ts";
+import { nextId, renumber, Rewrites, walk as walkTree, type Ids } from "./nodes.ts";
+import { rebuiltExpr, rebuiltStmt, rebuiltTypeNode } from "./rebuild.ts";
 import type { ObjectType, Type, UnionType, Typing } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the

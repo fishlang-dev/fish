@@ -1,8 +1,7 @@
 import { CompileError, type Names } from "./diag.ts";
 import type { Expr, Param, Pattern, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { Rewrites } from "./ids.ts";
-import { childrenOf, forEachChild, nextId, NodeMap, NodeSet, someNode, walk, type AnyNode, type Ids } from "./nodes.ts";
-import { rebuiltStmts } from "./walk.ts";
+import { childrenOf, forEachChild, nextId, NodeMap, NodeSet, Rewrites, someNode, walk, type AnyNode, type Ids } from "./nodes.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 
 // Local declarations: a `type`, `interface`, `enum` or `class` written in a body is a
 // declaration of the program's own, under a name only its scope can write. The uses in its scope

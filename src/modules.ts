@@ -13,9 +13,9 @@ import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.ts";
 import { ENGINE_HOOK, STD, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
-import { Rewrites, type Id } from "./ids.ts";
-import { forEachChild, nextId, NodeMap, shiftSpans, walk, type AnyNode, type Ids } from "./nodes.ts";
-import { rebuiltStmts } from "./walk.ts";
+import type { Id } from "./ids.ts";
+import { forEachChild, nextId, NodeMap, Rewrites, shiftSpans, walk, type AnyNode, type Ids } from "./nodes.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
 // offset range, so a position anywhere in the program says which file it is in.

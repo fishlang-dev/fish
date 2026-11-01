@@ -1,9 +1,8 @@
 import type { Tables } from "./compilation.ts";
-import { Rewrites } from "./ids.ts";
-import { nextId, walk, type Id, type Ids } from "./nodes.ts";
+import { nextId, Rewrites, walk, type Id, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
-import { rebuiltStmts } from "./walk.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 import type { Type, Typing } from "./typing.ts";
 
 // Default parameter values, lowered before checking. A parameter `x: T = v` becomes an optional

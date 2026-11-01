@@ -1,8 +1,7 @@
 import { CompileError } from "./diag.ts";
-import { Rewrites } from "./ids.ts";
-import { nextId, renumber, walk, type Ids } from "./nodes.ts";
+import { nextId, renumber, Rewrites, walk, type Ids } from "./nodes.ts";
 import type { ClassMember, ClassNode, Expr, Func, Param, Span, Stmt, TypeNode } from "./parser.ts";
-import { rebuiltStmts } from "./walk.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 import { unsupported } from "./unsupported.ts";
 
 // Overload signatures are the bodyless declarations of a name right before its implementation.

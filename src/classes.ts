@@ -2,7 +2,7 @@ import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { RustName, RustTables } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { rebuiltParam } from "./walk.ts";
+import { rebuiltParam } from "./rebuild.ts";
 import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
