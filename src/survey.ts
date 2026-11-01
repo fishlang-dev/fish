@@ -78,7 +78,7 @@ const RULES: Rule[] = [
   { id: "regexStrings", action: "guided", title: "match, matchAll and search given a string, and next() on matchAll: Fish takes a regex literal there, and matchAll gives an array" },
   { id: "regexState", action: "guided", title: "exec or test on a g or y regex, and lastIndex: a Fish regex keeps no state; use matchAll, or drop the flag" },
   { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
-  { id: "decorators", action: "unsupported", title: "decorators (macros, decorators and derive)", feature: "Macros, decorators and derive" },
+  { id: "decorators", action: "unsupported", title: "decorators, which Fish runs as macros, so a framework's decorators need a Fish macro of the same name" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
   { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
@@ -183,12 +183,12 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // `net` is TCP here; a socket path (Unix domain sockets) isn't told apart from an address.
   ["net", STD("TcpListener and TcpStream")], ["worker_threads", STD("spawn and spawnBlocking")], ["string_decoder", STD("TextDecoder")],
   ["timers/promises", STD("sleep")],
-  // `http` is a client as well as a server, and Fish has only the server so far.
-  ["http", PLANNED("HTTP client")], ["console", PLANNED("The rest of console")],
+  // `fetch` and `serve` are the client and the server, but importing `http` itself needs its shim.
+  ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
   ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
   ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
-  ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
+  ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("import.meta.url and file URLs")], ["querystring", PLANNED("node:querystring")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Typed arrays and DataView")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
   // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.

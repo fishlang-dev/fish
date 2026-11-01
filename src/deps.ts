@@ -32,7 +32,7 @@ const EQUIVALENTS = new Map<string, { name: string; planned: boolean }>(Object.e
   ...Object.fromEntries(["ioredis", "redis"].map((p) => [p, PLANNED("Redis client")])),
   ...Object.fromEntries(["glob", "fast-glob", "globby"].map((p) => [p, PLANNED("Glob")])),
   "fs-extra": PLANNED("Directory operations"), chokidar: PLANNED("File watching"), tmp: PLANNED("Temporary files and directories"),
-  ...Object.fromEntries(["execa", "cross-spawn"].map((p) => [p, PLANNED("Process spawning")])),
+  ...Object.fromEntries(["execa", "cross-spawn"].map((p) => [p, PLANNED("Streaming child processes")])),
   ...Object.fromEntries(["node-cron", "cron"].map((p) => [p, PLANNED("Scheduled jobs")])),
   cors: PLANNED("CORS middleware"), compression: PLANNED("Response compression"), "express-rate-limit": PLANNED("Rate-limiting middleware"),
   ...Object.fromEntries(["cookie", "cookie-parser"].map((p) => [p, IN_STD("req.cookies and res.cookies")])),
