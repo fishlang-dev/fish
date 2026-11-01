@@ -278,7 +278,7 @@ export function expressions(ctx: Context) {
     fixedPrints, formatCalls, inspectCalls, jsAccessors, jsBodies, jsCalledAt, jsCalls, jsClasses,
     jsCrossings, jsEmptyTests, jsEvaluations, jsExports, jsGiven, jsMembers, jsMethods, jsNews,
     jsOptionalOf, jsStatics, jsUses, jsonCalls, kindTests, lengthChecks, maths, namedParams,
-    ofElements, packed, pairs, parsedArgs, parses, presetParams, presetTypes, printCalls, printed,
+    objectReads, ofElements, packed, pairs, parsedArgs, parses, presetParams, presetTypes, printCalls, printed,
     promiseVariants, quotes, regexCalls, regexNews, regexStringCalls, stringBuilds, substituted,
     syncFileCalls, tagCalls, timerCalls, timerNames, timerSets, timerWrappers, tupleLiterals,
     unusedDefaults, restStarts, upcasts, typing, ids, regex, files
@@ -984,6 +984,7 @@ export function expressions(ctx: Context) {
       Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: helper, start: callee.start, end: callee.end } });
       return call(e);
     }
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Object" && !lookup("Object") && !classes.has("Object") && !byName.has("Object") && !byName.has("const Object") && !enums.has("Object")) return objectStatic(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "String" && !lookup("String") && !classes.has("String") && !byName.has("String") && !byName.has("const String") && !enums.has("String")) return stringStatic(e, callee);
     if (callee.kind === "member" && isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("E0505", "'Math' is always there, so its functions are called without '?.'", e.start, e.end);
@@ -2438,6 +2439,54 @@ export function expressions(ctx: Context) {
     if (f) made = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
     Object.assign(e, made, { id: e.id, start: e.start, end: e.end });
     return call(e as Call);
+  }
+
+  // `Object.keys(o)`, `Object.values(o)` and `Object.entries(o)`: o's fields are known while
+  // compiling, so each becomes an array literal reading them, the values cloned.
+  function objectStatic(e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    const name = callee.name;
+    if (name !== "keys" && name !== "values" && name !== "entries") throw new CompileError("E0502", `'Object' has no '${name}' yet; it has 'keys', 'values' and 'entries'`, callee.start, callee.end);
+    if (callee.optional || e.optional) throw new CompileError("E0505", `'Object' is always there, so 'Object.${name}' is called without '?.'`, e.start, e.end);
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", `'Object.${name}' takes no type arguments`, e.start, e.end);
+    const o = e.args[0];
+    if (!o || e.args.length > 1 || o.kind === "spread") throw new CompileError("E0504", `'Object.${name}' takes the object to read`, e.start, e.end);
+    const fields = objectRead(name, o).fields;
+    const at = { start: e.start, end: e.end };
+    const key = (f: Field): Expr => ({ id: nextId(ids), kind: "string", value: f.name, ...at });
+    const fieldValue = (f: Field): Expr => {
+      const member: Expr = { id: nextId(ids), kind: "member", object: spanned(renumber(structuredClone(o), () => nextId(ids)), o), name: f.name, optional: false, ...at };
+      return isCopy(f.type) ? member : { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: member, name: "clone", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+    };
+    const elements = fields.map((f): Expr => (name === "keys" ? key(f) : name === "values" ? fieldValue(f) : { id: nextId(ids), kind: "array", elements: [key(f), fieldValue(f)], ...at }));
+    for (const k of Object.keys(e)) if (k !== "id") delete (e as Record<string, unknown>)[k];
+    Object.assign(e, { kind: "array", elements, ...at });
+    objectReads.set(e, { name, object: o });
+    return { type: value(e), what: `'Object.${name}'` };
+  }
+
+  // The fields `Object.keys`, `values` or `entries` reads from o, and the array it gives. An
+  // instance gives its public fields, bases' first, in declaration order; an object type has only
+  // its sorted order, which printing and JSON use too. Values are typed as the union of the fields'.
+  function objectRead(name: "keys" | "values" | "entries", o: Expr): { fields: Field[]; type: ArrayType } {
+    // The object is read once per field, so it has to be a place reading it again gives.
+    const notPlace = () => new CompileError("E0504", `'Object.${name}' reads a variable or a field; store this value in a 'const' first`, o.start, o.end);
+    let root: Expr = o;
+    while (root.kind === "member" && !root.optional) root = root.object;
+    if (root.kind !== "this" && root.kind !== "ident") throw notPlace();
+    const probe = spanned(renumber(structuredClone(o), () => nextId(ids)), o);
+    const t = unfolded(read(probe));
+    if (!rooted(probe)) throw notPlace();
+    if (typeof t !== "string" && t.kind === "map") {
+      const which = t.set ? "Set" : "Map";
+      throw new CompileError("E0504", `'Object.${name}' reads an object's fields, and a ${which} has none; use the ${which}'s own '${name}()'`, o.start, o.end);
+    }
+    // A parameter typed with an object type gives that type's fields, as TypeScript types them.
+    const shape = typeof t !== "string" && t.kind === "param" && t.bound?.kind === "object" ? t.bound : t;
+    if (typeof shape === "string" || !((shape.kind === "object" && !isTuple(shape)) || shape.kind === "class")) throw new CompileError("E0504", `'Object.${name}' reads the fields of an object or a class instance, not '${show(t)}'`, o.start, o.end);
+    const fields = (shape.kind === "class" ? allFields(shape) : shape.fields).filter((f) => (f.access ?? "public") === "public");
+    if (name !== "keys" && fields.length === 0) throw new CompileError("E0504", `'${show(t)}' has no fields, so 'Object.${name}' would give an array of nothing`, o.start, o.end);
+    const held = unionType(fields.map((f) => widenLet(f.type)));
+    return { fields, type: arrayType(name === "keys" ? "string" : name === "values" ? held : tupleType(["string", held])) };
   }
 
   // `n` as the `i64` an array's length is made from, checked to be an i64 or a usize, and with
@@ -4486,6 +4535,8 @@ export function expressions(ctx: Context) {
       // declared type has to say what it holds.
       case "array": {
         if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
+        const fromObject = objectReads.get(e);
+        if (fromObject && !wanted.has(e)) expect(e, objectRead(fromObject.name, fromObject.object).type);
         const tuple = tuples.get(e);
         if (tuple) return tupleLiteral(e, tuple);
         // A pair in `new Map([[k, v]])` is a tuple of what it holds.
