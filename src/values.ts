@@ -23,7 +23,7 @@ import { holesOf, quoted, type Category } from "./quote.ts";
 import { holdsNull } from "./defaults.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
-import { bothSides, comparable, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 import { nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber } from "./nodes.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
@@ -4917,7 +4917,7 @@ export function expressions(ctx: Context) {
     // holding one as the union that flattens into.
     const concrete = (t: Type): Type => {
       if (typeof t !== "string" && t.kind === "param" && t.concrete) return concrete(t.concrete);
-      return typeof t !== "string" && t.kind === "union" && t.members.some((m) => typeof m !== "string" && m.kind === "param" && m.concrete) ? lower(t) : t;
+      return typeof t !== "string" && t.kind === "union" && holdsArgument(t) ? lower(t) : t;
     };
     const [cl, cr] = [concrete(l), concrete(r)];
     const common = fits(cl, cr) ? cr : fits(cr, cl) ? cl : undefined;

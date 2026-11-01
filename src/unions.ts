@@ -140,11 +140,18 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
   return "boolean";
 }
 
-// The number types a union holds, a type parameter's counted as the one it stands for in an
-// instance, so a literal meeting `T | 0` with T = i32 is an i32 as it is meeting `i32 | 0`.
+// The number types a union holds. In an instance, a union holding a type parameter is read as
+// the union it flattens into, so a literal meeting `T | 0` with T = `i32 | string` is an i32 as
+// it is meeting `i32 | string | 0`.
 export function numberMembers(lower: Typing["lower"], t: Type, members: (u: UnionType) => Type[] = (u) => u.members): Type[] {
   if (typeof t === "string" || t.kind !== "union") return [];
-  return members(t).map((m) => (typeof m !== "string" && m.kind === "param" && m.concrete ? lower(m) : m)).filter(isNumeric);
+  const flat = holdsArgument(t) ? lower(t) : t;
+  return (typeof flat !== "string" && flat.kind === "union" ? members(flat) : [flat]).filter(isNumeric);
+}
+
+// Whether an instance's union holds a type parameter, which stands for its type argument there.
+export function holdsArgument(t: UnionType): boolean {
+  return t.members.some((m) => typeof m !== "string" && m.kind === "param" && m.concrete !== undefined);
 }
 
 // A `?:` whose sides have different types makes the union of both, as in TypeScript.
@@ -230,7 +237,7 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing: 
   // A union of strings and patterns is a string once lowered, compared as one.
   const isUnion = (t: Type) => typeof t !== "string" && t.kind === "union" && lower(t) !== "string";
   // In an instance, a union holding a type parameter is the union its type argument flattens into.
-  const flat = (t: Type) => (typeof t !== "string" && t.kind === "union" && t.members.some((m) => typeof m !== "string" && m.kind === "param" && m.concrete) ? lower(t) : t);
+  const flat = (t: Type) => (typeof t !== "string" && t.kind === "union" && holdsArgument(t) ? lower(t) : t);
   const instanced = flat(left) !== left || flat(right) !== right;
   [left, right] = [flat(left), flat(right)];
   if (!isUnion(left) && !isUnion(right)) {

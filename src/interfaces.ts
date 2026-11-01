@@ -111,11 +111,12 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   if (typeof type !== "string" && type.kind === "param") {
     return type.bound ? unsatisfied(type.bound, trait, members, at) : `type '${type.name}' has no members`;
   }
-  // A future is a `Promise<T>` for exactly what it gives.
+  // A future is a `Promise<T>` for exactly what it gives, a type parameter's union in an
+  // instance being the one it flattens into.
   if (typeof type !== "string" && type.kind === "future") {
     const element = promiseElement(trait);
     if (element === undefined) return `a promise has no members, which type '${trait.name}' expects`;
-    return type.gives === element ? undefined : `it gives '${show(type.gives)}', not '${show(element)}'`;
+    return lower(type.gives) === lower(element) ? undefined : `it gives '${show(type.gives)}', not '${show(element)}'`;
   }
   // A generator is a `Generator<T>` for exactly what it yields, its `next` being its only member.
   if (typeof type !== "string" && type.kind === "generator") {

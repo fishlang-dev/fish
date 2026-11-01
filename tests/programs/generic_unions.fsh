@@ -461,3 +461,111 @@ function main(): void {
 }
 // expect: true false false true false
 // expect: false true
+// case: generic_unions_number_literal_union_argument
+function h<T>(x: T | 0): boolean {
+  return x === 0;
+}
+
+function concrete(x: f64 | null | 0): boolean {
+  return x === 0;
+}
+
+function sw<T>(x: T | 0 | 1): string {
+  switch (x) {
+    case 0:
+    case 1:
+      return "small";
+    default:
+      return "T";
+  }
+}
+
+function fall<T>(x: T | 0): string {
+  let s = "";
+  switch (x) {
+    case 0:
+      s += "z";
+    default:
+      s += "d";
+  }
+  return s;
+}
+
+const folded = comptime h<f64 | null>(0);
+
+function main(): void {
+  // With T a union, `T | 0` is the union it flattens into, read as written out by hand.
+  console.log(h<f64 | null>(0), h<f64 | null>(0.0), h<i32 | null>(0), h<f64 | null>(null), concrete(0), concrete(0.0));
+  console.log(h<i32 | string>(0), h<i32 | string>(0 as i32), h<i32 | string>("a"));
+  console.log(h<5>(0), h<5>(5), h<0>(0), h<bigint>(0), h<bigint>(0n), h<boolean>(0), h<boolean>(true));
+  console.log(sw<i32 | string>(1), sw<i32 | string>(1 as i32), sw<i32 | string>(2 as i32), sw<i32 | string>("q"), sw<f64 | null>(1), sw<f64 | null>(null));
+  console.log(fall<i32 | string>(0), fall<i32 | string>("a"), fall<f64>(0));
+  console.log(folded);
+}
+// expect: true true true false true true
+// expect: true true false
+// expect: true false true true false true false
+// expect: small small T T small T
+// expect: zd d zd
+// expect: true
+// case: generic_unions_number_literal_union_argument_release
+// mode: release
+function h<T>(x: T | 0): boolean {
+  return x === 0;
+}
+
+function main(): void {
+  console.log(h<f64 | null>(0), h<i32 | string>(0), h<i32 | string>("a"), h<u8 | null>(null));
+}
+// expect: true true false false
+// case: generic_unions_promise_parameter
+async function get<T>(x: T): Promise<T | null> {
+  return x;
+}
+
+async function none<T>(): Promise<T | null> {
+  return null;
+}
+
+async function take<T>(p: Promise<T | null>, d: T): Promise<T> {
+  const r = await p;
+  if (r === null) return d;
+  return r;
+}
+
+class Box<T> {
+  v: T;
+
+  constructor(v: T) {
+    this.v = v;
+  }
+
+  async refill(this: Mut<this>, p: Promise<T | null>, d: T): Promise<void> {
+    const r = await p;
+    if (r === null) {
+      this.v = d;
+      return;
+    }
+    this.v = r;
+  }
+}
+
+async function main(): Promise<void> {
+  const a = await take<string>(get<string>(`a${1}`), "d");
+  const b = await take<string | null>(get<string | null>(`b${1}`), "d");
+  const c = await take(get<string>(`c${1}`), "d");
+  const n = await take(none<string>(), `n${1}`);
+  console.log(a, b ?? "N", c, n);
+  let box = new Box<string | null>(null);
+  await box.refill(get<string | null>(`z${1}`), "d");
+  console.log(box.v ?? "N");
+  await box.refill(none<string | null>(), `e${2}`);
+  console.log(box.v ?? "N");
+  let plain = new Box<string>("s");
+  await plain.refill(get<string>(`w${3}`), "d");
+  console.log(plain.v);
+}
+// expect: a1 b1 c1 n1
+// expect: z1
+// expect: e2
+// expect: w3
