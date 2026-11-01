@@ -6429,6 +6429,11 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_unlock(&fsh_park);
   if (stuck) {
     fsh_abandoned = 1;
+    // Detached, the abandoned threads end with the process rather than as leaks a thread
+    // sanitizer reports.
+    for (int64_t i = 0; i < fsh_workers; i++) pthread_detach(fsh_threads[i]);
+    pthread_detach(fsh_timer_thread);
+    pthread_detach(fsh_io_thread);
     if (fsh_panicked) exit(101);
     memcpy(out, fsh_output(fsh_main_task), output_size);
     return fsh_main_task->outcome;
