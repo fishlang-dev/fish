@@ -4041,6 +4041,9 @@ export function expressions(ctx: Context) {
     if (object.kind === "super") return superMethod(callee);
     const type = receiver!;
     const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
+    if (!found && typeof type !== "string" && type.kind === "class" && type.name === "RequestCookies" && classOf(type).constructor.start >= STD_BASE && (name === "set" || name === "delete")) {
+      throw new CompileError("E0502", `a request's cookies can't be changed, so 'RequestCookies' has no method '${name}'; ${name} the cookie on the response instead, as 'res.cookies.${name}(...)'`, callee.start, callee.end);
+    }
     if (!found) throw new CompileError("E0502", `'${show(type)}' has no method '${name}'${didYouMean(name, memberNames(type))}`, callee.start, callee.end);
     visible(found.access, found.declared ?? found.owner!, name, callee);
     if (found.self!.owned) takesOver(object, name);

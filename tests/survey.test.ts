@@ -612,6 +612,16 @@ test("std's random functions make Math.random, crypto imports of them, and uuid 
   });
 });
 
+test("cookie and cookie-parser are replaced by std's cookies", () => {
+  project({
+    "package.json": JSON.stringify({ dependencies: { cookie: "1", "cookie-parser": "1" } }),
+  }, (dir) => {
+    expect(Object.fromEntries(dependencies(dir)!.list.map((x) => [x.name, [x.group, x.equivalent?.name]]))).toEqual({
+      cookie: ["std", "req.cookies and res.cookies"], "cookie-parser": ["std", "req.cookies and res.cookies"],
+    });
+  });
+});
+
 test("randomBytes waits on typed arrays, since Node's gives a Buffer and std's a u8[]", () => {
   project({
     "a.ts": "import { randomBytes } from \"node:crypto\";\nexport const t = randomBytes(16).toString(\"hex\");\n",
