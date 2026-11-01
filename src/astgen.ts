@@ -10,6 +10,9 @@ const CATEGORIES: Record<string, string> = { Expr: "AstExpr", Stmt: "AstStmt", T
 // The parser's types that aren't part of the tree. A node's id is the compiler's own, so macros
 // never see one.
 const SKIPPED = new Set(["Span", "Id", "Cursor", "Parse"]);
+// Fields the compiler sets on nodes for its own passes, which a macro must not write: an
+// overload's narrowing downcast is made only by overload lowering.
+const INTERNAL = new Set(["narrows"]);
 
 type Field = { name: string; optional: boolean; type: string };
 type Shape = Field[];
@@ -67,7 +70,7 @@ export function astDeclarations(src: string): string {
     const kinds = kind && kind.kind === "property" && kind.type?.kind === "union" ? kind.type.types : [kind && kind.kind === "property" ? kind.type : undefined];
     return kinds.map((k) => {
       const tag = k && k.kind === "literal" ? (k.value as { value: string }).value : undefined;
-      return t.members.map((m) => member(m, tag));
+      return t.members.filter((m) => !(m.kind === "property" && typeof m.name === "string" && INTERNAL.has(m.name))).map((m) => member(m, tag));
     });
   };
 

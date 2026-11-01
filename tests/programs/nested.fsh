@@ -357,3 +357,12 @@ function main() { f(); }
 // case: nested_checked_again_reference
 // error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
 function main() { let xs = ["a" + 1, "b" + 2]; let i = 0; { const r: Ref<string> = xs[i]; function show(): void { console.log(r); } xs.push("c"); show(); } }
+
+// case: nested_generic_async_awaits
+async function one(): Promise<i64> { return 1; }
+async function main() {
+  async function twice<T>(x: T): Promise<T> { await one(); return x; }
+  const a = await twice(5);
+  console.log(a);
+}
+// expect: 5
