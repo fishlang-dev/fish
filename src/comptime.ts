@@ -6,6 +6,7 @@ import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import type { Tables } from "./compilation.ts";
+import { timed } from "./timings.ts";
 import { baseOf, elementsOf, isSubclass, isTuple, field, INTEGERS, range, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
@@ -201,7 +202,7 @@ export function comptimeBody(instance: Instance): Value {
 // comptime site, noting where inside it happened.
 function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): Value {
   try {
-    return go(interpreter(tables));
+    return timed(tables.timings, "comptime", () => go(interpreter(tables)));
   } catch (e) {
     let stop = e;
     if (e instanceof Thrown) stop = new Stop(`this comptime code threw an error it didn't catch: ${described(e.value)}`, e.at, false);

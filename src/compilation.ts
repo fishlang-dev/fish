@@ -10,6 +10,7 @@ import type { RegexTables } from "./regex.ts";
 import type { RustTables } from "./rust.ts";
 import type { Locking } from "./dependencies.ts";
 import type { Unit } from "./mathlib.ts";
+import type { Timings } from "./timings.ts";
 import { newTyping, type ClassType, type DynType, type LiteralType, type Type, type Typing } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
@@ -51,6 +52,7 @@ export type Counts = { enums: number; lifts: number; destructures: number; expan
 // `mathUnits`: the Math runtime's objects to compile.
 // `std`: std's parsed tree, serialized, by the path it is cached at; the key naming it, null when
 // no compiler source can be read; and how many times std was parsed rather than loaded.
+// `timings`: each build stage's time, kept only when `--timings` asks.
 export type Session = {
   locking: Locking;
   engineHook: boolean;
@@ -59,6 +61,7 @@ export type Session = {
   compiling: Map<string, Promise<string>>;
   mathUnits?: Unit[];
   std: { key?: string | null; tree?: { path: string | null; bytes: Uint8Array }; parses: number };
+  timings?: Timings;
 };
 
 export function newSession(): Session {
@@ -74,7 +77,7 @@ export function newCompilation(session: Session): Compilation {
 // instance it makes holds it, so nothing one program records reaches another.
 export type Tables = {
   // What every check of the program shares: its types, the upcasts its macros wrote, the counter
-  // for the nodes checking makes, its regex tables, files and Rust names.
+  // for the nodes checking makes, its regex tables, files and Rust names, and the session's timings.
   typing: Typing;
   upcasts: Set<string>;
   ids: Ids;
@@ -82,6 +85,7 @@ export type Tables = {
   files: Compilation["files"];
   rust: RustTables;
   generated: Compilation["generated"];
+  timings?: Timings;
   // The `let` statements and parameters that declare a name, as the checker meets them; every
   // other node an instance's `locals` holds is a use of one.
   declarations: WeakNodeSet<Expr | Stmt | Param | ObjectProp>;
@@ -298,8 +302,9 @@ export type Tables = {
   computing: Set<Instance>;
 };
 
-export function newTables({ typing, upcasts, ids, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ session, typing, upcasts, ids, regex, files, rust, generated }: Compilation): Tables {
   return {
+    timings: session.timings,
     typing,
     upcasts,
     ids,

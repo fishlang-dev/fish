@@ -186,3 +186,26 @@ test("fishc check reports every error, with a closing count, painted only when a
   expect(env({ FORCE_COLOR: "0" })).toBe(plain.err);
   expect(env({ NO_COLOR: "1" })).toBe(plain.err);
 });
+
+// Each `--timings` line as [stage, milliseconds, note]; the numbers are only checked to parse.
+const stages = (err: string) =>
+  err.trimEnd().split("\n").map((l) => {
+    const m = /^(\w+) +(\d+\.\d) ms(?: \((.+)\))?$/.exec(l);
+    if (!m) throw new Error(`not a timings line: ${l}`);
+    return [m[1], Number(m[2]), m[3]] as const;
+  });
+
+const timed = `function fib(n: i64): i64 { return n < 2 ? n : fib(n - 1) + fib(n - 2); }\nconst N = comptime fib(10);\nfunction main() { console.log(N); }\n`;
+
+test("fishc check --timings prints each front-end stage's time, then the total", () => {
+  const p = dir("timings-check", { "main.fsh": timed });
+  const checked = fishc(p, "check", "main.fsh", "--timings");
+  expect([checked.code, checked.out]).toEqual([0, ""]);
+  expect(stages(checked.err).map(([s]) => s)).toEqual(["parse", "macros", "check", "moves", "comptime", "total"]);
+  expect(fishc(p, "check", "main.fsh")).toEqual({ code: 0, out: "", err: "" });
+  const ir = fishc(p, "build", "main.fsh", "--emit-llvm", "--timings");
+  expect(ir.out).toContain('@"fsh.main"');
+  expect(stages(ir.err).map(([s]) => s)).toEqual(["parse", "macros", "check", "moves", "comptime", "codegen", "total"]);
+  const bad = fishc(p, "check", "--timings", dir("timings-bad", { "bad.fsh": `function main() { const n: i64 = "no"; }\n` }) + "/bad.fsh");
+  expect([bad.code, bad.err.includes(" ms")]).toEqual([1, false]);
+});

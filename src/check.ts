@@ -26,6 +26,7 @@ import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { lowerOverloads } from "./overloads.ts";
 import { checkMoves } from "./moves.ts";
+import { timed } from "./timings.ts";
 import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
@@ -1611,7 +1612,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const at = f.returnType ?? f;
       throw new CompileError("E0601", "not all code paths return a value", at.start, at.end);
     }
-    checkMoves(f, instance, origins);
+    timed(instance.tables.timings, "moves", () => checkMoves(f, instance, origins));
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (self && classOf(self.type).methods.get("clone") === f && (f.params.length > 0 || type !== self.type)) {
       throw new CompileError("E0213", `a 'clone' method must take no parameters and return '${show(self.type)}', since it replaces the compiler's copy`, f.start, f.end);
