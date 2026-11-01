@@ -113,3 +113,71 @@ function main() {
   rows(r);
   keyed({ id: 3, label: "three" });
 }
+// case: object_keys_map
+// error: 'Object.keys' reads an object's fields, and a Map has none; use the Map's own 'keys()'
+function main() {
+  const m = new Map<string, i64>();
+  console.log(Object.keys(m));
+}
+// case: object_keys_set
+// error: 'Object.values' reads an object's fields, and a Set has none; use the Set's own 'values()'
+function main() {
+  const s = new Set<string>();
+  console.log(Object.values(s));
+}
+// case: object_keys_temporary
+// error: 'Object.values' reads a variable or a field; store this value in a 'const' first
+function make() {
+  return { a: 1 };
+}
+function main() {
+  console.log(Object.values(make()));
+}
+// case: object_keys_tuple
+// error: 'Object.keys' reads the fields of an object or a class instance, not '[i64, string]'
+function main() {
+  const t: [i64, string] = [1, "a"];
+  console.log(Object.keys(t));
+}
+// case: object_keys_number
+// error: 'Object.entries' reads the fields of an object or a class instance, not 'i64'
+function main() {
+  const n = 3;
+  console.log(Object.entries(n));
+}
+// case: object_keys_no_fields
+// error: '{}' has no fields, so 'Object.values' would give an array of nothing
+function main() {
+  const e = {};
+  console.log(Object.values(e));
+}
+// case: object_keys_other_static
+// error: 'Object' has no 'assign' yet; it has 'keys', 'values' and 'entries'
+function main() {
+  const o = { a: 1 };
+  console.log(Object.assign(o));
+}
+// case: object_keys_optional_call
+// error: 'Object' is always there, so 'Object.keys' is called without '?.'
+function main() {
+  const o = { a: 1 };
+  console.log(Object?.keys(o));
+}
+// case: object_keys_arguments
+// error: 'Object.keys' takes the object to read
+function main() {
+  const o = { a: 1 };
+  console.log(Object.keys(o, o));
+}
+// case: object_keys_shadowed
+// expect: mine
+// A program's own 'Object' is the one called.
+class Object {
+  static keys(o: { a: i64 }): string {
+    return "mine";
+  }
+}
+function main() {
+  const o = { a: 1 };
+  console.log(Object.keys(o));
+}
