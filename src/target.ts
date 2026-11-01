@@ -132,3 +132,36 @@ export function instrumented(ir: string, target: Target): string {
   const attribute = target.sanitize === "address" ? "sanitize_address" : "sanitize_thread";
   return ir.replace(/^(define [^\n]*\))( uwtable| \{$)/gm, `$1 ${attribute}$2`);
 }
+
+// Where OpenSSL is for a target: the flags to compile and link the TLS runtime with, or why it
+// isn't there.
+export type OpenSsl = { compile: string[]; link: string[] } | { missing: string };
+
+const LIBS = ["-lssl", "-lcrypto"];
+const INSTALL = "install it (brew install openssl@3 on macOS, apt install libssl-dev on Debian and Ubuntu, apk add openssl-dev on Alpine) and build the program again";
+
+// OpenSSL for `target`: on this machine through pkg-config, else Homebrew's openssl@3, else the
+// system's headers; for another target or a sysroot, only in the sysroot, never this machine's.
+export function findOpenSsl(target: Target): OpenSsl {
+  const at = target.compile.indexOf("--sysroot");
+  const sysroot = at >= 0 ? target.compile[at + 1] : undefined;
+  if (sysroot !== undefined || target.compile.includes("-target")) {
+    if (sysroot !== undefined && existsSync(join(sysroot, "usr", "include", "openssl", "ssl.h"))) return { compile: [], link: LIBS };
+    const local = sysroot === undefined ? undefined : join(sysroot, "usr", "local");
+    if (local !== undefined && existsSync(join(local, "include", "openssl", "ssl.h"))) return { compile: ["-I", join(local, "include")], link: ["-L", join(local, "lib"), ...LIBS] };
+    const where = sysroot === undefined ? "no sysroot was given" : `the sysroot ${sysroot} has no OpenSSL headers`;
+    return { missing: `TLS needs OpenSSL built for ${target.triple}, and ${where}; install OpenSSL's headers and libraries into a sysroot for that target and build the program again` };
+  }
+  if (Bun.which("pkg-config")) {
+    const asked = Bun.spawnSync(["pkg-config", "--cflags", "--libs", "openssl"]);
+    if (asked.exitCode === 0) {
+      const flags = asked.stdout.toString().trim().split(/\s+/).filter((f) => f !== "");
+      return { compile: flags.filter((f) => f.startsWith("-I")), link: flags.filter((f) => !f.startsWith("-I")) };
+    }
+  }
+  for (const dir of ["/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"]) {
+    if (existsSync(join(dir, "include", "openssl", "ssl.h"))) return { compile: ["-I", join(dir, "include")], link: ["-L", join(dir, "lib"), ...LIBS] };
+  }
+  if (existsSync("/usr/include/openssl/ssl.h")) return { compile: [], link: LIBS };
+  return { missing: `TLS needs OpenSSL, which wasn't found when this program was built; ${INSTALL}` };
+}

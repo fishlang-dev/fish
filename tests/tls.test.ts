@@ -1,9 +1,11 @@
 import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { newSession } from "../src/compilation.ts";
 import { buildAsync } from "../src/main.ts";
+import { NATIVE, tlsStub } from "../src/native.ts";
+import { findOpenSsl } from "../src/target.ts";
 
 // TLS between Fish and Bun, both ways, with the test-only certificates in tests/fixtures/tls.
 // Each test builds its program with clang, which can be slow on a busy machine.
@@ -94,4 +96,22 @@ async function main(): Promise<void> throws IoError {
     proc.kill();
     await proc.exited;
   }
+});
+
+test("OpenSSL for another target is looked for only in its sysroot", () => {
+  const target = (compile: string[]) => ({ triple: "x86_64-unknown-linux-musl", compile, link: [], ar: "llvm-ar" });
+  const sysroot = join(tmp, "sysroot");
+  mkdirSync(sysroot);
+  expect(findOpenSsl(target(["-target", "x86_64-unknown-linux-musl"]))).toEqual({ missing: "TLS needs OpenSSL built for x86_64-unknown-linux-musl, and no sysroot was given; install OpenSSL's headers and libraries into a sysroot for that target and build the program again" });
+  expect(findOpenSsl(target(["-target", "x86_64-unknown-linux-musl", "--sysroot", sysroot]))).toHaveProperty("missing");
+  mkdirSync(join(sysroot, "usr", "include", "openssl"), { recursive: true });
+  writeFileSync(join(sysroot, "usr", "include", "openssl", "ssl.h"), "");
+  expect(findOpenSsl(target(["-target", "x86_64-unknown-linux-musl", "--sysroot", sysroot]))).toEqual({ compile: [], link: ["-lssl", "-lcrypto"] });
+});
+
+test("the runtime without OpenSSL compiles, its TLS calls saying why", () => {
+  const object = join(tmp, "stub.o");
+  const clang = Bun.spawnSync(["clang", "-x", "c", "-", "-c", "-o", object], { stdin: new TextEncoder().encode(NATIVE + tlsStub("TLS needs \"OpenSSL\"")), stderr: "pipe" });
+  expect(clang.stderr.toString()).not.toContain("error");
+  expect(clang.exitCode).toBe(0);
 });
