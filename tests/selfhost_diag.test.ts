@@ -2,7 +2,7 @@ import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { build } from "../src/main.ts";
 import { mirrored } from "../scripts/selfhost.ts";
 
@@ -19,7 +19,7 @@ test("diagnostics built with fishc render errors exactly as the Bun build does",
     mkdirSync(join(dir, "tests", "selfhost"), { recursive: true });
     for (const f of readdirSync(join(ROOT, "src")).filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))) mirrored(join(ROOT, "src", f), join(dir, "src"));
     const driver = mirrored(join(ROOT, "tests", "selfhost", "diag.ts"), join(dir, "tests", "selfhost"));
-    build(newSession(), driver, join(dir, "diag"));
+    build(cachedSession(), driver, join(dir, "diag"));
     const native = Bun.spawnSync([join(dir, "diag")]);
     const bun = Bun.spawnSync(["bun", "-e", 'import { main } from "./tests/selfhost/diag.ts"; main()'], { cwd: ROOT });
     expect(native.exitCode).toBe(0);

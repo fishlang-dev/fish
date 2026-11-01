@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { check } from "../src/check.ts";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { CompileError } from "../src/diag.ts";
 import { expandMacros } from "../src/macros.ts";
 import { analyze } from "../src/main.ts";
@@ -70,7 +71,7 @@ test("every node of the compiler's own source has an id of its own", () => {
 });
 
 test("every node of the test programs, parsed, expanded and checked, has an id of its own", () => {
-  const session = newSession();
+  const session = cachedSession();
   const problems: string[] = [];
   for (const p of corpus()) {
     const ids = new Map<number, object>();
@@ -112,7 +113,7 @@ function auditTypes(roots: Type[], typing: Typing, where: string): string[] {
 }
 
 test("every type of the checked test programs is in its arena", () => {
-  const session = newSession();
+  const session = cachedSession();
   const problems: string[] = [];
   let types = 0;
   for (const p of corpus()) {
@@ -157,7 +158,7 @@ function sharedFields(typing: Typing, where: string): string[] {
 }
 
 test("no two types of the checked test programs share a Field array or Field", () => {
-  const session = newSession();
+  const session = cachedSession();
   const problems: string[] = [];
   for (const p of corpus()) {
     if (p.src.includes("// mode: parse")) continue;

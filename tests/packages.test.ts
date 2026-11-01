@@ -5,9 +5,9 @@ import { dirname, join } from "node:path";
 import { formatError } from "../src/diag.ts";
 import { build } from "../src/main.ts";
 import { sanitized } from "./sanitized.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // Each test builds a program with the JS engine, whose sources take several seconds to compile.
 setDefaultTimeout(30_000);

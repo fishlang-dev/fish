@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { check } from "../src/check.ts";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { parse } from "../src/parser.ts";
 
-const session = newSession();
+const session = cachedSession();
 // `src` checked as a program of its own, its nodes numbered by its compilation.
 const checkSource = (src: string, library = false) => {
   const compilation = newCompilation(session);

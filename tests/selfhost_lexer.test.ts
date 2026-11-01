@@ -2,7 +2,7 @@ import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { build } from "../src/main.ts";
 import { mirrored } from "../scripts/selfhost.ts";
 
@@ -26,7 +26,7 @@ test("the lexer built with fishc tokenizes the corpus exactly as the Bun build d
     mkdirSync(join(dir, "tests", "selfhost"), { recursive: true });
     for (const f of readdirSync(join(ROOT, "src")).filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))) mirrored(join(ROOT, "src", f), join(dir, "src"));
     const driver = mirrored(join(ROOT, "tests", "selfhost", "lexer.ts"), join(dir, "tests", "selfhost"));
-    build(newSession(), driver, join(dir, "lexer"));
+    build(cachedSession(), driver, join(dir, "lexer"));
     const files = corpus();
     const native = Bun.spawnSync([join(dir, "lexer"), ...files], { cwd: ROOT });
     // `lexer` stands in for the program's path, which Fish gives as argv[1] the way Node does.

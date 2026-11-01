@@ -3,9 +3,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compile } from "../src/main.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // Each compilation has its own state, so a program compiles the same whatever the process
 // compiled before it. These programs use what a compilation numbers or interns as it goes:

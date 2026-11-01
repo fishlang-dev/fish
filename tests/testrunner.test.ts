@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildTests } from "../src/main.ts";
 import { runTests, type Test } from "../src/tests.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // Each test builds a package's tests and runs them.
 setDefaultTimeout(30_000);

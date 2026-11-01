@@ -5,9 +5,9 @@ import { delimiter, join } from "node:path";
 import { CompileError, formatError } from "../src/diag.ts";
 import { compile } from "../src/main.ts";
 import { rustSymbol, trusted } from "../src/rust.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // Building a shim runs cargo, which compiles the fixture crate and the shim from nothing in each
 // test's own cache.

@@ -4,16 +4,17 @@ import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAsync, compile, ENGINE, runtimeUnits } from "../src/main.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjectsAsync } from "../src/mathlib.ts";
-import { STD_SOURCE, stdKey } from "../src/std.ts";
-import { newSession } from "../src/compilation.ts";
+import { STD_SOURCE } from "../src/std.ts";
+import { cachedSession, stdKey } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // A fresh cache compiles the Math runtime too, which takes seconds.
 setDefaultTimeout(120_000);
 
 const MAIN = join(import.meta.dir, "..", "src", "main.ts");
 const COMPILATION = join(import.meta.dir, "..", "src", "compilation.ts");
+const STDCACHE = join(import.meta.dir, "..", "src", "stdcache.ts");
 const root = mkdtempSync(join(tmpdir(), "fish-cache-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -103,8 +104,8 @@ writeFileSync(ENGINE_PROGRAM, `import { evaluate } from "fish:engine";\nfunction
 // Builds the program calling the engine into `out` with the cache at `cache`, from `cwd`.
 function buildEngine(cache: string, out: string, cwd = root) {
   const script = `import { build } from ${JSON.stringify(MAIN)};
-import { newSession } from ${JSON.stringify(COMPILATION)};
-const session = newSession();
+import { cachedSession } from ${JSON.stringify(STDCACHE)};
+const session = cachedSession();
 session.engineHook = true;
 build(session, ${JSON.stringify(ENGINE_PROGRAM)}, ${JSON.stringify(out)});`;
   const run = Bun.spawnSync(["bun", "-e", script], { cwd, env: { ...process.env, FISH_CACHE_DIR: cache } });
@@ -142,8 +143,8 @@ test("builds running at once compile each object once", () => {
   chmodSync(join(bin, "clang"), 0o755);
   const outs = [1, 2, 3, 4].map((i) => join(root, `concurrent-${i}`));
   const script = `import { buildAsync } from ${JSON.stringify(MAIN)};
-import { newSession } from ${JSON.stringify(COMPILATION)};
-const session = newSession();
+import { cachedSession } from ${JSON.stringify(STDCACHE)};
+const session = cachedSession();
 await Promise.all(${JSON.stringify(outs)}.map((out) => buildAsync(session, ${JSON.stringify(HELLO)}, out)));`;
   const run = Bun.spawnSync(["bun", "-e", script], { env: { ...process.env, FISH_CACHE_DIR: cache, PATH: `${bin}:${process.env.PATH}` } });
   expect(run.stderr.toString()).toBe("");
@@ -188,10 +189,11 @@ writeFileSync(HTTP_PROGRAM, `async function main(): Promise<void> {
 // How many times one session parsed std over two checks with the cache at `cache`.
 function stdParsesIn(cache: string): string {
   const script = `import { stdFor } from ${JSON.stringify(STD)};
-import { newCompilation, newSession } from ${JSON.stringify(COMPILATION)};
+import { newCompilation } from ${JSON.stringify(COMPILATION)};
+import { cachedSession } from ${JSON.stringify(STDCACHE)};
 // Each copy's nodes have ids of their own, so the copies are compared without them.
 const bare = (v) => Array.isArray(v) ? v.map(bare) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== "id").map(([k, x]) => [k, bare(x)])) : v;
-const session = newSession();
+const session = cachedSession();
 const [a, b] = [stdFor(newCompilation(session), []), stdFor(newCompilation(session), [])];
 if (Bun.deepEquals(bare(a), bare(b))) console.log(session.std.parses);`;
   const run = Bun.spawnSync(["bun", "-e", script], { env: { ...process.env, FISH_CACHE_DIR: cache } });
