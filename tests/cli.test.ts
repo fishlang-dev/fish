@@ -209,3 +209,22 @@ test("fishc check --timings prints each front-end stage's time, then the total",
   const bad = fishc(p, "check", "--timings", dir("timings-bad", { "bad.fsh": `function main() { const n: i64 = "no"; }\n` }) + "/bad.fsh");
   expect([bad.code, bad.err.includes(" ms")]).toEqual([1, false]);
 });
+
+test("fishc build and run --timings print every stage, saying which objects were built or cached", () => {
+  const p = dir("timings-build", { "main.fsh": timed });
+  const all = ["parse", "macros", "check", "moves", "comptime", "codegen", "compile", "runtime", "link", "total"];
+  // A cache of its own, so the first build compiles the runtime's objects and the second reuses them.
+  const env = { ...uncoloured, FISH_CACHE_DIR: join(p, "cache") };
+  const build = () => Bun.spawnSync(["bun", MAIN, "build", "main.fsh", "--timings"], { cwd: p, env });
+  const first = stages(build().stderr.toString());
+  expect(first.map(([s]) => s)).toEqual(all);
+  expect(first[7]![2]).toMatch(/^built runtime, std, .+; 0 cached$/);
+  const again = build();
+  expect(again.exitCode).toBe(0);
+  expect(stages(again.stderr.toString())[7]![2]).toMatch(/^\d+ cached$/);
+  expect(ran(join(p, "main"))).toBe("55\n");
+  const run = fishc(p, "run", "main.fsh", "--timings", "--release");
+  expect([run.code, run.out]).toEqual([0, "55\n"]);
+  expect(stages(run.err).map(([s]) => s)).toEqual(all);
+  expect(fishc(p, "build", "main.fsh", "--lib", "--timings")).toEqual({ code: 2, out: "", err: "fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from\n" });
+});
