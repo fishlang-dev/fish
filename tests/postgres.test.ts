@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Socket } from "bun";
 import { newSession } from "../src/compilation.ts";
 import { buildAsync } from "../src/main.ts";
@@ -13,7 +13,12 @@ import { buildAsync } from "../src/main.ts";
 setDefaultTimeout(60_000);
 
 const tmp = mkdtempSync(join(tmpdir(), "fish-postgres-"));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+// The throwaway Postgres further down, once started, stops before its directory goes.
+let real: { url: string; stop: () => void; binary: Promise<string> } | undefined;
+afterAll(() => {
+  real?.stop();
+  rmSync(tmp, { recursive: true, force: true });
+});
 const session = newSession();
 
 async function build(name: string, src: string): Promise<string> {
@@ -380,4 +385,123 @@ test("callers wait their turn for the pool's max connections, which are reused",
   } finally {
     fake.server.stop(true);
   }
+});
+
+// A throwaway Postgres: a cluster made in a temporary directory, on a free port, with SCRAM
+// passwords and TLS from the test certificates, stopped after the tests. Never any other server.
+const PG_BIN = ["/opt/homebrew/opt/postgresql@17/bin", ...(Bun.which("initdb") ? [dirname(Bun.which("initdb")!)] : [])].find((dir) => existsSync(join(dir, "initdb")));
+if (!PG_BIN) console.log("postgres.test.ts: no initdb found, in /opt/homebrew/opt/postgresql@17/bin or on PATH, so the tests against a real Postgres are skipped");
+
+// Typed rows, errors, a transaction left open, many tasks on a small pool, a connection killed
+// under it, and over TLS, the connection's encryption.
+const REAL = `import { Pool, PostgresError, RowError, SqlValue } from "postgres";
+
+type Item = { id: i64; name: string; price: string; tags: Json; note: string | null; small: i16; made: string };
+type Count = { n: i64 };
+
+async function slow(pool: Pool, i: i64): Promise<i64> {
+  try {
+    const row = await pool.queryOne<Count>("select $1::int8 * 2 as n, pg_sleep(0.05)::text as slept", [i]);
+    return row === null ? -1 : row.n;
+  } catch (e) {
+    console.log("failed", e.message);
+    return -1000;
+  }
+}
+
+async function main(): Promise<void> throws IoError | AbortError | TypeError | PostgresError | RowError {
+  const pool = await Pool.connect(process.argv[2]);
+  if (process.argv[3] === "tls") {
+    const tls = await pool.queryOne<{ ssl: boolean }>("select ssl from pg_stat_ssl where pid = pg_backend_pid()");
+    if (tls !== null) console.log("ssl", tls.ssl);
+    return;
+  }
+  await pool.execute("create table items (id int8 primary key, name text not null, price numeric, tags jsonb, note text, small int2, made timestamptz)");
+  const params: SqlValue[] = [1, "pen's \\"best\\"", "1.25", "[1, 2]", null, 3, new Date(0)];
+  const inserted = await pool.execute("insert into items values ($1, $2, $3::numeric, $4::jsonb, $5, $6, $7), (2, 'cup', 3.5, '{\\"x\\": true}', 'hi', -4, '2024-05-06 07:08:09+00')", params);
+  console.log("inserted", inserted);
+  const items = await pool.query<Item>("select *, 'more' as extra from items order by id");
+  for (const it of items) console.log(it.id, it.name, it.price, JSON.stringify(it.tags), it.note, it.small, it.made);
+  const none = await pool.queryOne<Item>("select * from items where id = $1", [99]);
+  console.log("none", none === null);
+  try {
+    await pool.query<Item>("select id, null::text as name, price, tags, note, small, made from items");
+  } catch (e) {
+    if (e instanceof RowError) console.log("RowError", e.message);
+  }
+  try {
+    await pool.execute("insert into items (id, name) values (1, 'again')");
+  } catch (e) {
+    if (e instanceof PostgresError) console.log("PostgresError", e.code, e.message, e.detail);
+  }
+  // A transaction a statement leaves open is rolled back before the connection is used again.
+  await pool.execute("begin");
+  const open = await pool.queryOne<Count>("select count(*) as n from pg_stat_activity where state like 'idle in transaction%'");
+  if (open !== null) console.log("idle in transaction", open.n);
+  let handles: JoinHandle<i64>[] = [];
+  for (let i: i64 = 1; i <= 6; i++) handles.push(spawn(slow(pool.clone(), i)));
+  let sum: i64 = 0;
+  while (handles.length > 0) {
+    const h = handles.pop()!;
+    const n = await h;
+    sum += n;
+  }
+  console.log("sum", sum);
+  const conns = await pool.queryOne<Count>("select count(*) as n from pg_stat_activity where backend_type = 'client backend'");
+  if (conns !== null) console.log("connections", conns.n);
+  try {
+    await pool.execute("select pg_terminate_backend(pg_backend_pid())");
+  } catch (e) {
+    if (e instanceof IoError) console.log("IoError", e.message);
+  }
+  const again = await pool.queryOne<Count>("select 1 as n");
+  if (again !== null) console.log("again", again.n);
+}
+`;
+
+beforeAll(async () => {
+  if (!PG_BIN) return;
+  const dir = join(tmp, "cluster");
+  writeFileSync(join(tmp, "pw"), "pa ss+word\n");
+  const init = Bun.spawnSync([join(PG_BIN, "initdb"), "-D", dir, "-U", "fish", "--auth=scram-sha-256", `--pwfile=${join(tmp, "pw")}`, "-E", "UTF8", "--no-locale"], { stdout: "pipe", stderr: "pipe" });
+  if (init.exitCode !== 0) throw new Error(`initdb failed: ${init.stderr}`);
+  const fixtures = join(import.meta.dir, "fixtures", "tls");
+  copyFileSync(join(fixtures, "server.pem"), join(dir, "server.pem"));
+  copyFileSync(join(fixtures, "server-key.pem"), join(dir, "server-key.pem"));
+  chmodSync(join(dir, "server-key.pem"), 0o600);
+  const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+  const port = probe.port;
+  probe.stop(true);
+  const options = `-p ${port} -k ${tmp} -c listen_addresses=127.0.0.1 -c ssl=on -c ssl_cert_file=server.pem -c ssl_key_file=server-key.pem -c timezone=UTC`;
+  const start = Bun.spawnSync([join(PG_BIN, "pg_ctl"), "-D", dir, "-o", options, "-l", join(tmp, "postgres.log"), "-w", "start"], { stdout: "pipe", stderr: "pipe" });
+  if (start.exitCode !== 0) throw new Error(`pg_ctl start failed: ${start.stderr}${readFileSync(join(tmp, "postgres.log"), "utf8")}`);
+  real = {
+    binary: build("real", REAL),
+    url: `postgres://fish:pa%20ss%2Bword@localhost:${port}/postgres`,
+    stop: () => void Bun.spawnSync([join(PG_BIN, "pg_ctl"), "-D", dir, "-m", "immediate", "stop"], { stdout: "pipe", stderr: "pipe" }),
+  };
+});
+
+test.skipIf(!PG_BIN)("a real Postgres: SCRAM, typed rows, errors, a small pool shared by many tasks, a killed connection", async () => {
+  const binary = await real!.binary;
+  expect(await run(binary, [`${real!.url}?max=3`, ""])).toBe([
+    "inserted 2",
+    '1 pen\'s "best" 1.25 [1,2] null 3 1970-01-01 00:00:00+00',
+    '2 cup 3.5 {"x":true} hi -4 2024-05-06 07:08:09+00',
+    "none true",
+    "RowError column 'name' is null, which its field can't hold; type it 'T | null'",
+    "PostgresError 23505 duplicate key value violates unique constraint \"items_pkey\" Key (id)=(1) already exists.",
+    "idle in transaction 0",
+    "sum 42",
+    "connections 3",
+    "IoError the Postgres server closed the connection",
+    "again 1",
+    "",
+  ].join("\n"));
+});
+
+test.skipIf(!PG_BIN)("a real Postgres over TLS, its certificate verified against sslrootcert", async () => {
+  const binary = await real!.binary;
+  const ca = join(import.meta.dir, "fixtures", "tls", "ca.pem");
+  expect(await run(binary, [`${real!.url}?sslmode=require&sslrootcert=${encodeURIComponent(ca)}`, "tls"])).toBe("ssl true\n");
 });
