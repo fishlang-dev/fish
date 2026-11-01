@@ -116,6 +116,9 @@ export type Tables = {
   substituted: WeakNodeSet<Expr>;
   // The element types written on `Array.of<T>(...)` calls, which became array literals.
   ofElements: WeakNodeMap<Expr, TypeNode>;
+  // The array literals `Object.keys`, `values` and `entries` calls became, with which it was and the
+  // object it reads, so a generic body's next instance types the literal as the call did.
+  objectReads: WeakNodeMap<Expr, { name: "keys" | "values" | "entries"; object: Expr }>;
   // `new Array(n).fill(x)` calls, rewritten into calls of the prelude's `array filled`.
   fills: WeakNodeSet<Expr>;
   filling: WeakNodeSet<Expr>;
@@ -323,6 +326,7 @@ export function newTables({ session, typing, upcasts, ids, regex, files, rust, g
     selfCalls: new WeakNodeSet<Expr>(),
     substituted: new WeakNodeSet<Expr>(),
     ofElements: new WeakNodeMap<Expr, TypeNode>(),
+    objectReads: new WeakNodeMap<Expr, { name: "keys" | "values" | "entries"; object: Expr }>(),
     fills: new WeakNodeSet<Expr>(),
     filling: new WeakNodeSet<Expr>(),
     packed: new WeakNodeSet<Expr>(),
