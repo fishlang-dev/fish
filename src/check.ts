@@ -16,9 +16,9 @@ import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
-import { comptimeName, infer, genericClasses, instancing, typeParamsOf } from "./generics.ts";
+import { comptimeName, infer, GenericClasses, Instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
-import { registry } from "./registry.ts";
+import { Registry } from "./registry.ts";
 import { addAlias, paramName, Resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
@@ -587,31 +587,31 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A class's members, for interface satisfaction. Like the resolver and generic classes,
   // which need each other, it reaches what is set up below lazily.
   const members: Members = {
-    classOf: (t) => classOf(t),
-    returnOf: (b, at) => returnOf(definition(b), at),
+    classOf: (t) => registry.classOf(t),
+    returnOf: (b, at) => returnOf(instancing.definition(b), at),
     // A generic method's, with its own type parameters standing for themselves.
-    paramTypesOf: (b) => ((b.typeParams ?? []).some((p) => !isLifetime(p)) ? paramTypes(definition(b), scopeOf(definition(b))) : declaredParams(b)),
+    paramTypesOf: (b) => ((b.typeParams ?? []).some((p) => !isLifetime(p)) ? instancing.paramTypes(instancing.definition(b), instancing.scopeOf(instancing.definition(b))) : instancing.declaredParams(b)),
     bodyNamed,
     typeParamsOf: (b) => {
-      const scope = scopeOf(definition(b));
+      const scope = instancing.scopeOf(instancing.definition(b));
       return (b.typeParams ?? []).filter((p) => !isLifetime(p)).map((p) => scope.get(p.name)!);
     },
     typing,
     arenas,
     assuming: new Set(),
   };
-  const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
+  const registry = new Registry({
     tables, classes, templates, members, resolveType: (t) => resolver.resolveType(t), withScope: (b, f) => resolver.withScope(b, f),
-    instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
+    instanceOf: (f) => instancing.instanceOf(f), definition: (f) => instancing.definition(f), checkBody: (i) => checkBody(i),
     classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
   });
-  classes.forEach((c) => register(arenas.classOf(c)));
-  const { classNamed, construct, start, define, definedClass } = genericClasses({
-    tables, classes, templates, register, layout, members, resolveType: (t) => resolver.resolveType(t), withScope: (b, f) => resolver.withScope(b, f),
+  classes.forEach((c) => registry.register(arenas.classOf(c)));
+  const genericClasses = new GenericClasses({
+    tables, classes, templates, register: (c) => registry.register(c), layout: (c) => registry.layout(c), members, resolveType: (t) => resolver.resolveType(t), withScope: (b, f) => resolver.withScope(b, f),
   });
   const resolver = new Resolver(tables, aliases, interfaces, enums, slots, {
-    classNamed: (name, args, at) => classNamed(name, args, at),
-    layout: (c) => layout(classOf(c)),
+    classNamed: (name, args, at) => genericClasses.classNamed(name, args, at),
+    layout: (c) => registry.layout(registry.classOf(c)),
     valueType: (name, at, shadowed) => valueTypeOf(name, at, shadowed),
     // An interface is met by shape, as a conditional type's `extends` asks of it.
     conforms(from, to, at) {
@@ -628,7 +628,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     },
     interfaceInstance: (t, args) => resolver.interfaceInstance(t, args),
     // A class first made while lowering is reported at the function being checked.
-    classInstance: (c, args) => classNamed(typing.rec(c).generic!.name, args, (checking && bodyOf(checking)) ?? { start: 0, end: 0 })!,
+    classInstance: (c, args) => genericClasses.classNamed(typing.rec(c).generic!.name, args, (checking && bodyOf(checking)) ?? { start: 0, end: 0 })!,
   });
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
@@ -649,10 +649,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const candidates = new Map<LocalId, Stmt>();
   // How many new demands the body being checked made itself, not counting its callees'.
   let demanded = 0;
-  const { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
+  const instancing = new Instancing({
     tables, resolveType: (t) => resolver.resolveType(t), paramType: (p, property) => resolver.paramType(p, property), withScope: (b, f) => resolver.withScope(b, f), members, checking: () => checking,
     signing: (f, run) => resolver.withSight({ inSight: (n, at) => writtenIn(f, at) && f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n) }, run),
-    classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
+    classParams: (f) => (f.scope?.size && f.owner ? registry.classOf(f.owner).node.typeParams : []),
     comptimeArgument: (arg) => comptimeLiteral(arg),
   });
   // What `typeof name` names in a type: a top-level const's type, or a non-generic function's,
@@ -667,9 +667,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     querying.add(name);
     try {
       if (!constant) return functionTypeOf(f, at);
-      const declared = returnTypeOf(constant, new Map());
+      const declared = instancing.returnTypeOf(constant, new Map());
       if (!declared || isInterface(declared)) unlaid(name, at);
-      return typing.widenLet(returnOf(instanceOf(constant), at));
+      return typing.widenLet(returnOf(instancing.instanceOf(constant), at));
     } finally {
       querying.delete(name);
     }
@@ -680,7 +680,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   function enumMemberValue(owner: string, member: string, init: Expr): Value {
     const giving: Stmt = { id: nextId(ids), kind: "return", value: init, start: init.start, end: init.end };
     const f = addBody(Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start: init.start, end: init.end }, { comptime: "const" as const }));
-    const instance = definition(f);
+    const instance = instancing.definition(f);
     checkBody(instance);
     return untagged(comptimeBody(instance));
   }
@@ -692,7 +692,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
   // A result worked out from a body may need the class being laid out, whose fields aren't known.
   function unlaid(name: string, at: Span) {
-    const [mid] = laying.values();
+    const [mid] = registry.laying.values();
     if (mid) throw new CompileError(`'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${typing.rec(arenas.classOf(mid).type).name}' are being worked out; write ${name}'s return type`, at.start, at.end);
   }
 
@@ -704,10 +704,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       throw new CompileError(`'typeof' of the generic function '${f.name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
     }
     if (f.generator) throw unsupported("generator functions in 'typeof' types", at);
-    const def = definition(f);
+    const def = instancing.definition(f);
     // An async function's written `Promise<T>` is its type; any other interface result, or one
     // left to inference, is worked out from the body.
-    const declared = returnTypeOf(f, def.bindings);
+    const declared = instancing.returnTypeOf(f, def.bindings);
     let result: Type;
     if (declared && (f.async || !isInterface(declared))) result = declared;
     else {
@@ -722,7 +722,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const param = f.params[i]?.pattern;
       throw new CompileError(`'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : typing.rec(open).name}'; write the return type`, at.start, at.end);
     }
-    return typing.functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(tables, p) : "_")), declaredParams(f), result);
+    return typing.functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(tables, p) : "_")), instancing.declaredParams(f), result);
   }
 
   // A comptime parameter's argument: its value, computed in the calling instance, as a literal
@@ -774,13 +774,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     return templateParams(named.name, seen.add(name)) ?? arenas.bodyOf(arenas.classOf(classes.get(named.name))?.constructor)?.params;
   }
 
-  classes.forEach((c) => link(arenas.classOf(c), new TypeSet()));
+  classes.forEach((c) => registry.link(arenas.classOf(c), new TypeSet()));
   typing.setJsError(arenas.classOf(classes.get("JsError"))?.type);
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
-  infoOf.forEach((c) => layout(arenas.classOf(c)));
-  start();
-  define();
+  registry.infoOf.forEach((c) => registry.layout(arenas.classOf(c)));
+  genericClasses.start();
+  genericClasses.define();
   // Aliases are checked once classes are laid out, since one may read a class's fields or a
   // function's inferred result, and so is an enum with no type parameters, made now so a
   // payload naming no type is caught unused.
@@ -792,28 +792,28 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   for (const e of enums.values()) void e.members;
   funcs.forEach((f) => {
     try {
-      checkBody(definition(f));
+      checkBody(instancing.definition(f));
     } catch (e) {
       // A package's function Fish can't type is refused where a program calls it.
       if (!f.js || !(e instanceof CompileError)) throw e;
       typing.jsUncalled.set(f, e);
     }
   });
-  while (unsettled.length > 0 || pending.length > 0) {
-    if (unsettled.length > 0) settle(arenas.classOf(unsettled.shift()!));
-    else checkBody(arenas.instanceOf(pending.shift()!));
+  while (registry.unsettled.length > 0 || instancing.pending.length > 0) {
+    if (registry.unsettled.length > 0) registry.settle(arenas.classOf(registry.unsettled.shift()!));
+    else checkBody(arenas.instanceOf(instancing.pending.shift()!));
   }
   if (main && main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
-  const started = main && instanceOf(main).returns;
+  const started = main && instancing.instanceOf(main).returns;
   const future = recOf(started);
   if (main && (future?.kind === "future" ? future.gives : started) !== "void") throw new CompileError("main() can't return a value yet", main.start, main.end);
-  if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
+  if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(instancing.definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
   // An abstract member and a template are checked but never compiled; each concrete class's copy is.
-  const compiled = new NodeSet([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap((c) => bodiesOf(arenas.classOf(c))).filter((f) => !f.abstract && !f.template)]);
+  const compiled = new NodeSet([...funcs.filter((f) => !f.macro || macros), ...[...registry.infoOf.values()].flatMap((c) => registry.bodiesOf(arenas.classOf(c))).filter((f) => !f.abstract && !f.template)]);
   // So is an instance made for an abstract class, which only a template's check makes.
   const checkedOnly = (i: Instance): boolean => bodyOf(i).template === true || [...i.bindings.values()].some((t) => abstractPart(typing, t)) || (bodyOf(i).closure !== undefined && checkedOnly(arenas.instanceOf(bodyOf(i).closure!.parent)));
-  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(bodyOf(i)) && !bodyOf(i).js && !checkedOnly(i)), ...closures.map((c) => arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
+  const compiledInstances = [...instancing.all().filter((i) => i.concrete && compiled.has(bodyOf(i)) && !bodyOf(i).js && !checkedOnly(i)), ...closures.map((c) => arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
   unreached(typing, equalities, arenas, compiledInstances.map((i) => i.id), (i) => bodyOf(i).abstract === true || checkedOnly(i));
   // A package's const whose value has no JS form yet stops the program where it is read.
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
@@ -840,7 +840,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A method's body is named for its class, as in `C.m`.
   const method = (b: Body) => b.name.slice(b.name.lastIndexOf(".") + 1);
   const overrides = (b: Body) => {
-    const base = arenas.classOf(classOf(b.owner!).base);
+    const base = arenas.classOf(registry.classOf(b.owner!).base);
     return base !== undefined && inherited(arenas, base, "methods", method(b)) !== undefined;
   };
   const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
@@ -927,7 +927,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const returns = returnOf(instance, at);
     if (!typing.holdsRef(returns)) return [];
     const ref = isRef(returns) ? returns : typing.optionRef(returns);
-    const origins = ref ? originsOf(f, paramTypes(instance), ref) : heldOrigins(f);
+    const origins = ref ? originsOf(f, instancing.paramTypes(instance), ref) : heldOrigins(f);
     if (!origins) return [...args.filter(lends), ...(receiver ? [receiver] : [])];
     return origins.flatMap((o) => (o === "this" ? (receiver ? [receiver] : []) : [args[o]!]));
   }
@@ -993,13 +993,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const owner = bodyOf(target).owner;
     const to = owner && (typing.lower(owner) as ClassType);
     if (!owner || to === owner) return target;
-    const body = bodiesOf(classOf(to!))[bodiesOf(classOf(owner)).indexOf(bodyOf(target))]!;
-    const implicit = [...implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
+    const body = registry.bodiesOf(registry.classOf(to!))[registry.bodiesOf(registry.classOf(owner)).indexOf(bodyOf(target))]!;
+    const implicit = [...instancing.implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
     // Its comptime parameters' values carry over too, as do a generic method's own type
     // arguments.
     const fixed = [...target.bindings].filter(([name]) => name.startsWith("comptime "));
     const own = typeParamsOf(body).map((p): [string, Type] => [p.name, target.bindings.get(p.name)!]);
-    return instanceOf(body, new Map([...body.scope!, ...own, ...implicit, ...fixed]));
+    return instancing.instanceOf(body, new Map([...body.scope!, ...own, ...implicit, ...fixed]));
   }
 
   // An export in a library is a C function too, so its signature crosses to C as a declared
@@ -1041,7 +1041,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (f.throws) throw new CompileError("a C function can't throw; C reports failures in its result", f.throws.start, f.throws.end);
     if (!f.returnType) throw new CompileError("a C function needs its return type written, 'void' if it returns nothing", f.start, f.end);
     const crosses = (t: Type) => isNumeric(t) || t === "boolean" || recOf(t)?.kind === "pointer";
-    const params = paramTypes(instance, scopeOf(instance));
+    const params = instancing.paramTypes(instance, instancing.scopeOf(instance));
     f.params.forEach((p, i) => {
       if (p.rest || p.optional || p.default) throw unsupported("rest, optional and default parameters on C functions", p);
       if (!crosses(params[i]!)) throw new CompileError(`a C function's parameter can't be a '${typing.show(params[i]!)}'; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
@@ -1067,7 +1067,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const r = recOf(error);
       const isError = r?.kind === "class" && r.name === "Error" && !r.generic;
       if (!isError && !rustClassOf(typing, error)) throw new CompileError(`${what} throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a '${typing.show(error)}'`, f.throws.start, f.throws.end);
-      if (isError) classOf(error as ClassType);
+      if (isError) registry.classOf(error as ClassType);
       instance.throws = error;
     }
     if (!f.returnType && !constructor) throw new CompileError(`${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
@@ -1075,7 +1075,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const why = crossingOf(typing, t, giving);
       if (typeof why === "string") throw new CompileError(`${giving ? `${what} can't give` : "a Rust function can't take"} a '${typing.show(t)}': ${why}`, at.start, at.end);
     };
-    const params = paramTypes(instance, scopeOf(instance));
+    const params = instancing.paramTypes(instance, instancing.scopeOf(instance));
     f.params.forEach((p, i) => {
       if (p.rest || p.optional || p.default || p.comptime) throw unsupported("rest, optional, default and comptime parameters on Rust functions", p);
       refuse(params[i]!, false, p);
@@ -1126,8 +1126,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       return;
     }
     // What its type parameters stand for, as plain types, since JS sees no Fish placeholders.
-    const concrete = new Map([...scopeOf(instance)].map(([n, t]): [string, Type] => [n, typing.lower(t)]));
-    const declared = paramTypes(instance, concrete);
+    const concrete = new Map([...instancing.scopeOf(instance)].map(([n, t]): [string, Type] => [n, typing.lower(t)]));
+    const declared = instancing.paramTypes(instance, concrete);
     const params = declared.map((t) => typing.jsTakes(t));
     f.params.forEach((p, i) => {
       if (p.rest) throw unsupported(`rest parameters on a package's functions, as ${named} takes,`, p);
@@ -1155,13 +1155,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // gave it: the callee's return with the callee's parameters as the ones the call passed.
   function resultOf(instance: Instance, at: Span & Id): Type {
     // Checking the callee may instantiate from this call again, so its site is read first.
-    const site = siteOf(at);
+    const site = instancing.siteOf(at);
     const returns = returnOf(instance, at);
     if (!site || (bodyOf(instance).js && instance.concrete)) return returns;
     const f = bodyOf(instance);
-    const declared = returnTypeOf(f, new Map([...instance.bindings, ...site]));
+    const declared = instancing.returnTypeOf(f, new Map([...instance.bindings, ...site]));
     if (declared && !describes(declared)) return declared;
-    const own = scopeOf(instance);
+    const own = instancing.scopeOf(instance);
     return typing.replaced(views.get(instance.id) ?? returns, new TypeMap([...site].map(([name, t]) => [own.get(name)!, t])));
   }
 
@@ -1183,7 +1183,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         const declared = arenas.bodyOf(id);
         const own = typing.rec(c.type).fields.find((x) => x.name === name);
         if (!declared.abstract || !own) continue;
-        const wanted = returnOf(instanceOf(declared), declared);
+        const wanted = returnOf(instancing.instanceOf(declared), declared);
         const at = c.fields.find((x) => x.name === name)!;
         // A field is read as it is, so it has the declared type exactly.
         if (own.type !== wanted) throw new CompileError(`'${name}' must be a '${typing.show(wanted)}', not a '${typing.show(own.type)}', as '${typing.rec(b.type).name}' declares it abstract`, at.start, at.end);
@@ -1194,7 +1194,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   function implementsSignature(f: Body, declared: Body, b: ClassInfo) {
     const base = typing.rec(b.type).name;
     const why = (text: string) => new CompileError(`'${declared.name.slice(base.length + 1)}' ${text}, as '${base}' declares it abstract`, f.start, f.end);
-    const want = declaredParams(declared);
+    const want = instancing.declaredParams(declared);
     const rest = f.params.find((p) => p.rest);
     if (rest && !declared.params.some((p) => p.rest)) throw new CompileError(`'${f.name.slice(typing.rec(f.owner!).name.length + 1)}' can't gather its arguments into a rest parameter yet where '${base}' declares it abstract with separate ones`, rest.start, rest.end);
     // A generic implementation is the instance its type parameters take from the declaration's.
@@ -1202,8 +1202,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const bindings = new Map<string, Type>();
     if (names.size > 0) f.params.forEach((p, i) => p.type && want[i] !== undefined && infer(tables, p.type, want[i]!, names, bindings, f));
     if (bindings.size < names.size) throw why(`must take (${want.map((t) => typing.show(t)).join(", ")})`);
-    const instance = names.size > 0 ? instanceOf(f, new Map([...(f.scope ?? []), ...bindings])) : instanceOf(f);
-    const have = names.size > 0 ? paramTypes(instance) : declaredParams(f);
+    const instance = names.size > 0 ? instancing.instanceOf(f, new Map([...(f.scope ?? []), ...bindings])) : instancing.instanceOf(f);
+    const have = names.size > 0 ? instancing.paramTypes(instance) : instancing.declaredParams(f);
     // Parameters past the declaration's must be optional, as the calls through it leave them out.
     const extra = f.params.slice(want.length).some((p) => !p.optional);
     if (have.length < want.length || extra || want.some((t, i) => !typing.fits(t, have[i]!))) throw why(`must take (${want.map((t) => typing.show(t)).join(", ")})`);
@@ -1211,9 +1211,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (!!f.generator !== !!declared.generator) throw why(declared.generator ? "must be a generator" : "can't be a generator");
     if (f.self!.mutable && !declared.self!.mutable) throw why("can't change 'this'; it borrows 'this' read-only");
     if (!!f.self!.owned !== !!declared.self!.owned) throw why(declared.self!.owned ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
-    const [error, allowed] = [errorOf(instance), errorOf(instanceOf(declared))];
+    const [error, allowed] = [errorOf(instance), errorOf(instancing.instanceOf(declared))];
     if (error && (!allowed || !typing.fits(error, allowed))) throw why(allowed ? `can only throw '${typing.show(allowed)}'` : "can't throw");
-    const [gives, wanted] = [returnOf(instance, f), returnOf(instanceOf(declared), declared)];
+    const [gives, wanted] = [returnOf(instance, f), returnOf(instancing.instanceOf(declared), declared)];
     if (!typing.fits(gives, wanted)) throw why(`must return '${typing.show(wanted)}', not '${typing.show(gives)}'`);
   }
 
@@ -1231,7 +1231,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       checkBody(instance);
       return instance.returns;
     }
-    const declared = returnTypeOf(f, instance.bindings);
+    const declared = instancing.returnTypeOf(f, instance.bindings);
     if (declared && !describes(declared)) return declared;
     if (inProgress.has(instance.id)) {
       if (f.generator) throw new CompileError(`a generator can't make another of itself, since its state would have to hold itself; loop inside one generator instead`, at.start, at.end);
@@ -1249,9 +1249,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     let f = bodyOf(instance);
     if (f.closure) return asWritten(arenas.instanceOf(f.closure.parent));
     const generic = f.scope && f.owner ? typing.rec(f.owner).generic : undefined;
-    const template = generic ? definedClass(generic.name) : undefined;
-    if (template) f = bodiesOf(template).find((b) => b.start === f.start && b.end === f.end) ?? f;
-    const written = definition(f);
+    const template = generic ? genericClasses.definedClass(generic.name) : undefined;
+    if (template) f = registry.bodiesOf(template).find((b) => b.start === f.start && b.end === f.end) ?? f;
+    const written = instancing.definition(f);
     if (written !== instance && !inProgress.has(written.id)) checkBody(written);
   }
 
@@ -1268,7 +1268,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         demanded = 0;
         try {
           // A body sees its own names, not those of a body whose check needed it.
-          resolver.withSight(undefined, () => resolver.withScope(scopeOf(instance), () => checkInstance(instance)));
+          resolver.withSight(undefined, () => resolver.withScope(instancing.scopeOf(instance), () => checkInstance(instance)));
         } catch (e) {
           inProgress.delete(instance.id);
           if (!(e instanceof CompileError) || demanded === 0) throw bodyOf(instance).signature ? incompatible(bodyOf(instance), e) : e;
@@ -1312,7 +1312,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (fixedParam && f.accessor) throw new CompileError("an accessor can't take a comptime parameter, since a read or an assignment gives it no value while compiling", fixedParam.start, fixedParam.end);
     if (f.foreign) return foreignSignature(instance);
     if (f.abstract) {
-      instance.returns = returnTypeOf(f, instance.bindings) ?? "void";
+      instance.returns = instancing.returnTypeOf(f, instance.bindings) ?? "void";
       done.add(instance.id);
       return;
     }
@@ -1324,7 +1324,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A closure returns the number type the function type it meets returns, so its literals
     // take that type.
     const given = f.closure?.expected && typing.rec(f.closure.expected).returns;
-    let declared = f.closure ? (f.returnType ? typing.stored(resolver.resolveType(f.returnType)) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
+    let declared = f.closure ? (f.returnType ? typing.stored(resolver.resolveType(f.returnType)) : given && isNumeric(given) ? given : undefined) : instancing.returnTypeOf(f, instancing.scopeOf(instance));
     // A generator's declared `Generator<T>`, or an async one's `AsyncGenerator<T>`, says what it
     // yields; calling it gives its own type.
     const generator = f.generator ? (instance.generator ??= madeBy(typing.generatorType(f.name, instance.concrete, f.async === true), instance)) : undefined;
@@ -1398,7 +1398,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
     // the target of an assignment to one of them, and the constructor can't return.
-    const unset = new Set(f.self?.constructor ? classOf(f.self.type).required : []);
+    const unset = new Set(f.self?.constructor ? registry.classOf(f.self.type).required : []);
     let exempt: Expr | undefined;
     // A derived constructor's first statement, `super(...)`, fills the embedded base.
     // After its parameters' defaults, which `super(...)` may read.
@@ -1411,15 +1411,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // In a member of a generic class's instance, `this` is the class made from the type
     // parameters as this body sees them, so it reads through their bounds as the definition did.
     const generic = f.self && typing.rec(f.self.type).generic;
-    const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolver.resolveType({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
+    const viewed = generic && genericClasses.classNamed(generic.name, registry.classOf(f.self!.type).node.typeParams.map((p) => resolver.resolveType({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     // A closure sees the `this` of the body it is written in, which it only reads.
     const enclosing = f.closure && selfOf(arenas, f);
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
-      tables, types, locals, coercions, calls, setters, byName, classes, enums, enumInstance: (info, given, at) => resolver.enumInstance(info, given, at), patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
-      templateParams, definedClass, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
+      tables, types, locals, coercions, calls, setters, byName, classes, enums, enumInstance: (info, given, at) => resolver.enumInstance(info, given, at), patterns: instance.patterns, copiesOut: instance.copiesOut, construct: (name, typeArgs, argTypes, at) => genericClasses.construct(name, typeArgs, argTypes, at), members,
+      templateParams, definedClass: (name) => genericClasses.definedClass(name), returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf: (t) => registry.classOf(t), instanceOf: (f, bindings) => instancing.instanceOf(f, bindings), instantiate: (f, typeArgs, args, argTypes, at) => instancing.instantiate(f, typeArgs, args, argTypes, at as Span & Id), paramTypes: (instance) => instancing.paramTypes(instance), lookup, peek, reach,
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
       classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
       asWritten: () => asWritten(instance),
@@ -1487,9 +1487,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       resolveWith: (t, scope) => resolver.withScope(scope, () => resolver.resolveType(t)),
       closureBody: (t) => arenas.instanceOf(closureBodies.get(t)!),
       resolveType: (t) => resolver.resolveType(t),
-      implicitOf,
-      callbackType,
-      constructs,
+      implicitOf: (f) => instancing.implicitOf(f),
+      callbackType: (f, typeArgs, argTypes, i, at) => instancing.callbackType(f, typeArgs, argTypes, i, at),
+      constructs: (f, args, argTypes) => instancing.constructs(f, args, argTypes),
       // A candidate meeting another integer type demands it, for the next pass.
       // A closure's capture stands for the variable it captures. The first demand decides,
       // and a different one is the usual mismatch once it applies.
@@ -1520,14 +1520,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (errorType === "void") throw new CompileError("a function can't throw 'void'; throw a value", f.throws!.start, f.throws!.end);
     if (errorType && typing.holdsRef(errorType)) throw unsupported("errors holding references", f.throws!);
     instance.throws = errorType;
-    const params = f.closure ? f.params.map((p, i) => closureParam(p, i, f.closure!.expected)) : paramTypes(instance, scopeOf(instance));
+    const params = f.closure ? f.params.map((p, i) => closureParam(p, i, f.closure!.expected)) : instancing.paramTypes(instance, instancing.scopeOf(instance));
     f.params.forEach((p, i) => declare(paramName(p), params[i]!, false, true, p));
     // A field initializer runs before the constructor's body, out of reach of its parameters.
     let hidden = false;
     statements(f.body, (s, check) => {
       const assigned = unset.size > 0 ? fieldAssignment(s) : undefined;
       exempt = assigned?.object;
-      hidden = f.self?.constructor === true && classOf(f.self.type).initializers.has(s);
+      hidden = f.self?.constructor === true && registry.classOf(f.self.type).initializers.has(s);
       const after = check(s);
       exempt = undefined;
       hidden = false;
@@ -1544,7 +1544,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       instance.throws = errorType;
     }
     if (unset.size > 0) {
-      const missing = classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
+      const missing = registry.classOf(f.self!.type).fields.find((d) => unset.has(d.name))!;
       throw new CompileError(`property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     if (generator) {
@@ -1587,7 +1587,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     rebuiltStmts(f.body, rewrites);
     checkMoves(f, instance, origins);
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
-    if (self && classOf(self.type).methods.get("clone") === f.bodyId && (f.params.length > 0 || type !== self.type)) {
+    if (self && registry.classOf(self.type).methods.get("clone") === f.bodyId && (f.params.length > 0 || type !== self.type)) {
       throw new CompileError(`a 'clone' method must take no parameters and return '${typing.show(self.type)}', since it replaces the compiler's copy`, f.start, f.end);
     }
     instance.returns = type;
@@ -2609,7 +2609,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // class's own are.
       const { base } = typing.rec(f.self!.type);
       const inherited = !unset.has(SUPER) && base !== undefined && typing.field(base, target.name) !== undefined;
-      return classOf(f.self!.type).fields.some((d) => d.name === target.name) || inherited ? target : undefined;
+      return registry.classOf(f.self!.type).fields.some((d) => d.name === target.name) || inherited ? target : undefined;
     }
 
     function within(target: Target, check: () => void) {
@@ -2815,7 +2815,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const union = recOf(errorType);
       const classes = (union?.kind === "union" ? union.members : [errorType])
         .filter((m): m is ClassType => typeof m !== "string" && typing.rec(m).kind === "class");
-      const wrappers = classes.flatMap((c) => wrapsOf(classOf(c)).filter(([x]) => typing.fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: instanceOf(arenas.bodyOf(body)).id })));
+      const wrappers = classes.flatMap((c) => registry.wrapsOf(registry.classOf(c)).filter(([x]) => typing.fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: instancing.instanceOf(arenas.bodyOf(body)).id })));
       const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${typing.show(type)}'` : `${what} can throw '${typing.show(type)}'`;
       if (wrappers.length === 0) {
         const hint = classes.length > 0 ? `convert it, or have '${typing.rec(classes[0]!).name}' implement 'From<${typing.show(type)}>'` : `convert it to '${typing.show(errorType)}'`;
