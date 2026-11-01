@@ -27,17 +27,17 @@ function main() {
   console.log("ran");
 }
 // case: test_without_a_name
-// error: test_without_a_name.fsh:2:1: error: a test is written as 'test("name", () => { ... })' at the top level of a file, its name a string literal
+// error: test_without_a_name.fsh:2:1: error[E1106]: a test is written as 'test("name", () => { ... })' at the top level of a file, its name a string literal
 test(1);
 function main() {}
 // case: test_without_a_body
-// error: test_without_a_body.fsh:5:1: error: a test is written as 'test("name", () => { ... })'
+// error: test_without_a_body.fsh:5:1: error[E1106]: a test is written as 'test("name", () => { ... })'
 // error:  5 | test("a", 2);
 // error:    | ^^^^^^^^^^^^
 function main() {}
 test("a", 2);
 // case: test_name_with_a_line_break
-// error: test_name_with_a_line_break.fsh:2:6: error: a test's name is one line, so it can't hold a line break
+// error: test_name_with_a_line_break.fsh:2:6: error[E1106]: a test's name is one line, so it can't hold a line break
 test("two\nlines", () => {});
 function main() {}
 // case: test_taking_parameters

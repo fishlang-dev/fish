@@ -98,7 +98,7 @@ abstract class Shape {
 function main() {
   const s = new Shape()
 }
-// error: 6:13: error: cannot create an instance of the abstract class 'Shape'
+// error: 6:13: error[E0701]: cannot create an instance of the abstract class 'Shape'
 // case: abstract_missing
 abstract class Shape {
   abstract area(): f64
@@ -114,42 +114,42 @@ class Triangle extends Polygon {
 }
 
 function main() {}
-// error: 10:1: error: class 'Triangle' must implement the abstract method 'area' of 'Shape', getter 'name' of 'Shape'
+// error: 10:1: error[E0701]: class 'Triangle' must implement the abstract method 'area' of 'Shape', getter 'name' of 'Shape'
 // case: abstract_outside_abstract_class
 class Shape {
   abstract area(): f64
 }
 
 function main() {}
-// error: 2:3: error: abstract members can only appear in an abstract class
+// error: 2:3: error[E0701]: abstract members can only appear in an abstract class
 // case: abstract_private
 abstract class Shape {
   private abstract area(): f64
 }
 
 function main() {}
-// error: 2:3: error: an abstract member can't be private, since subclasses must implement it
+// error: 2:3: error[E0701]: an abstract member can't be private, since subclasses must implement it
 // case: abstract_hash
 abstract class Shape {
   abstract #area(): f64
 }
 
 function main() {}
-// error: 2:3: error: an abstract member can't be private, since subclasses must implement it
+// error: 2:3: error[E0701]: an abstract member can't be private, since subclasses must implement it
 // case: abstract_static
 abstract class Shape {
   static abstract make(): i64
 }
 
 function main() {}
-// error: 2:3: error: 'static' can't be used with 'abstract'
+// error: 2:3: error[E0701]: 'static' can't be used with 'abstract'
 // case: abstract_body
 abstract class Shape {
   abstract area(): f64 { return 0.0 }
 }
 
 function main() {}
-// error: 2:3: error: 'area' can't have a body because it is marked abstract
+// error: 2:3: error[E0701]: 'area' can't have a body because it is marked abstract
 // case: abstract_narrower_access
 abstract class Shape {
   abstract area(): f64
@@ -160,7 +160,7 @@ class Circle extends Shape {
 }
 
 function main() {}
-// error: 6:3: error: 'area' implements a public abstract member of 'Shape', so it must be public
+// error: 6:3: error[E0701]: 'area' implements a public abstract member of 'Shape', so it must be public
 // case: abstract_as_local_type
 abstract class Shape {}
 
@@ -169,14 +169,14 @@ class Circle extends Shape {}
 function main() {
   const s: Shape = new Circle()
 }
-// error: 6:12: error: 'Shape' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead
+// error: 6:12: error[E0701]: 'Shape' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead
 // case: abstract_as_parameter_type
 abstract class Shape {}
 
 function area(s: Shape): f64 { return 0.0 }
 
 function main() {}
-// error: 3:18: error: 'Shape' is an abstract class
+// error: 3:18: error[E0701]: 'Shape' is an abstract class
 // case: abstract_as_field_type
 abstract class Shape {}
 
@@ -185,14 +185,14 @@ class Holder {
 }
 
 function main() {}
-// error: 4:29: error: 'Shape' is an abstract class
+// error: 4:29: error[E0701]: 'Shape' is an abstract class
 // case: abstract_field
 abstract class Shape {
   abstract sides: i64
 }
 
 function main() {}
-// error: 2:3: error: abstract fields are not supported yet
+// error: 2:3: error[E0801]: abstract fields are not supported yet
 // case: abstract_override_template
 // expect: 70 20
 // A subclass overriding a base method that calls an abstract member is reached through the
@@ -238,7 +238,7 @@ abstract class Source<T> {
 }
 
 function main() {}
-// error: 1:1: error: generic abstract classes are not supported yet
+// error: 1:1: error[E0801]: generic abstract classes are not supported yet
 // case: abstract_generic_subclass
 // expect: area 9 x
 // expect: area 4 2
@@ -269,7 +269,7 @@ class Square<T> extends Shape {
 }
 
 function main() {}
-// error: 5:1: error: class 'Square<T>' must implement the abstract method 'area' of 'Shape'
+// error: 5:1: error[E0701]: class 'Square<T>' must implement the abstract method 'area' of 'Shape'
 // case: abstract_implements_interface
 // expect: 2
 // expect: area 2
@@ -306,7 +306,7 @@ class Square extends Shape {
 }
 
 function main() {}
-// error: 6:3: error: 'area' must take (i64), as 'Shape' declares it abstract
+// error: 6:3: error[E0701]: 'area' must take (i64), as 'Shape' declares it abstract
 // case: abstract_signature_other_params
 abstract class Shape {
   abstract area(scale: i64): f64
@@ -317,7 +317,7 @@ class Square extends Shape {
 }
 
 function main() {}
-// error: 6:3: error: 'area' must take (i64), as 'Shape' declares it abstract
+// error: 6:3: error[E0701]: 'area' must take (i64), as 'Shape' declares it abstract
 // case: abstract_signature_return
 abstract class Shape {
   abstract area(): f64
@@ -331,7 +331,7 @@ class Square extends Shape {
 function main() {
   print(new Square().double())
 }
-// error: 7:3: error: 'area' must return 'number', not 'string', as 'Shape' declares it abstract
+// error: 7:3: error[E0701]: 'area' must return 'number', not 'string', as 'Shape' declares it abstract
 // case: abstract_signature_receiver
 abstract class Counter {
   n = 0
@@ -343,7 +343,7 @@ class ByOne extends Counter {
 }
 
 function main() {}
-// error: 7:3: error: 'bump' can't change 'this'; it borrows 'this' read-only, as 'Counter' declares it abstract
+// error: 7:3: error[E0701]: 'bump' can't change 'this'; it borrows 'this' read-only, as 'Counter' declares it abstract
 // case: abstract_signature_field
 abstract class Shape {
   abstract get sides(): i64
@@ -354,7 +354,7 @@ class Named extends Shape {
 }
 
 function main() {}
-// error: 6:3: error: 'sides' must be a 'i64', not a 'string', as 'Shape' declares it abstract
+// error: 6:3: error[E0701]: 'sides' must be a 'i64', not a 'string', as 'Shape' declares it abstract
 // case: abstract_template_unused
 // A member reaching an abstract member is checked even when nothing calls it.
 abstract class Shape {
@@ -372,7 +372,7 @@ class Square extends Shape {
 function main() {
   print(new Square().area())
 }
-// error: 5:23: error: type 'number' is not assignable to type 'string'
+// error: 5:23: error[E0101]: type 'number' is not assignable to type 'string'
 // case: abstract_template_no_subclass
 abstract class Counter {
   abstract bump(this: Mut<this>): void
@@ -380,7 +380,7 @@ abstract class Counter {
 }
 
 function main() {}
-// error: 3:13: error: cannot call 'bump' on 'this' because 'this' is read-only here; declare 'this: Mut<this>'
+// error: 3:13: error[E0206]: cannot call 'bump' on 'this' because 'this' is read-only here; declare 'this: Mut<this>'
 // case: abstract_constructor_reaches
 abstract class Shape {
   size: f64
@@ -394,7 +394,7 @@ class Square extends Shape {
 }
 
 function main() {}
-// error: 3:3: error: 'Shape' can't reach its abstract member 'area' while it is being constructed
+// error: 3:3: error[E0701]: 'Shape' can't reach its abstract member 'area' while it is being constructed
 // case: abstract_override_through_template
 // A concrete base calling a template runs its own copy, so a subclass can't override what the
 // template reaches.
@@ -413,7 +413,7 @@ class Odd extends Square {
 }
 
 function main() {}
-// error: 14:3: error: overriding 'sides' is an error here: 'Square' calls 'this.count', which reaches 'sides', and with 'extends' as embedding the copy of 'count' in 'Square' would still run 'Square.sides'
+// error: 14:3: error[E0704]: overriding 'sides' is an error here: 'Square' calls 'this.count', which reaches 'sides', and with 'extends' as embedding the copy of 'count' in 'Square' would still run 'Square.sides'
 // case: abstract_super_in_template
 // expect: 5
 // A base method reaching an abstract member may still call its own base through 'super'.
@@ -473,7 +473,7 @@ class Square extends Shape {
 }
 
 function main() {}
-// error: 6:3: error: 'Shape' is abstract, so its constructor can't hand 'this' on as a value
+// error: 6:3: error[E0701]: 'Shape' is abstract, so its constructor can't hand 'this' on as a value
 // case: abstract_super_abstract
 abstract class Shape {
   abstract area(): f64
@@ -484,7 +484,7 @@ class Square extends Shape {
 }
 
 function main() {}
-// error: 6:24: error: 'area' is abstract in 'Shape', so 'super.area()' has nothing to run
+// error: 6:24: error[E0701]: 'area' is abstract in 'Shape', so 'super.area()' has nothing to run
 // case: abstract_super_template
 // expect: 2
 // expect: 2
@@ -588,7 +588,7 @@ class Many extends Scale {
 }
 
 function main() {}
-// error: 6:6: error: 'by' can't gather its arguments into a rest parameter yet where 'Scale' declares it abstract with separate ones
+// error: 6:6: error[E0801]: 'by' can't gather its arguments into a rest parameter yet where 'Scale' declares it abstract with separate ones
 // case: abstract_without_abstract_members_this_escapes
 // expect: 5
 // expect: 5
@@ -626,7 +626,7 @@ class Square extends Shape {
 }
 
 function main() {}
-// error: 7:3: error: 'Shape' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet
+// error: 7:3: error[E0701]: 'Shape' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet
 // case: abstract_clone_to_generic
 interface Counts { count(): i64 }
 
@@ -643,7 +643,7 @@ class Daily extends Tally {}
 function main() {
   print(new Daily().sum())
 }
-// error: 8:29: error: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
+// error: 8:29: error[E0701]: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
 // case: abstract_clone_in_constructor
 interface Counts { count(): i64 }
 
@@ -662,7 +662,7 @@ class Daily extends Tally {
 function main() {
   print(new Daily().count())
 }
-// error: 8:31: error: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
+// error: 8:31: error[E0701]: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
 // case: abstract_clone_to_dyn
 // A copy of 'this' would be a value of the abstract class, whose table for a Dyn would hold an
 // abstract member with no code.
@@ -683,7 +683,7 @@ class Daily extends Tally {
 function main() {
   print(new Daily().boxed())
 }
-// error: 8:30: error: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
+// error: 8:30: error[E0701]: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
 // case: abstract_clone_to_generic_class
 interface Counts { count(): i64 }
 
@@ -707,7 +707,7 @@ class Daily extends Tally {}
 function main() {
   print(new Daily().held())
 }
-// error: 13:26: error: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
+// error: 13:26: error[E0701]: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
 // case: abstract_clone_in_closure
 interface Counts { count(): i64 }
 
@@ -728,7 +728,7 @@ function main() {
   const g = new Daily().later()
   print(g())
 }
-// error: 9:15: error: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
+// error: 9:15: error[E0701]: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
 // case: abstract_clone_compared
 class Base {
   n: i64 = 1
@@ -747,4 +747,4 @@ class Daily extends Tally {
 function main() {
   print(new Daily().same())
 }
-// error: 8:28: error: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there
+// error: 8:28: error[E0701]: this would make a value of the abstract class 'Tally', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there

@@ -49,7 +49,7 @@ test("two packages depending on a third from the same path share it, and one nam
   files("two/base2", { "fish.toml": manifest("base"), "src/lib.fsh": `export function n(): i64 { return 3; }\n` });
   files("two/odd", { "fish.toml": manifest("odd", `base = { path = "../base2" }\n`), "src/lib.fsh": `export function o(): i64 { return 1; }\n` });
   const clash = files("two/clash", { "fish.toml": manifest("clash", `left = { path = "../left" }\nodd = { path = "../odd" }\n`), "src/main.fsh": `function main() {}\n` });
-  expect(fishc(clash, "build").err).toBe("../odd/fish.toml:5:1: error: 'base' already comes from '../base' in this program, so it can't also come from '../base2'");
+  expect(fishc(clash, "build").err).toBe("../odd/fish.toml:5:1: error[E0906]: 'base' already comes from '../base' in this program, so it can't also come from '../base2'");
 });
 
 test("a dependency that can't be used is refused where it is named", () => {
@@ -59,11 +59,11 @@ test("a dependency that can't be used is refused where it is named", () => {
   files("bad/a", { "fish.toml": manifest("a", `b = { path = "../b" }\n`), "src/lib.fsh": "" });
   files("bad/b", { "fish.toml": manifest("b", `a = { path = "../a" }\n`), "src/lib.fsh": "" });
   const app = (deps: string) => files("bad/app", { "fish.toml": manifest("app", deps), "src/main.fsh": `function main() {}\n` });
-  expect(fishc(app(`util = { path = "../nowhere" }\n`), "build").err).toBe("fish.toml:5:1: error: can't find the directory '../nowhere' for 'util'");
-  expect(fishc(app(`plain = { path = "../plain" }\n`), "build").err).toBe("fish.toml:5:1: error: '../plain' has no fish.toml, so it isn't a Fish package");
-  expect(fishc(app(`named = { path = "../named" }\n`), "build").err).toBe("fish.toml:5:1: error: the package at '../named' is named 'other' in its fish.toml, not 'named'; depend on it by that name");
-  expect(fishc(app(`nolib = { path = "../nolib" }\n`), "build").err).toBe(`../nolib/fish.toml:1:1: error: the lib 'src/lib.fsh' doesn't exist; create it, or name another with lib = "..."`);
-  expect(fishc(app(`a = { path = "../a" }\n`), "build").err).toBe("../b/fish.toml:5:1: error: 'a' depends back on 'b': a -> b -> a; packages can't depend on each other in a cycle");
+  expect(fishc(app(`util = { path = "../nowhere" }\n`), "build").err).toBe("fish.toml:5:1: error[E0906]: can't find the directory '../nowhere' for 'util'");
+  expect(fishc(app(`plain = { path = "../plain" }\n`), "build").err).toBe("fish.toml:5:1: error[E0906]: '../plain' has no fish.toml, so it isn't a Fish package");
+  expect(fishc(app(`named = { path = "../named" }\n`), "build").err).toBe("fish.toml:5:1: error[E0906]: the package at '../named' is named 'other' in its fish.toml, not 'named'; depend on it by that name");
+  expect(fishc(app(`nolib = { path = "../nolib" }\n`), "build").err).toBe(`../nolib/fish.toml:1:1: error[E0905]: the lib 'src/lib.fsh' doesn't exist; create it, or name another with lib = "..."`);
+  expect(fishc(app(`a = { path = "../a" }\n`), "build").err).toBe("../b/fish.toml:5:1: error[E0906]: 'a' depends back on 'b': a -> b -> a; packages can't depend on each other in a cycle");
 });
 
 test("a package's lib is public, its other files' exports are package-private, and unexported names are file-private", () => {
@@ -75,11 +75,11 @@ test("a package's lib is public, its other files' exports are package-private, a
   const ok = app(`import { title, upper } from "words";\nfunction main() { console.log(title(" Fish ")); console.log(upper(" fish ")); }\n`);
   expect(fishc(ok, "build")).toEqual({ code: 0, err: "" });
   expect(ran(join(ok, "target", "debug", "app"))).toBe("[fish]\nFISH\n");
-  expect(fishc(app(`import { slug } from "words";\nfunction main() { console.log(slug("x")); }\n`), "build").err).toBe("src/main.fsh:1:10: error: 'slug' is private to the package 'words'; only what its lib src/lib.fsh exports is public");
-  expect(fishc(app(`import { nope } from "words";\nfunction main() {}\n`), "build").err).toBe("src/main.fsh:1:10: error: the package 'words' has no export named 'nope' in its lib src/lib.fsh");
-  expect(fishc(app(`import d from "words";\nfunction main() {}\n`), "build").err).toBe("src/main.fsh:1:1: error: the package 'words' has no default export in its lib src/lib.fsh");
+  expect(fishc(app(`import { slug } from "words";\nfunction main() { console.log(slug("x")); }\n`), "build").err).toBe("src/main.fsh:1:10: error[E0903]: 'slug' is private to the package 'words'; only what its lib src/lib.fsh exports is public");
+  expect(fishc(app(`import { nope } from "words";\nfunction main() {}\n`), "build").err).toBe("src/main.fsh:1:10: error[E0902]: the package 'words' has no export named 'nope' in its lib src/lib.fsh");
+  expect(fishc(app(`import d from "words";\nfunction main() {}\n`), "build").err).toBe("src/main.fsh:1:1: error[E0902]: the package 'words' has no default export in its lib src/lib.fsh");
   words(`import { clean } from "./util";\nexport function title(s: string): string { return clean(s); }\n`);
-  expect(fishc(app(`import { title } from "words";\nfunction main() { console.log(title("x")); }\n`), "build").err).toBe("../../words/src/lib.fsh:1:10: error: '../../words/src/util.fsh' has no export named 'clean'; it declares 'clean' without exporting it, so add 'export' before that declaration");
+  expect(fishc(app(`import { title } from "words";\nfunction main() { console.log(title("x")); }\n`), "build").err).toBe("../../words/src/lib.fsh:1:10: error[E0902]: '../../words/src/util.fsh' has no export named 'clean'; it declares 'clean' without exporting it, so add 'export' before that declaration");
 });
 
 test("a lib or entry can't be a nested package's file, and packages nested in each other keep their own messages", () => {
@@ -87,32 +87,32 @@ test("a lib or entry can't be a nested package's file, and packages nested in ea
   const outer = (lib: string, extra = "") => files("own/outer", { "fish.toml": `[package]\nname = "outer"\nversion = "0.1.0"\n${extra}[dependencies]\ndeep = { path = "./deep" }\n`, ...deep, "src/lib.fsh": lib });
   const app = (main: string) => files("own/app", { "fish.toml": manifest("app", `outer = { path = "../outer" }\n`), "src/main.fsh": main });
   outer("", `lib = "deep/src/inner.fsh"\n`);
-  expect(fishc(app(`import { secret } from "outer";\nfunction main() { console.log(secret()); }\n`), "build").err).toBe("../outer/fish.toml:4:7: error: the lib 'deep/src/inner.fsh' is a file inside the package 'deep'; a package's lib is one of its own files");
+  expect(fishc(app(`import { secret } from "outer";\nfunction main() { console.log(secret()); }\n`), "build").err).toBe("../outer/fish.toml:4:7: error[E0905]: the lib 'deep/src/inner.fsh' is a file inside the package 'deep'; a package's lib is one of its own files");
   outer(`import { pub } from "deep";\nexport function o(): i64 { return pub(); }\n`);
-  expect(fishc(app(`import { pub } from "outer";\nfunction main() { console.log(pub()); }\n`), "build").err).toBe("src/main.fsh:1:10: error: the package 'outer' has no export named 'pub' in its lib src/lib.fsh");
+  expect(fishc(app(`import { pub } from "outer";\nfunction main() { console.log(pub()); }\n`), "build").err).toBe("src/main.fsh:1:10: error[E0902]: the package 'outer' has no export named 'pub' in its lib src/lib.fsh");
   const entry = files("own/entry", { "fish.toml": `[package]\nname = "entry"\nversion = "0.1.0"\nentry = "deep/src/m.fsh"\n[dependencies]\ndeep = { path = "./deep" }\n`, ...deep, "deep/src/m.fsh": `import { secret } from "./inner";\nfunction main() { console.log(secret()); }\n` });
-  expect(fishc(entry, "build").err).toBe("fish.toml:4:9: error: the entry 'deep/src/m.fsh' is a file inside the package 'deep'; a package's entry is one of its own files");
+  expect(fishc(entry, "build").err).toBe("fish.toml:4:9: error[E0905]: the entry 'deep/src/m.fsh' is a file inside the package 'deep'; a package's entry is one of its own files");
   const linkedEntry = files("own/linked-entry", { "fish.toml": `[package]\nname = "linked"\nversion = "0.1.0"\nentry = "src/d/m.fsh"\n[dependencies]\ndeep = { path = "./deep" }\n`, ...deep, "deep/src/m.fsh": `import { secret } from "./inner";\nfunction main() { console.log(secret()); }\n` });
   mkdirSync(join(linkedEntry, "src"), { recursive: true });
   Bun.spawnSync(["ln", "-sfn", "../deep/src", join(linkedEntry, "src", "d")]);
-  expect(fishc(linkedEntry, "build").err).toBe("fish.toml:4:9: error: the entry 'src/d/m.fsh' is a file inside the package 'deep'; a package's entry is one of its own files");
+  expect(fishc(linkedEntry, "build").err).toBe("fish.toml:4:9: error[E0905]: the entry 'src/d/m.fsh' is a file inside the package 'deep'; a package's entry is one of its own files");
   const w = files("own/w", { "fish.toml": manifest("w"), "src/lib.fsh": `import { helper } from "./util";\nexport function pub(): i64 { return helper(); }\n`, "src/util.fsh": `export function helper(): i64 { return 7; }\n`, "examples/ex/fish.toml": manifest("ex", `w = { path = "../.." }\n`), "examples/ex/src/main.fsh": `import { helper } from "w";\nfunction main() { console.log(helper()); }\n` });
-  expect(fishc(join(w, "examples", "ex"), "build").err).toBe("src/main.fsh:1:10: error: 'helper' is private to the package 'w'; only what its lib src/lib.fsh exports is public");
+  expect(fishc(join(w, "examples", "ex"), "build").err).toBe("src/main.fsh:1:10: error[E0903]: 'helper' is private to the package 'w'; only what its lib src/lib.fsh exports is public");
 });
 
 test("a relative import into another package's directory is refused, directly or through a link", () => {
   const util = { "fish.toml": manifest("util"), "src/lib.fsh": `export function u(): i64 { return 1; }\n`, "src/inner.fsh": `export function i(): i64 { return 2; }\n` };
   const nested = (main: string) => files("nest/app", { "fish.toml": manifest("app", `util = { path = "./packages/util" }\n`), ...Object.fromEntries(Object.entries(util).map(([k, v]) => [`packages/util/${k}`, v])), "vendor/loose/fish.toml": manifest("loose"), "vendor/loose/x.fsh": `export function x(): i64 { return 3; }\n`, "src/main.fsh": main });
-  expect(fishc(nested(`import { i } from "../packages/util/src/inner";\nfunction main() { console.log(i()); }\n`), "build").err).toBe("src/main.fsh:1:1: error: '../packages/util/src/inner' is a file inside the package 'util'; import it by name, as 'util'");
+  expect(fishc(nested(`import { i } from "../packages/util/src/inner";\nfunction main() { console.log(i()); }\n`), "build").err).toBe("src/main.fsh:1:1: error[E0903]: '../packages/util/src/inner' is a file inside the package 'util'; import it by name, as 'util'");
   const linked = nested(`import { i } from "./link/inner";\nfunction main() { console.log(i()); }\n`);
   Bun.spawnSync(["ln", "-sfn", "../packages/util/src", join(linked, "src", "link")]);
-  expect(fishc(linked, "build").err).toBe("src/main.fsh:1:1: error: './link/inner' is a file inside the package 'util'; import it by name, as 'util'");
+  expect(fishc(linked, "build").err).toBe("src/main.fsh:1:1: error[E0903]: './link/inner' is a file inside the package 'util'; import it by name, as 'util'");
   const loose = nested(`import { x } from "../vendor/loose/x";\nimport { u } from "util";\nfunction main() { console.log(x() + u()); }\n`);
   expect(fishc(loose, "build")).toEqual({ code: 0, err: "" });
   expect(ran(join(loose, "target", "debug", "app"))).toBe("4\n");
   files("nest/outer", { "fish.toml": manifest("outer", `deep = { path = "./deep" }\n`), "deep/fish.toml": manifest("deep"), "deep/src/lib.fsh": "", "deep/src/x.fsh": `export function x(): i64 { return 5; }\n`, "src/lib.fsh": `import { x } from "../deep/src/x";\nexport function o(): i64 { return x(); }\n` });
   const top = files("nest/top", { "fish.toml": manifest("top", `outer = { path = "../outer" }\n`), "src/main.fsh": `import { o } from "outer";\nfunction main() { console.log(o()); }\n` });
-  expect(fishc(top, "build").err).toBe("../../outer/src/lib.fsh:1:1: error: '../deep/src/x' is a file inside the package 'deep'; import it by name, as 'deep'");
+  expect(fishc(top, "build").err).toBe("../../outer/src/lib.fsh:1:1: error[E0903]: '../deep/src/x' is a file inside the package 'deep'; import it by name, as 'deep'");
 });
 
 test("a dependency's inner files are private to it, by every import form, and a name not in fish.toml still reaches npm's packages", () => {
@@ -120,11 +120,11 @@ test("a dependency's inner files are private to it, by every import form, and a 
   const rule = "'words/src/util' is a file inside the package 'words', and a package's files are private to it; import from 'words', which gives what its lib src/lib.fsh exports";
   for (const form of [`import { w } from "words/src/util";`, `import type { W } from "words/src/util";`, `export { w } from "words/src/util";`, `export * from "words/src/util";`]) {
     const app = files("sub/app", { "fish.toml": manifest("app", `words = { path = "../words" }\n`), "src/main.fsh": `${form}\nfunction main() {}\n` });
-    expect([form, fishc(app, "build").err]).toEqual([form, `src/main.fsh:1:1: error: ${rule}`]);
+    expect([form, fishc(app, "build").err]).toEqual([form, `src/main.fsh:1:1: error[E0903]: ${rule}`]);
   }
   files("sub/mid", { "fish.toml": manifest("mid", `words = { path = "../words" }\n`), "src/lib.fsh": `import { w } from "words/src/util";\nexport function m(): string { return w(); }\n` });
   const top = files("sub/top", { "fish.toml": manifest("top", `mid = { path = "../mid" }\n`), "src/main.fsh": `import { m } from "mid";\nfunction main() { console.log(m()); }\n` });
-  expect(fishc(top, "build").err).toBe(`../../mid/src/lib.fsh:1:1: error: ${rule}`);
+  expect(fishc(top, "build").err).toBe(`../../mid/src/lib.fsh:1:1: error[E0903]: ${rule}`);
   const npm = files("sub/npm", { "fish.toml": manifest("npm"), "src/main.fsh": `import { x } from "nothing-installed";\nfunction main() {}\n` });
   expect(fishc(npm, "build").err).toContain("can't find the package 'nothing-installed'");
 });
@@ -153,11 +153,11 @@ test("a git dependency pinned to a commit is fetched into the cache once, and re
   expect(build()).toEqual({ code: 0, err: "" });
   const other = (deps: string) => files("git/other", { "fish.toml": manifest("other", deps), "src/main.fsh": `function main() {}\n` });
   const gitless = (deps: string) => Bun.spawnSync([process.execPath, MAIN, "build"], { cwd: other(deps), env: { ...process.env, FISH_CACHE_DIR: join(root, "empty-cache"), PATH: "/nonexistent" } }).stderr.toString().split("\n")[0];
-  expect(gitless(`w = { git = "file://${repo}", rev = "abcdef1" }\n`)).toBe(`fish.toml:5:1: error: fetching 'file://${repo}' needs the git command, which isn't on PATH; install git`);
+  expect(gitless(`w = { git = "file://${repo}", rev = "abcdef1" }\n`)).toBe(`fish.toml:5:1: error[E0906]: fetching 'file://${repo}' needs the git command, which isn't on PATH; install git`);
   const [repo2] = repository("git/second", { "fish.toml": manifest("second"), "src/lib.fsh": "" });
   const fetch = (deps: string) => Bun.spawnSync([process.execPath, MAIN, "build"], { cwd: other(deps), env: { ...process.env, FISH_CACHE_DIR: join(root, "empty-cache") } }).stderr.toString().split("\n")[0];
-  expect(fetch(`second = { git = "file://${root}/git/nowhere", rev = "abcdef1" }\n`)).toStartWith(`fish.toml:5:1: error: can't fetch 'file://${root}/git/nowhere': `);
-  expect(fetch(`second = { git = "file://${repo2}", rev = "abcdef1" }\n`)).toBe(`fish.toml:5:1: error: 'file://${repo2}' has no commit 'abcdef1'`);
+  expect(fetch(`second = { git = "file://${root}/git/nowhere", rev = "abcdef1" }\n`)).toStartWith(`fish.toml:5:1: error[E0906]: can't fetch 'file://${root}/git/nowhere': `);
+  expect(fetch(`second = { git = "file://${repo2}", rev = "abcdef1" }\n`)).toBe(`fish.toml:5:1: error[E0906]: 'file://${repo2}' has no commit 'abcdef1'`);
 });
 
 test("fish.lock records every package, keeps itself when nothing changed, checks git files, and --locked holds it", () => {
@@ -177,10 +177,10 @@ test("fish.lock records every package, keeps itself when nothing changed, checks
   expect(lock()).toBe(written);
   const cached = Bun.spawnSync(["find", cache, "-name", "lib.fsh", "-path", "*http*"]).stdout.toString().trim();
   writeFileSync(cached, `export function get(): string { return "tampered"; }\n`);
-  expect(build().err).toMatch(/^fish\.lock:4:1: error: the files of 'http' at .* no longer match its checksum in fish\.lock; delete that directory to fetch it again$/);
+  expect(build().err).toMatch(/^fish\.lock:4:1: error\[E0906\]: the files of 'http' at .* no longer match its checksum in fish\.lock; delete that directory to fetch it again$/);
   writeFileSync(join(app, "fish.toml"), manifest("app", ""));
   writeFileSync(join(app, "src", "main.fsh"), `function main() {}\n`);
-  expect(build("--locked").err).toBe("fish.lock:1:1: error: fish.lock is out of date with fish.toml, and --locked keeps it as it is; build without --locked to update it, then commit it");
+  expect(build("--locked").err).toBe("fish.lock:1:1: error[E0906]: fish.lock is out of date with fish.toml, and --locked keeps it as it is; build without --locked to update it, then commit it");
   expect(build()).toEqual({ code: 0, err: "" });
   expect(lock()).toBe("# Written by fishc build; it records exactly which packages a build used.\nversion = 1\n");
 });
@@ -211,7 +211,7 @@ test("a git package holding a symbolic link is refused, and can't write through 
   gitIn(evil, "commit", "-q", "-m", "link");
   const commit = gitIn(evil, "rev-parse", "HEAD");
   const app = files("attack/app", { "fish.toml": manifest("app", `evil = { git = "file://${evil}", rev = "${commit}" }\n`), "src/main.fsh": `function main() {}\n` });
-  expect(buildIn(app, join(root, "attack-cache")).err).toBe(`fish.toml:5:1: error: 'file://${evil}' holds a symbolic link at '.fish-commit'; a package from git can't, since a link reaches files its commit doesn't pin`);
+  expect(buildIn(app, join(root, "attack-cache")).err).toBe(`fish.toml:5:1: error[E0906]: 'file://${evil}' holds a symbolic link at '.fish-commit'; a package from git can't, since a link reaches files its commit doesn't pin`);
   expect(Bun.spawnSync(["cat", join(victim, "target.txt")]).stdout.toString()).toBe("SECRET");
 });
 
@@ -221,12 +221,12 @@ test("a git package can't reach outside its checkout through lib or a path depen
   const app = (deps: string) => files("reach/app", { "fish.toml": manifest("app", deps), "src/main.fsh": `function main() {}\n` });
   const cache = join(root, "reach-cache");
   const head = (repo: string) => gitIn(repo, "rev-parse", "HEAD");
-  expect(buildIn(app(`out = { git = "file://${out}", rev = "${head(out)}" }\n`), cache).err).toEndWith(`fish.toml:4:7: error: the lib is a file inside the package, as in lib = "src/lib.fsh"`);
-  expect(buildIn(app(`via = { git = "file://${viaPath}", rev = "${head(viaPath)}" }\n`), cache).err).toEndWith("fish.toml:5:1: error: 'via' comes from git, so its dependencies must too; a path dependency would bring in files its commit doesn't pin");
+  expect(buildIn(app(`out = { git = "file://${out}", rev = "${head(out)}" }\n`), cache).err).toEndWith(`fish.toml:4:7: error[E0905]: the lib is a file inside the package, as in lib = "src/lib.fsh"`);
+  expect(buildIn(app(`via = { git = "file://${viaPath}", rev = "${head(viaPath)}" }\n`), cache).err).toEndWith("fish.toml:5:1: error[E0906]: 'via' comes from git, so its dependencies must too; a path dependency would bring in files its commit doesn't pin");
   const outside = files("reach/elsewhere", { "lib.fsh": "" });
   files("reach/linked", { "fish.toml": manifest("linked"), "src/.keep": "" });
   Bun.spawnSync(["ln", "-s", join(outside, "lib.fsh"), join(root, "reach/linked/src/lib.fsh")]);
-  expect(buildIn(app(`linked = { path = "../linked" }\n`), cache).err).toBe("../linked/fish.toml:1:1: error: the lib 'src/lib.fsh' leads outside the package; it is a file inside it");
+  expect(buildIn(app(`linked = { path = "../linked" }\n`), cache).err).toBe("../linked/fish.toml:1:1: error[E0905]: the lib 'src/lib.fsh' leads outside the package; it is a file inside it");
 });
 
 test("a short rev is the commit it starts, never a tag named like it, and short and full revs of one commit are one package", () => {
@@ -246,11 +246,11 @@ test("a short rev is the commit it starts, never a tag named like it, and short 
 
 test("a package can't depend on itself, a second route by another name is refused, and GIT_DIR doesn't reach the fetch", () => {
   const self = files("names/self", { "fish.toml": manifest("self", `me = { path = "." }\n`), "src/main.fsh": `function main() {}\n` });
-  expect(fishc(self, "build").err).toBe("fish.toml:5:1: error: 'me' depends back on 'self': self -> me; packages can't depend on each other in a cycle");
+  expect(fishc(self, "build").err).toBe("fish.toml:5:1: error[E0906]: 'me' depends back on 'self': self -> me; packages can't depend on each other in a cycle");
   files("names/util", { "fish.toml": manifest("util"), "src/lib.fsh": "" });
   files("names/b", { "fish.toml": manifest("b", `foo = { path = "../util" }\n`), "src/lib.fsh": "" });
   const app = files("names/app", { "fish.toml": manifest("app", `util = { path = "../util" }\nb = { path = "../b" }\n`), "src/main.fsh": `function main() {}\n` });
-  expect(fishc(app, "build").err).toBe("../b/fish.toml:5:1: error: the package at '../util' is named 'util' in its fish.toml, not 'foo'; depend on it by that name");
+  expect(fishc(app, "build").err).toBe("../b/fish.toml:5:1: error[E0906]: the package at '../util' is named 'util' in its fish.toml, not 'foo'; depend on it by that name");
   const [repo, commit] = repository("names/repo", { "fish.toml": manifest("dep"), "src/lib.fsh": "" });
   const user = repository("names/user", { "x.txt": "x" })[0];
   const gitApp = files("names/gitapp", { "fish.toml": manifest("gitapp", `dep = { git = "file://${repo}", rev = "${commit}" }\n`), "src/main.fsh": `function main() {}\n` });
@@ -264,9 +264,9 @@ test("the lock's version is checked, and a tampered package is named at its entr
   expect(buildIn(app, cache)).toEqual({ code: 0, err: "" });
   const lib = Bun.spawnSync(["find", cache, "-name", "lib.fsh"]).stdout.toString().trim();
   Bun.spawnSync(["ln", "-s", "/etc/hosts", join(lib, "..", "added.fsh")]);
-  expect(buildIn(app, cache).err).toMatch(/^fish\.lock:4:1: error: the files of 'dep' at .* no longer match its checksum in fish\.lock/);
+  expect(buildIn(app, cache).err).toMatch(/^fish\.lock:4:1: error\[E0906\]: the files of 'dep' at .* no longer match its checksum in fish\.lock/);
   writeFileSync(join(app, "fish.lock"), "version = 2\n");
-  expect(buildIn(app, cache).err).toBe("fish.lock:1:11: error: this fish.lock isn't one this fishc writes, version 1; a newer fishc may have written it");
+  expect(buildIn(app, cache).err).toBe("fish.lock:1:11: error[E0906]: this fish.lock isn't one this fishc writes, version 1; a newer fishc may have written it");
 });
 
 test("builds fetching the same package at once all succeed", async () => {
@@ -294,7 +294,7 @@ test("a dependency's relative imports stay inside it, while the program's own pa
   files("rel/outside", { "lib.fsh": `export function hi(): string { return "outside"; }\n` });
   const [repo, commit] = repository("rel/repo", { "fish.toml": manifest("dep"), "src/lib.fsh": `import { hi } from "../../../outside/lib";\nexport function v(): string { return hi(); }\n` });
   const app = files("rel/app", { "fish.toml": manifest("app", `dep = { git = "file://${repo}", rev = "${commit}" }\n`), "src/main.fsh": `import { v } from "dep";\nfunction main() { console.log(v()); }\n` });
-  expect(buildIn(app, join(root, "rel-cache")).err).toEndWith("src/lib.fsh:1:1: error: '../../../outside/lib' leads outside the package 'dep'; a package imports its own files by path, and other packages by name");
+  expect(buildIn(app, join(root, "rel-cache")).err).toEndWith("src/lib.fsh:1:1: error[E0903]: '../../../outside/lib' leads outside the package 'dep'; a package imports its own files by path, and other packages by name");
   files("rel/shared", { "main.fsh": `function main() { console.log("outside"); }\n` });
   const own = files("rel/own", { "fish.toml": manifest("own"), "src/.keep": "" });
   Bun.spawnSync(["ln", "-s", join(root, "rel/shared/main.fsh"), join(own, "src/main.fsh")]);

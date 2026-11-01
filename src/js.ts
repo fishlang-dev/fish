@@ -42,7 +42,7 @@ export function jsDeclaration(ids: Ids, declared: Declared, name: string, specif
     case "class":
       return { ...classShape(ids, d, name, js), jsSource: declared.at } as Stmt;
     default:
-      throw new CompileError(`'${name}' from '${specifier}' is ${KINDS[d.kind] ?? "a declaration"}, which can't be imported from a package yet`, at.start, at.end);
+      throw new CompileError("E1005", `'${name}' from '${specifier}' is ${KINDS[d.kind] ?? "a declaration"}, which can't be imported from a package yet`, at.start, at.end);
   }
 }
 

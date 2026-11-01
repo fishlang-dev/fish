@@ -29,7 +29,7 @@ export function standIn(typing: Typing, types: Type[], what: string, at: Span, d
     const open = openParam(typing, t, deep);
     if (!open) continue;
     if (deferring()) return open;
-    throw new CompileError(`${what} of the type parameter '${typing.rec(open).name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
+    throw new CompileError("E0114", `${what} of the type parameter '${typing.rec(open).name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
   }
   return undefined;
 }
@@ -87,14 +87,14 @@ export class TypeFunctions {
     const r = this.recOf(t);
     if (r?.kind === "object") return r.fields;
     if (r?.kind === "class") {
-      if (!this.host.fieldsKnown(t as ClassType)) throw new CompileError(`${what} of '${r.name}' is needed while the field types of '${r.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
+      if (!this.host.fieldsKnown(t as ClassType)) throw new CompileError("E0114", `${what} of '${r.name}' is needed while the field types of '${r.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
       return this.typing.allFields(t as ClassType).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
     }
     if (r?.kind === "param" && r.concrete) return this.fieldsOf(r.concrete, what, at);
     if (r?.kind === "interface") {
-      throw new CompileError(`${what} takes an object type or a class, not the interface '${this.typing.show(t)}', whose methods aren't values in Fish; write its fields as a 'type'`, at.start, at.end);
+      throw new CompileError("E0114", `${what} takes an object type or a class, not the interface '${this.typing.show(t)}', whose methods aren't values in Fish; write its fields as a 'type'`, at.start, at.end);
     }
-    throw new CompileError(`${what} takes an object type or a class, not '${this.typing.show(t)}'`, at.start, at.end);
+    throw new CompileError("E0114", `${what} takes an object type or a class, not '${this.typing.show(t)}'`, at.start, at.end);
   }
 
   // The keys a type names: a string literal, or a union of them.
@@ -105,7 +105,7 @@ export class TypeFunctions {
     if (members.every((m) => m?.kind === "literal" && typeof m.value === "string")) {
       return members.map((m) => (m as { value: string }).value);
     }
-    throw new CompileError(`${what} takes keys written as string literals, like '"a" | "b"', not '${this.typing.show(k)}'`, at.start, at.end);
+    throw new CompileError("E0114", `${what} takes keys written as string literals, like '"a" | "b"', not '${this.typing.show(k)}'`, at.start, at.end);
   }
 
   // `keyof T`: the union of T's field names.
@@ -113,7 +113,7 @@ export class TypeFunctions {
     const held = standIn(this.typing, [t], "'keyof'", at, false, () => this.host.isDeferring());
     if (held) return held;
     const fields = this.fieldsOf(t, "'keyof'", at);
-    if (fields.length === 0) throw new CompileError(`'${this.typing.show(t)}' has no public fields, so 'keyof' of it has no keys`, at.start, at.end);
+    if (fields.length === 0) throw new CompileError("E0114", `'${this.typing.show(t)}' has no public fields, so 'keyof' of it has no keys`, at.start, at.end);
     return this.typing.unionType(fields.map((f) => this.typing.literalType(f.name)));
   }
 
@@ -126,7 +126,7 @@ export class TypeFunctions {
     if (r?.kind === "param" && r.concrete) return this.indexedType(r.concrete, k, at, keyAt);
     if (r?.kind === "array") {
       if (isNumeric(k)) return r.element;
-      throw new CompileError(`an array type is indexed by 'number', which gives its element type, here '${this.typing.show(r.element)}'`, keyAt.start, keyAt.end);
+      throw new CompileError("E0114", `an array type is indexed by 'number', which gives its element type, here '${this.typing.show(r.element)}'`, keyAt.start, keyAt.end);
     }
     const names = this.keysOf(k, "an indexed access type", keyAt);
     // As in TypeScript, a union gives the union of each member's field, which every member must have.
@@ -134,7 +134,7 @@ export class TypeFunctions {
       return this.typing.unionType(r.members.flatMap((m) => {
         const kind = this.recOf(m)?.kind;
         if (kind !== "object" && kind !== "class" && kind !== "param") {
-          throw new CompileError(`an indexed access type of a union takes object types or classes, but '${this.typing.show(t)}' has the member '${this.typing.show(m)}'`, at.start, at.end);
+          throw new CompileError("E0114", `an indexed access type of a union takes object types or classes, but '${this.typing.show(t)}' has the member '${this.typing.show(m)}'`, at.start, at.end);
         }
         return this.fieldTypes(m, names, at, keyAt, t);
       }));
@@ -147,7 +147,7 @@ export class TypeFunctions {
     const fields = this.fieldsOf(t, "an indexed access type", at);
     return names.map((name) => {
       const found = fields.find((f) => f.name === name);
-      if (!found) throw new CompileError(`'${name}' isn't a field of '${this.typing.show(t)}'${whole ? `, a member of '${this.typing.show(whole)}'` : ""}`, keyAt.start, keyAt.end);
+      if (!found) throw new CompileError("E0114", `'${name}' isn't a field of '${this.typing.show(t)}'${whole ? `, a member of '${this.typing.show(whole)}'` : ""}`, keyAt.start, keyAt.end);
       return found.type;
     });
   }
@@ -182,7 +182,7 @@ export class TypeFunctions {
   // `Record<K, V>`: an object type with a field of type V for each key K names.
   private recordType(this: Mut<this>, [k, v]: Type[], at: Span, [keyAt]: Span[]): Type {
     if (k === "string") {
-      throw new CompileError(`'Record<string, ${this.typing.show(v!)}>' is a dictionary whose keys are only known at run time, which needs a Map type Fish doesn't have yet; write its keys, like 'Record<"a" | "b", ${this.typing.show(v!)}>'`, at.start, at.end);
+      throw new CompileError("E0114", `'Record<string, ${this.typing.show(v!)}>' is a dictionary whose keys are only known at run time, which needs a Map type Fish doesn't have yet; write its keys, like 'Record<"a" | "b", ${this.typing.show(v!)}>'`, at.start, at.end);
     }
     return this.typing.objectType(this.keysOf(k!, "'Record'", keyAt!).map((name) => ({ name, type: v! })));
   }
@@ -206,7 +206,7 @@ export class TypeFunctions {
   private pickType(this: Mut<this>, [t, k]: Type[], at: Span, [, keyAt]: Span[]): Type {
     const fields = this.fieldsOf(t!, "'Pick'", at);
     const names = this.keysOf(k!, "'Pick'", keyAt!);
-    for (const name of names) if (!fields.some((f) => f.name === name)) throw new CompileError(`'${name}' isn't a field of '${this.typing.show(t!)}', so 'Pick' can't keep it`, keyAt!.start, keyAt!.end);
+    for (const name of names) if (!fields.some((f) => f.name === name)) throw new CompileError("E0114", `'${name}' isn't a field of '${this.typing.show(t!)}', so 'Pick' can't keep it`, keyAt!.start, keyAt!.end);
     return this.typing.objectType(fields.filter((f) => names.includes(f.name)));
   }
 
@@ -248,7 +248,7 @@ export class TypeFunctions {
     const r = this.recOf(f);
     if (r?.kind === "param" && r.concrete) return this.returnType([r.concrete], at);
     if (r?.kind === "function" || r?.kind === "closure") return r.returns;
-    throw new CompileError(`'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${this.typing.show(f)}'`, at.start, at.end);
+    throw new CompileError("E0114", `'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${this.typing.show(f)}'`, at.start, at.end);
   }
 
   // `Awaited<T>`: what awaiting a T gives, through promises of promises; any other type is itself.
@@ -275,11 +275,11 @@ export class TypeFunctions {
         if (r?.kind === "literal") return { quasis: [String(r.value)], holes: [] };
         if (m === "string" || isNumeric(m)) return { quasis: ["", ""], holes: [m] };
         if (r?.kind === "pattern") return { quasis: r.quasis, holes: r.holes };
-        throw new CompileError(`a template literal type's hole takes a string, a number type, or string, number or boolean literals, not '${this.typing.show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
+        throw new CompileError("E0114", `a template literal type's hole takes a string, a number type, or string, number or boolean literals, not '${this.typing.show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
       });
-      if (spelled.length * pieces.length > 10_000) throw new CompileError("this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
+      if (spelled.length * pieces.length > 10_000) throw new CompileError("E0114", "this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
       spelled = spelled.flatMap((s) => pieces.map((p) => joined(joined(s, p), { quasis: [quasis[i + 1]!], holes: [] })));
-      if (spelled.some((s) => s.quasis.some((q) => q.length > 100_000))) throw new CompileError("this template literal type spells a string longer than 100000 characters", at.start, at.end);
+      if (spelled.some((s) => s.quasis.some((q) => q.length > 100_000))) throw new CompileError("E0114", "this template literal type spells a string longer than 100000 characters", at.start, at.end);
     });
     return this.kept(spelled.map((s) => (s.holes.length === 0 ? this.typing.literalType(s.quasis[0]!) : this.typing.patternType(s.quasis, s.holes))));
   }
@@ -289,7 +289,7 @@ export class TypeFunctions {
     return this.kept(this.membersOf(s!, `'${what}'`, at).map((m) => {
       const r = this.recOf(m);
       if (r?.kind === "literal" && typeof r.value === "string") return this.typing.literalType(change(r.value));
-      throw new CompileError(`'${what}' takes string literals, like '${what}<"a" | "b">', not '${this.typing.show(m)}'`, at.start, at.end);
+      throw new CompileError("E0114", `'${what}' takes string literals, like '${what}<"a" | "b">', not '${this.typing.show(m)}'`, at.start, at.end);
     }));
   }
 }

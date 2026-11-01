@@ -6,7 +6,7 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap, walk } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, TypeFunctions, UTILITIES, type TypeFunctionsHost } from "./typefns.ts";
@@ -36,20 +36,20 @@ export function paramName(p: Param): string {
 const STD_CLASSES = new Set(["AbortError", "IoError", "TextEncoder", "TextDecoder"]);
 
 export function typeName(name: string, at: Span, ...namespaces: Map<string, unknown>[]) {
-  if (BUILT_IN_TYPES.has(name)) throw new CompileError(`'${name}' is a built-in type`, at.start, at.end);
-  if (STD_CLASSES.has(name) && namespaces.some((n) => n.has(name))) throw new CompileError(`'${name}' is a std class; give yours another name`, at.start, at.end);
-  if (namespaces.some((n) => n.has(name))) throw new CompileError(`duplicate type name '${name}'`, at.start, at.end);
+  if (BUILT_IN_TYPES.has(name)) throw new CompileError("E0407", `'${name}' is a built-in type`, at.start, at.end);
+  if (STD_CLASSES.has(name) && namespaces.some((n) => n.has(name))) throw new CompileError("E0407", `'${name}' is a std class; give yours another name`, at.start, at.end);
+  if (namespaces.some((n) => n.has(name))) throw new CompileError("E0402", `duplicate type name '${name}'`, at.start, at.end);
 }
 
 // A field holds a value, and an interface type describes values without being one. A
 // function type in a field would be a boxed callable, which needs the heap.
 export function storable(typing: Typing, written: Type, at: Span): Type {
   const w = typeof written === "string" ? undefined : typing.rec(written);
-  if (w?.kind === "function" && w.generic) throw new CompileError(familyHeld("a field"), at.start, at.end);
+  if (w?.kind === "function" && w.generic) throw new CompileError("E0115", familyHeld("a field"), at.start, at.end);
   const type = typing.stored(written);
   const r = typeof type === "string" ? undefined : typing.rec(type);
   if (r?.kind === "interface") {
-    throw new CompileError(`a field can't have the interface type '${r.name}'; use a type parameter instead`, at.start, at.end);
+    throw new CompileError("E0115", `a field can't have the interface type '${r.name}'; use a type parameter instead`, at.start, at.end);
   }
   if (r?.kind === "closure") throw unsupported("functions stored in fields", at);
   // A reference or nothing is only a variable's, a parameter's or a result's.
@@ -212,7 +212,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const data = info.data!;
     if (args.length !== data.params.length) {
       const n = data.params.length;
-      throw new CompileError(`enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, at.start, at.end);
+      throw new CompileError("E0707", `enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, at.start, at.end);
     }
     const key = args.map((t) => this.typing.keyOf(t)).join(",");
     const made = data.instances.get(key);
@@ -224,7 +224,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       if (!back) this.host.resolverState.enumBlocks.set(`${data.id} ${key}`, back = this.typing.recursiveType(shown, args));
       return { type: back, variants: new Map() };
     }
-    if (this.host.resolverState.making.has(data)) throw new CompileError(`enum '${data.name}' holds itself with other type arguments, which would make it infinitely large`, at.start, at.end);
+    if (this.host.resolverState.making.has(data)) throw new CompileError("E0707", `enum '${data.name}' holds itself with other type arguments, which would make it infinitely large`, at.start, at.end);
     this.host.resolverState.making.set(data, key);
     try {
       const bindings = new Map(data.params.map((p, i) => [p, args[i]!]));
@@ -274,7 +274,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (p.modifiers.length > 0 && !property) throw unsupported("parameter properties", p);
     if (name === "this") throw unsupported("'this' parameters", p);
     if (p.default) throw unsupported("default parameter values", p);
-    if (!p.type) throw new CompileError(`parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
+    if (!p.type) throw new CompileError("E0104", `parameter '${name}' implicitly has an 'any' type; add a type annotation`, p.start, p.end);
     // A parameter with a default is optional to callers, and holds its declared type in the body.
     const lowered = this.defaulted.get(p);
     if (lowered) {
@@ -282,15 +282,15 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const low = this.typing.lower(declared);
       const kind = this.recOf(low)?.kind;
       if (kind && ["function", "closure", "dyn", "interface", "param", "ref", "future", "generator", "handle"].includes(kind)) {
-        throw new CompileError(`defaults on parameters of type '${this.typing.show(declared)}' are not supported yet`, p.start, p.end);
+        throw new CompileError("E0801", `defaults on parameters of type '${this.typing.show(declared)}' are not supported yet`, p.start, p.end);
       }
-      if (holdsNull(this.typing, declared) && !lowered.empty) throw new CompileError(`a parameter that may be null can have only 'null' as its default so far, since a passed null and a missing argument would look the same; write '${lowered.name}?: ...' and give the default in the body`, p.start, p.end);
+      if (holdsNull(this.typing, declared) && !lowered.empty) throw new CompileError("E0801", `a parameter that may be null can have only 'null' as its default so far, since a passed null and a missing argument would look the same; write '${lowered.name}?: ...' and give the default in the body`, p.start, p.end);
       this.declaredTypes.set(p, declared);
     }
     // A call may leave out an optional parameter, which is then empty.
     const type = p.optional ? this.typing.unionType([this.unionMember(p.type), "null"]) : this.resolveType(p.type);
     const r = this.recOf(type);
-    if (p.rest && r?.kind !== "array") throw new CompileError(`a rest parameter takes an array of the values, as in '...${name}: ${this.typing.show(type)}[]'`, p.type.start, p.type.end);
+    if (p.rest && r?.kind !== "array") throw new CompileError("E0408", `a rest parameter takes an array of the values, as in '...${name}: ${this.typing.show(type)}[]'`, p.type.start, p.type.end);
     // A comptime parameter makes an instance per value, so its type is one whose values compare.
     const keyed = (t: Type): boolean => {
       const k = this.recOf(t);
@@ -298,7 +298,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     };
     // A tag's strings, `TemplateStringsArray`, are an array of strings.
     const strings = r?.kind === "array" && r.element === "string";
-    if (p.comptime && (p.optional || !(keyed(type) || strings))) throw new CompileError(`a comptime parameter takes an integer, a boolean, a string, an enum member or a string array, not '${this.typing.show(type)}'`, p.type.start, p.type.end);
+    if (p.comptime && (p.optional || !(keyed(type) || strings))) throw new CompileError("E1102", `a comptime parameter takes an integer, a boolean, a string, an enum member or a string array, not '${this.typing.show(type)}'`, p.type.start, p.type.end);
     return type;
   }
 
@@ -316,7 +316,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // An async function's error comes at the `await`, with its future, not from the call.
     if (this.typing.promiseElement(returns) !== undefined) throw unsupported("function types giving a Promise that throw", t.throws);
     const error = this.resolveType(t.throws);
-    if (error === "void") throw new CompileError("a function can't throw 'void'; throw a value", t.throws.start, t.throws.end);
+    if (error === "void") throw new CompileError("E0118", "a function can't throw 'void'; throw a value", t.throws.start, t.throws.end);
     if (this.typing.holdsRef(error)) throw unsupported("errors holding references", t.throws);
     return error;
   }
@@ -327,30 +327,30 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (this.typing.holdsRef(element)) throw unsupported("arrays of references", at);
     const e = this.recOf(element);
     if (e?.kind === "closure") throw unsupported("arrays of functions", at);
-    if (e?.kind === "function" && e.generic) throw new CompileError(familyHeld("an array"), at.start, at.end);
+    if (e?.kind === "function" && e.generic) throw new CompileError("E0115", familyHeld("an array"), at.start, at.end);
     if (e?.kind === "function") return this.typing.arrayType(this.typing.stored(element));
     if (e?.kind === "interface" && this.typing.stored(element) !== element) return this.typing.arrayType(this.typing.stored(element));
     // An interface describes values of many types, each laid out its own way, so an array of
     // them has no one element size.
     if (e?.kind === "interface") {
-      throw new CompileError(`an array can't hold the interface type '${e.name}' directly, since its values may each be a different type; use 'Dyn<${e.name}>[]' to hold any of them`, at.start, at.end);
+      throw new CompileError("E0115", `an array can't hold the interface type '${e.name}' directly, since its values may each be a different type; use 'Dyn<${e.name}>[]' to hold any of them`, at.start, at.end);
     }
     return this.typing.arrayType(element);
   }
 
   // `FixedArray<T, N>`: N elements of T held inline, N a number written in place.
   private fixedArray(this: Mut<this>, t: Extract<TypeNode, { kind: "ref" }>): Type {
-    if (t.args.length !== 2) throw new CompileError("'FixedArray' takes an element type and a length, like 'FixedArray<i64, 4>'", t.start, t.end);
+    if (t.args.length !== 2) throw new CompileError("E0116", "'FixedArray' takes an element type and a length, like 'FixedArray<i64, 4>'", t.start, t.end);
     const [of, n] = t.args as [TypeNode, TypeNode];
-    if (n.kind === "literal" && n.value.kind === "unary" && n.value.op === "-") throw new CompileError("a FixedArray's length can't be negative", n.start, n.end);
+    if (n.kind === "literal" && n.value.kind === "unary" && n.value.op === "-") throw new CompileError("E0116", "a FixedArray's length can't be negative", n.start, n.end);
     const size = n.kind === "literal" && n.value.kind === "int" ? n.value.value : undefined;
-    if (size === undefined) throw new CompileError("a FixedArray's length is a number written in place, like 'FixedArray<i64, 4>'", n.start, n.end);
+    if (size === undefined) throw new CompileError("E0116", "a FixedArray's length is a number written in place, like 'FixedArray<i64, 4>'", n.start, n.end);
     const element = storable(this.typing, this.resolveType(of), of);
     if (this.typing.holdsRef(element)) throw unsupported("fixed arrays of references", of);
     // Its elements live where it does, often the stack, so all of them together are limited.
-    if (size * BigInt(byteSize(this.typing, element)) > 65536n) throw new CompileError("a FixedArray holds at most 64 KiB inline, whatever its elements hold inline counted; use an array, 'T[]', for more", n.start, n.end);
+    if (size * BigInt(byteSize(this.typing, element)) > 65536n) throw new CompileError("E0116", "a FixedArray holds at most 64 KiB inline, whatever its elements hold inline counted; use an array, 'T[]', for more", n.start, n.end);
     const e = this.recOf(element);
-    if (e?.kind === "interface") throw new CompileError(`a FixedArray can't hold the interface type '${e.name}' directly; use 'Dyn<${e.name}>'`, of.start, of.end);
+    if (e?.kind === "interface") throw new CompileError("E0115", `a FixedArray can't hold the interface type '${e.name}' directly; use 'Dyn<${e.name}>'`, of.start, of.end);
     return this.typing.fixedType(element, Number(size));
   }
 
@@ -377,7 +377,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const holes = t.types.map((t) => this.resolveType(t));
       return standIn(this.typing, holes, "a template literal type", t, false, () => this.host.resolverState.deferring > 0) ?? this.typeFns().templateType(t.quasis, holes, t, t.types);
     }
-    if (t.kind === "infer") throw new CompileError(`'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
+    if (t.kind === "infer") throw new CompileError("E0114", `'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       const rest = t.params.find((p) => p.rest);
@@ -408,11 +408,11 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const fixed = rest < 0 ? t.elements : t.elements.slice(0, rest);
       const required = fixed.findIndex((e) => e.optional);
       const late = required < 0 ? undefined : fixed.slice(required).find((e) => !e.optional);
-      if (late) throw new CompileError("a required element can't follow an optional one; move it before the optional elements", late.start, late.end);
+      if (late) throw new CompileError("E0117", "a required element can't follow an optional one; move it before the optional elements", late.start, late.end);
       if (rest >= 0 && required >= 0) throw unsupported("tuple types with both optional and rest elements", t.elements[rest]!);
       const many = rest < 0 ? undefined : this.resolveType(t.elements[rest]!.type);
       const m = this.recOf(many);
-      if (many !== undefined && m?.kind !== "array") throw new CompileError(`a tuple's rest element is an array type, like '...${this.typing.show(many)}[]'`, t.elements[rest]!.start, t.elements[rest]!.end);
+      if (many !== undefined && m?.kind !== "array") throw new CompileError("E0117", `a tuple's rest element is an array type, like '...${this.typing.show(many)}[]'`, t.elements[rest]!.start, t.elements[rest]!.end);
       return this.typing.tupleType(fixed.map((e) => (e.optional ? this.typing.unionType([storable(this.typing, this.resolveType(e.type), e), "null"]) : storable(this.typing, this.resolveType(e.type), e))), required < 0 ? undefined : required, m?.kind === "array" ? m.element : undefined);
     }
     // `typeof f` or `typeof X`: a top-level function's or const's type.
@@ -424,7 +424,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const bound = this.host.resolverState.scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
     if (Object.hasOwn(INTEGERS, t.name) || ["boolean", "void", "number", "f32", "f64", "string", "bigint"].includes(t.name)) {
-      if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
+      if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
       // `number` is JavaScript's 64-bit float.
       return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string" | "bigint");
     }
@@ -434,67 +434,71 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (t.name === "Ref" || t.name === "Mut") return this.reference(t);
     if (t.name === "never" && t.args.length === 0) return "never";
     if (t.name === "null" || t.name === "undefined") {
-      if (t.args.length > 0) throw new CompileError(`type '${t.name}' is not generic`, t.start, t.end);
+      if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
       return "null";
     }
     if (t.name === "Ptr" || t.name === "MutPtr") {
-      if (t.args.length !== 1) throw new CompileError(`'${t.name}' takes the type it points to, like '${t.name}<u8>'`, t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it points to, like '${t.name}<u8>'`, t.start, t.end);
       return this.typing.pointerType(this.resolveType(t.args[0]!), t.name === "MutPtr");
     }
-    if (t.name === "Atomic" || t.name === "Lock" || t.name === "Cell") {
-      if (t.args.length !== 1) throw new CompileError(`'${t.name}' takes the type it holds, like '${t.name}<i64>'`, t.start, t.end);
-      return interior(this.typing, t.name, this.resolveType(t.args[0]!), t);
+    if (INTERIORS.has(t.name)) {
+      if (t.args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it holds, like '${t.name}<i64>'`, t.start, t.end);
+      return interior(this.typing, t.name as InteriorRecord["which"], this.resolveType(t.args[0]!), t);
     }
     if (t.name === "Dyn") {
       const of = t.args.length === 1 ? this.resolveType(t.args[0]!) : undefined;
       const o = this.recOf(of);
       if (o?.kind !== "interface" || this.typing.promiseElement(of!) !== undefined || this.typing.generatorElement(of!) !== undefined) {
-        throw new CompileError("'Dyn' takes the interface its values implement, like 'Dyn<Handler>'", t.start, t.end);
+        throw new CompileError("E0116", "'Dyn' takes the interface its values implement, like 'Dyn<Handler>'", t.start, t.end);
       }
       return this.typing.dynType(of as InterfaceType);
     }
     if (t.name === "RegExp") {
-      if (t.args.length !== 0) throw new CompileError("'RegExp' takes no type arguments", t.start, t.end);
+      if (t.args.length !== 0) throw new CompileError("E0106", "'RegExp' takes no type arguments", t.start, t.end);
       return ANY_REGEX;
     }
     if (t.name === "Semaphore" || t.name === "Permit" || t.name === "AbortController" || t.name === "AbortSignal" || t.name === "TcpListener" || t.name === "TcpStream" || t.name === "JsValue") {
-      if (t.args.length !== 0) throw new CompileError(`'${t.name}' takes no type arguments`, t.start, t.end);
+      if (t.args.length !== 0) throw new CompileError("E0106", `'${t.name}' takes no type arguments`, t.start, t.end);
       return this.typing.blockType(t.name);
     }
     if (t.name === "Channel") {
-      if (t.args.length !== 1) throw new CompileError("'Channel' takes the type it carries, like 'Channel<string>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'Channel' takes the type it carries, like 'Channel<string>'", t.start, t.end);
       return channel(this.typing, this.resolveType(t.args[0]!), t);
     }
     if (t.name === "Map" || t.name === "Set") {
       const set = t.name === "Set";
-      if (t.args.length !== (set ? 1 : 2)) throw new CompileError(set ? "'Set' takes the type of its members, like 'Set<string>'" : "'Map' takes its key and value types, like 'Map<string, i64>'", t.start, t.end);
+      if (t.args.length !== (set ? 1 : 2)) throw new CompileError("E0116", set ? "'Set' takes the type of its members, like 'Set<string>'" : "'Map' takes its key and value types, like 'Map<string, i64>'", t.start, t.end);
       return collection(this.typing, this.resolveType(t.args[0]!), set ? "void" : this.resolveType(t.args[1]!), set, t);
     }
     if (t.name === "shared") {
-      if (t.args.length !== 1) throw new CompileError("'shared' takes the type it holds, like 'shared<State>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'shared' takes the type it holds, like 'shared<State>'", t.start, t.end);
       return shareable(this.typing, this.resolveType(t.args[0]!), t);
     }
     // A `JoinHandle<T>` written out is one whose task can't throw.
     if (t.name === "JoinHandle") {
-      if (t.args.length !== 1) throw new CompileError("'JoinHandle' takes the type its task gives, like 'JoinHandle<i64>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'JoinHandle' takes the type its task gives, like 'JoinHandle<i64>'", t.start, t.end);
       return this.typing.handleType(this.typing.heldArgument(this.resolveType(t.args[0]!)), undefined);
     }
     if (t.name === "Promise") {
-      if (t.args.length !== 1) throw new CompileError("'Promise' takes the type it gives once awaited, like 'Promise<i64>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'Promise' takes the type it gives once awaited, like 'Promise<i64>'", t.start, t.end);
       const gives = this.typing.heldArgument(this.resolveType(t.args[0]!));
       if (this.typing.holdsPattern(gives)) throw unsupported("template literal pattern types in promises", t);
       return this.typing.promiseInterface(gives);
     }
-    if (t.name === "Generator") {
-      if (t.args.length !== 1) throw new CompileError("'Generator' takes the type it yields, like 'Generator<i64>'", t.start, t.end);
-      return this.typing.generatorInterface(this.resolveType(t.args[0]!));
-    }
-    if (t.name === "AsyncGenerator") {
-      if (t.args.length !== 1) throw new CompileError("'AsyncGenerator' takes the type it yields, like 'AsyncGenerator<i64>'", t.start, t.end);
-      return this.typing.asyncGeneratorInterface(this.resolveType(t.args[0]!));
+    // `Generator<T, R, N>`: what it yields, what it returns, which is nothing yet, and what
+    // `next(x)` sends it.
+    if (t.name === "Generator" || t.name === "AsyncGenerator") {
+      if (t.args.length < 1 || t.args.length > 3) throw new CompileError("E0116", `'${t.name}' takes the type it yields, like '${t.name}<i64>', then optionally 'void' and the type 'next' sends`, t.start, t.end);
+      const returned = t.args[1];
+      if (returned && this.resolveType(returned) !== "void" && !(returned.kind === "ref" && returned.name === "undefined")) throw unsupported("generator return values", returned);
+      const sends = t.args[2] && this.resolveType(t.args[2]);
+      if (sends !== undefined && t.name === "AsyncGenerator") throw unsupported("values sent into an async generator's 'next'", t.args[2]!);
+      if (sends !== undefined && this.typing.holdsRef(sends)) throw unsupported("references sent into generators", t.args[2]!);
+      const yields = this.resolveType(t.args[0]!);
+      return t.name === "Generator" ? this.typing.generatorInterface(yields, sends) : this.typing.asyncGeneratorInterface(yields);
     }
     if (t.name === "Option") {
-      if (t.args.length !== 1) throw new CompileError("'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);
+      if (t.args.length !== 1) throw new CompileError("E0116", "'Option' takes the type it may hold, like 'Option<i64>'", t.start, t.end);
       return this.typing.unionType([this.unionMember(t.args[0]!, true), "null"]);
     }
     // A class's lifetimes, written or left out, are no type arguments.
@@ -509,7 +513,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     }
     if (alias) return this.aliasType(alias, args, t);
     const named = this.host.classNamed(t.name, args, t);
-    if (named !== undefined && this.typing.rec(named).abstract) throw new CompileError(`'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
+    if (named !== undefined && this.typing.rec(named).abstract) throw new CompileError("E0701", `'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
     if (named) return named;
     const [owner, name] = t.name.split(".");
     const e = this.enums.get(owner!);
@@ -530,7 +534,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (utility) {
       const [count, example] = utility;
       const apply = (given: Type[], at: Span, argAt: Span[]) => this.typeFns().utility(t.name, given, at, argAt);
-      if (args.length !== count) throw new CompileError(`'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${example}'`, t.start, t.end);
+      if (args.length !== count) throw new CompileError("E0106", `'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${example}'`, t.start, t.end);
       // Over a JS handle, a utility type remakes its shape's fields, and gives a handle again.
       const shapes = args.map((t) => this.typing.jsShape(t));
       if (shapes.some((x) => x !== undefined)) {
@@ -540,22 +544,22 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       }
       return apply(args, t, t.args);
     }
-    throw new CompileError(`cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
+    throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
   }
 
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
   // `Ref<T, A>` also names the lifetime parameter it lives for, checked by the function.
   private reference(this: Mut<this>, t: Extract<TypeNode, { kind: "ref" }>): Type {
     if (t.args.length !== 1 && t.args.length !== 2) {
-      throw new CompileError(`type '${t.name}' takes the type it borrows, and optionally a lifetime`, t.start, t.end);
+      throw new CompileError("E0209", `type '${t.name}' takes the type it borrows, and optionally a lifetime`, t.start, t.end);
     }
     const to = this.resolveType(t.args[0]!);
-    if (to === "void") throw new CompileError("there is no 'void' value to borrow", t.start, t.end);
+    if (to === "void") throw new CompileError("E0118", "there is no 'void' value to borrow", t.start, t.end);
     if (this.recOf(to)?.kind === "function") throw unsupported("references to functions", t);
     // A type parameter standing for a reference makes one too.
     if (this.recOf(this.typing.lower(to))?.kind === "ref") throw unsupported("references to references", t);
     const life = t.args[1];
-    if (life && (life.kind !== "ref" || life.args.length > 0)) throw new CompileError("a lifetime is a name declared as '<A extends Lifetime>'", life.start, life.end);
+    if (life && (life.kind !== "ref" || life.args.length > 0)) throw new CompileError("E0209", "a lifetime is a name declared as '<A extends Lifetime>'", life.start, life.end);
     return this.typing.refType(to, t.name === "Mut", life?.name);
   }
 
@@ -570,11 +574,11 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // a member, and neither can `void`.
   private unionMember(this: Mut<this>, node: TypeNode, option = false): Type {
     const t = this.resolveType(node);
-    if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
+    if (t === "void") throw new CompileError("E0118", "'void' can't be a union member", node.start, node.end);
     const r = this.recOf(t);
-    if (r?.kind === "interface") throw new CompileError(`an interface can't be a union member; '${r.name}' describes values without being one`, node.start, node.end);
+    if (r?.kind === "interface") throw new CompileError("E0115", `an interface can't be a union member; '${r.name}' describes values without being one`, node.start, node.end);
     // A union holds a value, so a function type in one is a stored callable.
-    if (r?.kind === "function" && r.generic) throw new CompileError(familyHeld("a union"), node.start, node.end);
+    if (r?.kind === "function" && r.generic) throw new CompileError("E0115", familyHeld("a union"), node.start, node.end);
     if (r?.kind === "function") return this.typing.stored(t);
     if (this.typing.holdsRef(t) && !(option && r?.kind === "ref")) throw unsupported("unions holding references", node);
     return t;
@@ -586,7 +590,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const digits = negative ? e.operand : e;
     if (digits.kind !== "int") throw unsupported("literal types of this kind", e);
     const value = negative ? -digits.value : digits.value;
-    if (value > I64_MAX || value < -I64_MAX - 1n) throw new CompileError("integer literal does not fit in i64", e.start, e.end);
+    if (value > I64_MAX || value < -I64_MAX - 1n) throw new CompileError("E0110", "integer literal does not fit in i64", e.start, e.end);
     return this.typing.literalType(value);
   }
 
@@ -620,7 +624,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const same = this.typing.rec(found).methods.find((x) => x.name === m.name);
       if (!same) this.typing.rec(found).methods.push(m);
       else if (this.typing.shapeKey(same.returns) !== this.typing.shapeKey(m.returns) || same.params.length !== m.params.length || same.params.some((p, i) => this.typing.shapeKey(p) !== this.typing.shapeKey(m.params[i]!))) {
-        throw new CompileError(`method '${m.name}' has different types on each side of '&'`, from.start, to.end);
+        throw new CompileError("E0114", `method '${m.name}' has different types on each side of '&'`, from.start, to.end);
       }
     }
     return found;
@@ -630,7 +634,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // interface is one interface per list of type arguments, its members seeing them.
   private interfaceOf(this: Mut<this>, i: Interface, args: Type[] = [], at: Span = i): InterfaceType {
     if (args.length !== i.typeParams.length) {
-      throw new CompileError(`interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+      throw new CompileError("E0106", `interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     // Every copy of a package's interface, one per import of it, is one type.
     const owner = i.jsSource ?? i;
@@ -639,7 +643,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const key = args.map((t) => this.typing.keyOf(t)).join(",");
     const found = byArgs.get(key);
     if (found) return found;
-    if (byArgs.size > 64) throw new CompileError(`instantiating interface '${i.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
+    if (byArgs.size > 64) throw new CompileError("E0113", `instantiating interface '${i.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     const t = this.typing.interfaceType(args.length > 0 ? `${i.name}<${args.map((t) => this.typing.show(t)).join(", ")}>` : i.name);
     if (args.length > 0) this.typing.rec(t).generic = { name: i.name, args };
     byArgs.set(key, t);
@@ -658,8 +662,8 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
         return;
       }
       if (this.typing.rec(t).fields.some((f) => f.name === name) || this.typing.rec(t).methods.some((m) => m.name === name)) {
-        if ((at as { kind?: string }).kind === "method" && this.typing.rec(t).methods.some((m) => m.name === name)) throw new CompileError(`'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
-        throw new CompileError(`duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
+        if ((at as { kind?: string }).kind === "method" && this.typing.rec(t).methods.some((m) => m.name === name)) throw new CompileError("E0402", `'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
+        throw new CompileError("E0402", `duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
       }
     };
     for (const node of i.extends) {
@@ -667,7 +671,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const resolved = this.resolveType(node);
       const base = this.typing.jsShape(resolved) ?? resolved;
       const b = this.recOf(base);
-      if (b === undefined || (b.kind !== "interface" && !(i.js && b.kind === "object"))) throw new CompileError("an interface can only extend interfaces", node.start, node.end);
+      if (b === undefined || (b.kind !== "interface" && !(i.js && b.kind === "object"))) throw new CompileError("E0702", "an interface can only extend interfaces", node.start, node.end);
       for (const f of b.fields) add(f.name, node), this.typing.rec(t).fields.push({ ...f }), inherited.add(f.name);
       if (b.kind === "interface") for (const m of b.methods) add(m.name, node), this.typing.rec(t).methods.push(m), inherited.add(m.name);
     }
@@ -698,7 +702,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       if (m.kind === "method") {
         if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
         if (m.optional) throw unsupported("optional methods", m);
-        if (!m.returns) throw new CompileError(`method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
+        if (!m.returns) throw new CompileError("E0104", `method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
         add(m.name, m);
         const first = m.params[0];
         const self = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
@@ -727,7 +731,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // compiler puts a pointer, a recursive type standing for the alias's type.
   private aliasType(this: Mut<this>, a: TypeAlias, args: Type[], at: Span): Type {
     if (args.length !== a.typeParams.length) {
-      throw new CompileError(`type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+      throw new CompileError("E0106", `type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     const key = `${a.name}<${args.map((t) => this.typing.keyOf(t)).join(",")}>`;
     const done = this.host.resolverState.resolved.get(key);
@@ -737,7 +741,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const open = this.host.resolverState.deferring > 0 && this.host.resolverState.resolving.size > 0 ? args.map((t) => openParam(this.typing, t, true)).find((t) => t) : undefined;
     if (open) return open;
     if (this.host.resolverState.layouts.some((s) => s.has(key))) {
-      throw new CompileError(`type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
+      throw new CompileError("E0113", `type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
     }
     if (this.host.resolverState.resolving.has(key)) {
       let back = this.host.resolverState.recursives.get(key);
@@ -749,8 +753,8 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // A type that branches as it recurses grows exponentially, so the whole program's type
     // evaluation has a budget, as TypeScript caps instantiations.
     if (this.host.resolverState.resolving.size === 0) this.host.resolverState.computed = 0;
-    if (++this.host.resolverState.computed > 20_000) throw new CompileError(`computing type '${a.name}' needed more than 20000 alias instances; a type that branches as it recurses grows exponentially`, at.start, at.end);
-    if (this.host.resolverState.resolving.size > 64) throw new CompileError(`type '${a.name}' is nested more than 64 alias instances deep while being computed; a type that uses itself must reach a branch that stops sooner`, at.start, at.end);
+    if (++this.host.resolverState.computed > 20_000) throw new CompileError("E0113", `computing type '${a.name}' needed more than 20000 alias instances; a type that branches as it recurses grows exponentially`, at.start, at.end);
+    if (this.host.resolverState.resolving.size > 64) throw new CompileError("E0113", `type '${a.name}' is nested more than 64 alias instances deep while being computed; a type that uses itself must reach a branch that stops sooner`, at.start, at.end);
     this.host.resolverState.resolving.add(key);
     let type: Type;
     try {
@@ -764,7 +768,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // name for nothing but itself.
     const r = this.recOf(type);
     if (back && (type === back || (r?.kind === "union" && r.members.includes(back)))) {
-      throw new CompileError(`type '${a.name}' circularly references itself; a type can hold itself only inside an object, a tuple or an array`, a.start, a.end);
+      throw new CompileError("E0113", `type '${a.name}' circularly references itself; a type can hold itself only inside an object, a tuple or an array`, a.start, a.end);
     }
     if (back) {
       this.typing.standsFor(back, type);
@@ -780,7 +784,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   private mapped(this: Mut<this>, t: Extract<TypeNode, { kind: "mapped" }>): Type {
     const homomorphic = t.constraint.kind === "operator" && t.constraint.op === "keyof" ? this.resolveType(t.constraint.type) : undefined;
     const keys = this.resolveType(t.constraint);
-    if (!t.type) throw new CompileError(`a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
+    if (!t.type) throw new CompileError("E0114", `a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
     const held = standIn(this.typing, homomorphic ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, () => this.host.resolverState.deferring > 0);
     if (held) {
       this.withScope(new Map([...this.host.resolverState.scope, [t.name, held]]), () => (t.as && this.resolveType(t.as), this.resolveType(t.type!)));
@@ -796,7 +800,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const from = source.find((f) => f.name === key);
       const readonly = t.readonly ? t.readonly === "+" : from?.readonly === true;
       for (const name of names) {
-        if (fields.some((f) => f.name === name)) throw new CompileError(`two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
+        if (fields.some((f) => f.name === name)) throw new CompileError("E0114", `two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
         const field = t.optional === "+" ? this.typing.optionalField(name, value)
           : t.optional === "-" ? { name, type: from?.optional === "added" ? this.typing.withoutNull(value) : value }
           : from?.optional && from.optional !== "undefined" ? this.kept(name, value, from.optional)
@@ -856,7 +860,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const found = new Map<string, Type>();
     if (!this.matches(t.extends, check, found)) return this.resolveType(t.else);
     for (const name of names) {
-      if (!found.has(name)) throw new CompileError(`'infer ${name}' matched nothing in '${this.typing.show(check)}', since the optional field holding it is missing; TypeScript would give 'unknown', which Fish doesn't have`, t.extends.start, t.extends.end);
+      if (!found.has(name)) throw new CompileError("E0114", `'infer ${name}' matched nothing in '${this.typing.show(check)}', since the optional field holding it is missing; TypeScript would give 'unknown', which Fish doesn't have`, t.extends.start, t.extends.end);
     }
     return this.withScope(new Map([...this.host.resolverState.scope, ...found]), () => this.resolveType(t.then));
   }
@@ -949,7 +953,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   private member(this: Mut<this>, m: TypeMember): Field {
     if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
-    if (!m.type) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
+    if (!m.type) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An object may leave out an optional property, which is then empty; one spelled
     // `T | undefined` may be left out too, and printing and JSON leave it out while empty.
     const f: Field = m.optional ? this.typing.optionalField(m.name, this.unionMember(m.type)) : withoutUndefined(this.ids, m.type) ? { name: m.name, type: this.resolveType(m.type), optional: "undefined" } : { name: m.name, type: this.resolveType(m.type) };
@@ -1022,7 +1026,7 @@ function merged(typing: Typing, a: ObjectType, b: ObjectType, from: Span, to: Sp
       continue;
     }
     if (g.type !== f.type && !(x && y)) {
-      throw new CompileError(`property '${f.name}' has type '${typing.show(g.type)}' on one side of '&' and '${typing.show(f.type)}' on the other`, from.start, to.end);
+      throw new CompileError("E0114", `property '${f.name}' has type '${typing.show(g.type)}' on one side of '&' and '${typing.show(f.type)}' on the other`, from.start, to.end);
     }
     const type = x && y ? merged(typing, x, y, from, to) : f.type;
     fields[i] = { name: f.name, type, ...(g.readonly && f.readonly && { readonly: true }), ...(g.optional && f.optional && { optional: f.optional }) };
@@ -1045,7 +1049,7 @@ export function unboxedClosure(typing: Typing, t: Type, at: Span) {
   if (typeof lowered === "string") return;
   const c = typing.rec(lowered);
   if ((c.kind !== "closure" && c.kind !== "function") || c.generic) return;
-  throw new CompileError(`'${p.name}' is a closure's own type here, which a type argument can't hold; write '${p.name}' where it is called, as in '<${c.name}>', or name it in a type argument of the signature, as in 'Box<${p.name}>'`, at.start, at.end);
+  throw new CompileError("E0115", `'${p.name}' is a closure's own type here, which a type argument can't hold; write '${p.name}' where it is called, as in '<${c.name}>', or name it in a type argument of the signature, as in 'Box<${p.name}>'`, at.start, at.end);
 }
 
 // An `Atomic<T>`, `Lock<T>` or `Cell<T>` holding a T it can hold: an Atomic, an integer or a
@@ -1055,12 +1059,12 @@ export function interior(typing: Typing, which: InteriorRecord["which"], given: 
   const of = typing.heldArgument(given);
   const held = typing.lower(of);
   if (which === "Atomic" && isInteger(held) && INTEGERS[held].bits === 128) {
-    throw new CompileError(`'Atomic' holds integers of up to 64 bits, not '${typing.show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
+    throw new CompileError("E0116", `'Atomic' holds integers of up to 64 bits, not '${typing.show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
   }
   if (which === "Atomic" && held !== "boolean" && !isInteger(held) && !(typeof held !== "string" && typing.rec(held).kind === "param")) {
-    throw new CompileError(`'Atomic' holds an integer or a boolean, not '${typing.show(of)}'; use a 'Lock' for other values`, at.start, at.end);
+    throw new CompileError("E0116", `'Atomic' holds an integer or a boolean, not '${typing.show(of)}'; use a 'Lock' for other values`, at.start, at.end);
   }
-  if (typing.holdsRef(of)) throw new CompileError(`'${which}' can't hold a reference yet ('${typing.show(of)}')`, at.start, at.end);
+  if (typing.holdsRef(of)) throw new CompileError("E0801", `'${which}' can't hold a reference yet ('${typing.show(of)}')`, at.start, at.end);
   // Its methods take and give its value as lowered, which would let a plain string in.
   if (typing.holdsPattern(of)) throw unsupported(`template literal pattern types in '${which}' values`, at);
   abstractless(typing, of, `'${which}'`, at);
@@ -1073,7 +1077,7 @@ export function interior(typing: Typing, which: InteriorRecord["which"], given: 
 function abstractless(typing: Typing, of: Type, holder: string, at: Span) {
   let found: Type | undefined;
   typing.holdsPart(typing.lower(of), (u) => typeof u !== "string" && ["interface", "function"].includes(typing.rec(u).kind) && (found = u) !== undefined);
-  if (found) throw new CompileError(`${holder} can't hold a '${typing.show(found)}' yet: name a concrete type`, at.start, at.end);
+  if (found) throw new CompileError("E0801", `${holder} can't hold a '${typing.show(found)}' yet: name a concrete type`, at.start, at.end);
 }
 
 // A `shared<T>` holding a T every thread may use at once: nothing in it borrows, points
@@ -1090,10 +1094,10 @@ export function shareable(typing: Typing, given: Type, at: Span): SharedType {
     blocker = u;
     return true;
   });
-  if (typing.holdsHandle(held)) throw new CompileError("a 'shared' value can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only", at.start, at.end);
+  if (typing.holdsHandle(held)) throw new CompileError("E0303", "a 'shared' value can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only", at.start, at.end);
   if (blocker) {
     const why = kindOf(blocker) === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from one place, which other threads can't keep alive";
-    throw new CompileError(`a 'shared' value is used from many threads at once, so it can't hold a '${typing.show(blocker)}', which ${why}`, at.start, at.end);
+    throw new CompileError("E0303", `a 'shared' value is used from many threads at once, so it can't hold a '${typing.show(blocker)}', which ${why}`, at.start, at.end);
   }
   return typing.sharedType(of);
 }
@@ -1107,7 +1111,7 @@ export function channel(typing: Typing, given: Type, at: Span): BlockType {
   const held = typing.lower(of);
   const h = typeof held === "string" ? undefined : typing.rec(held);
   if (h?.kind === "union" && h.members.includes("null") || held === "null") {
-    throw new CompileError(`a 'Channel' can't carry '${typing.show(held)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${typing.show(held)} }>'`, at.start, at.end);
+    throw new CompileError("E0116", `a 'Channel' can't carry '${typing.show(held)}': 'receive' gives null once the channel is closed, so a null sent through it would look the same; wrap it, as in 'Channel<{ value: ${typing.show(held)} }>'`, at.start, at.end);
   }
   abstractless(typing, of, "a 'Channel'", at);
   if (typing.holdsPattern(of)) throw unsupported("template literal pattern types in channels", at);
@@ -1117,7 +1121,7 @@ export function channel(typing: Typing, given: Type, at: Span): BlockType {
     blocker = u;
     return true;
   });
-  if (blocker) throw new CompileError(`a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made"}`, at.start, at.end);
+  if (blocker) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made"}`, at.start, at.end);
   return typing.blockType("Channel", of);
 }
 
@@ -1149,17 +1153,17 @@ function keyable(typing: Typing, t: Type): boolean {
 // A `Map<K, V>`, or a `Set<K>` when `set`: keys it can hash, and values it can own.
 export function collection(typing: Typing, key: Type, value: Type, set: boolean, at: Span): MapType {
   const what = set ? "a 'Set'" : "a 'Map'";
-  if (!keyable(typing, key)) throw new CompileError(`${what} ${set ? "holds" : "is keyed by"} strings or integers, or unions of their literals, not '${typing.show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
+  if (!keyable(typing, key)) throw new CompileError("E0116", `${what} ${set ? "holds" : "is keyed by"} strings or integers, or unions of their literals, not '${typing.show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
   if (typing.holdsRef(value)) throw unsupported("maps of references", at);
   const lowered = typing.lower(value);
   const v = typeof lowered === "string" ? undefined : typing.rec(lowered);
   if ((v?.kind === "closure" || v?.kind === "function") && v.generic) throw unsupported("maps of generic functions", at);
-  if (v?.kind === "interface") throw new CompileError(`a 'Map' can't hold the interface type '${v.name}' directly, since its values may each be a different type; use 'Dyn<${v.name}>'`, at.start, at.end);
+  if (v?.kind === "interface") throw new CompileError("E0115", `a 'Map' can't hold the interface type '${v.name}' directly, since its values may each be a different type; use 'Dyn<${v.name}>'`, at.start, at.end);
   unboxedClosure(typing, value, at);
   return typing.mapType(key, typing.stored(typing.heldArgument(value)), set);
 }
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {
@@ -1174,7 +1178,7 @@ const MEMBER_FORMS = {
 // Fields with their source spans, checked for a name given twice.
 export function fields(list: Field[], at: Span[]): Field[] {
   list.forEach((f, i) => {
-    if (list.findIndex((other) => other.name === f.name) !== i) throw new CompileError(`duplicate property '${f.name}'`, at[i]!.start, at[i]!.end);
+    if (list.findIndex((other) => other.name === f.name) !== i) throw new CompileError("E0402", `duplicate property '${f.name}'`, at[i]!.start, at[i]!.end);
   });
   return list;
 }

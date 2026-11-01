@@ -52,6 +52,13 @@ test("a --leaks build that frees everything prints nothing", () => {
   expect(run("clean", src)).toEqual({ code: 0, out: "n1,n2,n3\n", err: "" });
 });
 
+// Each generator finishes in the call that sent it a string: the value it took or dropped there
+// is freed once, and one sent after it finished is freed too.
+test("a --leaks build of generators finishing after a sent string frees each value once", () => {
+  const src = "function* takes(): Generator<string, void, string> {\n  const x = yield \"a\";\n  console.log(\"got\", x);\n}\n\nfunction* drops(): Generator<string, void, string> {\n  yield \"a\";\n}\n\nfunction* never(): Generator<string, void, string> {\n  console.log(\"ran\");\n}\n\nfunction* stops(): Generator<string, void, string> {\n  while (true) {\n    const x = yield \"more\";\n    if (x === \"stop1\") return;\n    console.log(\"kept\", x);\n  }\n}\n\nfunction main() {\n  let a = takes();\n  a.next();\n  console.log(a.next(\"hi\" + 1).done);\n  console.log(a.next(\"late\" + 1).done);\n  let b = drops();\n  b.next();\n  console.log(b.next(\"hi\" + 2).done);\n  let c = never();\n  console.log(c.next(\"hi\" + 3).done);\n  let d = stops();\n  d.next();\n  d.next(\"go\" + 1);\n  console.log(d.next(\"stop\" + 1).done);\n}\n";
+  expect(run("sent", src)).toEqual({ code: 0, out: "got hi1\ntrue\ntrue\ntrue\nran\ntrue\nkept go1\ntrue\n", err: "" });
+});
+
 test("a block std makes is charged to the program's call into std", () => {
   // The channel holds a node holding the channel, so neither is ever dropped.
   const src = `class Node {
@@ -202,5 +209,5 @@ test("FISH_LEAKS=1 still counts in an ordinary build", () => {
 test("the usage text lists --leaks", () => {
   const bad = Bun.spawnSync(["bun", MAIN, "build", "x.fsh", "--panic=no"], { cwd: root });
   expect(bad.exitCode).toBe(2);
-  expect(bad.stderr.toString()).toContain("[--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--leaks] [--emit-llvm]");
+  expect(bad.stderr.toString()).toContain("[--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--emit-llvm]");
 });

@@ -151,7 +151,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const outside = [...loan.holders].filter((h) => !goneIds.has(h) && (last.get(h) ?? -1) > (end as f64));
       if (outside.length === 0) continue;
       const lent = pathOf(loan.place);
-      throw new CompileError(`'${lent}' doesn't live long enough: ${named(outside).join(" and ")} still ${outside.length > 1 ? "borrow" : "borrows"} it after its block ends`, loan.start, loan.end, {
+      throw new CompileError("E0204", `'${lent}' doesn't live long enough: ${named(outside).join(" and ")} still ${outside.length > 1 ? "borrow" : "borrows"} it after its block ends`, loan.start, loan.end, {
         message: `'${root.name}' is dropped here, at the end of its block; declare it outside the block, or give ${named(outside).join(" and ")} an owned value`,
         start: end, end,
       });
@@ -450,7 +450,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         free("this", e, "read");
         if (f.self?.owned) return use(e, consume);
         if (consume && state && !typing.isCopy(types.get(e)!)) {
-          throw new CompileError(hinted(types.get(e)!, "'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy"), e.start, e.end);
+          throw new CompileError("E0202", hinted(types.get(e)!, "'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy"), e.start, e.end);
         }
         return;
       case "member":
@@ -471,7 +471,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const lends = e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
         lends.forEach(([place, part, mutable], i) => {
           const other = lends.slice(0, i).find(([q, , m]) => overlaps(place, q) && (mutable || m));
-          if (other) throw new CompileError(`'${text(part as Named)}' is borrowed ${mutable && other[2] ? "mutably twice" : "mutably and shared"} in one value, which would let one change what the other reads`, part.start, part.end);
+          if (other) throw new CompileError("E0203", `'${text(part as Named)}' is borrowed ${mutable && other[2] ? "mutably twice" : "mutably and shared"} in one value, which would let one change what the other reads`, part.start, part.end);
         });
         for (const p of e.props) {
           const into = (place: string) => `'${place}' moved here into the new object; use '${place}.clone()' to keep a copy`;
@@ -521,7 +521,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
               usable(c.at, String(c.alias.id));
             } catch (err) {
               // The variable isn't written at the call, so the message says the function uses it.
-              if (err instanceof CompileError && !selfCalls.has(e)) throw new CompileError(`${name} uses '${c.alias.name}', and ${err.message}`, err.start, err.end, err.note);
+              if (err instanceof CompileError && !selfCalls.has(e)) throw new CompileError(err.code, `${name} uses '${c.alias.name}', and ${err.message}`, err.start, err.end, err.note);
               throw err;
             }
             lend(String(c.alias.id), false, c.at, undefined, name, e, c.at.start, c.key);
@@ -626,7 +626,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           change(target, e.end);
           if (typing.holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(target, [e.value]);
           if (consume && !typing.isCopy(types.get(e)!)) {
-            throw new CompileError(`this assignment's value can't be used: it was moved into what '${text(target)}' points to, which only borrows it`, e.start, e.end);
+            throw new CompileError("E0201", `this assignment's value can't be used: it was moved into what '${text(target)}' points to, which only borrows it`, e.start, e.end);
           }
           return;
         }
@@ -655,7 +655,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // An assignment used as a value hands over what it just stored. A setter keeps what it
         // was given, with nothing left to read or hand on.
         if (!discarded && state && !typing.isCopy(types.get(e)!) && setters.has(target)) {
-          throw new CompileError(`'${text(target)}' is a setter, which keeps the value assigned to it, so this assignment can't also be used as a value; assign a clone`, e.start, e.end);
+          throw new CompileError("E0201", `'${text(target)}' is a setter, which keeps the value assigned to it, so this assignment can't also be used as a value; assign a clone`, e.start, e.end);
         }
         if (consume && !typing.isCopy(types.get(e)!) && key(target) !== undefined) use(target, consume);
         return;
@@ -792,7 +792,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     for (let p: Expr = target; ; p = (p as Extract<Expr, { kind: "member" }>).object) {
       const t = types.get(p);
       if (t && isRef(t)) {
-        throw new CompileError(`keeping references through the reference '${text(p)}' is not supported yet; do it on what '${text(p)}' points to, directly`, target.start, target.end);
+        throw new CompileError("E0801", `keeping references through the reference '${text(p)}' is not supported yet; do it on what '${text(p)}' points to, directly`, target.start, target.end);
       }
       if (p.kind !== "member") break;
     }
@@ -800,7 +800,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // What a closure captures outlives the call that keeps it, like what a reference points to.
     const capture = localAt(root as never);
     if (capture && instance.captures?.has(capture.localId)) {
-      throw new CompileError(`keeping references in '${capture.name}', which this closure captures, is not supported yet; keep them in a variable of the closure's own`, target.start, target.end);
+      throw new CompileError("E0801", `keeping references in '${capture.name}', which this closure captures, is not supported yet; keep them in a variable of the closure's own`, target.start, target.end);
     }
     if (root.kind === "this" || root.kind === "super") {
       for (const v of values) {
@@ -892,20 +892,20 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (!moving || !state) return;
     const root = localAt(rootOf(e) as never);
     if (root && (isRef(root.type) || typing.optionRef(root.type))) {
-      throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
+      throw new CompileError("E0202", hinted(type, `'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
     }
     // Nor out of a reference a field holds, or a shared value every clone of it uses.
     for (let p: Named = e; p.kind === "member"; p = p.object) {
       const holder = record(types.get(p.object));
       if (holder?.kind === "shared" || (holder?.kind === "ref" && record(holder.to)?.kind === "shared")) {
-        throw new CompileError(`'${text(e)}' can't be moved out of '${text(p.object)}', which every clone of it shares; use it where it is`, e.start, e.end);
+        throw new CompileError("E0202", `'${text(e)}' can't be moved out of '${text(p.object)}', which every clone of it shares; use it where it is`, e.start, e.end);
       }
       if (p !== e && isRef(types.get(p)!)) {
-        throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of '${text(p)}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
+        throw new CompileError("E0202", hinted(type, `'${text(e)}' can't be moved out of '${text(p)}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
       }
     }
     if (place.startsWith("this") && !f.self?.owned) {
-      throw new CompileError(hinted(type, `'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`), e.start, e.end);
+      throw new CompileError("E0202", hinted(type, `'${text(e)}' can't be moved out of 'this', since it is only borrowed here; use '${text(e)}.clone()'`), e.start, e.end);
     }
     // A closure moving out what it captures holds it, and can run only once.
     if (root && instance.captures?.has(root.localId)) instance.moved!.add(root.localId);
@@ -931,13 +931,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const name = text(e);
       if (move.unassigned) {
         const root = pathOf(moved);
-        throw new CompileError(`'${root}' is used before being assigned; give it a value on every path that reaches here, as TypeScript requires`, e.start, e.end, { message: move.note, start: move.start, end: move.end });
+        throw new CompileError("E0205", `'${root}' is used before being assigned; give it a value on every path that reaches here, as TypeScript requires`, e.start, e.end, { message: move.note, start: move.start, end: move.end });
       }
       const what = moved === place ? `'${name}' was moved, so it can't be used here`
         : place.startsWith(`${moved}.`) ? `'${name}' can't be used here because '${pathOf(moved)}' was moved`
         : `'${name}' can't be used as a whole here because '${pathOf(moved)}' was moved out of it`;
       const earlier = [...passes].some(([loop, pass]) => (move.passes.get(loop) ?? pass) < pass) ? " (in an earlier pass through this loop)" : "";
-      throw new CompileError(what + earlier, e.start, e.end, { message: move.note, start: move.start, end: move.end });
+      throw new CompileError("E0201", what + earlier, e.start, e.end, { message: move.note, start: move.start, end: move.end });
     }
   }
 
@@ -964,7 +964,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         : `${named(holders).join(" and ")} ${named(holders).length > 1 ? "borrow" : "borrows"} '${lent}'${loan.mutable ? " mutably" : ""} and ${named(holders).length > 1 ? "are" : "is"} used later`;
       const until = loan.loop ? "the loop ends" : loan.guard ? "the guard ends" : loan.call ? "the call returns" : "the borrow's last use";
       const earlier = loan.start >= e.start && [...passes.values()].some((p) => p > 0) ? " on an earlier pass through this loop" : "";
-      throw new CompileError(`cannot ${verb} '${text(e)}' while ${holder}`, e.start, e.end, {
+      throw new CompileError("E0203", `cannot ${verb} '${text(e)}' while ${holder}`, e.start, e.end, {
         message: `'${lent}' is lent ${loan.mutable ? "mutably " : ""}here${earlier}, so it can't ${loan.mutable ? "be used" : "change or move"} until ${until}`,
         start: loan.start, end: loan.end,
       });
@@ -1086,8 +1086,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A borrow kept past its statement can't point at a temporary, which is gone once the
   // statement ends.
   function outlived(s: Expr, holder: string): CompileError {
-    if (instance.copiesOut.has(s) && s.kind === "ident") return new CompileError(`${holder} would keep borrowing what '${s.name}' gives here, which is read out of JS anew at each use and gone once its statement ends; keep it in a 'const' first and borrow that`, s.start, s.end);
-    return new CompileError(`${holder} would keep borrowing this temporary, which is gone once its statement ends; give it a name first, as in 'const xs = ...;'`, s.start, s.end);
+    if (instance.copiesOut.has(s) && s.kind === "ident") return new CompileError("E1005", `${holder} would keep borrowing what '${s.name}' gives here, which is read out of JS anew at each use and gone once its statement ends; keep it in a 'const' first and borrow that`, s.start, s.end);
+    return new CompileError("E0204", `${holder} would keep borrowing this temporary, which is gone once its statement ends; give it a name first, as in 'const xs = ...;'`, s.start, s.end);
   }
 
   // A reference to a temporary or a copy holds that, so it is never returned.
@@ -1156,7 +1156,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (!typing.holdsRef(type)) return;
     for (const place of pointsInto(e)) {
       if (place === TEMPORARY) {
-        throw new CompileError(`can't ${verb} a reference to a temporary or a copy, which is gone once the function returns; ${instead}`, e.start, e.end);
+        throw new CompileError("E0204", `can't ${verb} a reference to a temporary or a copy, which is gone once the function returns; ${instead}`, e.start, e.end);
       }
       const param = place.startsWith("param ") ? Number(place.slice(6)) : undefined;
       if (param !== undefined ? allowed.includes(param) : place.startsWith("this") && allowed.includes("this")) continue;
@@ -1165,7 +1165,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const message = what
         ? verb === "return" ? `the returned reference points into ${what}, but its lifetime ties it to ${names}; give ${what} that lifetime, or return an owned value` : `the stored reference points into ${what}, but it may only point into ${names}`
         : `can't ${verb} a reference to '${pathOf(place)}', which belongs to this function and is gone once it returns; ${instead}`;
-      throw new CompileError(message, e.start, e.end);
+      throw new CompileError("E0209", message, e.start, e.end);
     }
   }
 
@@ -1279,8 +1279,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (!state) return;
     for (const [moved, move] of state.moves) {
       if (place.startsWith(`${moved}.`)) {
-        if (move.unassigned) throw new CompileError(`'${pathOf(moved)}' is used before being assigned, so '${text(target)}' can't be set; assign all of '${pathOf(moved)}' first`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
-        throw new CompileError(`can't assign to '${text(target)}' because '${pathOf(moved)}' was moved`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
+        if (move.unassigned) throw new CompileError("E0205", `'${pathOf(moved)}' is used before being assigned, so '${text(target)}' can't be set; assign all of '${pathOf(moved)}' first`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
+        throw new CompileError("E0201", `can't assign to '${text(target)}' because '${pathOf(moved)}' was moved`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
       }
     }
     revive(place);
@@ -1355,7 +1355,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function outOfBorrow(option: Expr, e: Expr, consume?: Consumer) {
     const t = types.get(option);
     if (consume && state && t && isRef(t) && !typing.isCopy(types.get(e)!)) {
-      throw new CompileError(hinted(types.get(e)!, "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy"), e.start, e.end);
+      throw new CompileError("E0202", hinted(types.get(e)!, "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy"), e.start, e.end);
     }
   }
 
@@ -1367,7 +1367,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const stale = parts.find(([place, , from, , held]) => held && typing.isCopy(from!.type) && parts.some(([q, , , m, h]) => q === place && m && !h));
     if (stale) {
       const [, use, from] = stale;
-      throw new CompileError(`this closure holds its own copy of '${from!.name}', which a nested function it calls changes, so it wouldn't see the change; pass '${from!.name}' as a parameter instead`, use.start, use.end);
+      throw new CompileError("E0210", `this closure holds its own copy of '${from!.name}', which a nested function it calls changes, so it wouldn't see the change; pass '${from!.name}' as a parameter instead`, use.start, use.end);
     }
     for (const [place, use, from, mutable, held] of parts) {
       usable(use, place);
@@ -1459,7 +1459,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const [root, ...path] = loan.place.split(".");
       const local = byId.get(Number(root));
       if (!local || isRef(local.type) || path.includes("[]")) continue;
-      throw new CompileError(`a reference into '${pathOf(loan.place)}' is still in use at this 'yield'; a generator's variables move with it between 'next()' calls, so let the reference end before the yield`, e.start, e.end, {
+      throw new CompileError("E0203", `a reference into '${pathOf(loan.place)}' is still in use at this 'yield'; a generator's variables move with it between 'next()' calls, so let the reference end before the yield`, e.start, e.end, {
         message: `'${pathOf(loan.place)}' is borrowed here`, start: loan.start, end: loan.end,
       });
     }
@@ -1487,8 +1487,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const advice = typing.holdsHandle(type, true) ? "" : `'${text(e)}.clone()' to take a copy, or `;
     const t = types.get((e as Extract<Expr, { kind: "index" }>).object);
     const inline = t !== undefined && record(deref(t))?.kind === "fixed";
-    if (inline) return new CompileError(`'${text(e)}' can't be moved out of its fixed array, which keeps every element${advice ? `; use ${advice.slice(0, -5)}` : ""}`, e.start, e.end);
-    return new CompileError(`'${text(e)}' can't be moved out of its array; use ${advice}'pop()' to take the last element out`, e.start, e.end);
+    if (inline) return new CompileError("E0202", `'${text(e)}' can't be moved out of its fixed array, which keeps every element${advice ? `; use ${advice.slice(0, -5)}` : ""}`, e.start, e.end);
+    return new CompileError("E0202", `'${text(e)}' can't be moved out of its array; use ${advice}'pop()' to take the last element out`, e.start, e.end);
   }
 
   // How a place reads in a message.

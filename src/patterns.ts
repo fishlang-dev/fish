@@ -138,12 +138,12 @@ export function toPattern(c: Mut<Cursor>, e: Expr): Pattern {
           const id = nextId(c.ids);
           const value = p.default === undefined ? name : withDefault(c, name, p.default!);
           props.push({ id, key: p.name, value, ...at });
-        } else throw new CompileError("a method can't be a destructuring target", p.start, p.end);
+        } else throw new CompileError("E0003", "a method can't be a destructuring target", p.start, p.end);
       }
       return { id: nextId(c.ids), kind: "object", props, rest, ...span };
     }
   }
-  throw new CompileError("invalid destructuring target", span.start, span.end);
+  throw new CompileError("E0003", "invalid destructuring target", span.start, span.end);
 }
 
 // A pattern after `case` in a `match`: alternatives separated by `|`.

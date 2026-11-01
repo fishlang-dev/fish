@@ -209,9 +209,9 @@ function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): V
     if (e instanceof RangeError) stop = new Stop("this comptime code made a value too large to hold while compiling", site, false);
     if (!(stop instanceof Stop)) throw e;
     const inside = stop.at.start !== site.start || stop.at.end !== site.end;
-    if (stop instanceof Assertion) throw new CompileError(stop.message, stop.at.start, stop.at.end, inside ? { message: "while running this comptime code", start: site.start, end: site.end } : undefined);
+    if (stop instanceof Assertion) throw new CompileError("E1101", stop.message, stop.at.start, stop.at.end, inside ? { message: "while running this comptime code", start: site.start, end: site.end } : undefined);
     const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
-    throw new CompileError(what, site.start, site.end, inside ? { message: stop.panic ? "it panicked here" : "here", start: stop.at.start, end: stop.at.end } : undefined);
+    throw new CompileError("E1101", what, site.start, site.end, inside ? { message: stop.panic ? "it panicked here" : "here", start: stop.at.start, end: stop.at.end } : undefined);
   }
 }
 

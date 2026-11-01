@@ -12,7 +12,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { type ArrayRecord, type FixedRecord, TypeMap, TypeSet, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walk } from "./nodes.ts";
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
@@ -115,12 +115,13 @@ const rustGiven = (i: Instance): Crossing | undefined => (bodyOf(i).self?.constr
 // `sources` holds the program's files other than the entry, for panic locations.
 // `harness`: the entry file is `fishc test`'s generated harness, whose functions keep no frame.
 // `leaks`: a `--leaks` build, whose frames name each allocation's site, so it keeps them in release.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean };
+// `debug`: a `-g` build, whose own functions carry the marks `withDebugInfo` turns into line tables.
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen(checked: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false }: Options): string {
+export function codegen(checked: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false, debug = false }: Options): string {
   const { tables: noted } = checked;
   const instances = compiledOf(checked);
   const {
@@ -160,6 +161,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // calls it is making.
   let framing: string[] | undefined;
   let site: Span | undefined;
+  // In a `-g` build, the body of the program's own function being emitted, and the site last marked in it.
+  let debugging: string[] | undefined;
+  let marked: Span | undefined;
   let frames = false;
   const globals: string[] = [];
   const regexes = new Map<string, string>();
@@ -324,6 +328,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(harness && from === file) && !f.closure?.made;
     framing = (!release || leaks) && !library && ours ? body : undefined;
     site = undefined;
+    debugging = debug && f.start < STD_BASE && !BUILT_IN.test(from) ? body : undefined;
+    marked = undefined;
+    if (debugging) allocas.push(`  ;fsh.fn ${f.start}`);
     const machine = instance.generator ?? instance.future;
     resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };
     // A generator's variables, and its loops' state, are fields of the frame each `next()` is
@@ -350,6 +357,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       for (const [s, i] of instance.frame!.loops) [i, i + 1, ...((s as { await?: boolean }).await ? [i + 2] : [])].forEach((j) => field(`%loop${j}`, j));
       for (const i of instance.frame!.awaits.values()) field(`%await${i}`, i);
       startBlock(resuming.start);
+      // The first `next`'s value has no `yield` to go to.
+      dropSent();
     }
     // Parameters are copied into slots like any other binding.
     const params = f.params.flatMap((p) => {
@@ -393,13 +402,24 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (resuming) {
       // Each `next()` or poll goes on from where the last stopped: the start, a `yield` or an
       // `await`, or the end. A finished future is never polled again.
+      // Advancing a generator already finished drops what was sent; one finishing in this very
+      // call has dropped or taken it already, and comes to `done` directly.
+      const sent = recOf(resuming.type);
+      const finished = sent?.kind === "generator" && sent.sends && needsDrop(sent.sends) ? label() : resuming.done;
+      if (finished !== resuming.done) {
+        startBlock(finished);
+        dropSent();
+        emit(`br label %${resuming.done}`);
+      }
       startBlock(resuming.done);
       const resumed = typing.rec(resuming.type);
       if (resumed.kind === "generator") emit(`ret ${resultType(instance)} ${yieldedAs(answer(undefined, resumed.yields))}`);
       else emit("unreachable");
       const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
-      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${resuming.done} [ ${resumes} ]`);
-      const takes = resumed.kind === "future" || resumed.async ? "ptr %frame, ptr %cx" : "ptr %frame";
+      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${finished} [ ${resumes} ]`);
+      // A generator taking values through `next(x)` is given one, and whether it was.
+      const sends = resumed.kind === "generator" ? resumed.sends : undefined;
+      const takes = resumed.kind === "future" || resumed.async ? "ptr %frame, ptr %cx" : sends ? `ptr %frame, ${llvm(sends)} %sent, i1 %sent.has` : "ptr %frame";
       out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...popFrame(body), "}", "");
       continue;
     }
@@ -407,6 +427,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     out.push(`define internal ${resultType(instance)} ${symbol(instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...pushFrame(instance), ...popFrame(body), "}", "");
   }
   framing = undefined;
+  debugging = undefined;
   if (frames) globals.push("@fsh_rt_frames = external thread_local global ptr");
   // A cancel function wanted while making one may want another.
   for (const done = new Set<InstanceId>(); done.size < cancelled.size;) {
@@ -551,7 +572,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (!part) return;
     const inside = part === type ? "" : ` (in '${typing.show(type)}')`;
     const what = isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `'${typing.show(part)}'${inside} can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, objects, instances, unions and enums of them`;
-    throw new CompileError(what, at.start, at.end);
+    throw new CompileError("E1102", what, at.start, at.end);
   }
 
   // Rust's `as`: integers truncate or extend by the source's signedness, floats round toward
@@ -788,6 +809,10 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   function emit(line: string) {
+    if (body === debugging && site && site !== marked) {
+      body.push(`  ;fsh.at ${site.start}`);
+      marked = site;
+    }
     const callee = body === framing && site ? CALLEE.exec(line)?.[1] : undefined;
     if (callee && !QUIET.test(callee)) body.push(`  store ptr ${cString(where(site!))}, ptr %fsh.site`);
     body.push(`  ${line}`);
@@ -879,12 +904,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     }
   }
 
-  // A new Atomic, Cell or Lock: what it holds, a boolean widened to a byte in an Atomic, and a
-  // Lock's word unlocked.
+  // A new Atomic, Cell, Lock or RwLock: what it holds, a boolean widened to a byte in an Atomic,
+  // and a lock's word unlocked.
   function interiorNew(e: Extract<Expr, { kind: "new" }>, t: InteriorType): string {
     const v = owned(e.args![0]!);
     const result = temp();
-    if (typing.rec(t).which === "Lock") emit(`${result} = insertvalue ${llvm(t)} { i32 0, ${llvm(typing.rec(t).of)} poison }, ${llvm(typing.rec(t).of)} ${v}, 1`);
+    if (isLock(typing.rec(t))) emit(`${result} = insertvalue ${llvm(t)} { i32 0, ${llvm(typing.rec(t).of)} poison }, ${llvm(typing.rec(t).of)} ${v}, 1`);
     else if (llvm(t) !== llvm(typing.rec(t).of)) emit(`${result} = zext i1 ${v} to i8`);
     else return v;
     return result;
@@ -895,7 +920,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const t = referent(valueType(callee.object)) as InteriorType;
     const at = receiver(callee.object);
     if (typing.rec(t).which === "Cell") return cellCall(e, callee, t, at);
-    if (typing.rec(t).which === "Lock") return lockUpdate(e, t, at);
+    if (isLock(typing.rec(t))) return lockUpdate(e, t, at);
     const ty = llvm(t);
     const align = `align ${ty === "i8" ? 1 : ty === "i16" ? 2 : ty === "i32" ? 4 : 8}`;
     const byte = ty !== llvm(typing.rec(t).of);
@@ -949,11 +974,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
 
   // Takes a lock word, panicking if this thread already holds it, which would wait forever, or
   // if a task panicked holding it, which leaves it held over a value it may have half changed.
-  function takeLock(word: string, at: Span) {
+  function takeLock(word: string, at: Span, take = "fsh_rt_lock") {
     const [taken, held, poisoned] = [temp(), temp(), temp()];
-    emit(`${taken} = call i32 @fsh_rt_lock(ptr ${word})`);
+    emit(`${taken} = call i32 @${take}(ptr ${word})`);
     emit(`${held} = icmp eq i32 ${taken}, 1`);
-    panicIf(held, "this lock is already held by an `update` running here; use the value its callback is given", at);
+    const holder = take === "fsh_rt_lock" ? "an `update`" : "a `read` or an `update`";
+    panicIf(held, `this lock is already held by ${holder} running here; use the value its callback is given`, at);
     emit(`${poisoned} = icmp eq i32 ${taken}, 2`);
     panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
   }
@@ -2564,7 +2590,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   // `update`: the callback runs with a pointer to what the Lock holds, between taking and
-  // releasing its word. The callback's captures are made before the lock is taken.
+  // releasing its word; an RwLock's `read` or `update` takes its word's read or write side.
+  // The callback's captures are made before the lock is taken.
   function lockUpdate(e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string): string | undefined {
     const callback = e.args[0]!;
     // The callback's value lives in a slot it is called through; what it leaves of its captures
@@ -2573,12 +2600,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const env = alloca(llvm(made));
     emit(`store ${llvm(made)} ${owned(callback)}, ptr ${env}`);
     const leftovers = needsDrop(made) ? () => dispose(unstash(env, made), made) : undefined;
-    takeLock(at, e);
+    const reading = e.callee.kind === "member" && e.callee.name === "read";
+    takeLock(at, e, typing.rec(t).which === "Lock" ? "fsh_rt_lock" : reading ? "fsh_rt_read_lock" : "fsh_rt_write_lock");
     const inside = temp();
     emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = callOf(callback)!;
     const result = invoke(target, env, bodyOf(target).params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
-    emit(`call void @fsh_rt_unlock(ptr ${at})`);
+    emit(`call void @${reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
     if (result && !types.has(e) && needsDrop(target.returns)) pending.push({ v: result, type: target.returns });
     return result;
   }
@@ -2720,7 +2748,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       at = temp();
       emit(`${at} = load ptr, ptr ${held}`);
     }
-    const result = resume(generator, at);
+    const result = resume(generator, at, s.right);
     const [finished, more] = nextShapes(typing.rec(generator).yields);
     emit(`br i1 ${holds(result, typing.nextResult(typing.rec(generator).yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
     startBlock(loop);
@@ -2837,16 +2865,21 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return convert(made, more, typing.nextResult(yields));
   }
 
-  // Runs a generator to its next `yield`, through a pointer to it.
-  function resume(generator: GeneratorType, at: string): string {
+  // Runs a generator to its next `yield`, through a pointer to it. An error it throws is
+  // raised at `raising`.
+  // `sent` is the value `next(x)` gives it, for one taking values.
+  function resume(generator: GeneratorType, at: string, raising: Expr, sent?: string): string {
     const target = generatorOf.get(generator)!;
     const result = temp();
-    unwinding(`call ${resultType(target)} ${symbol(target)}(ptr ${at})`, result);
-    return result;
+    const g = typing.rec(generator);
+    const given = g.sends ? `, ${llvm(g.sends)} ${sent ?? "zeroinitializer"}, i1 ${sent !== undefined}` : "";
+    unwinding(`call ${resultType(target)} ${symbol(target)}(ptr ${at}${given})`, result);
+    return g.throws ? unpacked(resultType(target), result, typing.nextResult(g.yields), raising)! : result;
   }
 
   // `yield v`: the value goes back to `next()`'s caller, and the next call goes on from here.
-  function yielded(e: Extract<Expr, { kind: "yield" }>) {
+  // As a statement, it drops what `next(x)` sent; as a value, it gives it.
+  function yielded(e: Extract<Expr, { kind: "yield" }>, used = false): string {
     const g = resuming!;
     const v = owned(e.value!);
     settle();
@@ -2856,6 +2889,30 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store i32 ${g.resumes.length}, ptr %state`);
     emit(`ret ${resultType(current)} ${yieldedAs(result)}`);
     startBlock(at);
+    if (!used) {
+      dropSent();
+      return "";
+    }
+    // JavaScript gives `undefined` when nothing was sent, which no Fish type holds.
+    const [fail, ok] = [label(), label()];
+    emit(`br i1 %sent.has, label %${ok}, label %${fail}`);
+    startBlock(fail);
+    unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\ngenerator resumed without a value\n`)})`);
+    emit("unreachable");
+    startBlock(ok);
+    return "%sent";
+  }
+
+  // Drops a value `next(x)` sent that nothing takes.
+  function dropSent() {
+    const sends = current.generator === undefined ? undefined : typing.rec(current.generator).sends;
+    if (!sends || !needsDrop(sends)) return;
+    const [drop, on] = [label(), label()];
+    emit(`br i1 %sent.has, label %${drop}, label %${on}`);
+    startBlock(drop);
+    dispose("%sent", sends);
+    emit(`br label %${on}`);
+    startBlock(on);
   }
 
   // A variable's slot: an alloca, or in a generator, the frame's field, reached on entry.
@@ -2890,7 +2947,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   function lowerStatement(s: Stmt) {
     switch (s.kind) {
       case "expr":
-        if (s.expr.kind === "yield") return yielded(s.expr);
+        if (s.expr.kind === "yield") return void yielded(s.expr);
         effect(s.expr);
         settle();
         return;
@@ -3112,7 +3169,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       case "return":
         if (jumps.has(s)) {
           given(s, jumps.get(s)!);
-        } else if (s.value && current.returns === "void") {
+        } else if (s.value && (current.future ? typing.rec(current.future).gives : current.returns) === "void") {
           // An arrow's expression body may be a call returning nothing.
           effect(s.value);
           settle();
@@ -3521,7 +3578,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (r.kind === "union") return r.members.some(needsDrop);
     if (r.kind === "array" || r.kind === "map" || r.kind === "shared" || r.kind === "block" || r.kind === "dyn" || r.kind === "recursive") return true;
     if (r.kind === "fixed") return r.size > 0 && needsDrop(r.element);
-    if (r.kind === "interior" && r.which !== "Lock") return needsDrop(r.of);
+    if (r.kind === "interior" && !isLock(r)) return needsDrop(r.of);
     return parts(type).some(([t]) => needsDrop(t));
   }
 
@@ -3529,8 +3586,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // fields; an object's or a closure's fields.
   function parts(type: Exclude<Type, string>): [Type, usize][] {
     const r = typing.rec(type);
-    // A Lock is its word, then what it holds.
-    if (r.kind === "interior") return r.which === "Lock" ? [[r.of, 1]] : [];
+    // A lock is its word, then what it holds.
+    if (r.kind === "interior") return isLock(r) ? [[r.of, 1]] : [];
     if (r.kind !== "object" && r.kind !== "class" && r.kind !== "closure" && r.kind !== "variant" && r.kind !== "generator" && r.kind !== "future") return [];
     const base: [Type, usize][] = r.kind === "class" && r.base ? [[r.base, 0]] : [];
     return [...base, ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.fields).map((f, i): [Type, usize] => [f.type, i + base.length])];
@@ -3540,7 +3597,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   function copied(v: string, type: Type): string {
     if (holdsRust(type)) throw new Error(`internal error: a '${typing.show(type)}' holds a Rust handle, which is moved, never copied`);
     const r = recOf(type);
-    if (r?.kind === "interior" && r.which !== "Lock") return copied(v, r.of);
+    if (r?.kind === "interior" && !isLock(r)) return copied(v, r.of);
     if (!needsDrop(type)) return v;
     if (type === "string") {
       emit(`call void @fsh_rt_str_retain(ptr ${v})`);
@@ -3563,7 +3620,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // Gives up a value: releases a reference to everything it owns.
   function dispose(v: string, type: Type) {
     const r = recOf(type);
-    if (r?.kind === "interior" && r.which !== "Lock") return dispose(v, r.of);
+    if (r?.kind === "interior" && !isLock(r)) return dispose(v, r.of);
     if (!needsDrop(type)) return;
     if (type === "string") return emit(`call void @fsh_rt_str_release(ptr ${v})`);
     if (type === "bigint") return emit(`call void @fsh_rt_big_release(ptr ${v})`);
@@ -6201,6 +6258,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       case "array":
       case "match":
       case "pipe":
+      case "yield":
         return true;
       // An awaited future gives its value over.
       // Every operator on a bigint makes a new one; a literal is a constant.
@@ -6737,12 +6795,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         return n;
       }
       // `spawn(p)`: the future's frame moves into a new task, whose handle this gives.
-      if (e.callee.kind === "ident" && (e.callee.name === "spawn" || e.callee.name === "timer spawn")) {
+      if (e.callee.kind === "ident" && (e.callee.name === "spawn" || e.callee.name === "timer spawn" || e.callee.name === "blocking spawn")) {
         const future = valueType(e.args[0]!) as FutureType;
         const [poll, drop, dropOutput] = taskGlue(future);
         const [frame, task] = [alloca(llvm(future)), temp()];
         emit(`store ${llvm(future)} ${owned(e.args[0]!)}, ptr ${frame}`);
-        const spawning = e.callee.name === "spawn" ? "fsh_rt_spawn" : "fsh_rt_spawn_now";
+        const spawning = { spawn: "fsh_rt_spawn", "timer spawn": "fsh_rt_spawn_now", "blocking spawn": "fsh_rt_spawn_blocking" }[e.callee.name];
         unwinding(`call ptr @${spawning}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(pollType(future))})`, task);
         if (!types.has(e)) pending.push({ v: task, type: typing.handleType(typing.rec(future).gives, typing.rec(future).throws) });
         return task;
@@ -6867,7 +6925,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       }
       const generator = e.callee.kind === "member" ? recOf(valueType(e.callee.object)) : undefined;
       if (e.callee.kind === "member" && generator?.kind === "generator") {
-        const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object));
+        const sent = e.args[0] && owned(e.args[0]);
+        const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object), e, sent);
         const type = typing.nextResult(generator.yields);
         if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
         return result;
@@ -7575,14 +7634,22 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // What a generator gives back from a `yield` or its end: what `next()` gives, which an async
   // one's resume gives as ready.
   function yieldedAs(answer: string): string {
-    return recOf(current.generator)?.async ? polled(pollOf(current), 1, answer) : answer;
+    const g = recOf(current.generator);
+    if (g?.kind === "generator" && g.async) return polled(pollOf(current), 1, answer);
+    if (g?.kind !== "generator" || !g.throws) return answer;
+    const made = temp();
+    emit(`${made} = insertvalue ${resultType(current)} zeroinitializer, ${llvm(typing.nextResult(g.yields))} ${answer}, 1`);
+    return made;
   }
 
   // The IR type a function returns: its value, or for a throwing one, whether it failed, then
   // its value (`{}` for none) and its error.
   function resultType(i: Instance): string {
     if (recOf(i.generator)?.async) return pollType(pollOf(i));
-    if (i.generator) return llvm(typing.nextResult(typing.rec(i.generator).yields));
+    if (i.generator) {
+      const g = typing.rec(i.generator);
+      return g.throws ? throwing(typing.nextResult(g.yields), g.throws) : llvm(typing.nextResult(g.yields));
+    }
     if (i.future) return pollType(i.future);
     if (!i.throws) return llvm(i.returns);
     return throwing(i.returns, i.throws);
@@ -7702,6 +7769,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`ret ${resultType(current)} ${polled(current.future, 2, undefined, error)}`);
       return;
     }
+    // A generator that throws is finished, as in JavaScript.
+    if (current.generator) emit("store i32 -1, ptr %state");
+    if (recOf(current.generator)?.async) return emit(`ret ${resultType(current)} ${polled(pollOf(current), 2, undefined, error)}`);
     const type = resultType(current);
     const [a, b] = [temp(), temp()];
     emit(`${a} = insertvalue ${type} undef, i1 true, 0`);
@@ -8265,7 +8335,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const target = generatorOf.get(leaf.of as GeneratorType)!;
       unwinding(`call ${pollType(shape)} ${symbol(target)}(ptr ${generator}, ptr %cx)`, result);
       emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
+      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     } else if (leaf) {
       // A semaphore's, channel's or socket's wait, or a sleep given a signal, polled by the
       // runtime, which wakes the task when it may go on. A send moves its value in, leaving its
@@ -8477,7 +8547,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         startBlock(join);
         emit(`${made} = phi ${llvm(thrown)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
         error = made;
-      } else if (leaf) error = abortError(thrown);
+      } else if (leaf && leaf.method !== "next") error = abortError(thrown);
       else if (why) error = joinError(why, tag, result, typing.rec(inner as HandleType).joined!, thrown);
       else {
         error = temp();
@@ -9074,6 +9144,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       }
       case "assign":
         return fixing(e.target, () => assign(e));
+      case "yield":
+        return yielded(e, true);
       case "match":
         return lowerMatch(e, true)!;
       case "unsafe":
@@ -9526,9 +9598,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (typeof v === "number") return floatConstant(v, type as "f32" | "f64");
     if (typeof v === "bigint" && type === "bigint") return bigConstant(v);
     if (typeof v === "bigint") return String(v);
-    // An Atomic is its value; an atomic boolean a byte. A Lock is its word, free, then its value.
+    // An Atomic is its value; an atomic boolean a byte. A lock is its word, free, then its value.
     if (v && v.kind === "interior" && r?.kind === "interior") {
-      if (r.which === "Lock") {
+      if (isLock(r)) {
         const made = temp();
         emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ${llvm(r.of)} ${bake(v.value, r.of)}, 1`);
         return made;

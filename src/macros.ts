@@ -43,7 +43,7 @@ export function expandMacros(compilation: Compilation, loaded: Loaded, library: 
     if (sites.length === 0) return;
     if (round === ROUNDS) {
       const at = allDecorators(sites[0]!.decl)[0]!;
-      throw new CompileError(`macros gave declarations using macros ${ROUNDS} rounds deep; does a macro give back what it was applied to, with its decorator?`, at.start, at.end);
+      throw new CompileError("E1103", `macros gave declarations using macros ${ROUNDS} rounds deep; does a macro give back what it was applied to, with its decorator?`, at.start, at.end);
     }
     // The program as linked, from copies, for checking and running the macros; an import of what
     // an expansion will make isn't there yet, and nothing the macros use may need one.
@@ -102,7 +102,7 @@ function checkArguments(check: () => Checked, constants: Stmt[]): Checked {
   } catch (e) {
     const argument = e instanceof CompileError && constants.find((c) => e.start >= c.start && e.end <= c.end);
     const misfit = argument && /^type '(.*)' is not assignable to return type '(.*)'$/.exec(e.message);
-    if (misfit) throw new CompileError(`this argument is a '${misfit[1]}', but the macro takes a '${misfit[2]}' here`, e.start, e.end);
+    if (misfit) throw new CompileError("E1103", `this argument is a '${misfit[1]}', but the macro takes a '${misfit[2]}' here`, e.start, e.end);
     throw e;
   }
 }
@@ -120,11 +120,11 @@ function builtin(d: Expr, macros: Map<string, Func>): boolean {
 // with Eq, the `equals` comparing every field that `===` calls, unless the class has one.
 function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: boolean, pending: Pending): Stmt[] {
   const at = pending.decorator;
-  if (pending.where !== "own" || (d.kind !== "class" && d.kind !== "enum")) throw new CompileError("'derive' applies to a class or an enum", at.start, at.end);
+  if (pending.where !== "own" || (d.kind !== "class" && d.kind !== "enum")) throw new CompileError("E1104", "'derive' applies to a class or an enum", at.start, at.end);
   const traits = at.kind === "call" ? at.args : [];
-  if (traits.length === 0) throw new CompileError("'derive' names what to derive, as in '@derive(Eq)'", at.start, at.end);
+  if (traits.length === 0) throw new CompileError("E1104", "'derive' names what to derive, as in '@derive(Eq)'", at.start, at.end);
   const names = traits.map((t) => {
-    if (t.kind !== "ident" || (t.name !== "Eq" && t.name !== "Json")) throw new CompileError(`'derive' knows 'Eq' and 'Json' so far; '${t.kind === "ident" ? t.name : "this"}' isn't one it can derive yet`, t.start, t.end);
+    if (t.kind !== "ident" || (t.name !== "Eq" && t.name !== "Json")) throw new CompileError("E1104", `'derive' knows 'Eq' and 'Json' so far; '${t.kind === "ident" ? t.name : "this"}' isn't one it can derive yet`, t.start, t.end);
     return t.name;
   });
   let decl = { ...d, id: nextId(ids), decorators: (d.decorators ?? []).slice(0, -1), derives: [...(d.derives ?? []), ...names] } as Decl;
@@ -234,7 +234,7 @@ function pendingOf(d: Decl): Pending {
   if (d.kind === "class") {
     for (const m of d.members) {
       const p = "params" in m ? m.params.find((x) => x.decorators.length > 0) : undefined;
-      if (p) throw new CompileError("decorators on method and constructor parameters aren't supported yet; decorate the method, or a top-level function's parameter", p.decorators[0]!.start, p.decorators[0]!.end);
+      if (p) throw new CompileError("E0801", "decorators on method and constructor parameters aren't supported yet; decorate the method, or a top-level function's parameter", p.decorators[0]!.start, p.decorators[0]!.end);
     }
     const index = d.members.findIndex((m) => m.decorators.length > 0);
     if (index >= 0) return { where: "member", index: index as usize, decorator: d.members[index as usize]!.decorators.at(-1)! };
@@ -262,9 +262,9 @@ const written = (name: string) => name.replace(/-fsh\d+$/, "");
 // The macro a decorator names, `@name` or `@name(args)`.
 function macroOf(d: Expr, macros: Map<string, Func>): Func {
   const callee = d.kind === "call" ? d.callee : d;
-  if (callee.kind !== "ident") throw new CompileError("a decorator names a macro, as in '@name' or '@name(args)'", d.start, d.end);
+  if (callee.kind !== "ident") throw new CompileError("E1104", "a decorator names a macro, as in '@name' or '@name(args)'", d.start, d.end);
   const macro = macros.get(callee.name);
-  if (!macro) throw new CompileError(`'${written(callee.name)}' isn't a macro; a decorator applies a 'macro function ${written(callee.name)}(input: Ast): Ast'`, callee.start, callee.end);
+  if (!macro) throw new CompileError("E1104", `'${written(callee.name)}' isn't a macro; a decorator applies a 'macro function ${written(callee.name)}(input: Ast): Ast'`, callee.start, callee.end);
   return macro;
 }
 
@@ -280,7 +280,7 @@ function argumentsOf({ counts, ids }: Compilation, d: Expr, macros: Map<string, 
     // An index as an array is indexed, `usize`, or as an integer is written, `i64`.
     if (t?.kind !== "ref" || (t.name !== "i64" && t.name !== "usize")) {
       const what = where === "member" ? "the class and the member's index, as in 'macro function log(input: Ast, member: i64): Ast'" : "the function and the parameter's index, as in 'macro function check(input: Ast, param: i64): Ast'";
-      throw new CompileError(`a macro on a ${where === "member" ? "member" : "parameter"} takes ${what}`, d.start, d.end);
+      throw new CompileError("E1103", `a macro on a ${where === "member" ? "member" : "parameter"} takes ${what}`, d.start, d.end);
     }
   }
   const given = d.kind === "call" ? d.args : [];
@@ -289,7 +289,7 @@ function argumentsOf({ counts, ids }: Compilation, d: Expr, macros: Map<string, 
   if (given.length < needed || given.length > params.length) {
     const count = needed === params.length ? `${needed}` : `${needed} to ${params.length}`;
     const index = where === "own" && macro.params[1]?.type?.kind === "ref" && (macro.params[1].type.name === "i64" || macro.params[1].type.name === "usize") && given.length < needed ? "; a macro taking an index applies to a member or a parameter" : "";
-    throw new CompileError(`the macro '${written(macro.name)}' takes ${count} argument${params.length === 1 ? "" : "s"} after what it is applied to, but this gives ${given.length}${index}`, d.start, d.end);
+    throw new CompileError("E1103", `the macro '${written(macro.name)}' takes ${count} argument${params.length === 1 ? "" : "s"} after what it is applied to, but this gives ${given.length}${index}`, d.start, d.end);
   }
   // A parameter left out takes its default, the macro's own code computing its value, or else
   // nothing.
@@ -354,7 +354,7 @@ function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: NodeSet
     if (sites.has(d)) {
       const name = written(namesOf(s)[0] ?? "");
       const what = by.kind === "function" ? `the macro '${written(by.name)}'` : "this argument";
-      throw new CompileError(`${what} uses '${name}'${via ? ` through '${written(via)}'` : ""}, which a macro makes or changes; a macro can't depend on an expansion`, by.start, by.end);
+      throw new CompileError("E1103", `${what} uses '${name}'${via ? ` through '${written(via)}'` : ""}, which a macro makes or changes; a macro can't depend on an expansion`, by.start, by.end);
     }
     kept.add(s);
     const self = namesOf(s)[0];
@@ -398,10 +398,10 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const instance = compiledOf(checked).find((i) => bodyOf(i).name === macro.name && bodyOf(i).start === macro.start);
   // A parameter of an object or interface type makes a function generic, with no instance until
   // it is called.
-  if (!instance) throw new CompileError("a macro's parameters can't be object types or interfaces yet, which make it generic; use a class", macro.start, macro.end);
+  if (!instance) throw new CompileError("E1103", "a macro's parameters can't be object types or interfaces yet, which make it generic; use a class", macro.start, macro.end);
   const param = macro.params[0]!;
   const returns = instance.returns;
-  if (typeof returns === "string" || instance.tables.typing.rec(returns).kind === "literal") throw new CompileError(`a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${instance.tables.typing.show(returns)}'`, macro.start, macro.end);
+  if (typeof returns === "string" || instance.tables.typing.rec(returns).kind === "literal") throw new CompileError("E1103", `a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${instance.tables.typing.show(returns)}'`, macro.start, macro.end);
   const input = instance.tables.arenas.localOf(instance.locals.get(param)!).type;
   const { bare, restore } = stripped(ids, decl, pending);
   const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
@@ -410,7 +410,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     value = built<Value>(checked.tables, { tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
   } catch (e) {
     if (e instanceof CompileError) throw e;
-    throw new CompileError("a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
+    throw new CompileError("E1103", "a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
   }
   const suffix = `@m${compilation.counts.expansions++}`;
   const fresh = (name: string) => {
@@ -441,16 +441,16 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   markGenerated(compilation.generated, given);
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
   const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
-  if (forged) throw new CompileError(`the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);
+  if (forged) throw new CompileError("E1103", `the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);
   for (const d of given) {
     if (!d || typeof d !== "object" || !(TOP_LEVEL.has(d.kind) || isExport(d))) {
-      throw new CompileError(`the macro '${written(macro.name)}' gave ${d && typeof d === "object" ? `a '${d.kind}'` : "nothing"}, but a macro gives declarations that can stand at the top level`, nearest.start, nearest.end);
+      throw new CompileError("E1103", `the macro '${written(macro.name)}' gave ${d && typeof d === "object" ? `a '${d.kind}'` : "nothing"}, but a macro gives declarations that can stand at the top level`, nearest.start, nearest.end);
     }
   }
   const bodies = given.map((d) => (isExport(d) ? ((d as { body: Decl }).body) : d));
   // A macro on a member gives the class back, and one on a parameter its function.
   if (pending.where !== "own" && !bodies.some((d) => d.kind === decl.kind)) {
-    throw new CompileError(`a macro on a ${pending.where === "member" ? "member gives the class back" : "parameter gives the function back"}, changed as it likes, but '${written(macro.name)}' gave none`, nearest.start, nearest.end);
+    throw new CompileError("E1103", `a macro on a ${pending.where === "member" ? "member gives the class back" : "parameter gives the function back"}, changed as it likes, but '${written(macro.name)}' gave none`, nearest.start, nearest.end);
   }
   const restored = new Rewrites();
   restore(bodies, restored);
@@ -485,7 +485,7 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
     // Decorators of members or parameters need their container back to go on.
     if (waiting && !named) {
       const at = [...members, ...params].find((x) => x.length > 0)![0]!;
-      throw new CompileError(`a macro gave no '${name}' back, so the decorators still to apply to its ${decl.kind === "class" ? "members" : "parameters"} have nowhere to go`, at.start, at.end);
+      throw new CompileError("E1104", `a macro gave no '${name}' back, so the decorators still to apply to its ${decl.kind === "class" ? "members" : "parameters"} have nowhere to go`, at.start, at.end);
     }
     if (!same) return;
     if (own.length > 0) rewrites.replace(same, { ...same, decorators: [...own, ...(same.decorators ?? [])] } as Stmt);
@@ -498,7 +498,7 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
         const want = key(before[i]!);
         const place = list[i];
         const at = list.find((x) => !taken.has(x) && key(x) === want) ?? (place && !taken.has(place) && kindOf(place) === kindOf(before[i]!) ? place : undefined);
-        if (!at) throw new CompileError("a macro took away what these decorators were waiting to apply to", decorators[0]!.start, decorators[0]!.end);
+        if (!at) throw new CompileError("E1104", "a macro took away what these decorators were waiting to apply to", decorators[0]!.start, decorators[0]!.end);
         taken.add(at);
         rewrites.replace(at, { ...at, decorators: [...decorators, ...at.decorators] } as unknown as Param);
       });

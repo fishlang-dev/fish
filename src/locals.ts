@@ -75,13 +75,13 @@ export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program:
         if (used) {
           const what = local.kind === "class" ? `class '${name}'` : `enum '${name}'`;
           if (captured) captured(local, used);
-          else throw new CompileError(`the local ${what} can't use '${used}' from the function around it, which it may outlive; ${local.kind === "class" ? "pass it to its constructor" : "use a constant from the top level"}`, local.start, local.end);
+          else throw new CompileError("E0409", `the local ${what} can't use '${used}' from the function around it, which it may outlive; ${local.kind === "class" ? "pass it to its constructor" : "use a constant from the top level"}`, local.start, local.end);
         }
         const early = stmts.slice(0, stmts.indexOf(local)).find((s) => runsUse(s, name));
-        if (early && !captured) throw new CompileError(`${what(local)} '${name}' is used before its declaration`, early.start, early.end);
+        if (early && !captured) throw new CompileError("E0403", `${what(local)} '${name}' is used before its declaration`, early.start, early.end);
       }
       if (params.length > 0 && local.kind === "enum" && !Array.isArray((local as { typeParams?: unknown }).typeParams)) {
-        throw new CompileError(`the local enum '${name}' can't use the type parameters of the function around it`, local.start, local.end);
+        throw new CompileError("E0409", `the local enum '${name}' can't use the type parameters of the function around it`, local.start, local.end);
       }
       const args: TypeNode[] = params.map((p): TypeNode => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: local.start, end: local.start }));
       const own = local.typeParams?.length ?? 0;
@@ -180,7 +180,7 @@ function rename(written: AnyNode, r: Rename, rewrites: Rewrites, seen: Set<unkno
     const target = n.kind === "new" ? n.callee : n.expr;
     if (target?.kind === "ident" && target.name === from) {
       if ((n.typeArgs ?? []).length === 0 && own > 0) {
-        throw new CompileError(`'${from}' is generic over the function's type parameters as well as its own, so write its type arguments here`, (n as unknown as Expr).start, (n as unknown as Expr).end);
+        throw new CompileError("E0104", `'${from}' is generic over the function's type parameters as well as its own, so write its type arguments here`, (n as unknown as Expr).start, (n as unknown as Expr).end);
       }
       given({ typeArgs: [...args, ...(n.typeArgs ?? [])] });
     }

@@ -379,6 +379,171 @@ class Headers {
   }
 }
 
+// A cookie's attributes, with Bun's names. maxAge is in seconds and expires in milliseconds since
+// the epoch, as Date.now() gives.
+type CookieInit = { path?: string; domain?: string; maxAge?: i64; expires?: i64; secure?: boolean; httpOnly?: boolean; sameSite?: "strict" | "lax" | "none"; partitioned?: boolean };
+
+// Cookies by name, as Bun's CookieMap: read from a Cookie header as RFC 6265 reads one, the
+// first of a repeated name kept, and changed by set and delete, each change a Set-Cookie line
+// a response sends.
+class CookieMap {
+  #cookies: Map<string, string> = new Map();
+  // The latest Set-Cookie line for each name changed, in the order they were first changed.
+  #changed: string[] = [];
+  #lines: string[] = [];
+
+  constructor(header?: string) {
+    if (header === null) return;
+    for (const part of header.split(";")) {
+      const eq = part.indexOf("=");
+      if (eq < 0) continue;
+      const name = part.slice(0, eq).trim();
+      if (name.length === 0 || this.#cookies.has(name)) continue;
+      let value = part.slice(eq + 1).trim();
+      if (value.length >= 2 && value.startsWith("\\"") && value.endsWith("\\"")) value = value.slice(1, -1);
+      const decoded = value.includes("%") ? __urlDecodeStrict(value) : value;
+      this.#cookies.set(name, decoded ?? value);
+    }
+  }
+
+  get(name: string): string | null {
+    return this.#cookies.get(name);
+  }
+
+  has(name: string): boolean {
+    return this.#cookies.has(name);
+  }
+
+  get size(): i64 {
+    return this.#cookies.size as i64;
+  }
+
+  forEach(callback: (value: string, name: string) => void) {
+    for (const [name, value] of this.#cookies) callback(value, name);
+  }
+
+  // Sets a cookie, with Bun's defaults of path '/' and SameSite=Lax. A name must be an HTTP
+  // token and a path or domain printable ASCII without ';'; the value is percent-encoded as
+  // encodeURIComponent does, so nothing in it can end the cookie or the header.
+  set(this: Mut<this>, name: string, value: string, options?: CookieInit) {
+    const line = __cookieLine(name, value, options);
+    // Deleted first, so a cookie set again comes last, as Bun orders it.
+    this.#cookies.delete(name);
+    this.#cookies.set(name, value);
+    this.#change(name, line);
+  }
+
+  // Removes a cookie, telling the client to drop its copy at the path and domain given.
+  delete(this: Mut<this>, name: string, options?: { path?: string; domain?: string }) {
+    let path: string | null = null;
+    let domain: string | null = null;
+    if (options !== null) {
+      path = options.path;
+      domain = options.domain;
+    }
+    const line = __cookieLine(name, "", { path: path, domain: domain, expires: 0, maxAge: 0 });
+    this.#cookies.delete(name);
+    this.#change(name, line);
+  }
+
+  #change(this: Mut<this>, name: string, line: string) {
+    for (let i = 0; i < this.#changed.length; i++) {
+      if (this.#changed[i] === name) {
+        this.#lines[i] = line;
+        return;
+      }
+    }
+    this.#changed.push(name);
+    this.#lines.push(line);
+  }
+
+  // The Set-Cookie header values the changes make, one per cookie.
+  toSetCookieHeaders(): string[] {
+    return this.#lines.clone();
+  }
+}
+
+// A request's cookies, which can be read but not changed: a change goes on the response, through
+// res.cookies.
+class RequestCookies {
+  #cookies: CookieMap;
+  constructor(header: string) { this.#cookies = new CookieMap(header); }
+  get(name: string): string | null { return this.#cookies.get(name); }
+  has(name: string): boolean { return this.#cookies.has(name); }
+  get size(): i64 { return this.#cookies.size; }
+  forEach(callback: (value: string, name: string) => void) { this.#cookies.forEach(callback); }
+}
+
+// A Set-Cookie header's value: the cookie, then its attributes in the order Bun writes them.
+function __cookieLine(name: string, value: string, options: CookieInit | null): string {
+  assert(Http1.isToken(name), "a cookie's name must be an HTTP token, of letters, digits and !#$%&'*+-.^_|~, so '" + name + "' can't be one");
+  let out = new TextEncoder().encode(name + "=");
+  for (const c of __urlPoints(value)) {
+    const kept = __urlAlpha(c) || __urlDigit(c) || c === 33 || (c >= 39 && c <= 42) || c === 45 || c === 46 || c === 95 || c === 126;
+    __urlPut(out, c, kept ? "none" : "form");
+  }
+  let line = new TextDecoder().decode(out);
+  let path = "/";
+  let sameSite = "Lax";
+  if (options !== null) {
+    const domain = options.domain;
+    if (domain !== null && domain.length > 0) line = line + "; Domain=" + __cookieAttribute(name, "domain", domain);
+    const p = options.path;
+    if (p !== null) path = __cookieAttribute(name, "path", p);
+    const s = options.sameSite;
+    if (s !== null) sameSite = s === "strict" ? "Strict" : s === "none" ? "None" : "Lax";
+  }
+  if (path.length > 0) line = line + "; Path=" + path;
+  if (options !== null) {
+    const expires = options.expires;
+    if (expires !== null) {
+      // An HTTP date has a four-digit year, so 0000-01-01 to 9999-12-31 can be written.
+      assert(expires >= -62167219200000 && expires <= 253402300799999, "cookie '" + name + "' can't expire at " + String(expires) + "; give milliseconds since the epoch within the years 0000 to 9999");
+      line = line + "; Expires=" + __cookieDate(expires);
+    }
+    const maxAge = options.maxAge;
+    if (maxAge !== null) line = line + "; Max-Age=" + String(maxAge);
+    if (options.secure === true) line = line + "; Secure";
+    if (options.httpOnly === true) line = line + "; HttpOnly";
+    if (options.partitioned === true) line = line + "; Partitioned";
+  }
+  return line + "; SameSite=" + sameSite;
+}
+
+// A path or domain, which a ';' would end and a control character could break out of the header.
+function __cookieAttribute(name: string, attribute: string, value: string): string {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i) as i64;
+    assert(c >= 32 && c < 127 && c !== 59, "cookie '" + name + "' can't have a " + attribute + " holding ';', a control character or a character outside ASCII");
+  }
+  return value;
+}
+
+// Milliseconds since the epoch as an IMF-fixdate, the form HTTP writes dates in.
+function __cookieDate(ms: i64): string {
+  let days = ms / 86400000;
+  let rest = ms % 86400000;
+  if (rest < 0) {
+    days -= 1;
+    rest += 86400000;
+  }
+  // Howard Hinnant's days_from_civil, run backwards: the date of a day count from 1970-01-01.
+  const z = days + 719468;
+  const era = (z >= 0 ? z : z - 146096) / 146097;
+  const doe = z - era * 146097;
+  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const mp = (5 * doy + 2) / 153;
+  const day = doy - (153 * mp + 2) / 5 + 1;
+  const month = mp < 10 ? mp + 3 : mp - 9;
+  const year = yoe + era * 400 + (month <= 2 ? 1 : 0);
+  // 1970-01-01 was a Thursday.
+  const weekday = ((days % 7) + 11) % 7;
+  const seconds = rest / 1000;
+  const two = (n: i64) => (n < 10 ? "0" : "") + String(n);
+  return "Sun,Mon,Tue,Wed,Thu,Fri,Sat".split(",")[weekday as usize] + ", " + two(day) + " " + "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec".split(",")[(month - 1) as usize] + " " + String(year).padStart(4, "0") + " " + two(seconds / 3600) + ":" + two(seconds / 60 % 60) + ":" + two(seconds % 60) + " GMT";
+}
+
 type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal };
 
 // A body given as text or bytes, as the bytes sent.
@@ -434,6 +599,15 @@ class Request {
     return JSON.parse<T>(new TextDecoder().decode(this.body));
   }
 
+  // The cookies of every Cookie header the request has.
+  get cookies(): RequestCookies {
+    let all: string[] = [];
+    for (let i = 0; i < this.headers.names.length; i++) {
+      if (this.headers.names[i] === "cookie") all.push(this.headers.values[i]);
+    }
+    return new RequestCookies(all.join("; "));
+  }
+
   // The path segment a Router's ':name' matched, the last when the name repeats, or "" when its
   // route has no such parameter.
   param(name: string): string {
@@ -462,6 +636,8 @@ class Response {
   #read: Atomic<i64> = new Atomic(0);
   // The URL fetch got it from, or "" for one the program built.
   url: string = "";
+  // The cookies it sets and deletes, each sent as a Set-Cookie header of its own.
+  cookies: CookieMap = new CookieMap();
 
   // A text or streamed body is typed 'text/plain;charset=UTF-8' unless the headers say
   // otherwise; bytes are given no type, as Bun does.
@@ -524,6 +700,7 @@ class Response {
     let copy = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers.clone() });
     copy.body = this.body.clone();
     copy.url = this.url;
+    copy.cookies = this.cookies.clone();
     return copy;
   }
 
@@ -595,8 +772,9 @@ type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64 };
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
 type __routerMiddleware = (req: Request, next: __routerNext) => Promise<Response>;
-// Each route's method, split path and handler, added together under one lock.
-type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[] };
+// Each route's method, split path, handler, whether it takes every path below its own, and the
+// middleware of the routers mounted around it, outermost first, added together under one lock.
+type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[]; prefixes: boolean[]; groups: __routerMiddleware[][] };
 // A router's routes and middleware, shared so each middleware's next can hold them.
 type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
@@ -772,13 +950,20 @@ class Router {
   constructor() {
     // Named first: an empty array literal for a field of callables is typed 'never[]'.
     const handlers: ServeHandler[] = [];
-    const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers };
+    const groups: __routerMiddleware[][] = [];
+    const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers, prefixes: [], groups: groups };
     const middleware: __routerMiddleware[] = [];
     const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
     const held = table.clone();
     this.table = table;
-    this.inner = async (r: Request) => {
-      const res = await Router.dispatch(held.clone(), r);
+    this.inner = Router.routing(held, 1);
+  }
+
+  // Routes a request from the first route, with no middleware but the routes' own groups', as
+  // its depth-th re-route.
+  private static routing(table: shared<__routerTable>, depth: i64): __routerNext {
+    return async (r: Request) => {
+      const res = await Router.dispatch(table.clone(), r, 0, depth);
       return res;
     };
   }
@@ -786,22 +971,93 @@ class Router {
   // Wraps every route and the 404, whenever it is added; the first added runs outermost.
   use(this: Mut<this>, middleware: __routerMiddleware) { this.table.middleware.update((m) => { m.push(middleware); }); }
 
-  get(this: Mut<this>, path: string, handler: ServeHandler) { this.route("GET", path, handler); }
-  post(this: Mut<this>, path: string, handler: ServeHandler) { this.route("POST", path, handler); }
-  put(this: Mut<this>, path: string, handler: ServeHandler) { this.route("PUT", path, handler); }
-  patch(this: Mut<this>, path: string, handler: ServeHandler) { this.route("PATCH", path, handler); }
-  delete(this: Mut<this>, path: string, handler: ServeHandler) { this.route("DELETE", path, handler); }
+  get(this: Mut<this>, path: string, handler: ServeHandler) { this.add("GET", path, handler); }
+  post(this: Mut<this>, path: string, handler: ServeHandler) { this.add("POST", path, handler); }
+  put(this: Mut<this>, path: string, handler: ServeHandler) { this.add("PUT", path, handler); }
+  patch(this: Mut<this>, path: string, handler: ServeHandler) { this.add("PATCH", path, handler); }
+  delete(this: Mut<this>, path: string, handler: ServeHandler) { this.add("DELETE", path, handler); }
   // A route for every method.
-  all(this: Mut<this>, path: string, handler: ServeHandler) { this.route("", path, handler); }
+  all(this: Mut<this>, path: string, handler: ServeHandler) { this.add("", path, handler); }
 
-  // A route for a method, in any case; a path without a leading '/' gets one.
-  route(this: Mut<this>, method: string, path: string, handler: ServeHandler) {
+  // A route for a method, in any case, or a router mounted under a path prefix, as Hono's
+  // app.route does: its routes join this one's in place, under the prefix, its middleware
+  // running inside this one's for its routes alone.
+  route(this: Mut<this>, method: string, path: string, handler: ServeHandler): void;
+  route(this: Mut<this>, prefix: string, router: Router): void;
+  route(this: Mut<this>, a: string, b: string | Router, ...handler: ServeHandler[]): void {
+    if (typeof b !== "string") {
+      this.mount(a, b);
+      return;
+    }
+    for (const h of handler) this.add(a, b, h.clone());
+  }
+
+  // A path without a leading '/' gets one.
+  private add(this: Mut<this>, method: string, path: string, handler: ServeHandler) {
     const upper = method.toUpperCase();
     const split = (path.startsWith("/") ? path : "/" + path).split("/");
+    const none: __routerMiddleware[] = [];
     this.table.routes.update((t) => {
       t.methods.push(upper);
       t.paths.push(split);
       t.handlers.push(handler);
+      t.prefixes.push(false);
+      t.groups.push(none);
+    });
+  }
+
+  // Adds each of a child's routes at its path below the prefix, the child's '/' being the prefix
+  // itself. A static route's handler sees the path with the prefix taken off, as it would unmounted.
+  private mount(this: Mut<this>, prefix: string, child: Router) {
+    let base = (prefix.startsWith("/") ? prefix : "/" + prefix).split("/");
+    if (base.length > 1 && base[base.length - 1] === "") base.pop();
+    const drop = base.length as i64;
+    const outer = child.table.middleware.update((all) => all.map((m) => m.clone()));
+    const t = child.table.routes.update((t) => ({ methods: t.methods.clone(), paths: t.paths.clone(), handlers: t.handlers.map((h) => h.clone()), prefixes: t.prefixes.clone(), groups: t.groups.map((g) => g.map((m) => m.clone())) }));
+    for (let i = 0; i < t.paths.length; i++) {
+      const own = t.paths[i].clone();
+      const path = own.length === 2 && own[1] === "" && drop > 1 ? base.clone() : base.concat(own.slice(1));
+      let group = outer.map((m) => m.clone());
+      for (const m of t.groups[i]) group.push(m.clone());
+      let handler = t.handlers[i].clone();
+      if (t.prefixes[i]) {
+        const inner = handler;
+        handler = async (r: Request) => {
+          let moved = r;
+          moved.path = "/" + moved.path.split("/").slice(drop).join("/");
+          const res = await inner(moved);
+          return res;
+        };
+      }
+      const method = t.methods[i].clone();
+      const prefixed = t.prefixes[i];
+      this.table.routes.update((mine) => {
+        mine.methods.push(method);
+        mine.paths.push(path);
+        mine.handlers.push(handler);
+        mine.prefixes.push(prefixed);
+        mine.groups.push(group);
+      });
+    }
+  }
+
+  // Serves the files under root at the paths below prefix, for GET and HEAD. A path that isn't
+  // a readable regular file inside root, after symlinks are resolved, is answered 404.
+  static(this: Mut<this>, prefix: string, root: string) {
+    let split = (prefix.startsWith("/") ? prefix : "/" + prefix).split("/");
+    if (split.length > 1 && split[split.length - 1] === "") split.pop();
+    const skip = split.length;
+    const none: __routerMiddleware[] = [];
+    const handler: ServeHandler = async (req: Request) => {
+      const res = await __staticResponse(req, skip, root.clone());
+      return res;
+    };
+    this.table.routes.update((t) => {
+      t.methods.push("GET");
+      t.paths.push(split);
+      t.handlers.push(handler);
+      t.prefixes.push(true);
+      t.groups.push(none);
     });
   }
 
@@ -813,15 +1069,22 @@ class Router {
     const path = req.path.clone();
     const method = req.method.clone();
     const have = path.split("/");
-    const found = this.table.routes.update((t) => Router.find(t, method, have));
+    const found = this.table.routes.update((t) => Router.find(t, method, have, 0));
     let handler: ServeHandler = async (r: Request) => new Response("Not Found\\n", { status: 404 });
     let params: string[] = [];
+    let prefix = false;
+    let after: usize = 0;
+    let group: __routerMiddleware[] = [];
     if (found !== null) {
       const decoded = Router.decoded(found.params);
       if (decoded === null) return new Response("Bad Request\\n", { status: 400 });
       params = decoded;
       handler = found.handler;
+      prefix = found.prefix;
+      after = found.next;
+      group = found.group;
     }
+    const table = this.table.clone();
     // A middleware that changed the path or method has its request routed again.
     const again = this.inner.clone();
     let next: __routerNext = async (r: Request) => {
@@ -829,10 +1092,15 @@ class Router {
         const res = await again(r);
         return res;
       }
-      let routed = r;
-      routed.params = params.clone();
-      const res = await handler(routed);
-      return res;
+      if (!prefix) {
+        const res = await Router.run(handler.clone(), group.map((m) => m.clone()), params.clone(), again.clone(), r);
+        return res;
+      }
+      // A static route's 404 is a miss, passed on to the routes after it.
+      const res = await Router.run(handler.clone(), group.map((m) => m.clone()), params.clone(), again.clone(), r.clone());
+      if (res.status !== 404) return res;
+      const rest = await Router.dispatch(table.clone(), r, after, 0);
+      return rest;
     };
     let chain = this.table.middleware.update((all) => all.map((m) => m.clone()));
     while (chain.length > 0) {
@@ -847,28 +1115,69 @@ class Router {
     return res;
   }
 
-  // The first matching route's response; a HEAD request may run a GET route.
-  private static async dispatch(table: shared<__routerTable>, req: Request): Promise<Response> {
+  // The response of the first route from index start that matches; a HEAD request may run a GET
+  // route, and a static route's 404 is a miss, passed on to the routes after it.
+  // Group middleware that keep rewriting each other's paths are stopped with a 500 after a few
+  // re-routes, before the recursion overflows the stack and takes the server down.
+  private static async dispatch(table: shared<__routerTable>, req: Request, start: usize, depth: i64): Promise<Response> {
+    if (depth > 10) return new Response("Internal Server Error\\n", { status: 500 });
     const have = req.path.split("/");
-    const method = req.method;
-    const found = table.routes.update((t) => Router.find(t, method, have));
-    if (found === null) return new Response("Not Found\\n", { status: 404 });
-    const params = Router.decoded(found.params);
-    if (params === null) return new Response("Bad Request\\n", { status: 400 });
-    let routed = req;
-    routed.params = params;
-    const res = await found.handler(routed);
+    const method = req.method.clone();
+    let from = start;
+    while (true) {
+      const at = from;
+      const found = table.routes.update((t) => Router.find(t, method, have, at));
+      if (found === null) return new Response("Not Found\\n", { status: 404 });
+      const params = Router.decoded(found.params);
+      if (params === null) return new Response("Bad Request\\n", { status: 400 });
+      const again = Router.routing(table.clone(), depth + 1);
+      if (!found.prefix) {
+        const res = await Router.run(found.handler, found.group, params, again, req);
+        return res;
+      }
+      const res = await Router.run(found.handler, found.group, params, again, req.clone());
+      if (res.status !== 404) return res;
+      from = found.next;
+    }
+  }
+
+  // The response of a route's handler inside the middleware of the routers mounted around it,
+  // the first outermost. One of them that changes the path or method has the request routed again.
+  private static async run(handler: ServeHandler, group: __routerMiddleware[], params: string[], again: __routerNext, req: Request): Promise<Response> {
+    const path = req.path.clone();
+    const method = req.method.clone();
+    let next: __routerNext = async (r: Request) => {
+      if (r.path !== path || r.method !== method) {
+        const res = await again(r);
+        return res;
+      }
+      let routed = r;
+      routed.params = params.clone();
+      const res = await handler(routed);
+      return res;
+    };
+    let chain = group;
+    while (chain.length > 0) {
+      const m = chain.pop()!;
+      const inner = next;
+      next = async (r: Request) => {
+        const res = await m(r, inner.clone());
+        return res;
+      };
+    }
+    const res = await next(req);
     return res;
   }
 
-  // The first route taking a method and path, its handler cloned, with the :params it reads.
-  private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>): { handler: ServeHandler; params: string[] } | null {
+  // The first route from index start taking a method and path, its handler cloned, with the
+  // :params it reads, whether it is a prefix route, and the index after it.
+  private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>, start: usize): { handler: ServeHandler; params: string[]; prefix: boolean; next: usize; group: __routerMiddleware[] } | null {
     const head = method === "HEAD";
-    for (let i = 0; i < t.paths.length; i++) {
+    for (let i = start; i < t.paths.length; i++) {
       const want = t.methods[i];
       if (want !== "" && want !== method && !(head && want === "GET")) continue;
-      const found = Router.match(t.paths[i], have);
-      if (found !== null) return { handler: t.handlers[i].clone(), params: found };
+      const found = Router.match(t.paths[i], have, t.prefixes[i]);
+      if (found !== null) return { handler: t.handlers[i].clone(), params: found, prefix: t.prefixes[i], next: i + 1, group: t.groups[i].map((m) => m.clone()) };
     }
     return null;
   }
@@ -894,9 +1203,10 @@ class Router {
     return out;
   }
 
-  // The :params a route's segments take from a path's, or null when they don't match.
-  static match(want: Ref<string[]>, have: Ref<string[]>): string[] | null {
-    if (want.length !== have.length) return null;
+  // The :params a route's segments take from a path's, or null when they don't match. A prefix
+  // route matches a path with more segments than its own.
+  static match(want: Ref<string[]>, have: Ref<string[]>, prefix: boolean): string[] | null {
+    if (prefix ? have.length < want.length : want.length !== have.length) return null;
     let params: string[] = [];
     for (let i = 0; i < want.length; i++) {
       if (want[i].startsWith(":")) {
@@ -907,6 +1217,126 @@ class Router {
     }
     return params;
   }
+}
+
+// The response Router.static gives a request: the file below root its path names past the
+// route's skip segments, a directory's index.html, or a 404 for anything else. Each segment is
+// percent-decoded before it is checked, so an encoded slash, dot or NUL is refused like a plain one.
+async function __staticResponse(req: Request, skip: usize, root: string): Promise<Response> {
+  const segments = req.path.split("/");
+  let parts: string[] = [];
+  for (let i = skip; i < segments.length; i++) {
+    const part = __urlDecodeStrict(segments[i]);
+    if (part === null) return __staticMissing();
+    // A trailing slash is kept, so it names only a directory; an empty segment anywhere else is
+    // refused.
+    if (part === "" && i + 1 === segments.length) {
+      parts.push(part);
+      continue;
+    }
+    // A leading dot refuses '.', '..' and hidden files such as '.env'.
+    if (part === "" || part.startsWith(".") || part.includes("/") || part.includes("\\\\") || part.includes("\\0")) return __staticMissing();
+    parts.push(part);
+  }
+  const found = await spawnBlocking(() => __staticFind(root, parts));
+  if (found === null) return __staticMissing();
+  const [path, size, mtime] = found;
+  const tag = "W/\\"" + __staticHex(size) + "-" + __staticHex(mtime) + "\\"";
+  let headers = new Headers();
+  headers.set("etag", tag);
+  headers.set("last-modified", __cookieDate(mtime));
+  const asked = req.headers.get("if-none-match");
+  if (asked !== null && __staticMatches(asked, tag)) return new Response(null, { status: 304, headers: headers });
+  headers.set("content-type", __staticType(path));
+  try {
+    const bytes = await fileRead(path);
+    return new Response(bytes, { headers: headers });
+  } catch (e) {
+    return __staticMissing();
+  }
+}
+
+function __staticMissing(): Response {
+  return new Response("Not Found\\n", { status: 404 });
+}
+
+function __staticHex(n: i64): string {
+  const digits = "0123456789abcdef";
+  let out = "";
+  let rest = n < 0 ? 0 : n;
+  while (true) {
+    out = digits[(rest % 16) as usize] + out;
+    rest = rest / 16;
+    if (rest === 0) return out;
+  }
+}
+
+// The real path, size and modification time in milliseconds of the regular file root and parts
+// name, or of the index.html of the directory they name, or null when there is none inside root.
+// ponytail: the file is checked, then opened by its real path; a symlink swapped in between could
+// still be followed, which opening each segment with O_NOFOLLOW would close.
+function __staticFind(root: string, parts: Ref<string[]>): [string, i64, i64] | null {
+  try {
+    const base = pathReal(root);
+    const inside = base.endsWith("/") ? base : base + "/";
+    let path = inside + parts.join("/");
+    let stat = pathStat(path, true);
+    if (stat[3] === 2) {
+      path = (path.endsWith("/") ? path : path + "/") + "index.html";
+      stat = pathStat(path, true);
+    }
+    if (stat[3] !== 1) return null;
+    const real = pathReal(path);
+    if (!real.startsWith(inside)) return null;
+    return [real, stat[0], Math.floor(stat[2]) as i64];
+  } catch (e) {
+    return null;
+  }
+}
+
+// Whether an If-None-Match header names the ETag, compared weakly as RFC 9110 says for GET.
+function __staticMatches(asked: string, tag: string): boolean {
+  const strong = tag.slice(2);
+  for (const each of asked.split(",")) {
+    const t = each.trim();
+    if (t === "*" || t === tag || t === strong) return true;
+  }
+  return false;
+}
+
+// The Content-Type for a file's extension, text types in UTF-8.
+function __staticType(path: string): string {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  const ext = dot <= 0 ? "" : name.slice(dot + 1).toLowerCase();
+  const text = "; charset=utf-8";
+  if (ext === "html" || ext === "htm") return "text/html" + text;
+  if (ext === "css") return "text/css" + text;
+  if (ext === "js" || ext === "mjs") return "text/javascript" + text;
+  if (ext === "json" || ext === "map") return "application/json" + text;
+  if (ext === "txt") return "text/plain" + text;
+  if (ext === "md") return "text/markdown" + text;
+  if (ext === "csv") return "text/csv" + text;
+  if (ext === "xml") return "application/xml" + text;
+  if (ext === "svg") return "image/svg+xml" + text;
+  if (ext === "png") return "image/png";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  if (ext === "avif") return "image/avif";
+  if (ext === "ico") return "image/x-icon";
+  if (ext === "woff") return "font/woff";
+  if (ext === "woff2") return "font/woff2";
+  if (ext === "ttf") return "font/ttf";
+  if (ext === "otf") return "font/otf";
+  if (ext === "pdf") return "application/pdf";
+  if (ext === "wasm") return "application/wasm";
+  if (ext === "zip") return "application/zip";
+  if (ext === "mp4") return "video/mp4";
+  if (ext === "webm") return "video/webm";
+  if (ext === "mp3") return "audio/mpeg";
+  if (ext === "wav") return "audio/wav";
+  return "application/octet-stream";
 }
 
 // The wire format of HTTP/1.x.
@@ -1263,6 +1693,7 @@ class Http1 {
     res.headers.forEach((value: string, name: string) => {
       if (!Http1.isToken(name) || Http1.hasBreak(value)) fine = false;
     });
+    for (const line of res.cookies.toSetCookieHeaders()) if (Http1.hasBreak(line)) fine = false;
     return fine;
   }
 
@@ -1284,6 +1715,8 @@ class Http1 {
     res.headers.forEach((value: string, name: string) => {
       if (name !== "content-length" && name !== "transfer-encoding" && name !== "connection" && name !== "date") text = text + name + ": " + value + "\\r\\n";
     });
+    // Never folded into one line, since an Expires date holds a comma.
+    for (const line of res.cookies.toSetCookieHeaders()) text = text + "set-cookie: " + line + "\\r\\n";
     text = text + framing + "date: " + httpDate() + "\\r\\n";
     if (close) text = text + "connection: close\\r\\n";
     else if (version === "HTTP/1.0") text = text + "connection: keep-alive\\r\\n";
@@ -2650,7 +3083,7 @@ const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;

@@ -415,7 +415,7 @@ export class Cursor {
   /** @throws {CompileError} */
   error(this: Mut<this>, message: string, t: Token | undefined = undefined): CompileError {
     const at = t === undefined ? this.token() : t!;
-    return new CompileError(`${message}, found ${describe(at)}`, at.start, at.end);
+    return new CompileError("E0001", `${message}, found ${describe(at)}`, at.start, at.end);
   }
 
   // Items up to and including `close`, separated by commas, with an optional trailing comma.
@@ -586,7 +586,7 @@ export function documentedThrows(c: Mut<Cursor>, at: usize, written: Ref<TypeNod
   }
   if (written === undefined) return doc;
   if (shape(src, doc) !== shape(src, written!)) {
-    throw new CompileError(`the JSDoc says '@throws {${shown}}' but the function says 'throws ${src.slice(written!.start as i64, written!.end as i64)}'; make them the same type, or keep one`, doc.start, doc.end);
+    throw new CompileError("E0602", `the JSDoc says '@throws {${shown}}' but the function says 'throws ${src.slice(written!.start as i64, written!.end as i64)}'; make them the same type, or keep one`, doc.start, doc.end);
   }
   return undefined;
 }
@@ -1040,7 +1040,7 @@ function simpleStatement(c: Mut<Cursor>): Stmt {
   }
   if (c.at("throw")) {
     c.next();
-    if (c.peek().newlineBefore) throw new CompileError("a line break is not allowed after 'throw'", start, c.peek().start);
+    if (c.peek().newlineBefore) throw new CompileError("E0004", "a line break is not allowed after 'throw'", start, c.peek().start);
     const value = sequence(c);
     const valueEnd: usize = value.end;
     return { id: nextId(c.ids), kind: "throw", value, start, end: valueEnd };

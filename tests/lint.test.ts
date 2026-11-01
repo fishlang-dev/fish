@@ -77,7 +77,7 @@ test("a file that doesn't parse is reported as a build reports it, and the rest 
   const pkg = dir("unparsed", { "fish.toml": COMPAT, "src/a.fsh": "const = ;\n", "src/b.fsh": "delete o.k;\n" });
   const { code, out, err } = lint(pkg);
   expect(code).toBe(1);
-  expect(err).toBe("src/a.fsh:1:7: error: expected an identifier, found '='\n 1 | const = ;\n   |       ^\n");
+  expect(err).toBe("src/a.fsh:1:7: error[E0001]: expected an identifier, found '='\n 1 | const = ;\n   |       ^\n");
   expect(out).toBe(`src/b.fsh:1:1: reject R3: ${REJECTS.R3}\n 1 | delete o.k;\n   | ^^^^^^^^^^\nsrc/b.fsh:1:1: guided G7: ${GUIDED_G7}\n 1 | delete o.k;\n   | ^^^^^^^^^^\n2 to change in 1 file\n`);
 });
 
@@ -97,7 +97,7 @@ test("a broken manifest is reported once, and its package's files are skipped", 
   const pkg = dir("broken-manifest", { "fish.toml": '[package]\nname = "a"\nversion = "1.0.0"\nedition = "ts"\n', "src/a.fsh": 'eval("1");\n', "src/b.fsh": 'eval("2");\n' });
   const { code, out, err } = lint(pkg);
   expect(code).toBe(1);
-  expect(err).toBe(`fish.toml:4:11: error: 'ts' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated\n 4 | edition = "ts"\n   |           ^^^^\n`);
+  expect(err).toBe(`fish.toml:4:11: error[E0905]: 'ts' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated\n 4 | edition = "ts"\n   |           ^^^^\n`);
   expect(out).toBe("0 to change in 0 files\n");
 });
 
@@ -191,7 +191,7 @@ test("--fix leaves a file with nothing to fix, and one that doesn't parse, untou
   const after = statSync(join(pkg, "src/clean.fsh"));
   expect([after.ino, after.mtimeMs]).toEqual([before.ino, before.mtimeMs]);
   expect(readFileSync(join(pkg, "src/broken.fsh"), "utf8")).toBe("var a = ;\n");
-  expect(err).toBe("src/broken.fsh:1:9: error: expected an expression, found ';'\n 1 | var a = ;\n   |         ^\n");
+  expect(err).toBe("src/broken.fsh:1:9: error[E0001]: expected an expression, found ';'\n 1 | var a = ;\n   |         ^\n");
   expect(out).toBe("0 to change in 0 files\n");
   expect(code).toBe(1);
 });

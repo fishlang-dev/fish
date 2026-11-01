@@ -204,7 +204,7 @@ test("a program can't import the test hook", () => {
   const [file, src] = [join(dir, "hook.fsh"), `import { evaluate } from "fish:engine";\nfunction main() {}\n`];
   writeFileSync(file, src);
   expect(() => compile(cachedSession(), src, file)).toThrow(
-    new CompileError("'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", 0, 0),
+    new CompileError("E0903", "'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", 0, 0),
   );
 });
 

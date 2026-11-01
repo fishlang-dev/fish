@@ -62,7 +62,7 @@ test("uncommitted changes, packages outside git, missing libs, links and non-reg
   writeFileSync(join(loose, "src/lib.fsh"), "");
   expect(fishc(loose, "publish", "--dry-run").err).toBe(`fishc publish: the package at ${loose} isn't in a git repository; publishing packs the files git tracks`);
   const nolib = pkg("nolib", { "src/main.fsh": "" });
-  expect(fishc(nolib, "publish", "--dry-run").err.split("\n")[0]).toBe(`fish.toml:1:1: error: the lib 'src/lib.fsh' doesn't exist; create it, or name another with lib = "..."`);
+  expect(fishc(nolib, "publish", "--dry-run").err.split("\n")[0]).toBe(`fish.toml:1:1: error[E0905]: the lib 'src/lib.fsh' doesn't exist; create it, or name another with lib = "..."`);
   const linked = pkg("linked", { "src/lib.fsh": "" });
   Bun.spawnSync(["ln", "-s", "/etc/hosts", join(linked, "hosts")]);
   gitIn(linked, "add", ".");

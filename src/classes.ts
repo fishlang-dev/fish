@@ -131,7 +131,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   const constructors = node.members.filter((m) => m.kind === "constructor");
   const ctor = constructors[0];
   if (ctor && !ctor.body && constructors.length > 1) throw unsupported("constructor overloads", ctor);
-  if (constructors.length > 1) throw new CompileError("a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
+  if (constructors.length > 1) throw new CompileError("E0703", "a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
   const type = typing.classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
@@ -167,7 +167,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     }
     const access = modifiers(m.modifiers, m, m.name);
     if (m.definite) throw unsupported("definite assignment assertions", m);
-    if (!m.type && !m.init) throw new CompileError(`property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
+    if (!m.type && !m.init) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An optional field is an Option, empty until assigned.
     const at = { start: m.start, end: m.end };
     const type: TypeNode | undefined = m.optional && m.type ? { id: nextId(ids), kind: "union", types: [m.type, { id: nextId(ids), kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
@@ -184,27 +184,27 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   });
 
   for (const [name, f] of staticFields) {
-    if (statics.has(name) || statics.has(`get ${name}`) || statics.has(`set ${name}`)) throw new CompileError(`duplicate property '${name}'`, f.start, f.end);
+    if (statics.has(name) || statics.has(`get ${name}`) || statics.has(`set ${name}`)) throw new CompileError("E0402", `duplicate property '${name}'`, f.start, f.end);
   }
   for (const name of statics.keys()) {
     const accessor = /^[gs]et (.*)$/.exec(name)?.[1];
     if (accessor !== undefined && statics.has(accessor)) {
       const m = arenas.bodyOf(statics.get(accessor)!);
-      throw new CompileError(`duplicate property '${accessor}'`, m.start, m.end);
+      throw new CompileError("E0402", `duplicate property '${accessor}'`, m.start, m.end);
     }
   }
   for (const name of [...methods.keys(), ...getters.keys(), ...setters.keys()]) {
     const clash = fields.find((f) => f.name === name);
-    if (clash) throw new CompileError(`duplicate property '${name}'`, clash.start, clash.end);
+    if (clash) throw new CompileError("E0402", `duplicate property '${name}'`, clash.start, clash.end);
     if (methods.has(name) && (getters.has(name) || setters.has(name))) {
       const m = arenas.bodyOf(methods.get(name)!);
-      throw new CompileError(`duplicate property '${name}'`, m.start, m.end);
+      throw new CompileError("E0402", `duplicate property '${name}'`, m.start, m.end);
     }
   }
   // An abstract accessor's pair must be abstract too, as in TypeScript.
   for (const a of abstracts) {
     const pair = arenas.bodyOf(a.table === "getters" ? setters.get(a.name) : a.table === "setters" ? getters.get(a.name) : undefined);
-    if (pair && !pair.abstract) throw new CompileError(`a getter and a setter for '${a.name}' must both be abstract or neither`, a.start, a.end);
+    if (pair && !pair.abstract) throw new CompileError("E0701", `a getter and a setter for '${a.name}' must both be abstract or neither`, a.start, a.end);
   }
   // As in TypeScript, parameter properties are assigned before field initializers run.
   const initializers = fields.filter((f) => f.init).map((f) => assignField(ids, f.name, f.init!, f));
@@ -234,28 +234,28 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
   function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
     if (node.typeParams.length > 0) throw unsupported("static fields in generic classes", m);
-    if (!m.modifiers.includes("readonly")) throw new CompileError(`a static field that isn't 'readonly' would be a global that changes; declare it 'static readonly ${field}', whose value is computed while compiling, or hold an Atomic or a Lock in one`, m.start, m.end);
+    if (!m.modifiers.includes("readonly")) throw new CompileError("E0706", `a static field that isn't 'readonly' would be a global that changes; declare it 'static readonly ${field}', whose value is computed while compiling, or hold an Atomic or a Lock in one`, m.start, m.end);
     if (m.optional) throw unsupported("optional static fields", m);
     if (m.definite) throw unsupported("definite assignment assertions", m);
-    if (!m.init) throw new CompileError(`a 'static readonly' field needs its value where it is declared, as in 'static readonly ${field} = ...'`, m.start, m.end);
+    if (!m.init) throw new CompileError("E0706", `a 'static readonly' field needs its value where it is declared, as in 'static readonly ${field} = ...'`, m.start, m.end);
     const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, field);
-    if (staticFields.has(field)) throw new CompileError(`duplicate property '${field}'`, m.start, m.end);
+    if (staticFields.has(field)) throw new CompileError("E0402", `duplicate property '${field}'`, m.start, m.end);
     staticFields.set(field, { name: field, type: m.type, init: m.init, access, readonly: true, start: m.start, end: m.end });
   }
 
   // TypeScript's rules: only an abstract class has abstract members, which are methods or
   // accessors without a body, never private or static.
   function abstractMember(m: ClassMember) {
-    if (!node.abstract) throw new CompileError("abstract members can only appear in an abstract class", m.start, m.end);
+    if (!node.abstract) throw new CompileError("E0701", "abstract members can only appear in an abstract class", m.start, m.end);
     if (m.kind === "field") throw unsupported("abstract fields", m);
     if (m.kind !== "method" && m.kind !== "get" && m.kind !== "set") throw unsupported(MEMBER_FORMS[m.kind as keyof typeof MEMBER_FORMS] ?? "abstract members", m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
-    if (m.modifiers.includes("static")) throw new CompileError("'static' can't be used with 'abstract'", m.start, m.end);
-    if (m.modifiers.includes("private") || m.name.startsWith("#")) throw new CompileError("an abstract member can't be private, since subclasses must implement it", m.start, m.end);
-    if (m.body) throw new CompileError(`'${m.name}' can't have a body because it is marked abstract`, m.start, m.end);
+    if (m.modifiers.includes("static")) throw new CompileError("E0701", "'static' can't be used with 'abstract'", m.start, m.end);
+    if (m.modifiers.includes("private") || m.name.startsWith("#")) throw new CompileError("E0701", "an abstract member can't be private, since subclasses must implement it", m.start, m.end);
+    if (m.body) throw new CompileError("E0701", `'${m.name}' can't have a body because it is marked abstract`, m.start, m.end);
     if (m.kind === "method" && m.optional) throw unsupported("optional methods", m);
     if (m.kind === "method" && m.typeParams.length > 0) throw unsupported("generic abstract methods", m);
-    if (m.kind !== "set" && !m.returnType) throw new CompileError(`'${m.name}' needs its return type written, since it is abstract and has no body to infer it from`, m.start, m.end);
+    if (m.kind !== "set" && !m.returnType) throw new CompileError("E0701", `'${m.name}' needs its return type written, since it is abstract and has no body to infer it from`, m.start, m.end);
     const access = modifiers(m.modifiers.filter((x) => x !== "abstract" && x !== "async"), m, m.name);
     const table = m.kind === "method" ? "methods" : m.kind === "get" ? "getters" : "setters";
     const signature = { ...m, modifiers: m.modifiers.filter((x) => x !== "abstract"), body: [] };
@@ -270,16 +270,16 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     if (isStatic && node.typeParams.length > 0) throw unsupported("static accessors in generic classes", m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
     const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
-    if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of an accessor", m.start, m.end);
+    if (m.name === "constructor") throw new CompileError("E0705", "'constructor' can't be the name of an accessor", m.start, m.end);
     if (!m.body) throw unsupported("accessors without a body", m);
     // Only a JSDoc `@throws` gives an accessor an error type: reading a property can't fail yet.
     if (m.throws) throw unsupported("accessors that throw", m.throws);
     const table = isStatic ? statics : m.kind === "get" ? getters : setters;
     const key = isStatic ? `${m.kind} ${m.name}` : m.name;
-    if (table.has(key)) throw new CompileError(`duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
-    if (m.kind === "set" && m.params.length !== 1) throw new CompileError("a setter takes exactly one parameter", m.start, m.end);
-    if (m.kind === "set" && m.returnType) throw new CompileError("a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
-    if (isStatic && m.params[0]?.pattern.kind === "ident" && m.params[0].pattern.name === "this") throw new CompileError("a static accessor has no 'this'", m.params[0].start, m.params[0].end);
+    if (table.has(key)) throw new CompileError("E0705", `duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
+    if (m.kind === "set" && m.params.length !== 1) throw new CompileError("E0705", "a setter takes exactly one parameter", m.start, m.end);
+    if (m.kind === "set" && m.returnType) throw new CompileError("E0705", "a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
+    if (isStatic && m.params[0]?.pattern.kind === "ident" && m.params[0].pattern.name === "this") throw new CompileError("E0706", "a static accessor has no 'this'", m.params[0].start, m.params[0].end);
     table.set(key, arenas.addBody({
       id: nextId(ids),
       name: `${name}.${isStatic ? "static " : ""}${m.kind} ${m.name}`,
@@ -303,13 +303,13 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
     if (m.generator && !m.modifiers.includes("async")) throw unsupported("generator methods", m);
-    if (!m.body) throw new CompileError(`'${m.name}' has no implementation; follow its overload signatures with a '${m.name}' method that has a body`, m.start, m.end);
-    if (m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
+    if (!m.body) throw new CompileError("E0410", `'${m.name}' has no implementation; follow its overload signatures with a '${m.name}' method that has a body`, m.start, m.end);
+    if (m.name === "constructor") throw new CompileError("E0407", "'constructor' can't be the name of a method", m.start, m.end);
     const table = isStatic ? statics : methods;
-    if (table.has(m.name)) throw new CompileError(`duplicate method '${m.name}'`, m.start, m.end);
+    if (table.has(m.name)) throw new CompileError("E0402", `duplicate method '${m.name}'`, m.start, m.end);
     const [first, ...rest] = m.params;
     const receiver = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
-    if (receiver && isStatic) throw new CompileError("a static method has no 'this'", receiver.start, receiver.end);
+    if (receiver && isStatic) throw new CompileError("E0706", "a static method has no 'this'", receiver.start, receiver.end);
     if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) rebuiltParam(namesClass(p), tables.rewrites);
     if (isStatic) classParamIn(m);
     table.set(m.name, arenas.addBody({
@@ -352,7 +352,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
       return undefined;
     };
     const used = find({ of: "classMember", node: m }, new Set());
-    if (used) throw new CompileError(`a static method can't use the class's type parameter '${used.name}'; give the method its own, as in 'static ${m.name as string}<${used.name}>(...)'`, used.start, used.end);
+    if (used) throw new CompileError("E0706", `a static method can't use the class's type parameter '${used.name}'; give the method its own, as in 'static ${m.name as string}<${used.name}>(...)'`, used.start, used.end);
   }
 
   // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
@@ -366,7 +366,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   }
 
   function add(f: FieldDecl): FieldDecl {
-    if (fields.some((other) => other.name === f.name)) throw new CompileError(`duplicate property '${f.name}'`, f.start, f.end);
+    if (fields.some((other) => other.name === f.name)) throw new CompileError("E0402", `duplicate property '${f.name}'`, f.start, f.end);
     fields.push(f);
     return f;
   }
@@ -422,7 +422,7 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   for (let b: ClassInfo | undefined = base; b; b = arenas.classOf(b.base)) {
     const redeclared = c.fields.find((f) => b.fields.some((g) => g.name === f.name));
     if (redeclared) {
-      throw new CompileError(`'${redeclared.name}' is already a field of '${typing.rec(b.type).name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${redeclared.name} = ...'`, redeclared.start, redeclared.end);
+      throw new CompileError("E0704", `'${redeclared.name}' is already a field of '${typing.rec(b.type).name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${redeclared.name} = ...'`, redeclared.start, redeclared.end);
     }
   }
   const explicit = c.node.members.find((m) => m.kind === "constructor");
@@ -433,7 +433,7 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
     const defaults = written.filter((s) => prologues.has(s));
     const [first, ...rest] = written.slice(defaults.length);
     if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
-      throw new CompileError("a derived class's constructor must start with 'super(...)'", at.start, at.end);
+      throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", at.start, at.end);
     }
     constructor.body = [...defaults, first, ...c.prelude, ...rest];
     return;
@@ -500,7 +500,7 @@ export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
   for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
     const base = typing.rec(b.type).name;
     for (const [name, m] of own) {
-      if (b.fields.some((f) => f.name === name)) throw new CompileError(`'${name}' is already a field of '${base}'`, m.start, m.end);
+      if (b.fields.some((f) => f.name === name)) throw new CompileError("E0704", `'${name}' is already a field of '${base}'`, m.start, m.end);
       if (!b.methods.has(name) && !b.getters.has(name) && !b.setters.has(name)) continue;
       // A template reaches the override, through the copy this class gets. A base's own code
       // calling one reaches its own copy, and through it the base's member.
@@ -518,12 +518,12 @@ export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
       const via = [...through].find((n) => usesOnThis("classMember", members, n));
       if (via === name) {
         throw new CompileError(
-          `overriding '${name}' is an error here: '${base}' reaches it through 'this', and with 'extends' as embedding that would still run '${base}.${name}'; extract an interface instead`,
+          "E0704", `overriding '${name}' is an error here: '${base}' reaches it through 'this', and with 'extends' as embedding that would still run '${base}.${name}'; extract an interface instead`,
           m.start, m.end);
       }
       if (via !== undefined) {
         throw new CompileError(
-          `overriding '${name}' is an error here: '${base}' calls 'this.${via}', which reaches '${name}', and with 'extends' as embedding the copy of '${via}' in '${base}' would still run '${base}.${name}'; extract an interface instead`,
+          "E0704", `overriding '${name}' is an error here: '${base}' calls 'this.${via}', which reaches '${name}', and with 'extends' as embedding the copy of '${via}' in '${base}' would still run '${base}.${name}'; extract an interface instead`,
           m.start, m.end);
       }
     }
@@ -547,12 +547,12 @@ export function implementAbstracts(tables: Tables, c: ClassInfo) {
   const missing = abstracts.filter((a) => inherited(arenas, c, a.table, a.name)!.abstract && !(a.table !== "methods" && [c, ...bases].some((b) => b.fields.some((f) => f.name === a.name))));
   if (missing.length > 0) {
     const named = [...new Set(missing.map((a) => `${MEMBER_KINDS[a.table]} '${a.name}' of '${typing.rec(a.owner.type).name}'`))];
-    throw new CompileError(`class '${typing.rec(c.type).name}' must implement the abstract ${named.join(", ")}`, c.node.start, c.node.end);
+    throw new CompileError("E0701", `class '${typing.rec(c.type).name}' must implement the abstract ${named.join(", ")}`, c.node.start, c.node.end);
   }
   for (const a of abstracts) {
     const f = inherited(arenas, c, a.table, a.name)!;
     if (!f.abstract && (f.access === "private" || (f.access === "protected" && a.access === "public"))) {
-      throw new CompileError(`'${a.name}' implements a ${a.access} abstract member of '${typing.rec(a.owner.type).name}', so it must be ${a.access === "public" ? "public" : "public or protected"}`, f.start, f.end);
+      throw new CompileError("E0701", `'${a.name}' implements a ${a.access} abstract member of '${typing.rec(a.owner.type).name}', so it must be ${a.access === "public" ? "public" : "public or protected"}`, f.start, f.end);
     }
   }
   for (const b of bases.filter((b) => b.node.abstract)) {
@@ -602,10 +602,10 @@ function markTemplates(arenas: Arenas, typing: Typing, c: ClassInfo) {
   const constructor = arenas.bodyOf(c.constructor);
   const early = [...names].find((n) => usesOnThis("stmt", constructor.body, n, true));
   if (early !== undefined) {
-    throw new CompileError(`'${typing.rec(c.type).name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, constructor.start, constructor.end);
+    throw new CompileError("E0701", `'${typing.rec(c.type).name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, constructor.start, constructor.end);
   }
   if (thisEscapes(constructor.body)) {
-    throw new CompileError(`'${typing.rec(c.type).name}' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet`, constructor.start, constructor.end);
+    throw new CompileError("E0701", `'${typing.rec(c.type).name}' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet`, constructor.start, constructor.end);
   }
 }
 
@@ -669,9 +669,9 @@ function modifiers(list: string[], at: Span, name: string): Access {
   const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly");
   if (other) throw unsupported(`'${other}' modifiers`, at);
   list = list.filter((m) => m !== "readonly");
-  if (list.length > 1) throw new CompileError("a member can have only one accessibility modifier", at.start, at.end);
+  if (list.length > 1) throw new CompileError("E0709", "a member can have only one accessibility modifier", at.start, at.end);
   if (name.startsWith("#") && list.length > 0) {
-    throw new CompileError("an accessibility modifier can't be used with a private identifier", at.start, at.end);
+    throw new CompileError("E0709", "an accessibility modifier can't be used with a private identifier", at.start, at.end);
   }
   return name.startsWith("#") ? "private" : (list[0] as Access | undefined) ?? "public";
 }

@@ -7,7 +7,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
-import { TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { INTERIORS, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
 import { WeakNodeMap, NodeMap, NodeSet, forEachChild, type AnyNode } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
@@ -19,14 +19,14 @@ import { WeakNodeMap, NodeMap, NodeSet, forEachChild, type AnyNode } from "./nod
 export function placeholders(typing: Typing, params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type, concrete?: (name: string) => Type): Map<string, Type> {
   const scope = new Map<string, Type>();
   for (const p of params) {
-    if (p.modifiers.length > 0) throw new CompileError(`'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);
-    if (p.default) throw new CompileError("default type arguments are not supported yet", p.default.start, p.default.end);
+    if (p.modifiers.length > 0) throw new CompileError("E0801", `'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);
+    if (p.default) throw new CompileError("E0801", "default type arguments are not supported yet", p.default.start, p.default.end);
     let bound: ObjectType | InterfaceType | undefined;
     if (p.constraint) {
       const t = resolve(p.constraint, scope);
       const r = typeof t === "string" ? undefined : typing.rec(t);
       if (r?.kind !== "interface" && r?.kind !== "object") {
-        throw new CompileError(`a type parameter's bound must be an interface or an object type, not '${typing.show(t)}'`, p.constraint.start, p.constraint.end);
+        throw new CompileError("E0107", `a type parameter's bound must be an interface or an object type, not '${typing.show(t)}'`, p.constraint.start, p.constraint.end);
       }
       bound = t as ObjectType | InterfaceType;
     }
@@ -85,7 +85,7 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
       return;
     }
     if (earlier && !(typing.sameLowered(earlier, arg) && typing.sameLowered(arg, earlier))) {
-      throw new CompileError(`the type argument for '${node.name}' can't be both '${typing.show(earlier)}' and '${typing.show(arg)}'`, at.start, at.end);
+      throw new CompileError("E0104", `the type argument for '${node.name}' can't be both '${typing.show(earlier)}' and '${typing.show(arg)}'`, at.start, at.end);
     }
     bindings.set(node.name, arg);
     return;
@@ -125,7 +125,7 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
     return;
   }
   // `Lock<T>` against a Lock holds a T.
-  if (node.kind === "ref" && (node.name === "Atomic" || node.name === "Lock" || node.name === "Cell") && node.args.length === 1 && !names.has(node.name)) {
+  if (node.kind === "ref" && INTERIORS.has(node.name) && node.args.length === 1 && !names.has(node.name)) {
     if (a?.kind === "interior" && a.which === node.name) infer(tables, node.args[0]!, a.of, names, bindings, at);
     return;
   }
@@ -221,7 +221,7 @@ export function checkBound(type: Type, bound: Type, members: Members, at: Span) 
   const reason = trait?.kind === "interface" ? unsatisfied(type, bound as InterfaceType, members, at)
     : typing.fits(type, bound) ? undefined : "";
   if (reason === undefined) return;
-  throw new CompileError(`type '${typing.show(type)}' does not satisfy the constraint '${typing.show(bound)}'${reason ? `: ${reason}` : ""}`, at.start, at.end);
+  throw new CompileError("E0107", `type '${typing.show(type)}' does not satisfy the constraint '${typing.show(bound)}'${reason ? `: ${reason}` : ""}`, at.start, at.end);
 }
 
 // Whether a type has no type parameter in it, so its instance can be compiled. A class's
@@ -293,6 +293,8 @@ export interface InstancingHost {
   classParams(f: Body): TypeParam[];
   // A comptime parameter's argument, computed while compiling, as the literal type of its value.
   comptimeArgument(arg: Expr): Type;
+  // The error a body's check failed with, when it did.
+  failure(f: Body): CompileError | undefined;
 }
 
 // The instances of every body: one for a plain function, and for a generic one, its
@@ -404,12 +406,12 @@ export class Instancing {
       if (p.asserts) throw unsupported("assertion signatures", p);
       if (p.name === "this") throw unsupported("'this' type predicates", p);
       const param = f.params.find((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
-      if (!param) throw new CompileError(`a type predicate names one of the function's parameters, and '${p.name}' isn't one`, p.start, p.end);
+      if (!param) throw new CompileError("E0114", `a type predicate names one of the function's parameters, and '${p.name}' isn't one`, p.start, p.end);
       const [narrowed, declared] = this.host.withScope(scope, () => [p.type && this.host.resolveType(p.type), param.type && this.host.resolveType(param.type)]);
       // A predicate on a borrowed parameter says what the value it points to is.
       const ref = declared && typeof declared !== "string" ? this.typing.rec(declared) : undefined;
       const held = ref?.kind === "ref" ? ref.to : declared;
-      if (narrowed && held && !this.typing.fits(narrowed, held)) throw new CompileError(`a type predicate's type must be assignable to its parameter's type, and '${this.typing.show(narrowed)}' isn't a '${this.typing.show(held)}'`, p.type!.start, p.type!.end);
+      if (narrowed && held && !this.typing.fits(narrowed, held)) throw new CompileError("E0101", `a type predicate's type must be assignable to its parameter's type, and '${this.typing.show(narrowed)}' isn't a '${this.typing.show(held)}'`, p.type!.start, p.type!.end);
       return "boolean";
     }
     // A function type returned is a stored callable, and a `Promise<T>` a boxed future, except
@@ -496,16 +498,21 @@ export class Instancing {
   // The instance a call runs: a generic function's type arguments come from the call, or are
   // inferred from its arguments, and must satisfy their bounds.
   instantiate(this: Mut<this>, f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span & Id): Instance {
+    // A call of a body whose signature failed, or whose result only its body could tell, would
+    // report the same mistake again in other words; one with a written signature is typed by it.
+    const failed = this.host.failure(f);
+    const signature = { start: f.start, end: f.body[0]?.start ?? f.end };
+    if (failed && (f.returnType === undefined || (failed.start >= signature.start && failed.end <= signature.end))) throw failed;
     const params = typeParamsOf(f);
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
-      throw new CompileError(`expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
+      throw new CompileError("E0106", `expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
     }
     if (!this.generic(f)) return this.instanceOf(f);
     // Optional parameters may be left out at the end.
     const required = f.params.filter((p) => !p.optional).length;
     if (args.length < required || args.length > f.params.length) {
       const expected = required === f.params.length ? `${required}` : `${required}-${f.params.length}`;
-      throw new CompileError(`expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+      throw new CompileError("E0501", `expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     const bindings = new Map<string, Type>();
     if (typeArgs.length > 0) {
@@ -522,10 +529,10 @@ export class Instancing {
     }
     for (const p of params) {
       const type = bindings.get(p.name);
-      if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
+      if (!type) throw new CompileError("E0104", `can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
       const r = typeof type === "string" ? undefined : this.typing.rec(type);
       if (r?.kind === "interface") {
-        throw new CompileError(`an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
+        throw new CompileError("E0115", `an interface can't be a type argument, since it describes values without being one`, at.start, at.end);
       }
       if (r?.kind === "function" && r.generic) throw unsupported("generic function types as type arguments", at);
       // A closure inferred for T is the closure's own type, compiled for it, unless the body holds
@@ -548,7 +555,7 @@ export class Instancing {
     for (const p of typeArgs.length > 0 ? [] : params) {
       const t = bindings.get(p.name)!;
       if (!open.has(t)) continue;
-      if (!args.some((a, i) => a.kind !== "arrow" && argTypes[i] !== undefined && holds(argTypes[i]!, t))) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
+      if (!args.some((a, i) => a.kind !== "arrow" && argTypes[i] !== undefined && holds(argTypes[i]!, t))) throw new CompileError("E0104", `can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
     }
     this.readOnlyKept(f.params, params, bindings, argTypes, args, f.name);
     // An argument from inside another instance may be one of its type parameters; the instance
@@ -571,9 +578,9 @@ export class Instancing {
       const held = r?.kind === "ref" ? r.to : given;
       const ref = this.host.instancingState.lent.get(f.bodyId)!.get(i);
       const unlocked = ref && this.typing.rec(ref).mutable ? this.typing.unlocks(held, bound) : undefined;
-      if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${this.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
+      if (unlocked) throw new CompileError("E0206", `'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${this.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
       if (r?.kind === "closure" && r.once && repeats(f, paramName(f.params[i]!))) {
-        throw new CompileError(`'${f.name}' may call '${paramName(f.params[i]!)}' more than once, but this closure moves '${r.once}' out, so it can run only once`, args[i]!.start, args[i]!.end);
+        throw new CompileError("E0210", `'${f.name}' may call '${paramName(f.params[i]!)}' more than once, but this closure moves '${r.once}' out, so it can run only once`, args[i]!.start, args[i]!.end);
       }
     }
     // Each value a comptime parameter is given makes an instance of its own.
@@ -589,7 +596,7 @@ export class Instancing {
     if (instance.depth > 64) {
       const comptime = f.params.some((p) => p.comptime);
       const why = comptime && typeParamsOf(f).length === 0 && this.implicitOf(f).size === 0 ? "a different comptime value" : comptime ? "a different comptime value or larger type arguments" : "larger type arguments";
-      throw new CompileError(`instantiating '${f.name}' never ends: each instance needs another with ${why}`, at.start, at.end);
+      throw new CompileError("E0113", `instantiating '${f.name}' never ends: each instance needs another with ${why}`, at.start, at.end);
     }
     return instance;
   }
@@ -607,7 +614,7 @@ export class Instancing {
       const held = r?.kind === "ref" ? r.to : given;
       const bound = this.host.withScope(bindings, () => this.host.resolveType(param.constraint!));
       const unlocked = this.typing.unlocks(held, bound);
-      if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, but '${name}' takes it mutably as '${this.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
+      if (unlocked) throw new CompileError("E0206", `'${unlocked}' is read-only here, but '${name}' takes it mutably as '${this.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
     });
   }
 
@@ -721,7 +728,7 @@ export class Instancing {
       const t = this.typing.rec(type);
       if (p.modifiers.length > 0 && t.kind !== "function") return;
       if (f.accessor && t.kind === "interface") {
-        throw new CompileError(`a setter's parameter can't have the interface type '${t.name}'`, p.start, p.end);
+        throw new CompileError("E0705", `a setter's parameter can't have the interface type '${t.name}'`, p.start, p.end);
       }
       // A tuple's elements are inferred like any other type's parts, so it is no bound of its own.
       // A package's function or object parameter is a callback JS keeps or a JS object, its type
@@ -742,7 +749,7 @@ export class Instancing {
     const given = typeof type === "string" ? undefined : this.typing.rec(type);
     if (borrowed && given?.kind === "ref") type = given.to;
     else if (given?.kind === "ref") {
-      throw new CompileError("can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);
+      throw new CompileError("E0202", "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);
     }
     // A recursive type's value stands for the type it stands for.
     type = this.typing.unfold(type);
@@ -762,28 +769,28 @@ export class Instancing {
       if (h?.kind === "closure" && h.generic) {
         const f = this.host.members().bodyNamed(h.generic);
         const reason = f && familyMismatch(f, bound as FunctionType, this.host.members(), arg);
-        if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
+        if (reason) throw new CompileError("E0101", `${message}: ${reason}`, arg.start, arg.end);
         return type;
       }
-      throw new CompileError(`${message}: it takes a generic function, one that works for every type, as '<T>(x: T) => T'`, arg.start, arg.end);
+      throw new CompileError("E0101", `${message}: it takes a generic function, one that works for every type, as '<T>(x: T) => T'`, arg.start, arg.end);
     }
     if (b.kind === "function") {
-      if (!this.typing.fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
+      if (!this.typing.fits(type, bound)) throw new CompileError("E0101", message, arg.start, arg.end);
       return type;
     }
     if (b.kind === "interface") {
       const reason = unsatisfied(t?.kind === "param" && t.concrete ? this.typing.lower(type) : type, bound as InterfaceType, this.host.members(), arg);
-      if (reason) throw new CompileError(`${message}: ${reason}`, arg.start, arg.end);
+      if (reason) throw new CompileError("E0101", `${message}: ${reason}`, arg.start, arg.end);
       return type;
     }
     // A fresh object literal is checked against the parameter's type when it meets it, as its
     // nested literals then take their shapes from it.
     if (arg.kind === "object" && (this.typing.holdsRef(bound) || !this.typing.fits(type, bound))) return bound;
-    if (!this.typing.fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
+    if (!this.typing.fits(type, bound)) throw new CompileError("E0101", message, arg.start, arg.end);
     // A value leaving out an optional field is copied into the parameter's type, which fills
     // it in empty; a reference can't be.
     const missing = lacks(this.typing, type, bound);
-    if (missing && borrowed) throw new CompileError(`${message}: it has no '${missing}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
+    if (missing && borrowed) throw new CompileError("E0101", `${message}: it has no '${missing}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
     return arg.kind === "object" || missing ? bound : type;
   }
 }
@@ -890,7 +897,7 @@ export class GenericClasses {
 
   classNamed(this: Mut<this>, name: string, args: Type[], at: Span): ClassType | undefined {
     const c = this.host.tables.arenas.classOf(this.host.classes.get(name));
-    if (c && args.length > 0) throw new CompileError(`type '${name}' is not generic`, at.start, at.end);
+    if (c && args.length > 0) throw new CompileError("E0106", `type '${name}' is not generic`, at.start, at.end);
     if (c) return c.type;
     const template = this.host.templates.get(name);
     return template && this.classInstance(template, args, at).type;
@@ -907,7 +914,7 @@ export class GenericClasses {
     const args = given.map((t) => this.typing.heldArgument(t));
     const params = template.typeParams;
     if (args.length !== params.length) {
-      throw new CompileError(`type '${template.name}' expects ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+      throw new CompileError("E0106", `type '${template.name}' expects ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     let byKey = this.host.genericClassesState.instancesOf.get(template);
     if (!byKey) this.host.genericClassesState.instancesOf.set(template, byKey = new Map());
@@ -918,8 +925,8 @@ export class GenericClasses {
     let shapes = this.host.genericClassesState.shapesOf.get(template);
     if (!shapes) this.host.genericClassesState.shapesOf.set(template, shapes = new Set());
     const shape = args.map((t) => this.typing.shapeKey(t)).join(",");
-    if (!shapes.has(shape) && shapes.size > 64) throw new CompileError(`instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
-    if (args.some((a) => typeof a !== "string" && this.typing.rec(a).kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
+    if (!shapes.has(shape) && shapes.size > 64) throw new CompileError("E0113", `instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
+    if (args.some((a) => typeof a !== "string" && this.typing.rec(a).kind === "interface")) throw new CompileError("E0115", "an interface can't be a type argument, since it describes values without being one", at.start, at.end);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
     const c = declareClass(this.host.tables, template, `${template.name}<${args.map((t) => this.typing.show(t)).join(", ")}>`, scope);
     byKey.set(key, c.classId);
@@ -941,14 +948,14 @@ export class GenericClasses {
   // inferred from the constructor's arguments.
   construct(this: Mut<this>, name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined {
     const c = this.host.tables.arenas.classOf(this.host.classes.get(name));
-    if (c && typeArgs.length > 0) throw new CompileError(`type '${name}' is not generic`, at.start, at.end);
+    if (c && typeArgs.length > 0) throw new CompileError("E0106", `type '${name}' is not generic`, at.start, at.end);
     const template = this.host.templates.get(name);
     if (!template) return c;
     if (typeArgs.length > 0) return this.classInstance(template, typeArgs.map((t) => this.host.resolveType(t)), at);
     const bindings = this.inferred(template, argTypes, at);
     const args = template.typeParams.map((p) => {
       const type = bindings.get(p.name);
-      if (!type) throw new CompileError(`can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
+      if (!type) throw new CompileError("E0104", `can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
       return type;
     });
     return this.classInstance(template, args, at);
