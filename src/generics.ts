@@ -1,3 +1,4 @@
+import type { InstanceId } from "./arenas.ts";
 import { holdsNode, type Instance } from "./check.ts";
 import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
@@ -301,16 +302,16 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   const { holdsPart, unfold, widenLet, callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, promiseInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef, rec } = typing;
   const concrete = concreteness(typing);
   const explicit = new WeakNodeMap<Body, Map<string, Type>>();
-  const instances = new NodeMap<Body, Map<string, Instance>>();
+  const instances = new NodeMap<Body, Map<string, InstanceId>>();
   // By the method's first type parameter, which only its own list holds.
   const sharedPlaceholders = new NodeMap<TypeParam, Map<string, Type>>();
   const implicits = new NodeMap<Body, Map<usize, Bound>>();
   // Which implicit parameters are references to their type, and how.
   const lent = new NodeMap<Body, Map<usize, RefType>>();
-  const definitions = new NodeMap<Body, Instance>();
+  const definitions = new NodeMap<Body, InstanceId>();
   // Instances still to check.
-  const pending: Instance[] = [];
-  const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
+  const pending: InstanceId[] = [];
+  const all = () => [...instances.values()].flatMap((m) => [...m.values()].map((i) => tables.arenas.instanceOf(i)));
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
   const sites = new NodeMap<Span & Id, Map<string, Type>>();
@@ -428,22 +429,22 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // It is made once per body: fresh placeholders would make a new instance each time.
   function definition(f: Body): Instance {
     if (!generic(f)) return instanceOf(f);
-    let found = definitions.get(f);
-    if (found) return found;
+    const known = definitions.get(f);
+    if (known) return tables.arenas.instanceOf(known);
     const scope = explicitPlaceholders(f);
     for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, typeParameter(show(bound), sameParams(f, i, bound, new Map([...(f.scope ?? []), ...scope]))));
     // A comptime parameter's value is known only at each call; the definition has a placeholder.
     for (const p of f.params) if (p.comptime) scope.set(comptimeName(p), typeParameter(comptimeName(p), undefined));
-    found = instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
-    definitions.set(f, found);
+    const found = instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
+    definitions.set(f, found.id);
     return found;
   }
 
   // A concrete instance's symbol: its name and a hash of its type arguments, rather than a count,
   // so it is the same in every program using it. Arguments shown alike get numbered suffixes.
-  function instanceSymbol(name: string, bindings: Map<string, Type>, others: Map<string, Instance>): string {
+  function instanceSymbol(name: string, bindings: Map<string, Type>, others: Map<string, InstanceId>): string {
     const stem = `${name}#${digest([...bindings].map(([k, t]) => `${k}=${described(t)}`).join(","))}`;
-    const symbols = new Set([...others.values()].map((i) => i.symbol));
+    const symbols = new Set([...others.values()].map((i) => tables.arenas.instanceOf(i).symbol));
     let symbol = stem;
     for (let n = 1; symbols.has(symbol); n++) symbol = `${stem}.${n}`;
     return symbol;
@@ -454,20 +455,19 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     const key = [...bindings.values()].map(keyOf).join(",");
     let byKey = instances.get(f);
     if (!byKey) instances.set(f, byKey = new Map());
-    let found = byKey.get(key);
-    if (!found) {
-      // Every type parameter, implicit ones included, needs a concrete binding to compile.
-      const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
-      const isConcrete = complete && [...bindings.values()].every(concrete);
-      const generic = bindings.size > 0;
-      found = tables.arenas.addInstance({
-        tables, body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
-        depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
-        types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
-      });
-      byKey.set(key, found);
-      pending.push(found);
-    }
+    const known = byKey.get(key);
+    if (known) return tables.arenas.instanceOf(known);
+    // Every type parameter, implicit ones included, needs a concrete binding to compile.
+    const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
+    const isConcrete = complete && [...bindings.values()].every(concrete);
+    const generic = bindings.size > 0;
+    const found = tables.arenas.addInstance({
+      tables, body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
+      depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
+      types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
+    });
+    byKey.set(key, found.id);
+    pending.push(found.id);
     return found;
   }
 

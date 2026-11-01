@@ -176,7 +176,7 @@ function seeded(instance: Instance): Frame {
 // the functions it is written in, through what it captures.
 function known(instance: Instance): Map<LocalId, Value> {
   const parent = instance.body.closure?.parent;
-  const outer = parent ? known(parent) : new Map<LocalId, Value>();
+  const outer = parent ? known(instance.tables.arenas.instanceOf(parent)) : new Map<LocalId, Value>();
   const locals = new Map<LocalId, Value>();
   for (const p of instance.body.params) if (p.comptime) locals.set(instance.locals.get(p)!, comptimeParameter(instance, p));
   for (const [alias, from] of instance.captures ?? []) if (from !== "this" && outer.has(from)) locals.set(alias, outer.get(from));
@@ -186,15 +186,15 @@ function known(instance: Instance): Map<LocalId, Value> {
 // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
 // function the checker hasn't reached yet.
 export function comptimeChecks(tables: Tables, check: (instance: Instance) => boolean) {
-  tables.ensureChecked = check;
+  tables.ensureChecked = (id) => check(tables.arenas.instanceOf(id));
 }
 
 // A top-level const's value, or a `comptime { }` block run at the top level: its body.
 export function comptimeBody(instance: Instance): Value {
   const { constants } = instance.tables;
-  if (constants.has(instance)) return constants.get(instance);
+  if (constants.has(instance.id)) return constants.get(instance.id);
   const v = guarded(instance.tables, instance.body, (run) => run.constant(instance, instance.body));
-  constants.set(instance, v);
+  constants.set(instance.id, v);
   return v;
 }
 
@@ -219,7 +219,8 @@ function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): V
 const constName = (c: Instance) => c.body.name.slice("const ".length);
 
 function interpreter(tables: Tables) {
-  const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files, asserts, clocks, integerCalls } = tables;
+  const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files, asserts, clocks, integerCalls, arenas } = tables;
+  const calledAt = (f: Frame, e: Expr) => arenas.instanceOf(f.instance.calls.get(e));
   const { elementsOf, isSubclass, isTuple, show, lower, rec } = typing;
   let steps = 0;
   let depth = 0;
@@ -233,15 +234,15 @@ function interpreter(tables: Tables) {
 
   // A const's value, computed once; one that reads itself never ends, so it is refused.
   function constant(c: Instance, at: Span): Value {
-    if (constants.has(c)) return constants.get(c);
-    if (computing.has(c)) throw new Stop(`'${constName(c)}' needs its own value to compute its value${cycle([...computing].slice([...computing].indexOf(c)))}`, at, false);
-    computing.add(c);
+    if (constants.has(c.id)) return constants.get(c.id);
+    if (computing.has(c.id)) throw new Stop(`'${constName(c)}' needs its own value to compute its value${cycle([...computing].slice([...computing].indexOf(c.id)).map((i) => arenas.instanceOf(i)))}`, at, false);
+    computing.add(c.id);
     try {
       const v = call(c, [], undefined, at);
-      constants.set(c, v);
+      constants.set(c.id, v);
       return v;
     } finally {
-      computing.delete(c);
+      computing.delete(c.id);
     }
   }
 
@@ -284,7 +285,7 @@ function interpreter(tables: Tables) {
   // Instances of a class with an `equals` compare through it, as they do at run time.
   function byEquals(at: Span): Equals {
     return (a, b) => {
-      const method = rec(a.type).kind === "class" ? equalities.get(a.type as ClassType) : undefined;
+      const method = rec(a.type).kind === "class" ? arenas.instanceOf(equalities.get(a.type as ClassType)) : undefined;
       return method && call(method, [b], a, at) === true;
     };
   }
@@ -297,7 +298,7 @@ function interpreter(tables: Tables) {
       if (callee.body.generator) unsupported("a generator", at);
       if (callee.body.foreign) refuse(`the ${callee.body.rust ? "Rust" : "C"} function '${callee.body.name}'`, at);
       if (callee.body.js) refuse(`'${callee.body.name}' from the package '${callee.body.js.module}'`, at);
-      if (!ensureChecked(callee)) throw new Stop(`this comptime code calls '${callee.body.name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
+      if (!ensureChecked(callee.id)) throw new Stop(`this comptime code calls '${callee.body.name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
       const frame: Frame = { instance: callee, locals: new Map(), self };
       callee.body.params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!, args[i] ?? null));
       statements(frame, callee.body.body ?? []);
@@ -528,7 +529,7 @@ function interpreter(tables: Tables) {
       case "ident": {
         const literal = literalValue(typing, type);
         if (literal !== undefined && !f.instance.locals.has(e)) return literal;
-        const read = f.instance.calls.get(e);
+        const read = calledAt(f, e);
         if (read?.body.comptime === "const") return constant(read, e);
         const local = f.instance.locals.get(e);
         if (!local && e.name === "undefined") return null;
@@ -616,7 +617,7 @@ function interpreter(tables: Tables) {
     const r = typeof type === "string" ? undefined : rec(type);
     if (r?.kind === "interior" && r.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: expr(f, e.args[0]!) };
     if (r?.kind !== "class") return refuse(`'new ${show(type)}'`, e);
-    const ctor = f.instance.calls.get(e)!;
+    const ctor = calledAt(f, e)!;
     const made: Record = { kind: "record", type: type as ClassType, fields: new Map() };
     call(ctor, args(f, ctor, e.args ?? []), made, e);
     return made;
@@ -632,7 +633,7 @@ function interpreter(tables: Tables) {
     if (isShort(linked)) return SHORT;
     const object = unwrap(linked);
     if (object === null && e.optional) return SHORT;
-    const getter = f.instance.calls.get(e);
+    const getter = calledAt(f, e);
     if (getter) return call(getter, [], object as Record, e);
     if (e.name === "length" && typeof object === "string") return BigInt(object.length);
     if (object && typeof object === "object" && object.kind === "array" && e.name === "length") return BigInt(object.items.length);
@@ -665,7 +666,7 @@ function interpreter(tables: Tables) {
       if (expr(f, e.args[0]!) === true) return undefined;
       throw new Assertion(e.args[1] ? String(unwrap(expr(f, e.args[1]))) : `assertion failed: ${asserts.get(e)}`, e, true);
     }
-    const target = f.instance.calls.get(e);
+    const target = calledAt(f, e);
     if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return call(target, args(f, target, e.args), f.self, e);
     if (target && callee.kind === "member" && target.body.self) {
       const linked = link(f, callee.object);
@@ -863,8 +864,8 @@ function interpreter(tables: Tables) {
     }
     if (target.kind === "member" && f.instance.setters.has(target)) {
       const self = unwrap(expr(f, target.object)) as Record;
-      const getter = f.instance.calls.get(target);
-      return { kind: "place", get: () => (getter ? call(getter, [], self, target) : self.fields.get(target.name)), set: (v) => void call(f.instance.setters.get(target)!, [v], self, target) };
+      const getter = calledAt(f, target);
+      return { kind: "place", get: () => (getter ? call(getter, [], self, target) : self.fields.get(target.name)), set: (v) => void call(arenas.instanceOf(f.instance.setters.get(target)!), [v], self, target) };
     }
     if (target.kind === "member") {
       const holder = unwrap(expr(f, target.object));

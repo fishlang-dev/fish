@@ -21,7 +21,7 @@ import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
 import { holdsNull } from "./defaults.ts";
-import type { LocalId } from "./arenas.ts";
+import type { InstanceId, LocalId } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
@@ -66,8 +66,8 @@ export type Context = {
   types: NodeMap<Expr, Type>;
   locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
   coercions: NodeMap<Expr, Type>;
-  calls: NodeMap<Expr, Instance>;
-  setters: NodeMap<Expr, Instance>;
+  calls: NodeMap<Expr, InstanceId>;
+  setters: NodeMap<Expr, InstanceId>;
   byName: Map<string, Body>;
   classes: Map<string, ClassInfo>;
   enums: Map<string, EnumInfo>;
@@ -265,7 +265,7 @@ export function restText(restStarts: Tables["restStarts"], e: Expr, text: (e: Ex
 // What a type's Dyn runs: each method's instance, each field's getter (none for a field), and
 // what '.clone()' runs: the class's own `clone`, the compiler's copy, or nothing when the type
 // can't be cloned.
-export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | undefined)[]; clone: Instance | "copy" | undefined };
+export type DynTable = { methods: (InstanceId | undefined)[]; fields: (InstanceId | undefined)[]; clone: InstanceId | "copy" | undefined };
 
 export function expressions(ctx: Context) {
   const {
@@ -937,7 +937,7 @@ export function expressions(ctx: Context) {
       const argTypes = e.args.map(value);
       const instance = instantiate(base.constructor, [], e.args, argTypes, e);
       args(e.args, argTypes, instance, e);
-      calls.set(e, instance);
+      calls.set(e, instance.id);
       const error = errorOf(instance);
       if (error) raise(e, error, "'super'");
       return { type: "void", what: "'super'" };
@@ -1378,7 +1378,7 @@ export function expressions(ctx: Context) {
     }
     const instance = instantiate(target, e.typeArgs, e.args, argTypes, e);
     args(e.args, argTypes, instance, e);
-    calls.set(e, instance);
+    calls.set(e, instance.id);
     if (target.js) e.args.forEach((a) => givenToJs(a, types.get(a)!));
     // An async function's call only makes its future; its error comes at the `await`.
     // The error a call raises is the implementation's own, since that is what it gives, or what
@@ -1719,7 +1719,7 @@ export function expressions(ctx: Context) {
     });
     const given = lower(held);
     const run = recOf(given);
-    if (run?.kind === "closure") calls.set(e, closureBody(given as ClosureType));
+    if (run?.kind === "closure") calls.set(e, closureBody(given as ClosureType).id);
     // The closure it runs throws what it throws, which its function type may only widen.
     const error = run?.kind === "closure" ? run.throws : type.throws;
     if (error) raise(e, error, name);
@@ -4000,7 +4000,7 @@ export function expressions(ctx: Context) {
     if (target.self!.owned) takesOver(callee.object, callee.name);
     else if (target.self!.mutable) mutates(callee.object, callee.name);
     const instance = instantiate(target, e.typeArgs, e.args, e.args.map((a) => coercions.get(a) ?? types.get(a)!), e);
-    calls.set(e, instance);
+    calls.set(e, instance.id);
     const r = recOf(returns);
     if (r?.kind !== "interface") return returns;
     return wrapped(r.name, returns as InterfaceType, lower(returnOf(instance, e)));
@@ -4339,7 +4339,7 @@ export function expressions(ctx: Context) {
         const constant = local ? undefined : byName.get(`const ${e.name}`);
         if (constant) {
           const instance = ctx.instanceOf(constant);
-          calls.set(e, instance);
+          calls.set(e, instance.id);
           const type = ctx.returnOf(instance, e);
           return isCopy(type) || type === "string" ? type : refType(type, false);
         }
@@ -4497,7 +4497,7 @@ export function expressions(ctx: Context) {
         const getter = !found && c ? inherited(c, "getters", e.name) : undefined;
         if (getter) {
           visible(getter.access, getter.declared ?? getter.owner!, e.name, e);
-          calls.set(e, instanceOf(getter));
+          calls.set(e, instanceOf(getter).id);
           const returns = returnOf(instanceOf(abstractDeclaration(e, "getters") ?? getter), e);
           // A getter's reference borrows from its object.
           if (holdsRef(returns)) borrowsFrom.set(e, [e.object]);
@@ -4514,7 +4514,7 @@ export function expressions(ctx: Context) {
         if (stored !== object && sr?.kind === "class" && !field(stored as ClassType, e.name)) {
           const instance = instanceOf(inherited(classOf(stored as ClassType), "getters", e.name)!);
           returnOf(instance, e);
-          calls.set(e, instance);
+          calls.set(e, instance.id);
         }
         if (!calls.has(e)) load();
         return linked(e) ? optional(unfolded(found.type), e) : unfolded(found.type);
@@ -4706,7 +4706,7 @@ export function expressions(ctx: Context) {
         constructs(c.constructor, list, argTypes);
         const constructor = instantiate(c.constructor, [], list, argTypes, e);
         args(list, argTypes, constructor, e);
-        calls.set(e, constructor);
+        calls.set(e, constructor.id);
         const error = errorOf(constructor);
         if (error) raise(e, error, `'new ${rec(c.type).name}'`);
         // An instance holding references borrows from what it was built from.
@@ -5089,7 +5089,7 @@ export function expressions(ctx: Context) {
     const to = ar?.kind === "ref" ? recOf(ar.to) : undefined;
     const shaped = !method.self?.mutable && !method.self?.owned && more.length === 0 && ar?.kind === "ref" && !ar.mutable && (lower(ar.to) === lower(t) || (to?.kind === "class" && derives(t as ClassType, ar.to as ClassType))) && returnOf(instance, method) === "boolean";
     if (!shaped) throw new CompileError(`'${r.name}.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean`, method.start, method.end);
-    equalities.set(t as ClassType, instance);
+    equalities.set(t as ClassType, instance.id);
     return true;
   }
 
@@ -5740,7 +5740,7 @@ export function expressions(ctx: Context) {
       throw new CompileError(`the getter and setter of '${target.name}' must have the same type`, target.start, target.end);
     }
     changeable(target, "assign to");
-    setters.set(target, instanceOf(setter));
+    setters.set(target, instanceOf(setter).id);
     types.set(target, type);
     return type;
   }
@@ -5940,7 +5940,7 @@ export function expressions(ctx: Context) {
     if (r?.kind === "closure") {
       const body = closureBody(type as ClosureType);
       futureTable(body, rec(rec(to).of).methods[0]!.returns, false, e);
-      return { methods: [body], fields: [], clone: fixed ? undefined : "copy" };
+      return { methods: [body.id], fields: [], clone: fixed ? undefined : "copy" };
     }
     const methods = rec(rec(to).of).methods.map((m) => {
       const body = inherited(c!, "methods", m.name)!;
@@ -5956,11 +5956,11 @@ export function expressions(ctx: Context) {
       if ([...implicit.values()].some((b) => rec(b).kind !== "object")) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes an interface or a function, so it has a version per argument type and no one to call through a Dyn`, e.start, e.end);
       const instance = instanceOf(body, new Map([...(body.scope ?? []), ...[...implicit].map(([i, b]): [string, Type] => [`#${i}`, b])]));
       futureTable(instance, m.returns, true, e);
-      return instance;
+      return instance.id;
     });
-    const fields = rec(rec(to).of).fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(c, "getters", f.name)!)));
+    const fields = rec(rec(to).of).fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(c, "getters", f.name)!).id));
     const own = c?.methods.get("clone");
-    return { methods, fields, clone: own ? instanceOf(own) : fixed ? undefined : "copy" };
+    return { methods, fields, clone: own ? instanceOf(own).id : fixed ? undefined : "copy" };
   }
 
   // A slot giving a `Promise<T>` boxes the future its method or closure makes: borrowing the

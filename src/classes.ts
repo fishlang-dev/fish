@@ -4,8 +4,7 @@ import type { RustName, RustTables } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
-import type { Instance } from "./check.ts";
-import type { BodyId, ClassId } from "./arenas.ts";
+import type { BodyId, ClassId, InstanceId } from "./arenas.ts";
 import { NodeMap, nextId, NodeSet, type Ids, childrenOf, walk, type AnyNode, type NodeOf, type RootKind } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
@@ -65,7 +64,7 @@ export type Body = Span & Id & {
   // `move`: it captures everything by value.
   // A nested function's closure knows its own name, which its body calls itself by.
   // `made`: the checker wrote it around a function given as a value or a timer's callback.
-  closure?: { value?: Expr; parent: Instance; expected?: FunctionType; move: boolean; unsafe?: boolean; self?: string; made?: true };
+  closure?: { value?: Expr; parent: InstanceId; expected?: FunctionType; move: boolean; unsafe?: boolean; self?: string; made?: true };
 };
 
 // A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather

@@ -513,7 +513,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // these.
           const built = instance.envs?.get(e);
           const lent = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias: arenas.localOf(alias), changes: instance.changed?.has(alias) === true }))
-            : built ? built.env.map((alias, i) => ({ alias: arenas.localOf(alias), changes: built.of.changed?.has([...built.of.captures!.keys()][i]!) === true })) : [];
+            : built ? built.env.map((alias, i) => ({ alias: arenas.localOf(alias), changes: arenas.instanceOf(built.of).changed?.has([...arenas.instanceOf(built.of).captures!.keys()][i]!) === true })) : [];
           const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start + (i + 1) / 8192), at: { id: nextId(ids), kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
           for (const c of captures) {
             try {
@@ -546,7 +546,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const fieldCall = h?.kind === "closure" || (h?.kind === "dyn" && callableOf.has(h.of));
           const object = e.callee.kind === "member" ? (fieldCall ? e.callee : e.callee.object) : dyn?.callable;
           const place = object && key(object);
-          const self: { mutable: boolean; owned?: boolean } | undefined = calls.get(e)?.body.self ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
+          const self: { mutable: boolean; owned?: boolean } | undefined = arenas.instanceOf(calls.get(e))?.body.self ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
           // An owning method takes its receiver over, as an argument it is handed.
           if (object && self?.owned) {
             expr(object, (p) => `'${p}' moved here: ${name} takes its object over; call it on '${p}.clone()' to keep a copy`);
@@ -1387,17 +1387,19 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // this body's bindings for what it uses.
     const built = e.kind === "ident" ? instance.envs?.get(e) : undefined;
     if (built) {
-      const aliases = [...built.of.captures!.keys()];
+      const of = arenas.instanceOf(built.of);
+      const aliases = [...of.captures!.keys()];
       return built.env.map((id, i) => {
         const l = arenas.localOf(id);
-        return [String(l.id), { id: nextId(ids), kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, built.of.changed!.has(aliases[i]!), false];
+        return [String(l.id), { id: nextId(ids), kind: "ident", name: l.name, start: e.start, end: e.end } as Named, l, of.changed!.has(aliases[i]!), false];
       });
     }
     if (e.kind !== "arrow" || (nestedFunctions.has(e) && !e.async)) return [];
-    const inner = calls.get(e)!;
+    const inner = arenas.instanceOf(calls.get(e)!);
     // A closure owning what it captures holds the nested functions it uses as made here, so it
     // borrows what they use.
-    const through = (instance.made?.get(e) ?? []).flatMap(({ of, env }) => {
+    const through = (instance.made?.get(e) ?? []).flatMap(({ of: id, env }) => {
+      const of = arenas.instanceOf(id);
       const aliases = [...of.captures!.keys()];
       return env.map((id, i): [string, Named, Local | undefined, boolean, boolean] => {
         const l = arenas.localOf(id);
@@ -1649,7 +1651,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, t
         return;
       // A closure uses what it captures where it is made; whatever holds it holds that after.
       case "arrow":
-        for (const from of calls.get(e)!.captures!.values()) if (from !== "this") used(arenas.localOf(from), call ?? e.end);
+        for (const from of arenas.instanceOf(calls.get(e)!).captures!.values()) if (from !== "this") used(arenas.localOf(from), call ?? e.end);
         for (const { env } of made?.get(e) ?? []) for (const l of env) used(arenas.localOf(l), call ?? e.end);
         return;
       case "throw":

@@ -88,7 +88,7 @@ const HOISTED = new Set(["empty", "function", "typeAlias", "interface", "class",
 // What leaves a statement for good: a jump, or a call typed `never`.
 function leaves(s: Stmt, i: Instance): string | undefined {
   if (s.kind === "return" || s.kind === "throw" || s.kind === "break" || s.kind === "continue") return `'${s.kind}'`;
-  if (s.kind === "expr" && s.expr.kind === "call" && (i.types.get(s.expr) ?? i.calls.get(s.expr)?.returns) === "never") return "a call that never returns";
+  if (s.kind === "expr" && s.expr.kind === "call" && (i.types.get(s.expr) ?? i.tables.arenas.instanceOf(i.calls.get(s.expr))?.returns) === "never") return "a call that never returns";
   return undefined;
 }
 

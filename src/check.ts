@@ -30,7 +30,7 @@ import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
 import { expressions, stringLike, type DynTable } from "./values.ts";
-import type { InstanceId, LocalId } from "./arenas.ts";
+import type { Arenas, InstanceId, LocalId } from "./arenas.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -74,9 +74,9 @@ export type Instance = {
   locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
   // The function each call of a user function or method runs, and the getter each read of
   // an accessor runs.
-  calls: NodeMap<Expr, Instance>;
+  calls: NodeMap<Expr, InstanceId>;
   // The setter each assignment to an accessor runs.
-  setters: NodeMap<Expr, Instance>;
+  setters: NodeMap<Expr, InstanceId>;
   // Each expression whose value meets a narrower declared type, and the type it is copied
   // down to.
   coercions: NodeMap<Expr, Type>;
@@ -89,7 +89,7 @@ export type Instance = {
   // Each fallible call and `throw`, the error it raises, and the error type that error
   // becomes where it goes: the function's own, which returns it.
   // An error the function's type doesn't take is first wrapped by a class's static `from`.
-  raises: NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: Instance }>;
+  raises: NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>;
   // The type of what each `try` catches.
   caught: NodeMap<Stmt, Type>;
   // Each place whose value is handed over rather than copied, which leaves it empty.
@@ -109,12 +109,12 @@ export type Instance = {
   // Each call or use as a value of a nested function by name, the function, and this body's
   // bindings for what it captures, in its environment's order, from which the call or the
   // value builds it.
-  envs?: NodeMap<Expr, { of: Instance; env: LocalId[] }>;
+  envs?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }>;
   // What each value boxed into a Dyn runs for the interface's members.
   dyns?: NodeMap<Expr, DynTable>;
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
-  made?: NodeMap<Expr, { of: Instance; env: LocalId[] }[]>;
+  made?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }[]>;
   // Each call of a type predicate that narrows its argument: the predicate's type, and whether
   // its true and its false answers narrow, which codegen checks against the argument's tag.
   predicates?: NodeMap<Expr, { index: usize; type: Type; yes: boolean; no: boolean }>;
@@ -749,8 +749,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const inProgress = new NodeSet<Instance>();
   let nextLocal = 0;
   // Every closure's instance, and the instance each closure type calls.
-  const closures: Instance[] = [];
-  const closureBodies = new TypeMap<ClosureType, Instance>();
+  const closures: InstanceId[] = [];
+  const closureBodies = new TypeMap<ClosureType, InstanceId>();
 
   // A generic class's constructor parameters, its base's when it declares no constructor.
   function templateParams(name: string, seen: Set<string> = new Set<string>()): Param[] | undefined {
@@ -790,7 +790,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   });
   while (unsettled.length > 0 || pending.length > 0) {
     if (unsettled.length > 0) settle(unsettled.shift()!);
-    else checkBody(pending.shift()!);
+    else checkBody(arenas.instanceOf(pending.shift()!));
   }
   if (main && main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   const started = main && instanceOf(main).returns;
@@ -801,8 +801,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // An abstract member and a template are checked but never compiled; each concrete class's copy is.
   const compiled = new NodeSet([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf).filter((f) => !f.abstract && !f.template)]);
   // So is an instance made for an abstract class, which only a template's check makes.
-  const checkedOnly = (i: Instance): boolean => i.body.template === true || [...i.bindings.values()].some((t) => abstractPart(typing, t)) || (i.body.closure !== undefined && checkedOnly(i.body.closure.parent));
-  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js && !checkedOnly(i)), ...closures.filter((i) => i.concrete && !checkedOnly(i))];
+  const checkedOnly = (i: Instance): boolean => i.body.template === true || [...i.bindings.values()].some((t) => abstractPart(typing, t)) || (i.body.closure !== undefined && checkedOnly(arenas.instanceOf(i.body.closure.parent)));
+  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js && !checkedOnly(i)), ...closures.map((c) => arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
   unreached(typing, equalities, compiledInstances, (i) => i.body.abstract === true || checkedOnly(i));
   // A package's const whose value has no JS form yet stops the program where it is read.
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
@@ -811,7 +811,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A package's function called with a value, or giving one, that has no JS form.
   const unconverted = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
     if (x.kind !== "call" || !jsCalls.has(x)) return false;
-    const gives = i.calls.get(x)?.returns ?? "void";
+    const gives = arenas.instanceOf(i.calls.get(x))?.returns ?? "void";
     // A callback crosses as the stored callable it meets.
     const given = (a: Expr) => {
       const to = i.coercions.get(a);
@@ -970,7 +970,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: lower(p.type) }));
     if (instance.throws) instance.throws = lower(instance.throws);
     for (const local of new Set(instance.locals.values())) arenas.localOf(local).type = lower(arenas.localOf(local).type);
-    for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
+    for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(arenas.instanceOf(target)).id));
     instance.returns = lower(instance.returns);
   }
 
@@ -1233,7 +1233,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // checked within the body it is written in.
   function asWritten(instance: Instance) {
     let f = instance.body;
-    if (f.closure) return asWritten(f.closure.parent);
+    if (f.closure) return asWritten(arenas.instanceOf(f.closure.parent));
     const generic = f.scope && f.owner ? rec(f.owner).generic : undefined;
     const template = generic ? definedClass(generic.name) : undefined;
     if (template) f = bodiesOf(template).find((b) => b.start === f.start && b.end === f.end) ?? f;
@@ -1278,10 +1278,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     delete instance.dyns;
     delete instance.made;
     delete instance.predicates;
-    const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
+    const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(arenas.instanceOf(c.body.closure.parent)));
     // A closure checked within a discarded pass isn't in progress any more either.
     for (const c of [...inProgress]) if (within(c)) inProgress.delete(c);
-    const kept = closures.filter((c) => !within(c));
+    const kept = closures.filter((c) => !within(arenas.instanceOf(c)));
     closures.length = 0;
     closures.push(...kept);
     views.delete(instance);
@@ -1373,7 +1373,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const caseOnly = new NodeSet<Local>();
     // A call of a function whose result is `x is T` narrows its argument for x to T.
     const predicate = (call: Extract<Expr, { kind: "call" }>) => {
-      const target = calls.get(call);
+      const target = arenas.instanceOf(calls.get(call));
       const p = target?.body.returnType;
       if (!target || p?.kind !== "predicate" || !p.type) return undefined;
       const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name) as usize;
@@ -1399,7 +1399,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const generic = f.self && rec(f.self.type).generic;
     const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     // A closure sees the `this` of the body it is written in, which it only reads.
-    const enclosing = f.closure && selfOf(f);
+    const enclosing = f.closure && selfOf(arenas, f);
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
@@ -1409,7 +1409,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
       classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
       asWritten: () => asWritten(instance),
-      envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of, env: env.map((l) => l.localId) }),
+      envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of: of.id, env: env.map((l) => l.localId) }),
       dynOf: (e, table) => void (instance.dyns ??= new NodeMap()).set(e, table),
       nestedLocal,
       owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
@@ -1471,7 +1471,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       closure,
       liftArrow,
       resolveWith: (t, scope) => withScope(scope, () => resolveType(t)),
-      closureBody: (t) => closureBodies.get(t)!,
+      closureBody: (t) => arenas.instanceOf(closureBodies.get(t)!),
       resolveType,
       implicitOf,
       callbackType,
@@ -1481,7 +1481,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // and a different one is the usual mismatch once it applies.
       infer: (e, to) => {
         let local = e.kind === "ident" ? arenas.localOf(locals.get(e)) : undefined;
-        for (let at: Instance | undefined = instance; local && at?.captures?.has(local.localId); at = at.body.closure?.parent) {
+        for (let at: Instance | undefined = instance; local && at?.captures?.has(local.localId); at = arenas.instanceOf(at.body.closure?.parent)) {
           const from = at.captures.get(local.localId)!;
           local = from === "this" ? undefined : localOf(from);
         }
@@ -1615,7 +1615,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         coerce(a, t, to, `argument of type '${show(t)}' is not assignable to parameter of type '${show(to)}'`);
       });
       selfCalls.add(e);
-      calls.set(e, instance);
+      calls.set(e, instance.id);
       if (errorType) raise(e, errorType, `'${name}'`);
       return { type: resolveType(f.returnType), what: `'${name}'` };
     }
@@ -2041,11 +2041,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
       const body = arenas.addBody({
-        id: nextId(ids), name: f.name, params: e.params, returnType: e.returnType, ...(e.throws && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e), made: madeArrows.has(e) || undefined },
+        id: nextId(ids), name: f.name, params: e.params, returnType: e.returnType, ...(e.throws && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance.id, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e), made: madeArrows.has(e) || undefined },
         body: value ? [{ id: nextId(ids), kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
       });
       const inner = arenas.addInstance({
-        tables, body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
+        tables, body, symbol: `${instance.symbol}.closure${closures.filter((c) => arenas.instanceOf(c).body.closure!.parent === instance.id).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
         types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
       });
@@ -2053,7 +2053,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       inner.captureUses = new Map();
       inner.changed = new Set();
       inner.moved = new Set();
-      closures.push(inner);
+      closures.push(inner.id);
       withSight(inSight, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
@@ -2065,9 +2065,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         for (const [, from] of captured) {
           if (from === "this" || !nestedLocal(from)) continue;
           const of = closureBodies.get(lower(from.type) as ClosureType)!;
-          const env = [...of.captures!].map(([alias, x]) => {
+          const nested = arenas.instanceOf(of);
+          const env = [...nested.captures!].map(([alias, x]) => {
             const mine = reach(localOf(x as LocalId), e);
-            if (of.changed?.has(alias)) changesLocal(mine, "", "change", e, false);
+            if (nested.changed?.has(alias)) changesLocal(mine, "", "change", e, false);
             return mine.localId;
           });
           (instance.made ??= new NodeMap()).set(e, [...(instance.made.get(e) ?? []), { of, env }]);
@@ -2133,8 +2134,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         rec(inner.future).params = [{ name: "env", type }, ...rec(inner.future).params];
       }
       inner.closure = type;
-      calls.set(e, inner);
-      closureBodies.set(type, inner);
+      calls.set(e, inner.id);
+      closureBodies.set(type, inner.id);
       return type;
     }
 
@@ -2192,7 +2193,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           effect(s.expr);
           // A promise runs only when awaited, so one made and dropped would silently do nothing.
           const pausing = s.expr.kind === "call" && s.expr.callee.kind === "ident" && ["yieldNow", "sleep"].includes(s.expr.callee.name) && !byName.has(s.expr.callee.name);
-          const made = pausing ? YIELD_NOW : types.get(s.expr) ?? calls.get(s.expr)?.returns;
+          const made = pausing ? YIELD_NOW : types.get(s.expr) ?? arenas.instanceOf(calls.get(s.expr))?.returns;
           const r = recOf(made);
           const boxed = r?.kind === "dyn" && promiseElement(r.of) !== undefined;
           if (s.expr.kind !== "assign" && s.expr.kind !== "destructure" && (r?.kind === "future" || boxed)) {
@@ -2201,7 +2202,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             const executor = callee === undefined ? undefined : lower(callee);
             const closure = recOf(executor);
             if (closure?.kind === "closure") {
-              const written = closureBodies.get(executor as ClosureType)!.body;
+              const written = arenas.instanceOf(closureBodies.get(executor as ClosureType)!).body;
               throw new CompileError("an executor runs at once and what it gives is dropped, so the Promise it gives would never run; keep 'resolve' and await that call beside this Promise, as in 'Promise.all([promise, later(resolve)])'", written.start, written.end);
             }
             // `spawn` runs only an async function's call, and only inside an async function.
@@ -2661,7 +2662,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const type = lower(l.type);
       const closure = recOf(type);
       if (!nestedBindings.has(l.localId) || closure?.kind !== "closure") return false;
-      return closureBodies.get(type as ClosureType)?.body.async !== true;
+      return arenas.instanceOf(closureBodies.get(type as ClosureType))?.body.async !== true;
     }
 
     function peek(name: string): Local | undefined {
@@ -2799,7 +2800,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const union = recOf(errorType);
       const classes = (union?.kind === "union" ? union.members : [errorType])
         .filter((m): m is ClassType => typeof m !== "string" && rec(m).kind === "class");
-      const wrappers = classes.flatMap((c) => wrapsOf(classOf(c)).filter(([x]) => fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: instanceOf(body) })));
+      const wrappers = classes.flatMap((c) => wrapsOf(classOf(c)).filter(([x]) => fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: instanceOf(body).id })));
       const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${show(type)}'` : `${what} can throw '${show(type)}'`;
       if (wrappers.length === 0) {
         const hint = classes.length > 0 ? `convert it, or have '${rec(classes[0]!).name}' implement 'From<${show(type)}>'` : `convert it to '${show(errorType)}'`;
@@ -2827,7 +2828,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // Who a closure's body counts as for access to private members: its function's class.
     function closureOwner(b: Body): Body["owner"] {
       let outerBody = b;
-      while (outerBody.closure) outerBody = outerBody.closure.parent.body;
+      while (outerBody.closure) outerBody = arenas.instanceOf(outerBody.closure.parent).body;
       return outerBody.declared ?? (outerBody.owner && outerBody.owner === enclosing?.type ? self!.type : outerBody.owner);
     }
 
@@ -2857,8 +2858,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 }
 
 // The `this` a body sees: a closure's is that of the function it is written in.
-export function selfOf(f: Body): Body["self"] {
-  return f.closure ? selfOf(f.closure.parent.body) : f.self;
+export function selfOf(arenas: Arenas, f: Body): Body["self"] {
+  return f.closure ? selfOf(arenas, arenas.instanceOf(f.closure.parent).body) : f.self;
 }
 
 // Stands for the base in a derived constructor's unset fields until `super(...)` runs.
@@ -2889,18 +2890,20 @@ function abstractPart({ holdsPart, rec }: Typing, t: Type): ClassType | undefine
 // class's own type, which escaped where no rule saw it, could reach one.
 export function unreached(typing: Typing, equalities: Tables["equalities"], compiled: Instance[], dropped: (i: Instance) => boolean) {
   for (const i of compiled) {
-    const reached: [Expr, Instance, string][] = [
-      ...[...i.calls, ...i.setters].map(([at, target]): [Expr, Instance, string] => [at, target, ""]),
-      ...[...(i.dyns ?? [])].flatMap(([at, table]) => [...table.methods, ...table.fields, table.clone].flatMap((target): [Expr, Instance, string][] => (target && target !== "copy" ? [[at, target, " through a 'Dyn'"]] : []))),
+    const { arenas } = i.tables;
+    const reached: [Expr, InstanceId, string][] = [
+      ...[...i.calls, ...i.setters].map(([at, target]): [Expr, InstanceId, string] => [at, target, ""]),
+      ...[...(i.dyns ?? [])].flatMap(([at, table]) => [...table.methods, ...table.fields, table.clone].flatMap((target): [Expr, InstanceId, string][] => (target && target !== "copy" ? [[at, target, " through a 'Dyn'"]] : []))),
     ];
     // A comparison of values runs each class's `equals` it reaches, through objects and unions.
     for (const [e] of i.types) {
       if (e.kind !== "binary" || !["===", "!==", "==", "!="].includes(e.op)) continue;
       for (const target of [...comparedBy(typing, equalities, i.types.get(e.left)), ...comparedBy(typing, equalities, i.types.get(e.right))]) reached.push([e, target, " to compare them"]);
     }
-    const found = reached.find(([, target]) => dropped(target));
+    const found = reached.find(([, target]) => dropped(arenas.instanceOf(target)));
     if (!found) continue;
-    const [at, target, through] = found;
+    const [at, id, through] = found;
+    const target = arenas.instanceOf(id);
     const abstract = (target.body.abstract ? target.body.owner : undefined) ?? [...target.bindings.values()].map((t) => abstractPart(typing, t)).find((t) => t) ?? target.body.declared ?? target.body.owner;
     const { rec } = typing;
     const root = (i.body.closure ? closureRoot(i) : i).body;
@@ -2914,7 +2917,7 @@ export function unreached(typing: Typing, equalities: Tables["equalities"], comp
 
 // Each `equals` a comparison of two values runs, as codegen finds them: a class's own stops the
 // search, and otherwise its base and fields, an object's fields and a union's members compare.
-function comparedBy(typing: Typing, equalities: Tables["equalities"], t: Type | undefined, seen: TypeSet<Type> = new TypeSet<Type>()): Instance[] {
+function comparedBy(typing: Typing, equalities: Tables["equalities"], t: Type | undefined, seen: TypeSet<Type> = new TypeSet<Type>()): InstanceId[] {
   if (t === undefined || typeof t === "string" || seen.has(t)) return [];
   seen.add(t);
   const r = typing.rec(t);
@@ -2930,5 +2933,5 @@ function comparedBy(typing: Typing, equalities: Tables["equalities"], t: Type | 
 }
 
 function closureRoot(i: Instance): Instance {
-  return i.body.closure ? closureRoot(i.body.closure.parent) : i;
+  return i.body.closure ? closureRoot(i.tables.arenas.instanceOf(i.body.closure.parent)) : i;
 }

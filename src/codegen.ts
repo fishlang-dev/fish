@@ -177,6 +177,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   let current = instances[0]!;
   let { types, locals, calls, setters, coercions, jumps } = current;
   const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
+  const callOf = (e: Expr) => arenas.instanceOf(calls.get(e));
+  const setterOf = (e: Expr) => arenas.instanceOf(setters.get(e));
   // The class of the constructor or method being emitted, whose instance `%this` points to.
   let self: ClassType | undefined;
   // In a closure, where each variable it captures lives, loaded from its environment.
@@ -380,7 +382,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       else emit(load);
       captured.set(localOf(alias), pointer);
     });
-    if (f.closure) self = selfOf(f)?.type;
+    if (f.closure) self = selfOf(arenas, f)?.type;
     f.body.forEach(statement);
     // Falling off the end drops what the body holds there, at its closing brace.
     site = { start: f.end - 1, end: f.end };
@@ -1255,7 +1257,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       startBlock(hit);
       const found = temp();
       emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
-      const target = calls.get(callback)!;
+      const target = callOf(callback)!;
       const gives = invoke(target, env, [`ptr ${part(found, 4)}`].slice(0, target.body.params.length), e, undefined, drop);
       if (gives !== undefined && needsDrop(rec(closure).returns)) dispose(gives, rec(closure).returns);
       emit(`br label %${done}`);
@@ -1411,7 +1413,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const entry = entryType(t);
     const callback = e.args[0]!;
     const closure = types.get(callback) as ClosureType;
-    const target = calls.get(callback)!;
+    const target = callOf(callback)!;
     const env = alloca(llvm(closure));
     emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
     const parts: [3 | 4, Type][] = rec(t).set ? [[3, rec(t).key], [3, rec(t).key]] : [[4, rec(t).value], [3, rec(t).key]];
@@ -2226,7 +2228,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const own = table.clone;
     const name = `@fsh.dyn.clone.${n}`;
     thunk(name, "ptr", () => {
-      const made = invoke(own, "%p", [])!;
+      const made = invoke(arenas.instanceOf(own), "%p", [])!;
       const block = dynBlock(type, counted);
       emit(`store ${llvm(type)} ${made}, ptr ${block}`);
       emit(`ret ptr ${block}`);
@@ -2248,8 +2250,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const r = recOf(type);
     if (r?.kind === "generator") return [generatorNext(type as GeneratorType, n)];
     const abstract = (t: Type) => recOf(t)?.kind === "interface" && promiseElement(t) === undefined;
-    const made = rec(rec(to).of).methods.map((m, i) => (abstract(m.returns) || !methods[i] ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!)));
-    return [...made, ...rec(rec(to).of).fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
+    const made = rec(rec(to).of).methods.map((m, i) => (abstract(m.returns) || !methods[i] ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, arenas.instanceOf(methods[i]!))));
+    return [...made, ...rec(rec(to).of).fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, arenas.instanceOf(fields[i])))];
   }
 
   // A boxed async generator's `next()`: its future, borrowing the generator in the block, boxed.
@@ -2573,7 +2575,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     takeLock(at, e);
     const inside = temp();
     emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
-    const target = calls.get(callback)!;
+    const target = callOf(callback)!;
     const result = invoke(target, env, target.body.params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
     emit(`call void @fsh_rt_unlock(ptr ${at})`);
     if (result && !types.has(e) && needsDrop(target.returns)) pending.push({ v: result, type: target.returns });
@@ -3504,7 +3506,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (e.kind !== "call") return void value(e);
     const result = call(e);
     // A call whose value goes unused has no type of its own recorded.
-    const type = types.get(e) ?? calls.get(e)?.returns;
+    const type = types.get(e) ?? callOf(e)?.returns;
     if (result !== undefined && type) dispose(result, type);
   }
 
@@ -3789,7 +3791,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       return out;
     }
     // An instance compares through its class's `equals`, which takes the other by reference.
-    const own = r.kind === "class" ? equalities.get(type as ClassType) : undefined;
+    const own = r.kind === "class" ? arenas.instanceOf(equalities.get(type as ClassType)) : undefined;
     if (own) {
       const [x, y] = [alloca(llvm(type)), alloca(llvm(type))];
       emit(`store ${llvm(type)} ${a}, ptr ${x}`);
@@ -5459,7 +5461,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const element = rec(array).element;
     const t = llvm(element);
     const closure = types.get(callback) as ClosureType;
-    const target = calls.get(callback)!;
+    const target = callOf(callback)!;
     const env = alloca(llvm(closure));
     emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
     const result = method === "forEach" ? "void" : types.get(e) ?? (method === "map" ? arrayType(rec(closure).returns) : method === "flatMap" ? lower(rec(closure).returns)
@@ -5617,7 +5619,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     let env = "null";
     let through: string;
     if (compare && closure) {
-      const target = calls.get(compare)!;
+      const target = callOf(compare)!;
       env = alloca(llvm(closure));
       emit(`store ${llvm(closure)} ${owned(compare)}, ptr ${env}`);
       // Its own owner, since code emitted twice, as a `finally` is, makes two.
@@ -6576,7 +6578,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   function run(e: Extract<Expr, { kind: "call" }>): string | undefined {
-    const target = calls.get(e);
+    const target = callOf(e);
     const js = jsCalls.get(e);
     if (js && target) return jsCall(e, js, target);
     const statics = jsStatics.get(e);
@@ -7072,7 +7074,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     startBlock(fail);
     const [said, saidNot] = [label(), label()];
     emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
-    const name = calls.get(e)!.body.name;
+    const name = callOf(e)!.body.name;
     for (const [at, is] of [[said, "is"], [saidNot, "is not"]] as const) {
       startBlock(at);
       const tag = temp();
@@ -7178,7 +7180,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (jsMembers.has(e)) return jsGet(jsHandle(e.object), e.name, types.get(e)!, `property '${e.name}' of '${show(referent(valueType(e.object)))}' is`, e);
     if (current.copiesOut.has(e)) return copyOut(e);
     if (computed.has(e)) return isDyn(referent(types.get(e.object)!)) ? dynField(e) : blockProperty(e);
-    const getter = calls.get(e);
+    const getter = callOf(e);
     if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
     // An enum member's value is known, and the enum's name is no value to evaluate.
     if (!types.has(e.object)) return "zeroinitializer";
@@ -7662,7 +7664,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const { from, to, wrapper, param, via } = current.raises.get(at)!;
     if (!via) return route(convert(error, from, to), to);
     // Wrapped by the error class's static `from` first.
-    const wrapped = invoke(via, undefined, [`${llvm(param!)} ${convert(error, from, param!)}`])!;
+    const wrapped = invoke(arenas.instanceOf(via), undefined, [`${llvm(param!)} ${convert(error, from, param!)}`])!;
     route(convert(wrapped, wrapper!, to), to);
   }
 
@@ -8942,11 +8944,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       case "ident": {
         // A top-level const: a scalar or string baked where it is read, an aggregate read through
         // a pointer to its global.
-        const read = calls.get(e);
+        const read = callOf(e);
         if (read?.body.comptime === "const") return isRef(types.get(e)!) ? constantGlobal(read) : bake(comptimeBody(read), types.get(e)!);
         // A nested function used as a value is its closure, made here.
         const built = current.envs?.get(e);
-        if (built) return environment(built.of, built.env);
+        if (built) return environment(arenas.instanceOf(built.of), built.env);
         const exported = jsExports.get(e);
         if (exported) return fromJs(jsExport(exported, e), types.get(e)!, `'${exported.name}' from '${exported.module}' is`, e);
         // `undefined` is the empty value, unless a variable takes the name.
@@ -8982,7 +8984,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         return unwraps(e.object) ? link(e, e.object, () => member(e))! : member(e);
       // A closure's value is each variable it holds, and a pointer to each it borrows, or to `this`.
       case "arrow": {
-        const inner = calls.get(e)!;
+        const inner = callOf(e)!;
         return environment(inner, [...inner.captures!.values()]);
       }
       case "object": {
@@ -9021,14 +9023,14 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         if (newed?.kind === "block") return blockNew(e, types.get(e) as BlockType);
         if (newed?.kind === "map") return mapNew(types.get(e) as MapType, e.args?.[0]);
         // A Rust type's constructor gives the handle to the value it boxed.
-        if (calls.get(e)!.body.rust) return invoke(calls.get(e)!, undefined, argValues(e.args ?? [], calls.get(e)!), e)!;
+        if (callOf(e)!.body.rust) return invoke(callOf(e)!, undefined, argValues(e.args ?? [], callOf(e)!), e)!;
         // The constructor fills in a slot, which then holds the new instance. The slot starts
         // empty, so a field's first assignment has nothing to drop.
         const type = types.get(e) as ClassType;
         const instance = alloca(llvm(type));
         emit(`store ${llvm(type)} zeroinitializer, ptr ${instance}`);
         // A panic in the constructor drops the fields it has set. One that throws has set none.
-        invoke(calls.get(e)!, instance, argValues(e.args ?? [], calls.get(e)!), e, undefined, () => dispose(unstash(instance, type), type));
+        invoke(callOf(e)!, instance, argValues(e.args ?? [], callOf(e)!), e, undefined, () => dispose(unstash(instance, type), type));
         const result = temp();
         emit(`${result} = load ${llvm(type)}, ptr ${instance}`);
         return result;
@@ -9282,7 +9284,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // which keeps what it is given, a copy of its own released when the statement ends.
   function store(target: Expr, result: string): string {
     target = bare(target);
-    const setter = setters.get(target);
+    const setter = setterOf(target);
     if (setter && target.kind === "member") {
       const type = types.get(target)!;
       // A Rust value goes to the setter alone: the checker refuses such an assignment's value.
@@ -9728,7 +9730,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (list) appended(list, rec(type as ArrayType).element, matchValue(regexT, rec(type as ArrayType).element as ObjectType, s, slots));
     else if (pattern) emit(`call void @fsh_rt_regex_put_pattern(ptr ${it}, ptr ${pattern})`);
     else {
-      const target = calls.get(callback!)!;
+      const target = callOf(callback!)!;
       const match = matchType(regexT);
       const whole = matchValue(regexT, match, s, slots);
       const parts = elementsOf(match);

@@ -17,8 +17,10 @@ export class Arenas {
   private locals: Local[] = [];
   private classes: ClassInfo[] = [];
 
-  instanceOf(id: InstanceId): Instance {
-    return this.instances[id - 1]!;
+  instanceOf(id: InstanceId): Instance;
+  instanceOf(id: InstanceId | undefined): Instance | undefined;
+  instanceOf(id: InstanceId | undefined): Instance | undefined {
+    return id === undefined ? undefined : this.instances[id - 1];
   }
 
   bodyOf(id: BodyId): Body {

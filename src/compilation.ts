@@ -1,10 +1,9 @@
-import { Arenas, type LocalId } from "./arenas.ts";
-import type { Instance } from "./check.ts";
+import { Arenas, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Value } from "./comptime.ts";
 import type { Body } from "./classes.ts";
 import type { Names } from "./diag.ts";
 import type { Kind } from "./narrow.ts";
-import { NodeSet, WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
+import { WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
@@ -191,7 +190,7 @@ export type Tables = {
   // The calls a tagged template became, the only calls yet that fill a rest parameter.
   tagCalls: WeakNodeSet<Expr>;
   // The `equals` each class's `===` calls.
-  equalities: TypeMap<ClassType, Instance>;
+  equalities: TypeMap<ClassType, InstanceId>;
   // Each quote, by the Ast types it was checked with, for comptime to build its value from.
   quotes: WeakNodeMap<Expr, Record<Category, Type>>;
   // The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
@@ -293,11 +292,11 @@ export type Tables = {
   stringArrays: TypeMap<LiteralType, string[]>;
   // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
   // function the checker hasn't reached yet.
-  ensureChecked: (instance: Instance) => boolean;
+  ensureChecked: (instance: InstanceId) => boolean;
   // Each top-level const's value, once computed, and those being computed, which a const reading
   // itself would meet.
-  constants: WeakNodeMap<Instance, Value>;
-  computing: NodeSet<Instance>;
+  constants: Map<InstanceId, Value>;
+  computing: Set<InstanceId>;
 };
 
 export function newTables({ typing, arenas, upcasts, ids, counts, regex, files, rust, generated }: Compilation): Tables {
@@ -358,7 +357,7 @@ export function newTables({ typing, arenas, upcasts, ids, counts, regex, files, 
     maths: new WeakNodeSet<Expr>(),
     integerCalls: new WeakNodeSet<Expr>(),
     tagCalls: new WeakNodeSet<Expr>(),
-    equalities: new TypeMap<ClassType, Instance>(),
+    equalities: new TypeMap<ClassType, InstanceId>(),
     quotes: new WeakNodeMap<Expr, Record<Category, Type>>(),
     tupleLiterals: new WeakNodeSet<Expr>(),
     restStarts: new WeakNodeMap<Expr, usize>(),
@@ -402,7 +401,7 @@ export function newTables({ typing, arenas, upcasts, ids, counts, regex, files, 
     quotedSpans: new WeakMap<object, Set<string>>(),
     stringArrays: new TypeMap<LiteralType, string[]>(),
     ensureChecked: () => true,
-    constants: new WeakNodeMap<Instance, Value>(),
-    computing: new NodeSet<Instance>(),
+    constants: new Map<InstanceId, Value>(),
+    computing: new Set<InstanceId>(),
   };
 }
