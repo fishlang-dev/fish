@@ -2,13 +2,13 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compile } from "../src/main.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { unreached, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
 import { NodeMap } from "../src/nodes.ts";
 import { newTyping, TypeMap, type ClassType, type Type, digest } from "../src/typing.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // Monomorphization compiles each generic function once per distinct set of type arguments,
 // however many calls share it, and never compiles a definition check.
@@ -66,7 +66,7 @@ test("instance symbols are stable and tell type arguments apart", () => {
   const symbols = (ir: string) => [...ir.matchAll(/^define .*@"(fsh\.identity#[0-9a-z.]+)"/gm)].map((m) => m[1]!).sort();
   const here = symbols(compile(session, readFileSync(file, "utf8"), file));
   const src = (name: string) => JSON.stringify(join(import.meta.dir, "..", "src", name));
-  const script = `import { compile } from ${src("main.ts")}; import { newSession } from ${src("compilation.ts")}; import { readFileSync } from "node:fs"; console.log(compile(newSession(), readFileSync(${JSON.stringify(file)}, "utf8"), ${JSON.stringify(file)}));`;
+  const script = `import { compile } from ${src("main.ts")}; import { cachedSession } from ${src("stdcache.ts")}; import { readFileSync } from "node:fs"; console.log(compile(cachedSession(), readFileSync(${JSON.stringify(file)}, "utf8"), ${JSON.stringify(file)}));`;
   const other = Bun.spawnSync(["bun", "-e", script]);
   expect(symbols(other.stdout.toString())).toEqual(here);
   expect(new Set(here).size).toBe(4);

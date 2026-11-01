@@ -2,7 +2,7 @@ import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { build } from "../src/main.ts";
 import { mirrored } from "../scripts/selfhost.ts";
 import { DUMP, dumperSource } from "../scripts/dumpgen.ts";
@@ -37,7 +37,7 @@ test("the parser built with fishc parses the corpus into exactly the trees the B
     // A dev build gives every temporary its own stack slot, so the parser's recursive functions
     // take up to 100 KiB a frame and deeply nested files overflow the main stack; optimized, they
     // fit. The trees must match either way.
-    build(newSession(), driver, join(dir, "parser"), true);
+    build(cachedSession(), driver, join(dir, "parser"), true);
     const files = corpus();
     const native = Bun.spawnSync([join(dir, "parser"), ...files], { cwd: ROOT, maxBuffer: 1 << 30 });
     // `parser` stands in for the program's path, which Fish gives as argv[1] the way Node does.

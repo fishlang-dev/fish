@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Checked } from "./check.ts";
-import { newSession, type Session } from "./compilation.ts";
+import { type Session } from "./compilation.ts";
+import { cachedSession } from "./stdcache.ts";
 import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
 import { analyze } from "./main.ts";
 import { STD_BASE } from "./std.ts";
@@ -113,7 +114,7 @@ export function serveLsp() {
   const exit = () => process.exit(shutdown ? 0 : 1);
   const notify = (method: string, params: unknown) => send({ method, params });
   // What every check this server runs shares, as std's parsed tree.
-  const session = newSession();
+  const session = cachedSession();
 
   // The open documents' text, by URI.
   const documents = new Map<string, string>();

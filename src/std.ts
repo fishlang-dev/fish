@@ -1,11 +1,6 @@
-import { deserialize, serialize } from "bun:jsc";
-import { createHash } from "node:crypto";
-import type { Compilation, Session } from "./compilation.ts";
+import type { Compilation } from "./compilation.ts";
 import type { Source } from "./diag.ts";
-import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { AST } from "./ast.ts";
-import { cacheDir, partial } from "./mathlib.ts";
 import { nextId, renumber, shiftSpans, someNode, walk } from "./nodes.ts";
 import { parse, type Pattern, type Stmt } from "./parser.ts";
 
@@ -3668,61 +3663,11 @@ export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
 
-// A hash of the std source, the compiler's own sources and Bun's version, which decides the
-// serialization format, so no other parser's tree is ever loaded. Null when no compiler source
-// can be read, as inside a single-file executable, since the hash couldn't tell parsers apart.
-export function stdKey(source: string, dir: string): string | null {
-  let files: string[];
-  try {
-    files = readdirSync(dir).filter((f) => f.endsWith(".ts")).sort();
-  } catch {
-    return null;
-  }
-  if (files.length === 0) return null;
-  const hash = createHash("sha256").update(Bun.version).update("\0").update(source);
-  for (const f of files) hash.update("\0").update(f).update("\0").update(readFileSync(join(dir, f)));
-  return hash.digest("hex").slice(0, 16);
-}
-
-// std's parsed tree, serialized: kept in the session's memory, else read from the cache, else
-// parsed and written there, the session counting the parse. A cache that can't be read or written
-// only costs the parse, and without a key the cache isn't touched at all.
-function stdBytes({ std }: Session): Uint8Array {
-  if (std.key === undefined) std.key = stdKey(STD_SOURCE, import.meta.dir);
-  const path = std.key === null ? null : join(cacheDir(), "std", `ast-${std.key}.bin`);
-  if (std.tree !== undefined && std.tree.path === path) return std.tree.bytes;
-  let bytes: Uint8Array | undefined;
-  if (path !== null) {
-    try {
-      bytes = readFileSync(path);
-      // A tree from before nodes had ids, or anything else, is made again.
-      const cached = deserialize(bytes);
-      if (!Array.isArray(cached) || typeof cached[0]?.id !== "number") bytes = undefined;
-    } catch {
-      bytes = undefined;
-    }
-  }
-  if (bytes === undefined) {
-    std.parses++;
-    // Ids are each compilation's own, so the cached tree holds zeros, and each copy is numbered
-    // as it is loaded.
-    bytes = new Uint8Array(serialize(renumber("stmt", parse(STD_SOURCE, { last: 0 }), () => 0)));
-    if (path !== null) {
-      try {
-        const temp = partial(path);
-        writeFileSync(temp, bytes);
-        renameSync(temp, path);
-      } catch {}
-    }
-  }
-  std.tree = { path, bytes };
-  return bytes;
-}
-
 // The std statements a program is checked with, their spans moved past its own.
 export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
-  // Each call takes its own copy, since the passes below change the tree.
-  const all: Stmt[] = renumber("stmt", deserialize(stdBytes(session)), () => nextId(ids));
+  // Each call takes its own copy, since the passes below change the tree, numbered as it is taken.
+  const { std } = session;
+  const all: Stmt[] = renumber("stmt", std.load ? std.load() : (std.parses++, parse(STD_SOURCE, { last: 0 })), () => nextId(ids));
   shiftSpans("stmt", all, STD_BASE);
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.

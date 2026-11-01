@@ -6,9 +6,10 @@ import { CompileError } from "../src/diag.ts";
 import { analyze } from "../src/main.ts";
 import { frames } from "../src/lsp.ts";
 import { load } from "../src/modules.ts";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 const dir = mkdtempSync(join(tmpdir(), "fishc-lsp-"));
 

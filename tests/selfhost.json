@@ -3,7 +3,7 @@
     "arithmetic.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "ast.ts": "a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet",
     "astgen.ts": "only declarations are allowed at the top level; move this into main()",
-    "bundle.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
+    "bundle.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "casemap.ts": "a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet",
     "check.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "classes.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
@@ -32,7 +32,7 @@
     "match.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "mathlib.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "migrate.ts": "'node:fs' has no export named 'mkdirSync'",
-    "modules.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
+    "modules.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "moves.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "narrow.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "native.ts": "a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet",
@@ -43,7 +43,7 @@
     "printer.ts": "generator methods are not supported yet",
     "publish.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "quote.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
-    "rank.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
+    "rank.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "regex.ts": "functions returned without a function return type are not supported yet",
     "registry.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "registry_index.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
@@ -52,9 +52,10 @@
     "rust.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "semver.ts": "operator '!' cannot be applied to type 'null | RegExpExecArray'",
     "split.ts": "functions returned without a function return type are not supported yet",
-    "std.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
+    "std.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
+    "stdcache.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
     "suggest.ts": "cannot find type 'Iterable'",
-    "survey.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
+    "survey.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "tar.ts": "cannot find type 'Uint8Array'",
     "target.ts": "functions returned without a function return type are not supported yet",
     "tests.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
@@ -65,5 +66,5 @@
     "values.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet"
   },
-  "count": 64
+  "count": 65
 }
