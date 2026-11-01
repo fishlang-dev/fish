@@ -98,15 +98,20 @@ async function main(): Promise<void> throws IoError | AbortError {
 // expect: GET /assets/ 404
 // expect: GET /assets/fifo 404
 // expect: GET /assets/a.txt/ 404
+// expect: GET /assets/outdex 404
+// expect: GET /assets/outdex/ 404
+// expect: GET /pub/sib 404
+// expect: GET /pub/own.txt 200
 // expect: GET /ASSETS/a.txt 404
 // expect: GET /assetsx/a.txt 404
 // expect: GET /missing/a.txt 404
 // expect: POST /assets/a.txt 404
 // Nothing outside the root is served, however the path is spelled: dot segments, encoded and
 // Windows-style separators, NUL, empty segments, hidden files, symlinks leading out, a directory
-// with no index.html, which is never listed, a file that isn't a regular one, or a file named with
-// a trailing slash. Each is a 404, so a refusal doesn't say whether the file exists. Requests are
-// written raw, so no client cleans the path first.
+// with no index.html, which is never listed, a file that isn't a regular one, a file named with a
+// trailing slash, an index.html linking out, or a link into a sibling whose name starts with the
+// root's. Each is a 404, so a refusal doesn't say whether the file exists. Requests are written
+// raw, so no client cleans the path first.
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -133,15 +138,20 @@ async function main(): Promise<void> throws IoError | AbortError {
   spawnSync("ln", ["-s", "../secret", dir + "/public/out"]);
   spawnSync("ln", ["-s", "..", dir + "/public/escape"]);
   spawnSync("mkfifo", [dir + "/public/fifo"]);
+  spawnSync("mkdir", ["-p", dir + "/public/outdex", dir + "/pub"]);
+  spawnSync("ln", ["-s", "../../secret", dir + "/public/outdex/index.html"]);
+  writeFileSync(dir + "/pub/own.txt", "own");
+  spawnSync("ln", ["-s", "../public/a.txt", dir + "/pub/sib"]);
   let app = new Router();
   app.static("/assets", dir + "/public");
+  app.static("/pub", dir + "/pub");
   app.static("/missing", dir + "/nowhere");
   const found = shared({ port: new Atomic(0) });
   const seen = found.clone();
   spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, app.handler()));
   while (found.port.load() === 0) await sleep(1);
   const port = found.port.load();
-  const targets = ["/assets/a.txt", "/assets/../secret", "/assets/%2e%2e/secret", "/assets/..%2fsecret", "/assets/%2E%2E%2Fsecret", "/assets/sub/..%2f..%2fsecret", "/assets/..%5csecret", "/assets/..\\secret", "/assets/a.txt%00.png", "/assets/%2fetc%2fpasswd", "/assets//etc/passwd", "/assets/%zz", "/assets/.env", "/assets/sub/.hidden", "/assets/out", "/assets/escape/secret", "/assets/sub", "/assets/", "/assets/fifo", "/assets/a.txt/", "/ASSETS/a.txt", "/assetsx/a.txt", "/missing/a.txt"];
+  const targets = ["/assets/a.txt", "/assets/../secret", "/assets/%2e%2e/secret", "/assets/..%2fsecret", "/assets/%2E%2E%2Fsecret", "/assets/sub/..%2f..%2fsecret", "/assets/..%5csecret", "/assets/..\\secret", "/assets/a.txt%00.png", "/assets/%2fetc%2fpasswd", "/assets//etc/passwd", "/assets/%zz", "/assets/.env", "/assets/sub/.hidden", "/assets/out", "/assets/escape/secret", "/assets/sub", "/assets/", "/assets/fifo", "/assets/a.txt/", "/assets/outdex", "/assets/outdex/", "/pub/sib", "/pub/own.txt", "/ASSETS/a.txt", "/assetsx/a.txt", "/missing/a.txt"];
   for (const target of targets) {
     const status = await ask(port, "GET", target);
     console.log("GET", target, status);
