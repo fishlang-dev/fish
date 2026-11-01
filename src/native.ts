@@ -7666,8 +7666,9 @@ static fsh_str *fsh_tls_said(const char *text) {
 }
 
 // Whether a name is a DNS host name: dot-separated labels of 1 to 63 letters, digits, hyphens and
-// underscores, at most 253 bytes. Checked here so OpenSSL 3 and 4, which differ on what they
-// take, refuse the same names.
+// underscores, at most 253 bytes. What isn't one is refused here, before OpenSSL sees it.
+// OpenSSL 4 refuses a few more, such as one-character names and labels starting or ending with
+// a hyphen, which OpenSSL 3 checks against the certificate; those fail closed with the same error.
 static int fsh_tls_host_name(const char *host) {
   size_t length = strlen(host), label = 0;
   if (length == 0 || length > 253) return 0;
