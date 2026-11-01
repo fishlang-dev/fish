@@ -32,8 +32,6 @@ import { nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber } from "./
 type Call = Extract<Expr, { kind: "call" }>;
 
 const I64_MAX = (1n << 63n) - 1n;
-// The calls `spawnBlocking` makes of a function it was given other than as an arrow.
-const blockingRuns = new WeakSet<Expr>();
 
 // The operators an expression of only literals may use and still take its type from context.
 const LITERAL_OPERATORS = new Set<string>(["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>"]);
@@ -275,7 +273,7 @@ export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | 
 
 export function expressions(ctx: Context) {
   const {
-    asserts, awaitedNow, clocks, combinedCalls, computed, declaredTypes, deepEqualities, defaulted, joinCalls, integerCalls,
+    asserts, awaitedNow, blockingRuns, clocks, combinedCalls, computed, declaredTypes, deepEqualities, defaulted, joinCalls, integerCalls,
     dynCalls, dynMembers, boxedMembers, madeArrows, equalities, fallbacks, fileCalls, filling, fills, fixedFills,
     fixedPrints, formatCalls, inspectCalls, jsAccessors, jsBodies, jsCalledAt, jsCalls, jsClasses,
     jsCrossings, jsEmptyTests, jsEvaluations, jsExports, jsGiven, jsMembers, jsMethods, jsNews,

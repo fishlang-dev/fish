@@ -159,6 +159,8 @@ export type Tables = {
   inspectCalls: WeakNodeSet<Expr>;
   // The `isDeepStrictEqual` calls checked as the `===` they were turned into.
   deepEqualities: WeakNodeSet<Expr>;
+  // The calls `spawnBlocking` makes of a function it was given other than as an arrow.
+  blockingRuns: WeakNodeSet<Expr>;
   // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
   parsedArgs: WeakNodeSet<Expr>;
   // The values printed as Node's util.inspect prints them, whose types as written say how their
@@ -339,6 +341,7 @@ export function newTables({ typing, upcasts, ids, regex, files, rust, generated 
     awaitedNow: new WeakNodeSet<Expr>(),
     inspectCalls: new WeakNodeSet<Expr>(),
     deepEqualities: new WeakNodeSet<Expr>(),
+    blockingRuns: new WeakNodeSet<Expr>(),
     parsedArgs: new WeakNodeSet<Expr>(),
     printed: new WeakNodeSet<Expr>(),
     clocks: new WeakNodeMap<Expr, "Date.now" | "performance.now" | "Math.random">(),
