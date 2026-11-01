@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { C_KEYWORDS, check } from "./check.ts";
+import { bodyOf } from "./arenas.ts";
+import { C_KEYWORDS, check, compiledOf } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
 import { newCompilation, type Compilation, type Session } from "./compilation.ts";
 import { cachedSession } from "./stdcache.ts";
@@ -65,13 +66,13 @@ export function checkProgram(session: Session, file: string): CompileError[] {
 }
 
 // `compile`, with the Rust shim the program's calls need, built when asked for.
-function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false): { ir: string; instances: Instance[]; shim: () => Shim | undefined; warnings: CompileError[] } {
+function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false): { ir: string; checked: Checked; shim: () => Shim | undefined; warnings: CompileError[] } {
   const compilation = newCompilation(session);
   const loaded = load(compilation, file, src);
   return withSources(compilation, loaded.sources, () => {
     const checked = check(compilation, expanded(compilation, loaded, library), library);
     for (const w of checked.warnings) w.sources = loaded.sources;
-    return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks }), loaded), instances: checked.instances, shim: () => rustShim(loaded.rust, checked.instances), warnings: checked.warnings };
+    return { ir: bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks }), loaded), checked, shim: () => rustShim(loaded.rust, checked), warnings: checked.warnings };
   });
 }
 
@@ -112,7 +113,7 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
   const loaded = load(compilation, file, src);
   const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), true));
   const ir = withSources(compilation, loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources }), loaded));
-  const shim = rustShim(loaded.rust, checked.instances);
+  const shim = rustShim(loaded.rust, checked);
   if (shim) refuseForeignRust(target);
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
@@ -139,7 +140,7 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
       if (shim && process.platform === "darwin") run(["libtool", "-static", "-o", at(`lib${name}.a`), archive, shim.lib]);
       else if (shim) run(["ar", "-M"], `CREATE ${at(`lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
     }
-    writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
+    writeFileSync(at(`${name}.h`), header(name, compiledOf(checked).filter((i) => bodyOf(i).exported)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -152,13 +153,13 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
 function header(name: string, exports: Instance[]): string {
   const guard = `${/^[A-Za-z]/.test(name) ? "" : "FISH_"}${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
   const lines = exports.map((i) => {
-    const params = i.body.params.map((p) => {
-      const { type, name } = i.locals.get(p)!;
+    const params = bodyOf(i).params.map((p) => {
+      const { type, name } = i.tables.arenas.localOf(i.locals.get(p)!);
       const c = cType(i.tables.typing.rec, type);
       const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
       return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;
     });
-    return `${cType(i.tables.typing.rec, i.returns)} ${i.body.name}(${params.length > 0 ? params.join(", ") : "void"});`;
+    return `${cType(i.tables.typing.rec, i.returns)} ${bodyOf(i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
   });
   return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "", ...lines, "", "#ifdef __cplusplus", "}", "#endif", "", `#endif`, ""].join("\n");
 }
@@ -186,10 +187,10 @@ function cType(rec: Typing["rec"], t: Type): string {
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
 // program reports at exit what it never freed, by where it was allocated. Gives the warnings.
 export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false): CompileError[] {
-  const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks);
+  const { ir, checked, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks);
   const rust = shim();
   if (rust) refuseForeignRust(target);
-  linked(session, ir, instances, out, release, links, rust, target, leaks);
+  linked(session, ir, checked, out, release, links, rust, target, leaks);
   return warnings;
 }
 
@@ -201,17 +202,17 @@ function refuseForeignRust(target: Target) {
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
 // and the program, and a dev build's as the program's part, with std's part a unit of its own that
 // the cache keeps between builds.
-function parts(ir: string, instances: Instance[], release: boolean, target: Target = HOST_TARGET): { std: Unit[]; program: string } {
+function parts(ir: string, checked: Checked, release: boolean, target: Target = HOST_TARGET): { std: Unit[]; program: string } {
   if (release) return { std: [], program: ir };
-  const bodies = instances.filter((i) => !i.body.foreign && !i.body.rust);
-  const named = (std: boolean) => bodies.filter((i) => i.body.start >= STD_BASE === std).map(symbol);
+  const bodies = compiledOf(checked).filter((i) => !bodyOf(i).foreign && !bodyOf(i).rust);
+  const named = (std: boolean) => bodies.filter((i) => bodyOf(i).start >= STD_BASE === std).map(symbol);
   const { std, program } = split(ir, named(true), named(false));
   return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", "-O0", "-funwind-tables"], stdin: std, inputs: [] }], program };
 }
 
-// Builds the IR `ir`, of `instances`, into the executable `out`.
-function linked(session: Session, ir: string, instances: Instance[], out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false) {
-  const { std, program } = parts(ir, instances, release, target);
+// Builds the IR `ir`, of the checked program, into the executable `out`.
+function linked(session: Session, ir: string, checked: Checked, out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false) {
+  const { std, program } = parts(ir, checked, release, target);
   const objects = [...[...runtimeUnits(ir, release, false, target, leaks), ...std].map((u) => cachedObject(session, u)), ...mathObjects(session, target.compile)];
   const clang = Bun.spawnSync(clangArgs(out, release, links, objects, shim, target), { stdin: new TextEncoder().encode(program) });
   if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
@@ -219,8 +220,8 @@ function linked(session: Session, ir: string, instances: Instance[], out: string
 
 // `build`, with clang run without blocking, so several builds can go at once.
 export async function buildAsync(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
-  const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false);
-  const { std, program } = parts(ir, instances, release);
+  const { ir, checked, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false);
+  const { std, program } = parts(ir, checked, release);
   const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map((u) => cachedObjectAsync(session, u)), mathObjectsAsync(session)])).flat();
   const clang = Bun.spawn(clangArgs(out, release, links, objects, shim()), { stdin: new TextEncoder().encode(program), stderr: "pipe" });
   const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
@@ -245,7 +246,7 @@ export function buildTests(session: Session, dir: string, out: string): Test[] {
     hideMains(compilation, loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
     loaded.modules[0]!.statements.push(...harnessMain(compilation.ids, tests, loaded.modules));
     const checked = check(compilation, expanded(compilation, loaded, false));
-    linked(session, bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources, harness: true }), loaded), checked.instances, out, false, [], rustShim(loaded.rust, checked.instances));
+    linked(session, bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources, harness: true }), loaded), checked, out, false, [], rustShim(loaded.rust, checked));
     return tests;
   });
 }

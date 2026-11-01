@@ -1,4 +1,5 @@
 import type { Instance } from "./check.ts";
+import { bodyOf, type LocalId } from "./arenas.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
@@ -85,7 +86,7 @@ class Thrown {
   }
 }
 
-type Frame = { instance: Instance; locals: Map<usize, Value>; self: Record | undefined };
+type Frame = { instance: Instance; locals: Map<LocalId, Value>; self: Record | undefined };
 
 type Interpreter = ReturnType<typeof interpreter>;
 
@@ -173,27 +174,27 @@ function seeded(instance: Instance): Frame {
 
 // The comptime parameters an instance can read, by local: its own, and in a closure, those of
 // the functions it is written in, through what it captures.
-function known(instance: Instance): Map<usize, Value> {
-  const parent = instance.body.closure?.parent;
-  const outer = parent ? known(parent) : new Map<usize, Value>();
-  const locals = new Map<usize, Value>();
-  for (const p of instance.body.params) if (p.comptime) locals.set(instance.locals.get(p)!.id, comptimeParameter(instance, p));
-  for (const [alias, from] of instance.captures ?? []) if (from !== "this" && outer.has(from.id)) locals.set(alias.id, outer.get(from.id));
+function known(instance: Instance): Map<LocalId, Value> {
+  const parent = bodyOf(instance).closure?.parent;
+  const outer = parent ? known(instance.tables.arenas.instanceOf(parent)) : new Map<LocalId, Value>();
+  const locals = new Map<LocalId, Value>();
+  for (const p of bodyOf(instance).params) if (p.comptime) locals.set(instance.locals.get(p)!, comptimeParameter(instance, p));
+  for (const [alias, from] of instance.captures ?? []) if (from !== "this" && outer.has(from)) locals.set(alias, outer.get(from));
   return locals;
 }
 
 // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
 // function the checker hasn't reached yet.
 export function comptimeChecks(tables: Tables, check: (instance: Instance) => boolean) {
-  tables.ensureChecked = check;
+  tables.ensureChecked = (id) => check(tables.arenas.instanceOf(id));
 }
 
 // A top-level const's value, or a `comptime { }` block run at the top level: its body.
 export function comptimeBody(instance: Instance): Value {
   const { constants } = instance.tables;
-  if (constants.has(instance)) return constants.get(instance);
-  const v = guarded(instance.tables, instance.body, (run) => run.constant(instance, instance.body));
-  constants.set(instance, v);
+  if (constants.has(instance.id)) return constants.get(instance.id);
+  const v = guarded(instance.tables, bodyOf(instance), (run) => run.constant(instance, bodyOf(instance)));
+  constants.set(instance.id, v);
   return v;
 }
 
@@ -215,10 +216,11 @@ function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): V
   }
 }
 
-const constName = (c: Instance) => c.body.name.slice("const ".length);
+const constName = (c: Instance) => bodyOf(c).name.slice("const ".length);
 
 function interpreter(tables: Tables) {
-  const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files, asserts, clocks, integerCalls } = tables;
+  const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files, asserts, clocks, integerCalls, arenas } = tables;
+  const calledAt = (f: Frame, e: Expr) => arenas.instanceOf(f.instance.calls.get(e));
   const { elementsOf, isSubclass, isTuple, show, lower, rec } = typing;
   let steps = 0;
   let depth = 0;
@@ -232,23 +234,23 @@ function interpreter(tables: Tables) {
 
   // A const's value, computed once; one that reads itself never ends, so it is refused.
   function constant(c: Instance, at: Span): Value {
-    if (constants.has(c)) return constants.get(c);
-    if (computing.has(c)) throw new Stop(`'${constName(c)}' needs its own value to compute its value${cycle([...computing].slice([...computing].indexOf(c)))}`, at, false);
-    computing.add(c);
+    if (constants.has(c.id)) return constants.get(c.id);
+    if (computing.has(c.id)) throw new Stop(`'${constName(c)}' needs its own value to compute its value${cycle([...computing].slice([...computing].indexOf(c.id)).map((i) => arenas.instanceOf(i)))}`, at, false);
+    computing.add(c.id);
     try {
       const v = call(c, [], undefined, at);
-      constants.set(c, v);
+      constants.set(c.id, v);
       return v;
     } finally {
-      computing.delete(c);
+      computing.delete(c.id);
     }
   }
 
   // How consts reading each other in a ring do it, naming their files when they are in several.
   function cycle(ring: Instance[]): string {
     if (ring.length < 2) return "";
-    const ringFiles = new Set(ring.map((c) => fileAt(files, c.body.start)));
-    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${ringFiles.size > 1 ? ` in '${fileAt(files, c.body.start)}'` : ""}`);
+    const ringFiles = new Set(ring.map((c) => fileAt(files, bodyOf(c).start)));
+    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${ringFiles.size > 1 ? ` in '${fileAt(files, bodyOf(c).start)}'` : ""}`);
     return `: ${named[0]} reads ${named.slice(1).join(", which reads ")}`;
   }
 
@@ -283,7 +285,7 @@ function interpreter(tables: Tables) {
   // Instances of a class with an `equals` compare through it, as they do at run time.
   function byEquals(at: Span): Equals {
     return (a, b) => {
-      const method = rec(a.type).kind === "class" ? equalities.get(a.type as ClassType) : undefined;
+      const method = rec(a.type).kind === "class" ? arenas.instanceOf(equalities.get(a.type as ClassType)) : undefined;
       return method && call(method, [b], a, at) === true;
     };
   }
@@ -291,15 +293,15 @@ function interpreter(tables: Tables) {
   function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
-      if (RANDOM.has(callee.body.name) && fileAt(files, callee.body.start) === "node:crypto") random(`'crypto.${callee.body.name}'`, at);
-      if (callee.body.async) refuse("an async function", at);
-      if (callee.body.generator) unsupported("a generator", at);
-      if (callee.body.foreign) refuse(`the ${callee.body.rust ? "Rust" : "C"} function '${callee.body.name}'`, at);
-      if (callee.body.js) refuse(`'${callee.body.name}' from the package '${callee.body.js.module}'`, at);
-      if (!ensureChecked(callee)) throw new Stop(`this comptime code calls '${callee.body.name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
+      if (RANDOM.has(bodyOf(callee).name) && fileAt(files, bodyOf(callee).start) === "node:crypto") random(`'crypto.${bodyOf(callee).name}'`, at);
+      if (bodyOf(callee).async) refuse("an async function", at);
+      if (bodyOf(callee).generator) unsupported("a generator", at);
+      if (bodyOf(callee).foreign) refuse(`the ${bodyOf(callee).rust ? "Rust" : "C"} function '${bodyOf(callee).name}'`, at);
+      if (bodyOf(callee).js) refuse(`'${bodyOf(callee).name}' from the package '${bodyOf(callee).js!.module}'`, at);
+      if (!ensureChecked(callee.id)) throw new Stop(`this comptime code calls '${bodyOf(callee).name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
       const frame: Frame = { instance: callee, locals: new Map(), self };
-      callee.body.params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!.id, args[i] ?? null));
-      statements(frame, callee.body.body ?? []);
+      bodyOf(callee).params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!, args[i] ?? null));
+      statements(frame, bodyOf(callee).body ?? []);
       return undefined;
     } catch (e) {
       if (e instanceof Return) return e.value;
@@ -329,7 +331,7 @@ function interpreter(tables: Tables) {
         const local = f.instance.locals.get(s);
         const d = s.declarations[0]!;
         if (!local || s.declarations.length !== 1) return unsupported("destructuring", s);
-        f.locals.set(local.id, d.init ? expr(f, d.init) : undefined);
+        f.locals.set(local, d.init ? expr(f, d.init) : undefined);
         return;
       }
       case "return":
@@ -363,7 +365,7 @@ function interpreter(tables: Tables) {
         const local = f.instance.locals.get(s.left as Stmt)!;
         const items = typeof over === "string" ? [...over] : over && typeof over === "object" && over.kind === "array" ? over.items : unsupported("looping over this", s.right);
         for (const item of [...items]) {
-          f.locals.set(local.id, item);
+          f.locals.set(local, item);
           if (!loopBody(f, s, s.body)) break;
         }
         return;
@@ -412,7 +414,7 @@ function interpreter(tables: Tables) {
     } catch (e) {
       if (e instanceof Thrown && s.handler) {
         const local = s.param ? f.instance.locals.get(s) : undefined;
-        if (local) f.locals.set(local.id, e.value);
+        if (local) f.locals.set(local, e.value);
         try {
           statements(f, s.handler);
         } catch (again) {
@@ -527,12 +529,12 @@ function interpreter(tables: Tables) {
       case "ident": {
         const literal = literalValue(typing, type);
         if (literal !== undefined && !f.instance.locals.has(e)) return literal;
-        const read = f.instance.calls.get(e);
-        if (read?.body.comptime === "const") return constant(read, e);
+        const read = calledAt(f, e);
+        if (read && bodyOf(read).comptime === "const") return constant(read, e);
         const local = f.instance.locals.get(e);
         if (!local && e.name === "undefined") return null;
-        if (!local || !f.locals.has(local.id)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
-        return f.locals.get(local.id);
+        if (!local || !f.locals.has(local)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
+        return f.locals.get(local);
       }
       case "this":
         return f.self ?? unsupported("'this'", e);
@@ -580,8 +582,8 @@ function interpreter(tables: Tables) {
           if (p.kind === "property" && typeof p.key === "string") fields.set(p.key, expr(f, p.value));
           else if (p.kind === "shorthand") {
             const local = f.instance.locals.get(p)!;
-            if (!f.locals.has(local.id)) throw new Stop(`'${p.name}' is only known when the program runs, so comptime code can't read it`, p, false);
-            const held = f.locals.get(local.id);
+            if (!f.locals.has(local)) throw new Stop(`'${p.name}' is only known when the program runs, so comptime code can't read it`, p, false);
+            const held = f.locals.get(local);
             fields.set(p.name, held);
           } else return unsupported("this property", p);
         }
@@ -615,7 +617,7 @@ function interpreter(tables: Tables) {
     const r = typeof type === "string" ? undefined : rec(type);
     if (r?.kind === "interior" && r.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: expr(f, e.args[0]!) };
     if (r?.kind !== "class") return refuse(`'new ${show(type)}'`, e);
-    const ctor = f.instance.calls.get(e)!;
+    const ctor = calledAt(f, e)!;
     const made: Record = { kind: "record", type: type as ClassType, fields: new Map() };
     call(ctor, args(f, ctor, e.args ?? []), made, e);
     return made;
@@ -631,7 +633,7 @@ function interpreter(tables: Tables) {
     if (isShort(linked)) return SHORT;
     const object = unwrap(linked);
     if (object === null && e.optional) return SHORT;
-    const getter = f.instance.calls.get(e);
+    const getter = calledAt(f, e);
     if (getter) return call(getter, [], object as Record, e);
     if (e.name === "length" && typeof object === "string") return BigInt(object.length);
     if (object && typeof object === "object" && object.kind === "array" && e.name === "length") return BigInt(object.items.length);
@@ -664,9 +666,9 @@ function interpreter(tables: Tables) {
       if (expr(f, e.args[0]!) === true) return undefined;
       throw new Assertion(e.args[1] ? String(unwrap(expr(f, e.args[1]))) : `assertion failed: ${asserts.get(e)}`, e, true);
     }
-    const target = f.instance.calls.get(e);
+    const target = calledAt(f, e);
     if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return call(target, args(f, target, e.args), f.self, e);
-    if (target && callee.kind === "member" && target.body.self) {
+    if (target && callee.kind === "member" && bodyOf(target).self) {
       const linked = link(f, callee.object);
       if (isShort(linked)) return SHORT;
       const object = unwrap(linked);
@@ -855,15 +857,15 @@ function interpreter(tables: Tables) {
     if (target.kind === "this") return { kind: "place", get: () => f.self, set: () => unsupported("replacing 'this'", target) };
     if (target.kind === "ident") {
       const local = f.instance.locals.get(target);
-      if (!local || !f.locals.has(local.id)) throw new Stop(`'${target.name}' is only known when the program runs, so comptime code can't use it here`, target, false);
-      const held = f.locals.get(local.id);
+      if (!local || !f.locals.has(local)) throw new Stop(`'${target.name}' is only known when the program runs, so comptime code can't use it here`, target, false);
+      const held = f.locals.get(local);
       if (isPlace(held)) return held;
-      return { kind: "place", get: () => f.locals.get(local.id) as Value, set: (v) => void f.locals.set(local.id, v) };
+      return { kind: "place", get: () => f.locals.get(local) as Value, set: (v) => void f.locals.set(local, v) };
     }
     if (target.kind === "member" && f.instance.setters.has(target)) {
       const self = unwrap(expr(f, target.object)) as Record;
-      const getter = f.instance.calls.get(target);
-      return { kind: "place", get: () => (getter ? call(getter, [], self, target) : self.fields.get(target.name)), set: (v) => void call(f.instance.setters.get(target)!, [v], self, target) };
+      const getter = calledAt(f, target);
+      return { kind: "place", get: () => (getter ? call(getter, [], self, target) : self.fields.get(target.name)), set: (v) => void call(arenas.instanceOf(f.instance.setters.get(target)!), [v], self, target) };
     }
     if (target.kind === "member") {
       const holder = unwrap(expr(f, target.object));
@@ -947,7 +949,7 @@ function interpreter(tables: Tables) {
   function bind(f: Frame, p: Pattern, value: Value) {
     const info = f.instance.patterns.get(p)!;
     const v = unwrap(value);
-    if (info.kind === "any" && p.kind === "ident") return void f.locals.set(f.instance.locals.get(p as Expr)!.id, value);
+    if (info.kind === "any" && p.kind === "ident") return void f.locals.set(f.instance.locals.get(p as Expr)!, value);
     if (info.kind === "variant") info.args.forEach((arg, i) => bind(f, arg, (v as Variant).args[i]));
     if (info.kind === "object") for (const [key, sub] of info.fields) bind(f, sub, (v as Record).fields.get(key));
     if (info.kind === "array") info.items.forEach((item, i) => bind(f, item, (v as Items).items[i]));

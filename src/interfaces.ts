@@ -1,3 +1,4 @@
+import type { Arenas } from "./arenas.ts";
 import { inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
 import { TypeMap, TypeSet, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
@@ -13,6 +14,7 @@ export type Members = {
   // A function declared at the top level, or lifted there, by its name.
   bodyNamed(name: string): Body | undefined;
   typing: Typing;
+  arenas: Arenas;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
   assuming: Set<string>;
 };
@@ -138,7 +140,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   const c = t?.kind === "class" ? members.classOf(type as ClassType) : undefined;
   for (const f of rec(trait).fields) {
     const own = typeof type === "string" ? undefined : field(type, f.name);
-    const getter = !own && c ? inherited(c, "getters", f.name) : undefined;
+    const getter = !own && c ? inherited(members.arenas, c, "getters", f.name) : undefined;
     if (getter && getter.access === "public") {
       if (!fits(members.returnOf(getter, at), f.type)) return `types of property '${f.name}' are incompatible`;
       continue;
@@ -162,7 +164,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
       }
       continue;
     }
-    const method = c ? inherited(c, "methods", m.name) : undefined;
+    const method = c ? inherited(members.arenas, c, "methods", m.name) : undefined;
     if (!method || method.access !== "public") return missing("method", m.name);
     // An interface's methods can't declare what they throw yet, so a throwing one can't
     // stand in for one.

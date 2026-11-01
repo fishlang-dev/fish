@@ -1,6 +1,7 @@
 import { checkOverrides, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
 import type { Tables } from "./compilation.ts";
-import { nextId, NodeSet } from "./nodes.ts";
+import { nextId } from "./nodes.ts";
+import type { ClassId } from "./arenas.ts";
 import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
@@ -18,7 +19,7 @@ import { type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, 
 // other lazily.
 type Checker = {
   tables: Tables;
-  classes: Map<string, ClassInfo>;
+  classes: Map<string, ClassId>;
   templates: Map<string, ClassNode>;
   members: Members;
   resolveType(t: TypeNode): Type;
@@ -31,21 +32,21 @@ type Checker = {
 };
 
 export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
-  const { typing, ids } = tables;
+  const { typing, ids, arenas } = tables;
   const { fieldsOf, widenEnum, optionalField, holdsPattern, fits, show, blockFor, rec } = typing;
   // Every class by its type, and those not yet laid out and checked.
-  const infoOf = new TypeMap<ClassType, ClassInfo>();
-  const unsettled: ClassInfo[] = [];
+  const infoOf = new TypeMap<ClassType, ClassId>();
+  const unsettled: ClassId[] = [];
   // Each class's progress, keyed by its type.
   const linked = new TypeSet<ClassType>();
   const laidOut = new TypeSet<ClassType>();
-  const laying = new TypeMap<ClassType, ClassInfo>();
+  const laying = new TypeMap<ClassType, ClassId>();
   const wrapped = new TypeSet<ClassType>();
   return { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
 
   function register(c: ClassInfo) {
-    infoOf.set(c.type, c);
-    unsettled.push(c);
+    infoOf.set(c.type, c.classId);
+    unsettled.push(c.classId);
   }
 
   // Lays out a class, checks what it claims, and checks each of its members at its definition.
@@ -56,7 +57,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   }
 
   function bodiesOf(c: ClassInfo): Body[] {
-    return [...new NodeSet([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])];
+    return [...new Set([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])].map((b) => arenas.bodyOf(b));
   }
 
   // Bases are linked first, since a derived constructor may take its base's parameters. An abstract
@@ -77,7 +78,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     const at = c.node.extends!;
     extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: nextId(ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
     implementAbstracts(tables, c);
-    checkOverrides(typing, c);
+    checkOverrides(arenas, typing, c);
     linked.add(c.type);
   }
 
@@ -88,22 +89,23 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     if (!classes.has(name) && !templates.has(name)) throw new CompileError(`cannot find class '${name}'${didYouMean(name, classNames(at.start))}`, at.start, at.end);
     const args = at.kind === "instantiation" ? at.typeArgs : [];
     // A declared class is found by name: an abstract one is no type a value can have to resolve.
-    const declared = at.kind === "instantiation" ? undefined : classes.get(name);
+    const declared = at.kind === "instantiation" ? undefined : arenas.classOf(classes.get(name));
     if (declared) return declared;
     const type = withScope(c.scope, () => resolveType({ id: nextId(ids), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
-    return infoOf.get(type)!;
+    return arenas.classOf(infoOf.get(type)!);
   }
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
   // is checked as the body of a function that returns it, so it may use other classes.
   // Whether its fields are known, which they aren't yet while its own fields are being resolved.
   function layout(c: ClassInfo): boolean {
-    if (laidOut.has(c.type)) return !laying.has(c.type) && (!c.base || layout(c.base));
+    const base = arenas.classOf(c.base);
+    if (laidOut.has(c.type)) return !laying.has(c.type) && (!base || layout(base));
     // A generic class's instance is made after the declared classes are linked.
     link(c, new TypeSet());
     laidOut.add(c.type);
-    laying.set(c.type, c);
-    if (c.base) layout(c.base);
+    laying.set(c.type, c.classId);
+    if (c.base !== undefined) layout(arenas.classOf(c.base));
     rec(c.type).fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
       if (f.type) {
@@ -113,10 +115,10 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       }
       if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
       const name = `${rec(c.type).name}.${f.name} initializer`;
-      const initializer: Body = {
+      const initializer = tables.arenas.addBody({
         id: nextId(ids), name, params: [], body: [{ id: nextId(ids), kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
         owner: c.type, scope: c.scope, start: f.start, end: f.end,
-      };
+      });
       const instance = instanceOf(initializer);
       checkBody(instance);
       return { name: f.name, type: widenEnum(instance.returns), access: f.access, ...readonly };
@@ -158,7 +160,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       if (node.kind !== "ref" || node.name !== "From") continue;
       if (node.args.length !== 1) throw new CompileError("'From' takes the type it wraps, like 'From<DbError>'", node.start, node.end);
       const x = withScope(c.scope, () => resolveType(node.args[0]!));
-      const from = c.statics.get("from");
+      const from = arenas.bodyOf(c.statics.get("from"));
       const name = rec(c.type).name;
       const wanted = `class '${name}' implements 'From<${show(x)}>', so it needs 'static from(e: ${show(x)}): ${name}'`;
       if (!from || from.params.length !== 1 || !from.params[0]!.type || !from.returnType) throw new CompileError(wanted, node.start, node.end);
@@ -166,7 +168,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       if (!fits(x, param) || returns !== c.type) throw new CompileError(wanted, from.start, from.end);
       if (from.throws) throw new CompileError(`'${name}.from' wraps an error, so it can't throw one itself`, from.throws.start, from.throws.end);
       if (from.params[0]!.comptime) throw new CompileError(`'${name}.from' wraps errors as they are raised at run time, so it can't take a comptime parameter`, from.params[0]!.start, from.params[0]!.end);
-      c.wraps.push([x, from, param]);
+      c.wraps.push([x, from.bodyId, param]);
     }
     return c.wraps;
   }
@@ -201,7 +203,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   }
 
   function classOf(t: ClassType): ClassInfo {
-    const c = infoOf.get(t)!;
+    const c = arenas.classOf(infoOf.get(t)!);
     layout(c);
     return c;
   }

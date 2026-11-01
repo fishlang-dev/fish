@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { check } from "../src/check.ts";
+import { check, compiledOf } from "../src/check.ts";
 import { newCompilation } from "../src/compilation.ts";
 import { cachedSession } from "../src/stdcache.ts";
 import { CompileError } from "../src/diag.ts";
@@ -120,7 +120,7 @@ test("every type of the checked test programs is in its arena", () => {
     if (p.src.includes("// mode: parse")) continue;
     try {
       const { checked } = analyze(session, p.src, p.file);
-      const roots: Type[] = checked.instances.flatMap((i) => [...i.types.values(), ...i.coercions.values(), ...i.bindings.values(), i.returns, ...(i.throws ? [i.throws] : [])]);
+      const roots: Type[] = compiledOf(checked).flatMap((i) => [...i.types.values(), ...i.coercions.values(), ...i.bindings.values(), i.returns, ...(i.throws ? [i.throws] : [])]);
       types += roots.length;
       problems.push(...auditTypes(roots, checked.compilation.typing, p.name));
     } catch (e) {
@@ -252,8 +252,41 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by an instance, body, loca
   expect(offenders).toEqual([]);
 });
 
+// The checker's records and its tables, by where each is declared. They name one another by id,
+// read back through the compilation's arenas, which alone hold the records themselves.
+const RECORDS: [string, string][] = [
+  ["compilation.ts", "Tables"], ["check.ts", "Checked"], ["check.ts", "Instance"], ["check.ts", "Local"], ["classes.ts", "Body"], ["classes.ts", "ClassInfo"], ["values.ts", "DynTable"],
+];
+
+test("no instance, body, local or class holds another, nor does a checker table, but through its id", () => {
+  const offenders: string[] = [];
+  for (const [f, name] of RECORDS) {
+    const text = readFileSync(join(src, f), "utf8");
+    const start = text.search(new RegExp(`^export type ${name} = `, "m"));
+    expect(start).toBeGreaterThanOrEqual(0);
+    const first = text.slice(start, text.indexOf("\n", start));
+    // A declaration whose first line opens a brace runs to the line closing it.
+    const declared = (first.endsWith("{") ? text.slice(start, text.indexOf("\n};", start)) : first).slice(`export type ${name} = `.length);
+    for (const line of declared.replace(/\/\/.*$/gm, "").split("\n")) {
+      if (/^\s*arenas: Arenas;$/.test(line)) continue;
+      for (const m of line.matchAll(/\b(?:Instance|Body|Local|ClassInfo)\b/g)) offenders.push(`${name}: ${line.trim()} (${m[0]})`);
+    }
+  }
+  expect(offenders).toEqual([]);
+});
+
 // The checker's files: the checker, codegen and what they share.
 const CHECKER = ["check", "values", "classes", "resolve", "typefns", "operators", "typing", "generics", "interfaces", "flow", "narrow", "match", "moves", "comptime", "unions", "enums", "registry", "unsupported", "compilation", "codegen", "layout", "arithmetic", "runtime", "locals", "warnings"];
+
+// The checker's working tables, its own and codegen's, hold ids too, keys and values alike.
+test("no Map or Set in the checker holds an instance, body, local or class", () => {
+  const offenders: string[] = [];
+  for (const f of CHECKER.map((name) => `${name}.ts`)) {
+    const text = readFileSync(join(src, f), "utf8");
+    for (const m of text.matchAll(/\b(?:Map|Set)<([^;=()]*)/g)) if (/\b(?:Instance|Body|Local|ClassInfo)\b/.test(m[1]!)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
 
 // Tables still keyed by objects, each until it is given a key of its own: a walk's set of the
 // values it has visited, the quote, call and scope tables keyed by tree nodes without ids, and
@@ -264,14 +297,14 @@ const OBJECT_KEYED = [
 ];
 
 // Fish's Map and Set key on strings and integers, so every table the checker keeps does: by a
-// string, an integer, a string-literal union, or through NodeMap, TypeMap and their kin, which key
-// by id. Type parameters, `K` and `T`, are a generic table's own.
+// string, an integer, an arena id, a string-literal union, or through NodeMap, TypeMap and their
+// kin, which key by id. Type parameters, `K` and `T`, are a generic table's own.
 test("no Map, WeakMap, Set or WeakSet in the checker is keyed by anything but strings or integers", () => {
   const offenders: string[] = [];
   for (const f of CHECKER.map((name) => `${name}.ts`)) {
     const text = readFileSync(join(src, f), "utf8");
     for (const m of text.matchAll(/\b(?:Weak)?(?:Map|Set)<\s*([A-Za-z_][\w.]*(?:\[\])?|"[^"]*")/g)) {
-      if (/^(?:string|usize|isize|[iu](?:8|16|32|64|128)|f32|f64|number|bigint|boolean|BinaryOp|[KT]|"[^"]*")$/.test(m[1]!)) continue;
+      if (/^(?:string|usize|isize|[iu](?:8|16|32|64|128)|f32|f64|number|bigint|boolean|BinaryOp|(?:Instance|Body|Local|Class)Id|[KT]|"[^"]*")$/.test(m[1]!)) continue;
       const at = `${f}: ${m[0]}`;
       if (!OBJECT_KEYED.includes(at)) offenders.push(at);
     }

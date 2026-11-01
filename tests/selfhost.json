@@ -1,5 +1,6 @@
 {
   "failing": {
+    "arenas.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "arithmetic.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "ast.ts": "a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet",
     "astgen.ts": "only declarations are allowed at the top level; move this into main()",
@@ -66,5 +67,5 @@
     "values.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet"
   },
-  "count": 65
+  "count": 66
 }

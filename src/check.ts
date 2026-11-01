@@ -30,6 +30,7 @@ import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
 import { expressions, stringLike, type DynTable } from "./values.ts";
+import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 
 export type { Type } from "./typing.ts";
 export type { Body } from "./classes.ts";
@@ -37,21 +38,25 @@ export type { Body } from "./classes.ts";
 // A function with a body; overload signatures and `declare function` are rejected first.
 type Func = Declared & { body: Stmt[] };
 
-// A local generic function's name stands for the function it was lifted to, `generic`.
-export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; generic?: Func };
+// A local generic function's name stands for the function it was lifted to, `generic`. `id`
+// numbers it in its check, naming its slot in the IR; `localId` names it in the compilation's arena.
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: Func };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
 // A checked program: the functions to compile, the tables its check filled in, and the
 // compilation it was checked in.
 // `warnings`: what the build reports without failing, in source order.
-export type Checked = { instances: Instance[]; tables: Tables; compilation: Compilation; warnings: CompileError[] };
+export type Checked = { instances: InstanceId[]; tables: Tables; compilation: Compilation; warnings: CompileError[] };
+
+// The instances a checked program compiles, read from its arena.
+export const compiledOf = ({ instances, tables }: Checked): Instance[] => instances.map((i) => tables.arenas.instanceOf(i));
 
 // One compiled function: a body checked with concrete types, and the tables codegen reads
 // to lower it. `symbol` names it in the IR.
 export type Instance = {
-  // Unique in its compilation, which tables of instances key on.
-  id: usize;
-  body: Body;
+  // Its place in the compilation's arena, which tables of instances key on.
+  id: InstanceId;
+  body: BodyId;
   symbol: string;
   // The tables of the check that made it.
   tables: Tables;
@@ -69,12 +74,12 @@ export type Instance = {
   spelled?: NodeMap<Expr, Type>;
   // The binding each name use, declaration, parameter and shorthand property refers to,
   // after shadowing.
-  locals: NodeMap<Expr | Stmt | Param | ObjectProp, Local>;
+  locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
   // The function each call of a user function or method runs, and the getter each read of
   // an accessor runs.
-  calls: NodeMap<Expr, Instance>;
+  calls: NodeMap<Expr, InstanceId>;
   // The setter each assignment to an accessor runs.
-  setters: NodeMap<Expr, Instance>;
+  setters: NodeMap<Expr, InstanceId>;
   // Each expression whose value meets a narrower declared type, and the type it is copied
   // down to.
   coercions: NodeMap<Expr, Type>;
@@ -87,7 +92,7 @@ export type Instance = {
   // Each fallible call and `throw`, the error it raises, and the error type that error
   // becomes where it goes: the function's own, which returns it.
   // An error the function's type doesn't take is first wrapped by a class's static `from`.
-  raises: NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: Instance }>;
+  raises: NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>;
   // The type of what each `try` catches.
   caught: NodeMap<Stmt, Type>;
   // Each place whose value is handed over rather than copied, which leaves it empty.
@@ -99,20 +104,20 @@ export type Instance = {
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
-  captures?: NodeMap<Local, Local | "this">;
-  captureUses?: NodeMap<Local, Expr | ObjectProp>;
+  captures?: Map<LocalId, LocalId | "this">;
+  captureUses?: Map<LocalId, Expr | ObjectProp>;
   // The captures it changes, which it captures mutably, and those it moves out of itself.
-  changed?: NodeSet<Local>;
-  moved?: NodeSet<Local>;
+  changed?: Set<LocalId>;
+  moved?: Set<LocalId>;
   // Each call or use as a value of a nested function by name, the function, and this body's
   // bindings for what it captures, in its environment's order, from which the call or the
   // value builds it.
-  envs?: NodeMap<Expr, { of: Instance; env: Local[] }>;
+  envs?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }>;
   // What each value boxed into a Dyn runs for the interface's members.
   dyns?: NodeMap<Expr, DynTable>;
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
-  made?: NodeMap<Expr, { of: Instance; env: Local[] }[]>;
+  made?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }[]>;
   // Each call of a type predicate that narrows its argument: the predicate's type, and whether
   // its true and its false answers narrow, which codegen checks against the argument's tag.
   predicates?: NodeMap<Expr, { index: usize; type: Type; yes: boolean; no: boolean }>;
@@ -125,7 +130,7 @@ export type Instance = {
   // A generator's own type, which calling it gives, and where each variable and each
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
-  frame?: { locals: NodeMap<Local, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
+  frame?: { locals: Map<LocalId, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -257,26 +262,26 @@ function madeBy<T extends ClosureType | FutureType | GeneratorType>(t: T, instan
 }
 
 function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
-  const { typing } = instance.tables;
+  const { typing, arenas } = instance.tables;
   const { leafFuture, lower, lentPromise, nextResult, yieldsOf, promiseInterface, rec } = typing;
   const fields: Field[] = [{ name: "state", type: "i32" }];
-  const locals = new NodeMap<Local, usize>();
+  const locals = new Map<LocalId, usize>();
   const loops = new NodeMap<Stmt, usize>();
   // Each `await` keeps the future it awaits in the frame while it is pending.
   const awaits = new NodeMap<Expr, usize>();
   const add = (l: Local) => {
-    if (locals.has(l)) return;
-    locals.set(l, fields.length);
+    if (locals.has(l.localId)) return;
+    locals.set(l.localId, fields.length);
     fields.push({ name: `${l.name}.${l.id}`, type: l.type });
   };
   // An async arrow's frame holds what it captured, first, and an async method's its object.
-  if (instance.body.closure) fields.push({ name: "env", type: "void" });
-  const self = instance.body.self;
+  if (bodyOf(instance).closure) fields.push({ name: "env", type: "void" });
+  const self = bodyOf(instance).self;
   if (self && !self.constructor) fields.push(receiverField(typing, self, (t) => (instance.concrete ? typing.lower(t) : t)));
-  instance.body.params.forEach((p) => add(instance.locals.get(p)!));
+  bodyOf(instance).params.forEach((p) => add(arenas.localOf(instance.locals.get(p)!)));
   // A local generic function's name holds nothing.
-  [...new NodeSet(instance.locals.values())].filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
-  walk("stmt", instance.body.body, ({ of, node }) => {
+  [...new Set(instance.locals.values())].map((l) => arenas.localOf(l)).filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
+  walk("stmt", bodyOf(instance).body, ({ of, node }) => {
     if (of === "expr" && node.kind === "arrow") return false;
     const s = node as Stmt;
     if (of === "stmt" && s.kind === "forOf") {
@@ -405,7 +410,8 @@ export function check(compilation: Compilation, written: Stmt[], library = false
 }
 
 function checkAll(compilation: Compilation, written: Stmt[], library: boolean, macros: boolean, module: boolean): Checked {
-  const { counts, ids, rust: { names: rustNames, classNodes: rustClassNodes } } = compilation;
+  const { arenas, counts, ids, rust: { names: rustNames, classNodes: rustClassNodes } } = compilation;
+  const localOf = (id: LocalId): Local => arenas.localOf(id);
   const tables = newTables(compilation);
   const { typing } = tables;
   const { allFields, elementsOf, field, holdsPart, interiorMutable, isCopy, isTuple, optionRef, widenLet,
@@ -444,9 +450,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   lowerDefaults(tables, written);
   if (!library) timersRunAsync(ids, written, timerMains);
   const program = [...stdFor(compilation, written), ...written];
-  const funcs: Func[] = [];
+  const funcs: (Func & Body)[] = [];
+  const addBody = <F extends Func>(f: F) => arenas.addBody(f);
   const { aliases } = tables;
-  const classes = new Map<string, ClassInfo>();
+  const classes = new Map<string, ClassId>();
   // Generic classes, declared again for each set of type arguments they are used with.
   const templates = new Map<string, ClassNode & { name: string }>();
   const interfaces = new Map<string, Interface>();
@@ -478,17 +485,17 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const node = { ...s, id: nextId(ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
       if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
       if (node.typeParams.length > 0) templates.set(s.name, node);
-      else classes.set(s.name, declareClass(tables, node));
+      else classes.set(s.name, declareClass(tables, node).classId);
+      const declared = arenas.classOf(classes.get(s.name));
       const rust = rustClassNodes.get(s);
-      if (rust) rec(classes.get(s.name)!.type).rust = rust;
+      if (rust) rec(declared!.type).rust = rust;
       // A Rust type declaring no constructor is never made with `new`, so its handle needs no
       // assigning in the empty one it is given.
-      if (rust && !classes.get(s.name)!.constructor.rust) classes.get(s.name)!.required.clear();
+      if (rust && !arenas.bodyOf(declared!.constructor).rust) declared!.required.clear();
       // A `static readonly` field is a top-level const named `C.x`, which no source name can be.
-      const declared = classes.get(s.name);
       for (const f of declared?.staticFields.values() ?? []) {
         const giving: Stmt = { id: nextId(ids), kind: "return", value: f.init!, start: f.init!.start, end: f.init!.end };
-        funcs.push(Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end }, { comptime: "const" as const, owner: declared!.type }));
+        funcs.push(addBody(Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end }, { comptime: "const" as const, owner: declared!.type })));
       }
       continue;
     }
@@ -496,14 +503,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (s.kind === "declare" && s.body.kind === "function" && !hasBody(s.body)) {
       const rest = s.body.params.find((p) => p.rest);
       if (rest) throw unsupported("variadic C functions", rest);
-      funcs.push(Object.assign({ ...s.body, id: nextId(ids), body: [] }, { foreign: true }));
+      funcs.push(addBody(Object.assign({ ...s.body, id: nextId(ids), body: [] }, { foreign: true })));
       continue;
     }
     // `export function f() {}` is an ordinary function, and in a library a C function too; an
     // exported macro is for other files.
     if (s.kind === "export" && s.body.kind === "function" && hasBody(s.body)) {
       if (s.body.macro) macroShape(s.body);
-      funcs.push(s.body.macro ? s.body : Object.assign({ ...s.body, id: nextId(ids) }, { exported: true }));
+      funcs.push(addBody(s.body.macro ? s.body : Object.assign({ ...s.body, id: nextId(ids) }, { exported: true })));
       continue;
     }
     const declaration = unsupportedDeclaration(s);
@@ -519,16 +526,16 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         if (!d.init) throw new CompileError("a top-level 'const' needs its value", d.start, d.end);
         // A generic arrow is a family of functions, so it is declared as a generic function is.
         if (d.init.kind === "arrow" && d.init.typeParams.some((p) => !isLifetime(p))) {
-          funcs.push(arrowFunction(ids, d.target.name, d.init, d));
+          funcs.push(addBody(arrowFunction(ids, d.target.name, d.init, d)));
           continue;
         }
         const giving: Stmt = { id: nextId(ids), kind: "return", value: d.init, start: d.init.start, end: d.init.end };
-        funcs.push(Object.assign({ ...made, id: nextId(ids), name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const }));
+        funcs.push(addBody(Object.assign({ ...made, id: nextId(ids), name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const })));
       }
       continue;
     }
     if (s.kind === "comptime") {
-      funcs.push(Object.assign({ ...made, id: nextId(ids), name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const }));
+      funcs.push(addBody(Object.assign({ ...made, id: nextId(ids), name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const })));
       continue;
     }
     if (s.kind === "let") throw new CompileError("a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
@@ -536,20 +543,24 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (s.kind !== "function") throw new CompileError("only declarations are allowed at the top level; move this into main()", s.start, s.end);
     const rust = rustNames.get(s);
     if (rust) {
-      funcs.push(Object.assign({ ...s, id: nextId(ids), body: [] }, { foreign: true, rust }));
+      funcs.push(addBody(Object.assign({ ...s, id: nextId(ids), body: [] }, { foreign: true, rust })));
       continue;
     }
     if (s.js) {
-      const body = { ...s, id: nextId(ids), body: [] };
-      jsBodies.set(s, body);
+      const body = addBody({ ...s, id: nextId(ids), body: [] });
+      jsBodies.set(s, body.bodyId);
       funcs.push(body);
       continue;
     }
     if (!hasBody(s)) throw new CompileError(`'${s.name}' has no implementation; follow its overload signatures with a 'function ${s.name}' that has a body`, s.start, s.end);
     if (s.macro) macroShape(s);
-    funcs.push(s);
+    funcs.push(addBody(s));
   }
-  const byName = new Map<string, Func>();
+  // Overloads are lowered on the tree, where an implementation holds its signatures' functions;
+  // as a body it names them by id.
+  for (const f of funcs) if (f.overloads) f.overloads = (f.overloads as unknown as Func[]).map((w) => addBody(w).bodyId);
+  const byName = new Map<string, BodyId>();
+  const bodyNamed = (name: string) => arenas.bodyOf(byName.get(name));
   for (const f of funcs) {
     // A tag takes its strings, then its values as a rest parameter.
     const tag = f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest;
@@ -562,7 +573,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
     if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
-    byName.set(f.name, f);
+    byName.set(f.name, f.bodyId);
   }
   // The name the file holding `at` writes for a top-level name, or nothing when that file can't
   // reach it. Std's prelude is in no file's table and reaches every file, but for its internals.
@@ -574,7 +585,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     return STD_INTERNAL.has(name) || name.startsWith("__") ? undefined : name;
   };
   const reached = (names: Iterable<string>, at: usize) => [...names].flatMap((n) => reachedAs(n, at) ?? []);
-  const main = byName.get("main");
+  const main = bodyNamed("main");
   if (!main && !library && !macros && !module) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   // A class's members, for interface satisfaction. Like the resolver and generic classes,
@@ -584,12 +595,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     returnOf: (b, at) => returnOf(definition(b), at),
     // A generic method's, with its own type parameters standing for themselves.
     paramTypesOf: (b) => ((b.typeParams ?? []).some((p) => !isLifetime(p)) ? paramTypes(definition(b), scopeOf(definition(b))) : declaredParams(b)),
-    bodyNamed: (name) => byName.get(name),
+    bodyNamed,
     typeParamsOf: (b) => {
       const scope = scopeOf(definition(b));
       return (b.typeParams ?? []).filter((p) => !isLifetime(p)).map((p) => scope.get(p.name)!);
     },
     typing,
+    arenas,
     assuming: new Set(),
   };
   const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
@@ -597,7 +609,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
     classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
   });
-  classes.forEach(register);
+  classes.forEach((c) => register(arenas.classOf(c)));
   const { classNamed, construct, start, define, definedClass } = genericClasses({
     tables, classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
   });
@@ -611,28 +623,28 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A generic enum's variant made with other type arguments, while lowering.
   lowersVariants((v, args) => {
     const r = rec(v);
-    return enumInstance(enums.get(r.enum)!, args, checking?.body ?? { start: 0, end: 0 }).variants.get(r.member)!;
+    return enumInstance(enums.get(r.enum)!, args, (checking && bodyOf(checking)) ?? { start: 0, end: 0 }).variants.get(r.member)!;
   });
   lowersInterfaces(interfaceInstance);
   // A class first made while lowering is reported at the function being checked.
-  lowersClasses((c, args) => classNamed(rec(c).generic!.name, args, checking?.body ?? { start: 0, end: 0 })!);
+  lowersClasses((c, args) => classNamed(rec(c).generic!.name, args, (checking && bodyOf(checking)) ?? { start: 0, end: 0 })!);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
-  const done = new NodeSet<Instance>();
+  const done = new Set<InstanceId>();
   // Each Rust function's types, by its shim symbol, as first declared.
   const rustTypes = new Map<string, string>();
   // Comptime runs a function only once the checker has been through it.
   comptimeChecks(tables, (i) => {
-    if (inProgress.has(i)) return false;
+    if (inProgress.has(i.id)) return false;
     checkBody(i);
     return true;
   });
   // Each concrete instance's return type as its own body saw it, before lowering.
-  const views = new NodeMap<Instance, Type>();
+  const views = new Map<InstanceId, Type>();
   // Each unannotated `let` of integer literals a use needs as another integer type, as Rust
   // infers it, and the variables still open to that in the pass being checked.
   const demands = new NodeMap<Stmt, Integer>();
-  const candidates = new NodeMap<Local, Stmt>();
+  const candidates = new Map<LocalId, Stmt>();
   // How many new demands the body being checked made itself, not counting its callees'.
   let demanded = 0;
   const { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
@@ -646,8 +658,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   function valueTypeOf(name: string, at: Span, shadowed: boolean): Type {
     if (shadowed) throw new CompileError(`'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
     if (classes.has(name)) throw new CompileError(`'typeof' of the class '${name}' isn't supported yet, since classes aren't values in Fish; name the class itself as the type`, at.start, at.end);
-    const constant = byName.get(`const ${name}`);
-    const f = constant ?? byName.get(name);
+    const constant = bodyNamed(`const ${name}`);
+    const f = constant ?? bodyNamed(name);
     if (!f) throw new CompileError(`'typeof' in a type names a top-level function or const, and there is none named '${name}'`, at.start, at.end);
     if (querying.has(name)) throw new CompileError(`'typeof ${name}' is used in working out ${name}'s own type, so that type would depend on itself; write it out`, at.start, at.end);
     querying.add(name);
@@ -665,7 +677,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A computed enum member's value: its initializer, run while compiling as a top-level const is.
   function enumMemberValue(owner: string, member: string, init: Expr): Value {
     const giving: Stmt = { id: nextId(ids), kind: "return", value: init, start: init.start, end: init.end };
-    const f: Func = Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start: init.start, end: init.end }, { comptime: "const" as const });
+    const f = addBody(Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start: init.start, end: init.end }, { comptime: "const" as const }));
     const instance = definition(f);
     checkBody(instance);
     return untagged(comptimeBody(instance));
@@ -679,13 +691,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A result worked out from a body may need the class being laid out, whose fields aren't known.
   function unlaid(name: string, at: Span) {
     const [mid] = laying.values();
-    if (mid) throw new CompileError(`'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${rec(mid.type).name}' are being worked out; write ${name}'s return type`, at.start, at.end);
+    if (mid) throw new CompileError(`'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${rec(arenas.classOf(mid).type).name}' are being worked out; write ${name}'s return type`, at.start, at.end);
   }
 
   // A function's type for `typeof`: a parameter typed with an object type, an interface or a
   // function type makes it generic in Fish, but its declared type is what `typeof` names.
-  function functionTypeOf(f: Func, at: Span): Type {
-    const explicit = f.typeParams.filter((p) => !(p.constraint?.kind === "ref" && p.constraint.name === "Lifetime"));
+  function functionTypeOf(f: Body, at: Span): Type {
+    const explicit = (f.typeParams ?? []).filter((p) => !(p.constraint?.kind === "ref" && p.constraint.name === "Lifetime"));
     if (explicit.length > 0 || f.params.some((p) => p.comptime)) {
       throw new CompileError(`'typeof' of the generic function '${f.name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
     }
@@ -717,7 +729,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // The caller's own comptime parameter passed on: the same value, or in a definition the same
     // placeholder, so a call passing it on shares the caller's instance.
     const local = arg.kind === "ident" ? checking?.locals.get(arg) : undefined;
-    const own = local && checking?.body.params.find((p) => p.comptime && checking!.locals.get(p) === local);
+    const own = local && checking && bodyOf(checking).params.find((p) => p.comptime && checking!.locals.get(p) === local);
     if (own && checking) return checking.bindings.get(comptimeName(own))!;
     if (!checking?.concrete) {
       let open = placeholders.get(arg);
@@ -725,7 +737,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       return open;
     }
     // The argument was checked in the innermost body being checked, a closure's perhaps.
-    const site = [...inProgress].reverse().find((i) => i.types.has(arg)) ?? checking;
+    const site = [...inProgress].reverse().map((i) => arenas.instanceOf(i)).find((i) => i.types.has(arg)) ?? checking;
     const given = site.types.get(arg);
     const member = recOf(given);
     if (member?.kind === "literal" && member.owner) return given!;
@@ -742,11 +754,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new NodeSet<Stmt>();
   const continued = new NodeSet<Stmt>();
-  const inProgress = new NodeSet<Instance>();
+  const inProgress = new Set<InstanceId>();
   let nextLocal = 0;
   // Every closure's instance, and the instance each closure type calls.
-  const closures: Instance[] = [];
-  const closureBodies = new TypeMap<ClosureType, Instance>();
+  const closures: InstanceId[] = [];
+  const closureBodies = new TypeMap<ClosureType, InstanceId>();
 
   // A generic class's constructor parameters, its base's when it declares no constructor.
   function templateParams(name: string, seen: Set<string> = new Set<string>()): Param[] | undefined {
@@ -756,14 +768,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (ctor) return ctor.params;
     const named = t.extends?.kind === "instantiation" ? t.extends.expr : t.extends;
     if (named?.kind !== "ident") return undefined;
-    return templateParams(named.name, seen.add(name)) ?? classes.get(named.name)?.constructor.params;
+    return templateParams(named.name, seen.add(name)) ?? arenas.bodyOf(arenas.classOf(classes.get(named.name))?.constructor)?.params;
   }
 
-  classes.forEach((c) => link(c, new TypeSet()));
-  setJsError(classes.get("JsError")?.type);
+  classes.forEach((c) => link(arenas.classOf(c), new TypeSet()));
+  setJsError(arenas.classOf(classes.get("JsError"))?.type);
   // Classes are laid out before any body is checked, since checking one may need another's
   // fields. Until the resolver exists, a generic class's instance waits for `start`.
-  infoOf.forEach(layout);
+  infoOf.forEach((c) => layout(arenas.classOf(c)));
   start();
   define();
   // Aliases are checked once classes are laid out, since one may read a class's fields or a
@@ -771,7 +783,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // payload naming no type is caught unused.
   validate();
   for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
-  classes.forEach(implementsSignatures);
+  classes.forEach((c) => implementsSignatures(arenas.classOf(c)));
   // An enum with computed members is settled when first read; one nothing reads still reports
   // a bad initializer.
   for (const e of enums.values()) void e.members;
@@ -785,8 +797,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
   });
   while (unsettled.length > 0 || pending.length > 0) {
-    if (unsettled.length > 0) settle(unsettled.shift()!);
-    else checkBody(pending.shift()!);
+    if (unsettled.length > 0) settle(arenas.classOf(unsettled.shift()!));
+    else checkBody(arenas.instanceOf(pending.shift()!));
   }
   if (main && main.params.length > 0) throw new CompileError("main() takes no parameters", main.start, main.end);
   const started = main && instanceOf(main).returns;
@@ -795,11 +807,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   if (library) funcs.filter((f) => (f as Body).exported).forEach((f) => exportable(definition(f)));
   if (library && !funcs.some((f) => (f as Body).exported)) throw new CompileError("a library has nothing for C to call; mark functions with 'export'", 0, 0);
   // An abstract member and a template are checked but never compiled; each concrete class's copy is.
-  const compiled = new NodeSet([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf).filter((f) => !f.abstract && !f.template)]);
+  const compiled = new NodeSet([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap((c) => bodiesOf(arenas.classOf(c))).filter((f) => !f.abstract && !f.template)]);
   // So is an instance made for an abstract class, which only a template's check makes.
-  const checkedOnly = (i: Instance): boolean => i.body.template === true || [...i.bindings.values()].some((t) => abstractPart(typing, t)) || (i.body.closure !== undefined && checkedOnly(i.body.closure.parent));
-  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js && !checkedOnly(i)), ...closures.filter((i) => i.concrete && !checkedOnly(i))];
-  unreached(typing, equalities, compiledInstances, (i) => i.body.abstract === true || checkedOnly(i));
+  const checkedOnly = (i: Instance): boolean => bodyOf(i).template === true || [...i.bindings.values()].some((t) => abstractPart(typing, t)) || (bodyOf(i).closure !== undefined && checkedOnly(arenas.instanceOf(bodyOf(i).closure!.parent)));
+  const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(bodyOf(i)) && !bodyOf(i).js && !checkedOnly(i)), ...closures.map((c) => arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
+  unreached(typing, equalities, arenas, compiledInstances.map((i) => i.id), (i) => bodyOf(i).abstract === true || checkedOnly(i));
   // A package's const whose value has no JS form yet stops the program where it is read.
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses);
@@ -807,7 +819,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A package's function called with a value, or giving one, that has no JS form.
   const unconverted = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
     if (x.kind !== "call" || !jsCalls.has(x)) return false;
-    const gives = i.calls.get(x)?.returns ?? "void";
+    const gives = arenas.instanceOf(i.calls.get(x))?.returns ?? "void";
     // A callback crosses as the stored callable it meets.
     const given = (a: Expr) => {
       const to = i.coercions.get(a);
@@ -825,11 +837,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A method's body is named for its class, as in `C.m`.
   const method = (b: Body) => b.name.slice(b.name.lastIndexOf(".") + 1);
   const overrides = (b: Body) => {
-    const base = classOf(b.owner!).base;
-    return base !== undefined && inherited(base, "methods", method(b)) !== undefined;
+    const base = arenas.classOf(classOf(b.owner!).base);
+    return base !== undefined && inherited(arenas, base, "methods", method(b)) !== undefined;
   };
   const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
-  return { instances: compiledInstances, tables, compilation, warnings: warnings(tables, compiledInstances, required) };
+  const compiledIds = compiledInstances.map((i) => i.id);
+  return { instances: compiledIds, tables, compilation, warnings: warnings(tables, compiledIds, required) };
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
   // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
@@ -907,7 +920,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // What a call's returned reference, or returned value holding references, borrows from, as
   // the callee's signature says; with no lifetime written, whatever was lent to the call.
   function sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[] {
-    const f = instance.body;
+    const f = bodyOf(instance);
     const returns = returnOf(instance, at);
     if (!holdsRef(returns)) return [];
     const ref = isRef(returns) ? returns : optionRef(returns);
@@ -943,7 +956,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
   // Codegen sees each type parameter as the concrete type it stands for.
   function lowerTables(instance: Instance) {
-    views.set(instance, instance.returns);
+    views.set(instance.id, instance.returns);
     // `JSON.stringify` and printing write a field by how it was spelled, which lowering forgets.
     for (const e of instance.types.keys()) {
       const stringified = e.kind === "call" && jsonCalls.get(e) === "stringify" ? e.args[0] : undefined;
@@ -965,8 +978,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     instance.caught.forEach((t, s) => instance.caught.set(s, lower(t)));
     instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: lower(p.type) }));
     if (instance.throws) instance.throws = lower(instance.throws);
-    for (const local of new NodeSet(instance.locals.values())) local.type = lower(local.type);
-    for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(target)));
+    for (const local of new Set(instance.locals.values())) arenas.localOf(local).type = lower(arenas.localOf(local).type);
+    for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, counterpart(arenas.instanceOf(target)).id));
     instance.returns = lower(instance.returns);
   }
 
@@ -974,10 +987,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // class made from what the parameter stands for. Both come from one template, so their
   // members are in the same order.
   function counterpart(target: Instance): Instance {
-    const owner = target.body.owner;
+    const owner = bodyOf(target).owner;
     const to = owner && (lower(owner) as ClassType);
     if (!owner || to === owner) return target;
-    const body = bodiesOf(classOf(to!))[bodiesOf(classOf(owner)).indexOf(target.body)]!;
+    const body = bodiesOf(classOf(to!))[bodiesOf(classOf(owner)).indexOf(bodyOf(target))]!;
     const implicit = [...implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
     // Its comptime parameters' values carry over too, as do a generic method's own type
     // arguments.
@@ -989,7 +1002,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // An export in a library is a C function too, so its signature crosses to C as a declared
   // function's does, and it can't throw, be generic or be a generator, which C can't call.
   function exportable(instance: Instance) {
-    const f = instance.body;
+    const f = bodyOf(instance);
     const crosses = (t: Type) => isNumeric(t) || t === "boolean" || recOf(t)?.kind === "pointer";
     if (f.typeParams?.length) throw new CompileError("a library can't export a generic function to C, which has no generics; export one for each type", f.start, f.end);
     if (f.generator) throw new CompileError("a library can't export a generator to C, which has no generators", f.start, f.end);
@@ -1004,7 +1017,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     f.params.forEach((p) => {
       if (defaulted.has(p)) throw new CompileError("an exported function's parameter can't have a default in a library, since C callers pass every argument", p.start, p.end);
-      const t = instance.locals.get(p)!.type;
+      const t = arenas.localOf(instance.locals.get(p)!).type;
       if (!crosses(t)) throw new CompileError(`an exported function's parameter can't be a '${show(t)}' in a library; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
     });
     if (instance.returns !== "void" && !crosses(instance.returns)) {
@@ -1016,7 +1029,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // A C function's signature, which must cross to C as it is: numbers, booleans and raw
   // pointers, with `void` for no result.
   function foreignSignature(instance: Instance) {
-    const f = instance.body;
+    const f = bodyOf(instance);
     if (f.rust) return rustSignature(instance);
     if (f.typeParams?.length) throw unsupported("generic C functions", f);
     if (f.generator) throw new CompileError("a C function can't be a generator; drop the '*'", f.start, f.end);
@@ -1034,12 +1047,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const returns = resolveType(f.returnType);
     if (returns !== "void" && !crosses(returns)) throw new CompileError(`a C function can't return a '${show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
     instance.returns = returns;
-    done.add(instance);
+    done.add(instance.id);
   }
 
   // A Rust function's signature: numbers and booleans, with `void` for no result, so far.
   function rustSignature(instance: Instance) {
-    const f = instance.body;
+    const f = bodyOf(instance);
     const what = `the Rust function '${f.name}'`;
     const constructor = f.self?.constructor === true;
     if (f.typeParams?.length) throw unsupported("generic Rust functions", f);
@@ -1076,7 +1089,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const other = rustTypes.get(f.rust!.symbol);
     if (other !== undefined && other !== types) throw new CompileError(`'${f.rust!.crate}::${f.rust!.path}' is declared elsewhere as ${other}; declare it with the same types`, f.start, f.end);
     rustTypes.set(f.rust!.symbol, types);
-    done.add(instance);
+    done.add(instance.id);
   }
 
   // A package's function's signature, from its declaration: what it takes and gives must cross
@@ -1087,16 +1100,16 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     try {
       jsSigned(instance);
     } catch (e) {
-      if (!(e instanceof CompileError) || jsCalledAt.has(instance.body)) throw e;
-      jsUncalled.set(instance.body, e);
+      if (!(e instanceof CompileError) || jsCalledAt.has(bodyOf(instance))) throw e;
+      jsUncalled.set(bodyOf(instance), e);
       instance.signature = [];
       instance.returns = blockType("JsValue");
-      done.add(instance);
+      done.add(instance.id);
     }
   }
 
   function jsSigned(instance: Instance) {
-    const f = instance.body;
+    const f = bodyOf(instance);
     const named = `'${f.js!.name}' from '${f.js!.module}'`;
     // A declaration Fish can't type is refused where it is declared, noting the call that reached it.
     const at = jsCalledAt.get(f);
@@ -1106,7 +1119,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (!instance.concrete) {
       instance.signature = [];
       instance.returns = blockType("JsValue");
-      done.add(instance);
+      done.add(instance.id);
       return;
     }
     // What its type parameters stand for, as plain types, since JS sees no Fish placeholders.
@@ -1124,7 +1137,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const why = returns === "void" ? undefined : uncrossable(returns);
     if (why) throw refuse(`${named} gives a '${show(returns)}', which can't cross between Fish and JS yet: ${why}`, f.returnType!);
     instance.returns = returns;
-    done.add(instance);
+    done.add(instance.id);
   }
 
   // An overload signature's body only passes its parameters on, so what fails there is the
@@ -1141,28 +1154,30 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // Checking the callee may instantiate from this call again, so its site is read first.
     const site = siteOf(at);
     const returns = returnOf(instance, at);
-    if (!site || (instance.body.js && instance.concrete)) return returns;
-    const f = instance.body;
+    if (!site || (bodyOf(instance).js && instance.concrete)) return returns;
+    const f = bodyOf(instance);
     const declared = returnTypeOf(f, new Map([...instance.bindings, ...site]));
     if (declared && !describes(declared)) return declared;
     const own = scopeOf(instance);
-    return replaced(views.get(instance) ?? returns, new TypeMap([...site].map(([name, t]) => [own.get(name)!, t])));
+    return replaced(views.get(instance.id) ?? returns, new TypeMap([...site].map(([name, t]) => [own.get(name)!, t])));
   }
 
   // Each member a class writes that implements an abstract member takes what the declaration
   // takes and gives what it gives, as a template calling it through the abstract class expects.
   function implementsSignatures(c: ClassInfo) {
     for (const table of ["methods", "getters", "setters"] as const) {
-      for (const [name, f] of c[table]) {
-        if (f.abstract || f.copyOf) continue;
-        for (let b = c.base; b; b = b.base) {
-          const declared = b[table].get(name);
+      for (const [name, id] of c[table]) {
+        const f = arenas.bodyOf(id);
+        if (f.abstract || f.copyOf !== undefined) continue;
+        for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
+          const declared = arenas.bodyOf(b[table].get(name));
           if (declared?.abstract) implementsSignature(f, declared, b);
         }
       }
     }
-    for (let b = c.base; b; b = b.base) {
-      for (const [name, declared] of b.getters) {
+    for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
+      for (const [name, id] of b.getters) {
+        const declared = arenas.bodyOf(id);
         const own = rec(c.type).fields.find((x) => x.name === name);
         if (!declared.abstract || !own) continue;
         const wanted = returnOf(instanceOf(declared), declared);
@@ -1201,12 +1216,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
   // What a call of an instance may throw, as its caller sees it.
   function errorOf(instance: Instance): Type | undefined {
-    const f = instance.body;
+    const f = bodyOf(instance);
     return f.throws && withScope(instance.bindings, () => resolveType(f.throws!));
   }
 
   function returnOf(instance: Instance, at: Span): Type {
-    const f = instance.body;
+    const f = bodyOf(instance);
     // A package's function gives what its signature made of its declaration for JS; a generic
     // one's definition gives what it declares, as each instance makes its own.
     if (f.js && instance.concrete) {
@@ -1215,7 +1230,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     const declared = returnTypeOf(f, instance.bindings);
     if (declared && !describes(declared)) return declared;
-    if (inProgress.has(instance)) {
+    if (inProgress.has(instance.id)) {
       if (f.generator) throw new CompileError(`a generator can't make another of itself, since its state would have to hold itself; loop inside one generator instead`, at.start, at.end);
       if (f.async) throw new CompileError(`an async function can't await another of itself, since its state would have to hold itself; loop inside one instead`, at.start, at.end);
       throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
@@ -1228,18 +1243,18 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // definition, or the same member of its generic class's definition, with a closure's body
   // checked within the body it is written in.
   function asWritten(instance: Instance) {
-    let f = instance.body;
-    if (f.closure) return asWritten(f.closure.parent);
+    let f = bodyOf(instance);
+    if (f.closure) return asWritten(arenas.instanceOf(f.closure.parent));
     const generic = f.scope && f.owner ? rec(f.owner).generic : undefined;
     const template = generic ? definedClass(generic.name) : undefined;
     if (template) f = bodiesOf(template).find((b) => b.start === f.start && b.end === f.end) ?? f;
     const written = definition(f);
-    if (written !== instance && !inProgress.has(written)) checkBody(written);
+    if (written !== instance && !inProgress.has(written.id)) checkBody(written);
   }
 
   // Checks an instance with its type arguments in scope.
   function checkBody(instance: Instance) {
-    if (done.has(instance)) return;
+    if (done.has(instance.id)) return;
     const outer = checking;
     const outerDemanded = demanded;
     checking = instance;
@@ -1252,8 +1267,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // A body sees its own names, not those of a body whose check needed it.
           withSight(undefined, () => withScope(scopeOf(instance), () => checkInstance(instance)));
         } catch (e) {
-          inProgress.delete(instance);
-          if (!(e instanceof CompileError) || demanded === 0) throw instance.body.signature ? incompatible(instance.body, e) : e;
+          inProgress.delete(instance.id);
+          if (!(e instanceof CompileError) || demanded === 0) throw bodyOf(instance).signature ? incompatible(bodyOf(instance), e) : e;
         }
         if (demanded === 0) return;
         forget(instance);
@@ -1274,19 +1289,19 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     delete instance.dyns;
     delete instance.made;
     delete instance.predicates;
-    const within = (c: Instance): boolean => c === instance || (c.body.closure !== undefined && within(c.body.closure.parent));
+    const within = (c: Instance): boolean => c === instance || (bodyOf(c).closure !== undefined && within(arenas.instanceOf(bodyOf(c).closure!.parent)));
     // A closure checked within a discarded pass isn't in progress any more either.
-    for (const c of [...inProgress]) if (within(c)) inProgress.delete(c);
-    const kept = closures.filter((c) => !within(c));
+    for (const c of [...inProgress]) if (within(arenas.instanceOf(c))) inProgress.delete(c);
+    const kept = closures.filter((c) => !within(arenas.instanceOf(c)));
     closures.length = 0;
     closures.push(...kept);
-    views.delete(instance);
-    done.delete(instance);
-    inProgress.delete(instance);
+    views.delete(instance.id);
+    done.delete(instance.id);
+    inProgress.delete(instance.id);
   }
 
   function checkInstance(instance: Instance, outer?: Outer) {
-    const f = instance.body;
+    const f = bodyOf(instance);
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async
     // function's or a generator's state, or given to an accessor, has no instance per value.
     const fixedParam = f.params.find((p) => p.comptime);
@@ -1295,13 +1310,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (f.foreign) return foreignSignature(instance);
     if (f.abstract) {
       instance.returns = returnTypeOf(f, instance.bindings) ?? "void";
-      done.add(instance);
+      done.add(instance.id);
       return;
     }
     if (f.js) return jsSignature(instance);
     if (fixedParam && (f.async || f.generator)) throw unsupported("comptime parameters on async functions and generators", fixedParam);
     if (fixedParam && f.exported) throw new CompileError("an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
-    inProgress.add(instance);
+    inProgress.add(instance.id);
     const { types, locals, coercions, calls, setters, jumps } = instance;
     // A closure returns the number type the function type it meets returns, so its literals
     // take that type.
@@ -1336,7 +1351,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // How many statements with a `finally` enclose the code being checked: a generator dropped
     // at a `yield` there would never run the `finally`.
     let finalizing = 0;
-    const scopes: Map<string, Local>[] = [new Map()];
+    const scopes: Map<string, LocalId>[] = [new Map()];
     // Every type written from here on, in annotations, casts and closures, sees these names.
     const named = (p: Param, name: string) => p.pattern.kind === "ident" && p.pattern.name === name;
     // Only a type written inside the body sees them: one written elsewhere, a class's field or
@@ -1356,27 +1371,27 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     let comptimeDepth = 0;
     const floors: usize[] = [];
     // Each narrowed `Mut` given a whole value of another member, in order.
-    const changed: Local[] = [];
+    const changed: LocalId[] = [];
     // The expression an expression statement being checked consists of.
     let whole: Expr | undefined;
     const assigned = assignedNames(f.body);
     // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
     // A capture narrows as a variable of the closure's would.
-    const narrowable = (l: Local) => (captures?.has(l) ? !assigned.has(l.name) : l.param || !l.mutable || !assigned.has(l.name)) || (isRef(l.type) && rec(l.type).mutable);
+    const narrowable = (l: Local) => (captures?.has(l.localId) ? !assigned.has(l.name) : l.param || !l.mutable || !assigned.has(l.name)) || (isRef(l.type) && rec(l.type).mutable);
     // How many scopes enclose each binding's declaration.
-    const depths = new NodeMap<Local, usize>();
+    const depths = new Map<LocalId, usize>();
     // Bindings declared directly in a switch case body whose checking has finished.
-    const caseOnly = new NodeSet<Local>();
+    const caseOnly = new Set<LocalId>();
     // A call of a function whose result is `x is T` narrows its argument for x to T.
     const predicate = (call: Extract<Expr, { kind: "call" }>) => {
-      const target = calls.get(call);
-      const p = target?.body.returnType;
+      const target = arenas.instanceOf(calls.get(call));
+      const p = target && bodyOf(target).returnType;
       if (!target || p?.kind !== "predicate" || !p.type) return undefined;
-      const index = target.body.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name) as usize;
+      const index = bodyOf(target).params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name) as usize;
       const type = withScope(target.bindings, () => resolveType(p.type!));
       return { index, type, narrows: (yes: boolean, no: boolean) => void ((yes || no) && (instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no })) };
     };
-    const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, Local>, narrowable, predicate);
+    const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, LocalId>, narrowable, predicate);
 
     // A constructor's fields are unset until assigned, so until then `this` may only appear as
     // the target of an assignment to one of them, and the constructor can't return.
@@ -1395,7 +1410,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const generic = f.self && rec(f.self.type).generic;
     const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     // A closure sees the `this` of the body it is written in, which it only reads.
-    const enclosing = f.closure && selfOf(f);
+    const enclosing = f.closure && selfOf(arenas, f);
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
@@ -1405,7 +1420,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
       classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
       asWritten: () => asWritten(instance),
-      envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of, env }),
+      envOf: (e, of, env) => void (instance.envs ??= new NodeMap()).set(e, { of: of.id, env: env.map((l) => l.localId) }),
       dynOf: (e, table) => void (instance.dyns ??= new NodeMap()).set(e, table),
       nestedLocal,
       owning: f.closure !== undefined && (f.async === true || f.closure.move === true),
@@ -1434,10 +1449,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       },
       bind: (name, type, node) => {
         declare(name, type, false, false, node);
-        return locals.get(node)!;
+        return localOf(locals.get(node)!);
       },
       narrowed,
-      captured: (l) => captures?.has(l) ?? false,
+      captured: (l) => captures?.has(l.localId) ?? false,
       raise,
       comptime: <T>(check: () => T): T => {
         comptimeDepth++;
@@ -1449,7 +1464,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       },
       errorOf,
       throwsDeclared: () => instance.throws,
-      syncMain: timerMains.has(f as Func),
+      syncMain: timerMains.has(f as Body & Func),
       thrown,
       noteThis,
       closing: f.closure !== undefined,
@@ -1461,13 +1476,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       awaitable,
       unsafe: f.closure?.unsafe === true,
       changesCapture,
-      reachable: (l) => !caseOnly.has(l),
+      reachable: (l) => !caseOnly.has(l.localId),
       rewritten,
-      depthOf: (l) => depths.get(l)!,
+      depthOf: (l) => depths.get(l.localId)!,
       closure,
       liftArrow,
       resolveWith: (t, scope) => withScope(scope, () => resolveType(t)),
-      closureBody: (t) => closureBodies.get(t)!,
+      closureBody: (t) => arenas.instanceOf(closureBodies.get(t)!),
       resolveType,
       implicitOf,
       callbackType,
@@ -1476,12 +1491,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // A closure's capture stands for the variable it captures. The first demand decides,
       // and a different one is the usual mismatch once it applies.
       infer: (e, to) => {
-        let local = e.kind === "ident" ? locals.get(e) : undefined;
-        for (let at: Instance | undefined = instance; local && at?.captures?.has(local); at = at.body.closure?.parent) {
-          const from = at.captures.get(local)!;
-          local = from === "this" ? undefined : from;
+        let local = e.kind === "ident" ? arenas.localOf(locals.get(e)) : undefined;
+        for (let at: Instance | undefined = instance; local && at?.captures?.has(local.localId); at = arenas.instanceOf(bodyOf(at).closure?.parent)) {
+          const from = at.captures.get(local.localId)!;
+          local = from === "this" ? undefined : localOf(from);
         }
-        const s = local && candidates.get(local);
+        const s = local && candidates.get(local.localId);
         if (!s || !isInteger(to) || to === "i64") return false;
         if (demands.has(s)) return demands.get(s) === to;
         demands.set(s, to);
@@ -1566,15 +1581,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     checkMoves(f, instance, origins);
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
-    if (self && classOf(self.type).methods.get("clone") === f && (f.params.length > 0 || type !== self.type)) {
+    if (self && classOf(self.type).methods.get("clone") === f.bodyId && (f.params.length > 0 || type !== self.type)) {
       throw new CompileError(`a 'clone' method must take no parameters and return '${show(self.type)}', since it replaces the compiler's copy`, f.start, f.end);
     }
     instance.returns = type;
     if (instance.concrete) lowerTables(instance);
     if (generator) frameOf(instance, generator);
     if (future) frameOf(instance, future);
-    done.add(instance);
-    inProgress.delete(instance);
+    done.add(instance.id);
+    inProgress.delete(instance.id);
 
     // Nested functions go right after the declarations of the variables they use, as early as
     // that allows, so a call before a function's own statement still finds it, as JavaScript's
@@ -1605,13 +1620,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const required = f.params.filter((p) => !p.optional && !p.rest).length;
       if (e.args.length < required || e.args.length > f.params.length) throw new CompileError(`expected ${required === f.params.length ? required : `${required}-${f.params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
       e.args.forEach((a, i) => {
-        const to = locals.get(f.params[i]!)!.type;
+        const to = localOf(locals.get(f.params[i]!)!).type;
         expect(a, to);
         const t = value(a);
         coerce(a, t, to, `argument of type '${show(t)}' is not assignable to parameter of type '${show(to)}'`);
       });
       selfCalls.add(e);
-      calls.set(e, instance);
+      calls.set(e, instance.id);
       if (errorType) raise(e, errorType, `'${name}'`);
       return { type: resolveType(f.returnType), what: `'${name}'` };
     }
@@ -1841,7 +1856,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         const held = patternText(pattern);
         Object.assign(d, { target: { id: nextId(ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
         statement(s);
-        type = locals.get(s)!.type;
+        type = localOf(locals.get(s)!).type;
         from = (at) => ({ id: nextId(ids), kind: "ident", name: held, start: at.start, end: at.end });
       }
       const destructuring: Type = type!;
@@ -1999,27 +2014,27 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // end of each narrowing scope it is read as declared. A loop inside such a scope could come
     // back to reads already checked as narrowed.
     function rewritten(l: Local, at: Expr) {
-      const outside = captures?.get(l);
-      if (outside && outside !== "this" && outer!.narrowed(outside)) {
+      const outside = captures?.get(l.localId);
+      if (outside && outside !== "this" && outer!.narrowed(localOf(outside))) {
         throw new CompileError(`can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
       }
-      const from = facts.findIndex((f) => f.has(l));
+      const from = facts.findIndex((f) => f.has(l.localId));
       if (from < 0) return;
       // Inside a larger expression, a condition could still prove the member it had.
       if (at !== whole) {
         throw new CompileError(`can't give '${l.name}' another member inside a larger expression while a check narrows it; assign it as a statement of its own`, at.start, at.end);
       }
-      changed.push(l);
+      changed.push(l.localId);
       if (targets.some((t) => t.kind === "loop" && t.facts! > from)) {
         throw new CompileError(`can't give '${l.name}' another member inside a loop here: a check outside the loop narrowed it; assign its fields instead, or check it inside the loop`, at.start, at.end);
       }
-      for (let i = from; i < facts.length; i++) facts[i] = new NodeMap(facts[i]).set(l, l.type);
+      for (let i = from; i < facts.length; i++) facts[i] = new Map(facts[i]).set(l.localId, l.type);
     }
 
     // Facts proven before a statement that carry past it, less any it gave another member.
     function current(proven: Facts, mark: usize): Facts {
       const gone = changed.slice(mark);
-      return gone.length === 0 ? proven : new NodeMap([...proven].filter(([l]) => !gone.includes(l)));
+      return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => !gone.includes(l)));
     }
 
     function assume<T>(proven: Facts, check: () => T): T {
@@ -2036,33 +2051,36 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // An async arrow's future usually outlives the call making it, so it owns its captures.
       owning ||= e.async;
       const value = Array.isArray(e.body) ? undefined : e.body;
-      const body: Body = {
-        id: nextId(ids), name: f.name, params: e.params, returnType: e.returnType, ...(e.throws && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e), made: madeArrows.has(e) || undefined },
+      const body = arenas.addBody({
+        id: nextId(ids), name: f.name, params: e.params, returnType: e.returnType, ...(e.throws && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: instance.id, expected, move: e.move || owning, unsafe, self: nestedFunctions.get(e), made: madeArrows.has(e) || undefined },
         body: value ? [{ id: nextId(ids), kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
-      };
-      const inner: Instance = {
-        id: ++counts.instances, tables, body, symbol: `${instance.symbol}.closure${closures.filter((c) => c.body.closure!.parent === instance).length}`,
+      });
+      const inner = arenas.addInstance({
+        tables, body: body.bodyId, symbol: `${instance.symbol}.closure${closures.filter((c) => bodyOf(arenas.instanceOf(c)).closure!.parent === instance.id).length}`,
         bindings: instance.bindings, concrete: instance.concrete, depth: instance.depth, returns: "void",
         types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
-      };
-      inner.captures = new NodeMap();
-      inner.captureUses = new NodeMap();
-      inner.changed = new NodeSet();
-      inner.moved = new NodeSet();
-      closures.push(inner);
+      });
+      inner.captures = new Map();
+      inner.captureUses = new Map();
+      inner.changed = new Set();
+      inner.moved = new Set();
+      closures.push(inner.id);
       withSight(inSight, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
+      const captured = [...inner.captures].map(([alias, from]): [Local, Local | "this"] => [localOf(alias), from === "this" ? from : localOf(from)]);
+      const moved = [...inner.moved].map(localOf);
       // A closure owning what it captures holds a nested function it uses as made here, so it
       // borrows what that function uses, as this body has it.
-      if (e.async || inner.body.closure!.move) {
-        for (const [, from] of inner.captures) {
+      if (e.async || bodyOf(inner).closure!.move) {
+        for (const [, from] of captured) {
           if (from === "this" || !nestedLocal(from)) continue;
           const of = closureBodies.get(lower(from.type) as ClosureType)!;
-          const env = [...of.captures!].map(([alias, x]) => {
-            const mine = reach(x as Local, e);
-            if (of.changed?.has(alias)) changesLocal(mine, "", "change", e, false);
-            return mine;
+          const nested = arenas.instanceOf(of);
+          const env = [...nested.captures!].map(([alias, x]) => {
+            const mine = reach(localOf(x as LocalId), e);
+            if (nested.changed?.has(alias)) changesLocal(mine, "", "change", e, false);
+            return mine.localId;
           });
           (instance.made ??= new NodeMap()).set(e, [...(instance.made.get(e) ?? []), { of, env }]);
         }
@@ -2070,22 +2088,22 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // A nested function runs whenever it is called, so it can't take over what it uses.
       const nested = nestedFunctions.get(e);
       if (nested !== undefined) {
-        const self = [...inner.captures].find(([, from]) => from === "this");
-        if (self) throw new CompileError(`'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses!.get(self[0]) ?? e).start, (inner.captureUses!.get(self[0]) ?? e).end);
+        const self = captured.find(([, from]) => from === "this");
+        if (self) throw new CompileError(`'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses.get(self[0].localId) ?? e).start, (inner.captureUses.get(self[0].localId) ?? e).end);
         // An async one takes its own copy of what it uses when it is made, which a later change
         // to a `let` wouldn't reach, as it would in JavaScript.
-        const changing = e.async ? [...inner.captures].find(([, from]) => from !== "this" && from.mutable) : undefined;
-        if (changing) throw new CompileError(`the async nested function '${nested}' takes its own copy of '${changing[0].name}' when it is made, so a later change to it wouldn't reach the function; pass '${changing[0].name}' as a parameter, or make it a 'const'`, (inner.captureUses!.get(changing[0]) ?? e).start, (inner.captureUses!.get(changing[0]) ?? e).end);
-        const moved = [...inner.moved!][0];
-        if (moved) throw new CompileError(`the nested function '${nested}' moves '${moved.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses!.get(moved) ?? e).start, (inner.captureUses!.get(moved) ?? e).end);
+        const changing = e.async ? captured.find(([, from]) => from !== "this" && from.mutable) : undefined;
+        if (changing) throw new CompileError(`the async nested function '${nested}' takes its own copy of '${changing[0].name}' when it is made, so a later change to it wouldn't reach the function; pass '${changing[0].name}' as a parameter, or make it a 'const'`, (inner.captureUses.get(changing[0].localId) ?? e).start, (inner.captureUses.get(changing[0].localId) ?? e).end);
+        const first = moved[0];
+        if (first) throw new CompileError(`the nested function '${nested}' moves '${first.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses.get(first.localId) ?? e).start, (inner.captureUses.get(first.localId) ?? e).end);
       }
       // A shared value's `update` callback lends its parameter only through its fields.
       if (f.closure?.expected && sharedCallbacks.has(f.closure.expected)) {
-        for (const [alias, from] of inner.captures!) {
+        for (const [alias, from] of captured) {
           const ref = from === "this" ? undefined : recOf(from.type);
           const held = from === "this" ? undefined : ref?.kind === "ref" ? ref.to : from.type;
           if (from !== "this" && from.param && held !== undefined && interiorMutable(held)) {
-            const at = inner.captureUses!.get(alias) ?? e;
+            const at = inner.captureUses.get(alias.localId) ?? e;
             throw new CompileError(`a closure inside a shared value's 'update' can't capture '${alias.name}': other tasks borrow its interior-mutable parts without the lock`, at.start, at.end);
           }
         }
@@ -2094,14 +2112,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // is a reference either way.
       // In an instance, what a type parameter stands for is laid out.
       const laid = (t: Type) => (inner.concrete ? lower(t) : t);
-      const fields = [...inner.captures].map(([alias, from]) => ({
+      const fields = captured.map(([alias, from]) => ({
         name: alias.name,
-        type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias)) : e.move || owning || inner.moved!.has(alias) ? from.type : refType(from.type, inner.changed!.has(alias))),
+        type: laid(from === "this" ? refType(self!.type, inner.changed!.has(alias.localId)) : e.move || owning || inner.moved!.has(alias.localId) ? from.type : refType(from.type, inner.changed!.has(alias.localId))),
       }));
       // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
       // An async arrow's call only makes its future, which carries what it throws.
       const throws = inner.future ? undefined : inner.throws && laid(inner.throws);
-      const type = madeBy(closureType(e.params.map((p) => writtenName(tables, p)), e.params.map((p) => inner.locals.get(p)!.type), inner.future ?? inner.returns, fields, [...inner.moved!][0]?.name, inner.concrete, throws), inner);
+      const type = madeBy(closureType(e.params.map((p) => writtenName(tables, p)), e.params.map((p) => localOf(inner.locals.get(p)!).type), inner.future ?? inner.returns, fields, moved[0]?.name, inner.concrete, throws), inner);
       // One throwing what the function type it is given as doesn't take can't be given as it.
       const given = expected && rec(expected);
       if (expected && given && throws && e.throws && !openThrows.has(expected) && !(given.throws && fits(throws, given.throws))) {
@@ -2115,9 +2133,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         throw new CompileError(`this async closure throws '${show(failing)}', but it is given as '${show(expected)}', whose Promise throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
       }
       // Each call's future works on its own copy of the captures, so a change would be lost.
-      const changed = e.async ? [...inner.changed!][0] : undefined;
+      const changed = e.async && inner.changed.size > 0 ? localOf([...inner.changed][0]!) : undefined;
       if (changed) {
-        const at = inner.captureUses!.get(changed) ?? e;
+        const at = inner.captureUses.get(changed.localId) ?? e;
         if (timerWrappers.has(e)) throw new CompileError(`a timer's function owns what it captures, so changing '${changed.name}' would change only its own copy; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
         throw new CompileError(`this async arrow changes '${changed.name}', which it captured, but each call's future works on its own copy, so the change would be lost; keep that state in an 'Atomic' or a 'Lock'`, at.start, at.end);
       }
@@ -2127,8 +2145,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         rec(inner.future).params = [{ name: "env", type }, ...rec(inner.future).params];
       }
       inner.closure = type;
-      calls.set(e, inner);
-      closureBodies.set(type, inner);
+      calls.set(e, inner.id);
+      closureBodies.set(type, inner.id);
       return type;
     }
 
@@ -2186,7 +2204,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           effect(s.expr);
           // A promise runs only when awaited, so one made and dropped would silently do nothing.
           const pausing = s.expr.kind === "call" && s.expr.callee.kind === "ident" && ["yieldNow", "sleep"].includes(s.expr.callee.name) && !byName.has(s.expr.callee.name);
-          const made = pausing ? YIELD_NOW : types.get(s.expr) ?? calls.get(s.expr)?.returns;
+          const made = pausing ? YIELD_NOW : types.get(s.expr) ?? arenas.instanceOf(calls.get(s.expr))?.returns;
           const r = recOf(made);
           const boxed = r?.kind === "dyn" && promiseElement(r.of) !== undefined;
           if (s.expr.kind !== "assign" && s.expr.kind !== "destructure" && (r?.kind === "future" || boxed)) {
@@ -2195,7 +2213,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             const executor = callee === undefined ? undefined : lower(callee);
             const closure = recOf(executor);
             if (closure?.kind === "closure") {
-              const written = closureBodies.get(executor as ClosureType)!.body;
+              const written = bodyOf(arenas.instanceOf(closureBodies.get(executor as ClosureType)!));
               throw new CompileError("an executor runs at once and what it gives is dropped, so the Promise it gives would never run; keep 'resolve' and await that call beside this Promise, as in 'Promise.all([promise, later(resolve)])'", written.start, written.end);
             }
             // `spawn` runs only an async function's call, and only inside an async function.
@@ -2295,7 +2313,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const lifted = liftedFunctions.get(s);
           if (lifted) {
             declare(lifted.name, "void", false, false, s);
-            locals.get(s)!.generic = lifted.fn;
+            localOf(locals.get(s)!).generic = lifted.fn;
           }
           return;
         }
@@ -2313,7 +2331,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         // `for (const x of arr)` borrows each element, shared, or copies a Copy one.
         case "forOf": {
           if (s.await) {
-            if (!f.async || timerMains.has(f as Func)) throw new CompileError("'for await' can only be used inside an 'async' function", s.start, s.end);
+            if (!f.async || timerMains.has(f as Body & Func)) throw new CompileError("'for await' can only be used inside an 'async' function", s.start, s.end);
             if (targets.some((t) => t.kind === "arm")) throw unsupported("'for await' loops inside match arms", s);
             if (finalizing > 0) throw unsupported("'for await' loops in a 'try' with a 'finally'", s);
           }
@@ -2402,14 +2420,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // The case bodies share one scope, as in JavaScript, but any case may be entered
           // directly, skipping the bodies before it, so a binding one case declares is usable
           // only in that case.
-          const shared = new Map<string, Local>();
+          const shared = new Map<string, LocalId>();
           scopes.push(shared);
           within({ stmt: s, kind: "switch" }, () => {
             // A case narrows a union for its body, and so do the cases that fall through into it.
             // `falling` is what holds for a body the previous one falls into, or null when it leaves.
             let falling: Facts | null = null;
             for (const c of s.cases) {
-              const before = new NodeSet(shared.values());
+              const before = new Set(shared.values());
               let test = c.test && value(c.test);
               // A literal case takes the discriminant's type, or its union's one number type.
               const numbers = union ? numberMembers(tables.typing, union) : [type];
@@ -2420,7 +2438,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
               if (test && test !== type && !comparable(tables.typing, tables.typing.lower(type), test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
-              const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new NodeMap();
+              const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
               const reaching: Facts = falling ? either(tables.typing, falling, tested) : tested;
               const mark = changed.length;
               assume(reaching, () => statements(c.body));
@@ -2632,17 +2650,17 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const scope = scopes[scopes.length - 1]!;
       // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
       if (scope.has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
-      const local = { name, type, mutable, param, id: nextLocal++ };
-      depths.set(local, scopes.length);
-      scope.set(name, local);
-      locals.set(node, local);
+      const local = arenas.addLocal({ name, type, mutable, param, id: nextLocal++ });
+      depths.set(local.localId, scopes.length);
+      scope.set(name, local.localId);
+      locals.set(node, local.localId);
       declarations.add(node);
     }
 
     function lookup(name: string, at?: Expr | ObjectProp): Local | undefined {
       for (let i = scopes.length - 1; i >= (hidden ? 1 : 0); i--) {
         const local = scopes[i]!.get(name);
-        if (local) return local;
+        if (local) return localOf(local);
       }
       const outside = outer?.lookup(name, at);
       // A local generic function holds nothing to capture.
@@ -2654,14 +2672,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     function nestedLocal(l: Local): boolean {
       const type = lower(l.type);
       const closure = recOf(type);
-      if (!nestedBindings.has(l) || closure?.kind !== "closure") return false;
-      return closureBodies.get(type as ClosureType)?.body.async !== true;
+      if (!nestedBindings.has(l.localId) || closure?.kind !== "closure") return false;
+      const nested = arenas.instanceOf(closureBodies.get(type as ClosureType));
+      return nested === undefined || bodyOf(nested).async !== true;
     }
 
     function peek(name: string): Local | undefined {
       for (let i = scopes.length - 1; i >= (hidden ? 1 : 0); i--) {
         const local = scopes[i]!.get(name);
-        if (local) return local;
+        if (local) return localOf(local);
       }
       return outer?.peek(name);
     }
@@ -2672,7 +2691,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
     // By the binding itself, not its name, which a body in between may have taken for another.
     function reach(l: Local, at?: Expr | ObjectProp): Local {
-      if (captures?.has(l) || scopes.some((scope) => [...scope.values()].includes(l))) return l;
+      if (captures?.has(l.localId) || scopes.some((scope) => [...scope.values()].includes(l.localId))) return l;
       return capture(outer!.reach(l, at), at);
     }
 
@@ -2720,8 +2739,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           return false;
         });
         liftedFunctions.set(key, lifted);
-        byName.set(lifted.fn.name, lifted.fn);
-        funcs.push(lifted.fn);
+        byName.set(lifted.fn.name, addBody(lifted.fn).bodyId);
+        funcs.push(addBody(lifted.fn));
       }
       return lifted.fn;
     }
@@ -2735,9 +2754,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A closure changing what it captures captures it mutably, if it may change where the
     // closure is made.
     function changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean) {
-      const alias = l ?? [...captures!].find(([, from]) => from === "this")![0];
-      const from = captures!.get(alias)!;
+      const alias = l?.localId ?? [...captures!].find(([, from]) => from === "this")![0];
+      const held = captures!.get(alias)!;
       instance.changed!.add(alias);
+      const from = held === "this" ? held : localOf(held);
       if (from === "this") outer!.changesThis(path, action, target);
       // What a `move` closure holds is its own to change, unless the change goes through a
       // mutable reference it holds a copy of; as in Rust, only a copy of a `let` may change.
@@ -2754,8 +2774,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
 
     function constant(l: Local): boolean {
-      const from = captures?.get(l);
-      if (from && from !== "this") return outer!.constant(from);
+      const from = captures?.get(l.localId);
+      if (from && from !== "this") return outer!.constant(localOf(from));
       return !l.mutable || l.param;
     }
 
@@ -2792,7 +2812,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const union = recOf(errorType);
       const classes = (union?.kind === "union" ? union.members : [errorType])
         .filter((m): m is ClassType => typeof m !== "string" && rec(m).kind === "class");
-      const wrappers = classes.flatMap((c) => wrapsOf(classOf(c)).filter(([x]) => fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: instanceOf(body) })));
+      const wrappers = classes.flatMap((c) => wrapsOf(classOf(c)).filter(([x]) => fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: instanceOf(arenas.bodyOf(body)).id })));
       const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${show(type)}'` : `${what} can throw '${show(type)}'`;
       if (wrappers.length === 0) {
         const hint = classes.length > 0 ? `convert it, or have '${rec(classes[0]!).name}' implement 'From<${show(type)}>'` : `convert it to '${show(errorType)}'`;
@@ -2811,37 +2831,38 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
     function noteThis(e: Expr) {
       if (!captures || [...captures.values()].includes("this")) return;
-      const alias: Local = { name: "this", type: self!.type, mutable: false, param: false, id: nextLocal++ };
-      captures.set(alias, "this");
-      instance.captureUses!.set(alias, e);
+      const alias = arenas.addLocal({ name: "this", type: self!.type, mutable: false, param: false, id: nextLocal++ });
+      captures.set(alias.localId, "this");
+      instance.captureUses!.set(alias.localId, e);
       outer!.noteThis(e);
     }
 
     // Who a closure's body counts as for access to private members: its function's class.
     function closureOwner(b: Body): Body["owner"] {
       let outerBody = b;
-      while (outerBody.closure) outerBody = outerBody.closure.parent.body;
+      while (outerBody.closure) outerBody = bodyOf(arenas.instanceOf(outerBody.closure.parent));
       return outerBody.declared ?? (outerBody.owner && outerBody.owner === enclosing?.type ? self!.type : outerBody.owner);
     }
 
     // A variable's type where something narrowed it: a captured one as it was where the closure
     // was made.
     function narrowed(l: Local): Type | undefined {
-      const outside = captures?.get(l);
-      return facts.findLast((f) => f.has(l))?.get(l) ?? (outside && outside !== "this" ? outer!.narrowed(outside) : undefined);
+      const outside = captures?.get(l.localId);
+      return facts.findLast((f) => f.has(l.localId))?.get(l.localId) ?? (outside && outside !== "this" ? outer!.narrowed(localOf(outside)) : undefined);
     }
 
     // A closure's body reads a variable it captures through a binding of its own, standing
     // for it.
     function capture(from: Local, at?: Expr | ObjectProp): Local {
-      let alias = [...captures!].find(([, l]) => l === from)?.[0];
+      const found = [...captures!].find(([, l]) => l === from.localId)?.[0];
+      let alias = found === undefined ? undefined : localOf(found);
       if (!alias) {
-        alias = { name: from.name, type: from.type, mutable: false, param: false, id: nextLocal++ };
-        depths.set(alias, 0);
-        captures!.set(alias, from);
-        if (nestedBindings.has(from)) nestedBindings.add(alias);
+        alias = arenas.addLocal({ name: from.name, type: from.type, mutable: false, param: false, id: nextLocal++ });
+        depths.set(alias.localId, 0);
+        captures!.set(alias.localId, from.localId);
+        if (nestedBindings.has(from.localId)) nestedBindings.add(alias.localId);
       }
-      if (at && !instance.captureUses!.has(alias)) instance.captureUses!.set(alias, at);
+      if (at && !instance.captureUses!.has(alias.localId)) instance.captureUses!.set(alias.localId, at);
       return alias;
     }
   }
@@ -2849,8 +2870,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 }
 
 // The `this` a body sees: a closure's is that of the function it is written in.
-export function selfOf(f: Body): Body["self"] {
-  return f.closure ? selfOf(f.closure.parent.body) : f.self;
+export function selfOf(arenas: Arenas, f: Body): Body["self"] {
+  return f.closure ? selfOf(arenas, bodyOf(arenas.instanceOf(f.closure.parent))) : f.self;
 }
 
 // Stands for the base in a derived constructor's unset fields until `super(...)` runs.
@@ -2879,34 +2900,35 @@ function abstractPart({ holdsPart, rec }: Typing, t: Type): ClassType | undefine
 // A net under the rules that decide what is compiled: no compiled function calls, and no
 // compiled Dyn's table holds, an instance that isn't compiled. Only a value of an abstract
 // class's own type, which escaped where no rule saw it, could reach one.
-export function unreached(typing: Typing, equalities: Tables["equalities"], compiled: Instance[], dropped: (i: Instance) => boolean) {
-  for (const i of compiled) {
-    const reached: [Expr, Instance, string][] = [
-      ...[...i.calls, ...i.setters].map(([at, target]): [Expr, Instance, string] => [at, target, ""]),
-      ...[...(i.dyns ?? [])].flatMap(([at, table]) => [...table.methods, ...table.fields, table.clone].flatMap((target): [Expr, Instance, string][] => (target && target !== "copy" ? [[at, target, " through a 'Dyn'"]] : []))),
+export function unreached(typing: Typing, equalities: Tables["equalities"], arenas: Arenas, compiled: InstanceId[], dropped: (i: Instance) => boolean) {
+  for (const i of compiled.map((id) => arenas.instanceOf(id))) {
+    const reached: [Expr, InstanceId, string][] = [
+      ...[...i.calls, ...i.setters].map(([at, target]): [Expr, InstanceId, string] => [at, target, ""]),
+      ...[...(i.dyns ?? [])].flatMap(([at, table]) => [...table.methods, ...table.fields, table.clone].flatMap((target): [Expr, InstanceId, string][] => (target && target !== "copy" ? [[at, target, " through a 'Dyn'"]] : []))),
     ];
     // A comparison of values runs each class's `equals` it reaches, through objects and unions.
     for (const [e] of i.types) {
       if (e.kind !== "binary" || !["===", "!==", "==", "!="].includes(e.op)) continue;
       for (const target of [...comparedBy(typing, equalities, i.types.get(e.left)), ...comparedBy(typing, equalities, i.types.get(e.right))]) reached.push([e, target, " to compare them"]);
     }
-    const found = reached.find(([, target]) => dropped(target));
+    const found = reached.find(([, target]) => dropped(arenas.instanceOf(target)));
     if (!found) continue;
-    const [at, target, through] = found;
-    const abstract = (target.body.abstract ? target.body.owner : undefined) ?? [...target.bindings.values()].map((t) => abstractPart(typing, t)).find((t) => t) ?? target.body.declared ?? target.body.owner;
+    const [at, id, through] = found;
+    const target = arenas.instanceOf(id);
+    const abstract = (bodyOf(target).abstract ? bodyOf(target).owner : undefined) ?? [...target.bindings.values()].map((t) => abstractPart(typing, t)).find((t) => t) ?? bodyOf(target).declared ?? bodyOf(target).owner;
     const { rec } = typing;
-    const root = (i.body.closure ? closureRoot(i) : i).body;
+    const root = bodyOf(bodyOf(i).closure ? closureRoot(i) : i);
     const member = (root.owner ? root.name.slice(rec(root.owner).name.length + 1) : root.name).replace(/#.*$/, "");
     // The name the call wrote, rather than the prelude function it may run.
     const callee = at.kind === "call" || at.kind === "new" ? at.callee : undefined;
-    const named = callee?.kind === "ident" || callee?.kind === "member" ? callee.name : target.body.name.replace(/#.*$/, "");
+    const named = callee?.kind === "ident" || callee?.kind === "member" ? callee.name : bodyOf(target).name.replace(/#.*$/, "");
     throw new CompileError(`a value of the abstract class '${abstract && rec(abstract).name}' can't reach '${named}'${through} here yet; pass a subclass's value instead, or give '${member}' to each subclass`, at.start, at.end);
   }
 }
 
 // Each `equals` a comparison of two values runs, as codegen finds them: a class's own stops the
 // search, and otherwise its base and fields, an object's fields and a union's members compare.
-function comparedBy(typing: Typing, equalities: Tables["equalities"], t: Type | undefined, seen: TypeSet<Type> = new TypeSet<Type>()): Instance[] {
+function comparedBy(typing: Typing, equalities: Tables["equalities"], t: Type | undefined, seen: TypeSet<Type> = new TypeSet<Type>()): InstanceId[] {
   if (t === undefined || typeof t === "string" || seen.has(t)) return [];
   seen.add(t);
   const r = typing.rec(t);
@@ -2922,5 +2944,6 @@ function comparedBy(typing: Typing, equalities: Tables["equalities"], t: Type | 
 }
 
 function closureRoot(i: Instance): Instance {
-  return i.body.closure ? closureRoot(i.body.closure.parent) : i;
+  const parent = bodyOf(i).closure?.parent;
+  return parent ? closureRoot(i.tables.arenas.instanceOf(parent)) : i;
 }

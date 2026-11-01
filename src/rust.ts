@@ -1,7 +1,8 @@
+import { bodyOf } from "./arenas.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Instance } from "./check.ts";
+import { compiledOf, type Checked, type Instance } from "./check.ts";
 import { validCrate } from "./manifest.ts";
 import { cacheDir } from "./mathlib.ts";
 import type { RustCrate } from "./modules.ts";
@@ -64,10 +65,11 @@ export type Shim = { lib: string; links: string[] };
 const LIBRARY = "fsh_rust_shim";
 
 // The shim the instances' Rust functions need, built by cargo; none when the program has none.
-export function rustShim(crates: RustCrate[], instances: Instance[]): Shim | undefined {
+export function rustShim(crates: RustCrate[], checked: Checked): Shim | undefined {
+  const instances = compiledOf(checked);
   // One shim function per Rust function, however many declarations name it.
   // The first declaration of each, as code generation declares it; the checker makes the rest agree.
-  const called = [...instances.filter((i) => i.body.rust).reduce((seen, i) => (seen.has(trusted(i.body.rust!).symbol) ? seen : seen.set(i.body.rust!.symbol, i)), new Map<string, Instance>()).values()];
+  const called = [...instances.filter((i) => bodyOf(i).rust).reduce((seen, i) => (seen.has(trusted(bodyOf(i).rust!).symbol) ? seen : seen.set(bodyOf(i).rust!.symbol, i)), new Map<string, Instance>()).values()];
   if (called.length === 0) return undefined;
   const cargo = Bun.which("cargo");
   if (!cargo) throw new Error("this program calls Rust, which needs cargo to build, and cargo isn't on PATH; install Rust with rustup, from https://rustup.rs");
@@ -336,13 +338,14 @@ function source(called: Instance[]): string {
   const types = new Map<string, RustClass>();
   const note = (c: RustClass) => types.set(typePath(c), c);
   const wrappers = called.map((i) => {
-    const { crate, path, symbol } = trusted(i.body.rust!);
-    const owner = i.body.owner && rustClassOf(i.tables.typing, i.body.owner);
-    const self = owner && i.body.self && !i.body.self.constructor ? i.body.self : undefined;
-    const constructor = owner && i.body.self?.constructor;
+    const { crate, path, symbol } = trusted(bodyOf(i).rust!);
+    const b = bodyOf(i);
+    const owner = b.owner && rustClassOf(i.tables.typing, b.owner);
+    const self = owner && b.self && !b.self.constructor ? b.self : undefined;
+    const constructor = owner && bodyOf(i).self?.constructor;
     if (owner) note(owner);
     const crossings = i.signature!.map((t) => crossed(i.tables.typing, t));
-    const gives = constructor ? crossed(i.tables.typing, i.body.owner!, true) : i.returns === "void" ? undefined : crossed(i.tables.typing, i.returns, true);
+    const gives = constructor ? crossed(i.tables.typing, bodyOf(i).owner!, true) : i.returns === "void" ? undefined : crossed(i.tables.typing, i.returns, true);
     [...crossings, ...(gives ? [gives] : [])].flatMap(classesIn).forEach(note);
     const { returns, out } = rustGives(gives);
     // A `Result`'s `Err` goes to its own slot, as Fish's text for an `Error`, or as the Rust value.

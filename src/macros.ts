@@ -1,4 +1,5 @@
-import type { Checked } from "./check.ts";
+import { bodyOf } from "./arenas.ts";
+import { compiledOf, type Checked } from "./check.ts";
 import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import type { Compilation, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
@@ -393,14 +394,14 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const nearest = ready.linked;
   const macro = macroOf(nearest, macros);
   const before = pending.where === "own" ? 1 : 2;
-  const instance = checked.instances.find((i) => i.body.name === macro.name && i.body.start === macro.start);
+  const instance = compiledOf(checked).find((i) => bodyOf(i).name === macro.name && bodyOf(i).start === macro.start);
   // A parameter of an object or interface type makes a function generic, with no instance until
   // it is called.
   if (!instance) throw new CompileError("a macro's parameters can't be object types or interfaces yet, which make it generic; use a class", macro.start, macro.end);
   const param = macro.params[0]!;
   const returns = instance.returns;
   if (typeof returns === "string" || instance.tables.typing.rec(returns).kind === "literal") throw new CompileError(`a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${instance.tables.typing.show(returns)}'`, macro.start, macro.end);
-  const input = instance.locals.get(param)!.type;
+  const input = instance.tables.arenas.localOf(instance.locals.get(param)!).type;
   const { bare, restore } = stripped(ids, decl, pending);
   const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
   let value: Value;
@@ -427,9 +428,9 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
   // Computed in the macro's hygiene, so a quote in an argument or a default means its file's names.
   const values = () => ready.args.map((a, i) => {
-    const t = instance.locals.get(macro.params[i + before]!)!.type;
+    const t = instance.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
     if (a.none) return null;
-    if (!a.syntax) return comptimeBody(checked.instances.find((c) => c.body.name === `const ${a.name}`)!);
+    if (!a.syntax) return comptimeBody(compiledOf(checked).find((c) => bodyOf(c).name === `const ${a.name}`)!);
     return built<Value>(checked.tables, { tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];

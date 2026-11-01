@@ -1,3 +1,4 @@
+import { bodyOf, type BodyId, type ClassId, type InstanceId } from "./arenas.ts";
 import { holdsNode, type Instance } from "./check.ts";
 import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
@@ -300,17 +301,17 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   const { typing } = tables;
   const { holdsPart, unfold, widenLet, callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, promiseInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef, rec } = typing;
   const concrete = concreteness(typing);
-  const explicit = new WeakNodeMap<Body, Map<string, Type>>();
-  const instances = new NodeMap<Body, Map<string, Instance>>();
+  const explicit = new Map<BodyId, Map<string, Type>>();
+  const instances = new Map<BodyId, Map<string, InstanceId>>();
   // By the method's first type parameter, which only its own list holds.
   const sharedPlaceholders = new NodeMap<TypeParam, Map<string, Type>>();
-  const implicits = new NodeMap<Body, Map<usize, Bound>>();
+  const implicits = new Map<BodyId, Map<usize, Bound>>();
   // Which implicit parameters are references to their type, and how.
-  const lent = new NodeMap<Body, Map<usize, RefType>>();
-  const definitions = new NodeMap<Body, Instance>();
+  const lent = new Map<BodyId, Map<usize, RefType>>();
+  const definitions = new Map<BodyId, InstanceId>();
   // Instances still to check.
-  const pending: Instance[] = [];
-  const all = () => [...instances.values()].flatMap((m) => [...m.values()]);
+  const pending: InstanceId[] = [];
+  const all = () => [...instances.values()].flatMap((m) => [...m.values()].map((i) => tables.arenas.instanceOf(i)));
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
   const sites = new NodeMap<Span & Id, Map<string, Type>>();
@@ -399,13 +400,13 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     // Only the one parameter the result borrows from, by its lifetime or by elision.
     const implicit = implicitOf(f);
     const refs = f.params.flatMap((p, i) => {
-      const type = lent.get(f)?.get(i) ?? (p.type && withScope(scope, () => resolveType(p.type!)));
+      const type = lent.get(f.bodyId)?.get(i) ?? (p.type && withScope(scope, () => resolveType(p.type!)));
       const r = type && typeof type !== "string" ? rec(type) : undefined;
       return r?.kind === "ref" && (!t.life || r.life === t.life) ? [i] : [];
     });
     const [i] = refs;
     const bound = i !== undefined && refs.length === 1 && !(f.self && !f.self.constructor && !t.life) ? implicit.get(i) : undefined;
-    return bound && lent.get(f)?.has(i!) && lower(t.to) === lower(bound) ? refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life) : returned;
+    return bound && lent.get(f.bodyId)?.has(i!) && lower(t.to) === lower(bound) ? refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life) : returned;
   }
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
@@ -417,7 +418,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
 
   // An implicit parameter's type, borrowed when the parameter is a reference to it.
   function lentAs(f: Body, i: usize, t: Type | undefined): Type | undefined {
-    const ref = lent.get(f)?.get(i);
+    const ref = lent.get(f.bodyId)?.get(i);
     if (!t || !ref) return t;
     const { mutable, life } = rec(ref);
     return refType(t, mutable, life);
@@ -428,22 +429,22 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // It is made once per body: fresh placeholders would make a new instance each time.
   function definition(f: Body): Instance {
     if (!generic(f)) return instanceOf(f);
-    let found = definitions.get(f);
-    if (found) return found;
+    const known = definitions.get(f.bodyId);
+    if (known) return tables.arenas.instanceOf(known);
     const scope = explicitPlaceholders(f);
     for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, typeParameter(show(bound), sameParams(f, i, bound, new Map([...(f.scope ?? []), ...scope]))));
     // A comptime parameter's value is known only at each call; the definition has a placeholder.
     for (const p of f.params) if (p.comptime) scope.set(comptimeName(p), typeParameter(comptimeName(p), undefined));
-    found = instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
-    definitions.set(f, found);
+    const found = instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
+    definitions.set(f.bodyId, found.id);
     return found;
   }
 
   // A concrete instance's symbol: its name and a hash of its type arguments, rather than a count,
   // so it is the same in every program using it. Arguments shown alike get numbered suffixes.
-  function instanceSymbol(name: string, bindings: Map<string, Type>, others: Map<string, Instance>): string {
+  function instanceSymbol(name: string, bindings: Map<string, Type>, others: Map<string, InstanceId>): string {
     const stem = `${name}#${digest([...bindings].map(([k, t]) => `${k}=${described(t)}`).join(","))}`;
-    const symbols = new Set([...others.values()].map((i) => i.symbol));
+    const symbols = new Set([...others.values()].map((i) => tables.arenas.instanceOf(i).symbol));
     let symbol = stem;
     for (let n = 1; symbols.has(symbol); n++) symbol = `${stem}.${n}`;
     return symbol;
@@ -452,22 +453,21 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // A member of a generic class's instance runs with the class's type arguments in scope.
   function instanceOf(f: Body, bindings: Map<string, Type> = f.scope ?? new Map<string, Type>()): Instance {
     const key = [...bindings.values()].map(keyOf).join(",");
-    let byKey = instances.get(f);
-    if (!byKey) instances.set(f, byKey = new Map());
-    let found = byKey.get(key);
-    if (!found) {
-      // Every type parameter, implicit ones included, needs a concrete binding to compile.
-      const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
-      const isConcrete = complete && [...bindings.values()].every(concrete);
-      const generic = bindings.size > 0;
-      found = {
-        id: ++tables.counts.instances, tables, body: f, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
-        depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
-        types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
-      };
-      byKey.set(key, found);
-      pending.push(found);
-    }
+    let byKey = instances.get(f.bodyId);
+    if (!byKey) instances.set(f.bodyId, byKey = new Map());
+    const known = byKey.get(key);
+    if (known) return tables.arenas.instanceOf(known);
+    // Every type parameter, implicit ones included, needs a concrete binding to compile.
+    const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
+    const isConcrete = complete && [...bindings.values()].every(concrete);
+    const generic = bindings.size > 0;
+    const found = tables.arenas.addInstance({
+      tables, body: tables.arenas.addBody(f).bodyId, symbol: generic && isConcrete ? instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,
+      depth: generic && checking() ? checking()!.depth + 1 : 0, returns: "void",
+      types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
+    });
+    byKey.set(key, found.id);
+    pending.push(found.id);
     return found;
   }
 
@@ -543,11 +543,11 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     ]);
     for (const [i, bound] of implicitOf(f)) {
       const meant = rebound(bound, decided);
-      own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f)!.has(i)));
+      own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f.bodyId)!.has(i)));
       const given = argTypes[i]!;
       const r = typeof given === "string" ? undefined : rec(given);
       const held = r?.kind === "ref" ? r.to : given;
-      const ref = lent.get(f)!.get(i);
+      const ref = lent.get(f.bodyId)!.get(i);
       const unlocked = ref && rec(ref).mutable ? unlocks(held, bound) : undefined;
       if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
       if (r?.kind === "closure" && r.once && repeats(f, paramName(f.params[i]!))) {
@@ -592,7 +592,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // The parameter types an instance's callers pass, or with `scopeOf(instance)`, the ones its
   // body sees.
   function paramTypes(instance: Instance, scope: Map<string, Type> = instance.bindings): Type[] {
-    const f = instance.body;
+    const f = bodyOf(instance);
     const implicit = implicitOf(f);
     // A generic class's instance gives its parameters what they stand for there, in an implicit
     // parameter's bound too, as a call decides the function's own.
@@ -618,7 +618,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // class it belongs to, offering only its bound, as at the definition, while holding the
   // concrete type for codegen.
   function scopeOf(instance: Instance): Map<string, Type> {
-    const f = instance.body;
+    const f = bodyOf(instance);
     const known = (names: string[]) => names.every((n) => instance.bindings.has(n) && concrete(instance.bindings.get(n)!));
     const stands = (name: string) => instance.bindings.get(name)!;
     const outer = classParams(f);
@@ -657,7 +657,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // One set of placeholders per body, so a parameter's type and the body name the same `T`;
   // callers get a copy they may add to.
   function explicitPlaceholders(f: Body): Map<string, Type> {
-    let made = explicit.get(f);
+    let made = explicit.get(f.bodyId);
     if (!made) {
       // A generic method's own parameters are one placeholder for every instance of its class
       // when no bound names the class's parameters, so 'map<U>(): Box<U>' makes one 'Box<U>'.
@@ -668,7 +668,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       // A bound may name the class's own parameters, as this instance holds them.
       if (!made) made = placeholders(typing, own, (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)));
       if (shared) sharedPlaceholders.set(f.typeParams![0]!, made);
-      explicit.set(f, made);
+      explicit.set(f.bodyId, made);
     }
     return new Map(made);
   }
@@ -677,16 +677,16 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // each concrete argument type gets its own instance instead of being copied down. A
   // parameter property and a setter's parameter keep their type, since it is a field's.
   function implicitOf(f: Body): Map<usize, Bound> {
-    let found = implicits.get(f);
+    let found = implicits.get(f.bodyId);
     if (found) return found;
     found = new Map();
-    implicits.set(f, found);
+    implicits.set(f.bodyId, found);
     // A generic class's member decides this as its definition does: a parameter of the class's
     // type parameter is one in every instance, whatever that parameter stands for.
     const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
     const scope = new Map([...(f.scope ?? []), ...outer, ...explicitPlaceholders(f)]);
     const borrows = new Map<usize, RefType>();
-    lent.set(f, borrows);
+    lent.set(f.bodyId, borrows);
     withScope(scope, () => f.params.forEach((p, i) => {
       const written = p.type && resolveType(p.type);
       // A reference to an interface or object type is one over what it borrows.
@@ -803,7 +803,7 @@ function repeats(f: Body, name: string): boolean {
 // What generic classes need from the checker.
 type ClassChecker = {
   tables: Tables;
-  classes: Map<string, ClassInfo>;
+  classes: Map<string, ClassId>;
   templates: Map<string, ClassNode & { name: string }>;
   register(c: ClassInfo): void;
   layout(c: ClassInfo): void;
@@ -826,32 +826,32 @@ function heldInArgument(f: Body, name: string): boolean {
 
 // Generic classes: each set of type arguments declares the class again, on first use.
 export function genericClasses({ tables, classes, templates, register, layout, members, resolveType, withScope }: ClassChecker) {
-  const { typing } = tables;
+  const { typing, arenas } = tables;
   const { heldArgument, keyOf, shapeKey, show, rec } = typing;
   // Where each instance was first used, and each template's instances by their arguments.
-  const uses = new TypeMap<ClassType, { c: ClassInfo; at: Span }>();
-  const instancesOf = new NodeMap<ClassNode, Map<string, ClassInfo>>();
+  const uses = new TypeMap<ClassType, { c: ClassId; at: Span }>();
+  const instancesOf = new NodeMap<ClassNode, Map<string, ClassId>>();
   const shapesOf = new NodeMap<ClassNode, Set<string>>();
   // An instance made while the resolver is still being built waits for `start` to check its
   // bounds and lay it out, since both need the resolver.
   let ready = false;
   // Each generic class as its definition is checked, which holds the statics every instance shares.
-  const defined = new Map<string, ClassInfo>();
-  return { classNamed, construct, start, define, definedClass: (name: string) => defined.get(name) };
+  const defined = new Map<string, ClassId>();
+  return { classNamed, construct, start, define, definedClass: (name: string) => arenas.classOf(defined.get(name)) };
 
   function start() {
     ready = true;
-    uses.forEach(({ c }) => bounded(c));
+    uses.forEach(({ c }) => bounded(arenas.classOf(c)));
   }
 
   // A generic class, like a generic body, is checked once at its definition with
   // placeholders for its type parameters, whether or not anything instantiates it.
   function define() {
-    templates.forEach((t) => defined.set(t.name, classInstance(t, [...classPlaceholders(tables, t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t)));
+    templates.forEach((t) => defined.set(t.name, classInstance(t, [...classPlaceholders(tables, t.typeParams, (n, s) => withScope(s, () => resolveType(n))).values()], t).classId));
   }
 
   function classNamed(name: string, args: Type[], at: Span): ClassType | undefined {
-    const c = classes.get(name);
+    const c = tables.arenas.classOf(classes.get(name));
     if (c && args.length > 0) throw new CompileError(`type '${name}' is not generic`, at.start, at.end);
     if (c) return c.type;
     const template = templates.get(name);
@@ -875,7 +875,7 @@ export function genericClasses({ tables, classes, templates, register, layout, m
     if (!byKey) instancesOf.set(template, byKey = new Map());
     const key = args.map(keyOf).join(",");
     const found = byKey.get(key);
-    if (found) return found;
+    if (found !== undefined) return arenas.classOf(found);
     // Spellings of one value shape, like `{ a?: T }` and `{ a: T | null }`, count once.
     let shapes = shapesOf.get(template);
     if (!shapes) shapesOf.set(template, shapes = new Set());
@@ -884,10 +884,10 @@ export function genericClasses({ tables, classes, templates, register, layout, m
     if (args.some((a) => typeof a !== "string" && rec(a).kind === "interface")) throw new CompileError("an interface can't be a type argument, since it describes values without being one", at.start, at.end);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
     const c = declareClass(tables, template, `${template.name}<${args.map(show).join(", ")}>`, scope);
-    byKey.set(key, c);
+    byKey.set(key, c.classId);
     shapes.add(shape);
     register(c);
-    uses.set(c.type, { c, at });
+    uses.set(c.type, { c: c.classId, at });
     if (ready) bounded(c);
     return c;
   }
@@ -902,7 +902,7 @@ export function genericClasses({ tables, classes, templates, register, layout, m
   // The class a `new` builds; a generic one's type arguments come from the expression or are
   // inferred from the constructor's arguments.
   function construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined {
-    const c = classes.get(name);
+    const c = tables.arenas.classOf(classes.get(name));
     if (c && typeArgs.length > 0) throw new CompileError(`type '${name}' is not generic`, at.start, at.end);
     const template = templates.get(name);
     if (!template) return c;
