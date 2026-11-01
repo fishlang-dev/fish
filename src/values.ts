@@ -3331,9 +3331,11 @@ export function expressions(ctx: Context) {
   function signatureTypes(f: Body): Type[] | undefined {
     if ((f.typeParams ?? []).some((p) => !isLifetime(p)) || f.params.some((p) => p.comptime)) return undefined;
     const bounds = implicitOf(f);
-    const known = bounds.size > 0 ? undefined : paramTypes(instanceOf(f));
+    // With an implicit parameter, an instance would check the signature's body against bounds,
+    // so the others are read as declared.
+    const known = bounds.size > 0 ? members.paramTypesOf(f) : paramTypes(instanceOf(f));
     return f.params.map((p, i) => {
-      const t = bounds.get(i) ?? known![i]!;
+      const t = bounds.get(i) ?? known[i]!;
       return p.optional ? unionType([t, "null"]) : p.rest && isArray(lower(t)) ? (lower(t) as ArrayType).element : t;
     });
   }
