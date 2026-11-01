@@ -47,11 +47,12 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     unsettled.push(c);
   }
 
-  // Lays out a class, checks what it claims, and checks each of its members at its definition.
-  function settle(c: ClassInfo) {
+  // Lays out a class, checks what it claims, and checks each of its members at its definition,
+  // each through `each`, which may recover from one member's error to check the next.
+  function settle(c: ClassInfo, each: (run: () => void) => void = (run) => run()) {
     layout(c);
     implemented(c);
-    bodiesOf(c).forEach((f) => checkBody(definition(f)));
+    bodiesOf(c).forEach((f) => each(() => checkBody(definition(f))));
   }
 
   function bodiesOf(c: ClassInfo): Body[] {
