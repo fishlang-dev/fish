@@ -500,9 +500,14 @@ export function expressions(ctx: Context) {
     if (typeof t === "string" || t.kind !== "union") return undefined;
     const props = e.props.filter((p): p is Extract<typeof p, { kind: "property" }> => p.kind === "property" && typeof p.key === "string");
     const named = t.members.map(unfold).filter((m): m is ObjectType => typeof m !== "string" && m.kind === "object" && props.every((p) => field(m, p.key as string)));
+    // A field of one literal, or of a union of literals as `kind: "as" | "satisfies"` is, names
+    // the member only for a string among them.
     const matching = named.filter((m) => props.every((p) => {
       const f = field(m, p.key as string)!.type;
-      return typeof f === "string" || f.kind !== "literal" || (p.value.kind === "string" && p.value.value === f.value);
+      const isLiteral = (l: Type): l is LiteralType => typeof l !== "string" && l.kind === "literal";
+      const literals = isLiteral(f) ? [f] : typeof f !== "string" && f.kind === "union" && f.members.every(isLiteral) ? f.members as LiteralType[] : [];
+      const value = p.value.kind === "string" ? p.value.value : undefined;
+      return literals.length === 0 || literals.some((l) => l.value === value);
     }));
     return matching.length === 1 ? matching[0] : undefined;
   }
@@ -5064,6 +5069,16 @@ export function expressions(ctx: Context) {
     type = adaptFields(e, type, to);
     if (type === to) return;
     if (literalArray(e, type, to)) return;
+    // A `?:` that doesn't fit as a whole, as two string literals don't fit a union of literals
+    // once joined as a 'string', fits when each side does.
+    if (e.kind === "conditional" && !fits(type, to)) {
+      for (const side of [e.then, e.else]) {
+        coercions.delete(side);
+        coerce(side, types.get(side)!, to, message);
+      }
+      types.set(e, to);
+      return;
+    }
     if (isNumeric(type) && isNumeric(to)) throw new CompileError(`${message}; convert it with 'as ${show(to)}'`, e.start, e.end);
     if (typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) {
       borrow(e, type, to, message);

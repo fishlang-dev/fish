@@ -112,6 +112,10 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
       return split(subject.object, (m) => {
         const kind = typeof m === "string" ? undefined : m.fields.find((f) => f.name === subject.name)?.type;
         if (kind && is(kind, value)) return "yes";
+        // A `kind` that is one of several literals is that literal only when it is among them.
+        if (kind && typeof kind !== "string" && kind.kind === "union" && kind.members.every((k) => typeof k !== "string" && k.kind === "literal")) {
+          return kind.members.some((k) => is(k, value)) ? "both" : "no";
+        }
         return kind && typeof kind !== "string" && kind.kind === "literal" ? "no" : "both";
       }, e.op === "===");
     }
