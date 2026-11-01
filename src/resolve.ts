@@ -63,7 +63,7 @@ type ClassNamed = (name: string, args: Type[], at: Span) => ClassType | undefine
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
 export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classNamed: ClassNamed, interfaces: Map<string, Interface>, enums: Map<string, EnumInfo>, slots: Map<string, boolean[]>, layout: (c: ClassType) => boolean, valueType: (name: string, at: Span, shadowed: boolean) => Type,
-  conforms: (from: Type, to: Type, at: Span) => boolean, typeNames: (at: number) => string[]) {
+  conforms: (from: Type, to: Type, at: Span) => boolean, typeNames: (at: number) => string[], inStd: (at: number) => boolean) {
   const { declaredTypes, defaulted, presetTypes, ids } = tables;
   const { typing } = tables;
   const {
@@ -511,7 +511,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     // A generic alias checked before any use holds its parameters anywhere; each use gives them types.
     // Std's own helpers, like the generators' 'find', return one only to give back a value
     // they hold or nothing, which needs no narrowing against the placeholder.
-    if (typeof t !== "string" && t.kind === "param" && deferring === 0 && node.start < STD_BASE) throw unsupported("unions holding a type parameter", node);
+    if (typeof t !== "string" && t.kind === "param" && deferring === 0 && !inStd(node.start)) throw unsupported("unions holding a type parameter", node);
     // A union holds a value, so a function type in one is a stored callable.
     if (typeof t !== "string" && t.kind === "function" && t.generic) throw new CompileError("E0115", familyHeld("a union"), node.start, node.end);
     if (typeof t !== "string" && t.kind === "function") return stored(t);
