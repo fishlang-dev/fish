@@ -4396,6 +4396,15 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       emit(`${held} = load ${llvm(lower(to))}, ptr ${v}`);
       return inspectTree(held, writtenPart(written, t, (x) => (x.kind === "ref" ? x.to : undefined)) ?? to, "%d");
     }
+    // std's Date prints as its ISO string at any depth, as Node prints one.
+    const iso = t.kind === "class" ? instances.find((i) => i.body.name === `${t.name}.toISOString` && i.body.start >= STD_BASE) : undefined;
+    if (iso) {
+      const [self, text, node] = [alloca(llvm(t)), temp(), temp()];
+      emit(`store ${llvm(t)} ${v}, ptr ${self}`);
+      emit(`${text} = call ptr ${symbol(iso)}(ptr ${self})`);
+      emit(`${node} = call ptr @fsh_rt_insp_raw(ptr ${text})`);
+      return node;
+    }
     // Past depth 2 Node prints a value with parts as `[Object]`, or `{}` when it has none, so
     // only its size and keys are kept, which also bounds how deep this goes.
     if (t.kind !== "union" && t.kind !== "variant") {

@@ -122,3 +122,27 @@ function main() {
 function main() {
   const t = Date.parse("2026-11-01");
 }
+// case: date_printed
+// expect: 1970-01-01T00:00:00.000Z
+// expect: [ 1970-01-01T00:00:00.000Z ] { d: 1970-01-02T00:00:00.000Z }
+// expect: 1970-01-01T00:00:00.000Z x 1969-12-31T23:59:59.999Z
+// expect: { a: { b: { c: [Object] } } }
+// expect: 1970-01-01T00:00:00.007Z
+// expect: [
+// expect:   1970-01-01T00:00:00.000Z,
+// expect:   1970-01-01T00:00:00.001Z,
+// expect:   1970-01-01T00:00:00.002Z,
+// expect:   1970-01-01T00:00:00.003Z
+// expect: ]
+// A Date prints as its ISO string, alone or inside other values, as Node prints one.
+type Deep = { a: { b: { c: { d: Date } } } };
+function main() {
+  console.log(new Date(0));
+  console.log([new Date(0)], { d: new Date(86400000) });
+  console.log(new Date(0), "x", new Date(-1));
+  const deep: Deep = { a: { b: { c: { d: new Date(5) } } } };
+  console.log(deep);
+  const maybe: Date | null = new Date(7);
+  console.log(maybe);
+  console.log([new Date(0), new Date(1), new Date(2), new Date(3)]);
+}
