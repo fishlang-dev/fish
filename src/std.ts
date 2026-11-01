@@ -961,13 +961,14 @@ class Router {
     const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
     const held = table.clone();
     this.table = table;
-    this.inner = Router.routing(held);
+    this.inner = Router.routing(held, 1);
   }
 
-  // Routes a request from the first route, with no middleware but the routes' own groups'.
-  private static routing(table: shared<__routerTable>): __routerNext {
+  // Routes a request from the first route, with no middleware but the routes' own groups', as
+  // its depth-th re-route.
+  private static routing(table: shared<__routerTable>, depth: i64): __routerNext {
     return async (r: Request) => {
-      const res = await Router.dispatch(table.clone(), r, 0);
+      const res = await Router.dispatch(table.clone(), r, 0, depth);
       return res;
     };
   }
@@ -1103,7 +1104,7 @@ class Router {
       // A static route's 404 is a miss, passed on to the routes after it.
       const res = await Router.run(handler.clone(), group.map((m) => m.clone()), params.clone(), again.clone(), r.clone());
       if (res.status !== 404) return res;
-      const rest = await Router.dispatch(table.clone(), r, after);
+      const rest = await Router.dispatch(table.clone(), r, after, 0);
       return rest;
     };
     let chain = this.table.middleware.update((all) => all.map((m) => m.clone()));
@@ -1121,7 +1122,10 @@ class Router {
 
   // The response of the first route from index start that matches; a HEAD request may run a GET
   // route, and a static route's 404 is a miss, passed on to the routes after it.
-  private static async dispatch(table: shared<__routerTable>, req: Request, start: usize): Promise<Response> {
+  // Group middleware that keep rewriting each other's paths are stopped with a 500 after a few
+  // re-routes, before the recursion overflows the stack and takes the server down.
+  private static async dispatch(table: shared<__routerTable>, req: Request, start: usize, depth: i64): Promise<Response> {
+    if (depth > 10) return new Response("Internal Server Error\\n", { status: 500 });
     const have = req.path.split("/");
     const method = req.method.clone();
     let from = start;
@@ -1131,7 +1135,7 @@ class Router {
       if (found === null) return new Response("Not Found\\n", { status: 404 });
       const params = Router.decoded(found.params);
       if (params === null) return new Response("Bad Request\\n", { status: 400 });
-      const again = Router.routing(table.clone());
+      const again = Router.routing(table.clone(), depth + 1);
       if (!found.prefix) {
         const res = await Router.run(found.handler, found.group, params, again, req);
         return res;

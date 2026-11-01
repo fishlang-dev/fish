@@ -475,3 +475,34 @@ function main() {
   let app = new Router();
   app.route("GET", "/api");
 }
+// case: router_groups_loop
+// expect: /g/a 500 Internal Server Error
+// expect: /ok 200 ok
+// Group middleware that keep rewriting a request between each other's routes are stopped with a
+// 500 after a few re-routes, and the server goes on serving.
+async function get(port: i64, path: string): Promise<void> throws IoError | AbortError {
+  const res = await fetch("http://127.0.0.1:" + String(port) + path);
+  const body = await res.text();
+  console.log(path, res.status, body.trim());
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  let g = new Router();
+  g.use(async (req, next) => {
+    let moved = req;
+    moved.path = moved.path === "/g/a" ? "/g/b" : "/g/a";
+    const res = await next(moved);
+    return res;
+  });
+  g.get("/a", async (_req) => new Response("a"));
+  g.get("/b", async (_req) => new Response("b"));
+  let app = new Router();
+  app.route("/g", g);
+  app.get("/ok", async (_req) => new Response("ok"));
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, app.handler()));
+  while (found.port.load() === 0) await sleep(1);
+  await get(found.port.load(), "/g/a");
+  await get(found.port.load(), "/ok");
+}
