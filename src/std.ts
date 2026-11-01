@@ -392,8 +392,7 @@ type CookieInit = { path?: string; domain?: string; maxAge?: i64; expires?: i64;
 // first of a repeated name kept, and changed by set and delete, each change a Set-Cookie line
 // a response sends.
 class CookieMap {
-  #names: string[] = [];
-  #values: string[] = [];
+  #cookies: Map<string, string> = new Map();
   // The latest Set-Cookie line for each name changed, in the order they were first changed.
   #changed: string[] = [];
   #lines: string[] = [];
@@ -404,32 +403,28 @@ class CookieMap {
       const eq = part.indexOf("=");
       if (eq < 0) continue;
       const name = part.slice(0, eq).trim();
-      if (name.length === 0 || this.has(name)) continue;
+      if (name.length === 0 || this.#cookies.has(name)) continue;
       let value = part.slice(eq + 1).trim();
       if (value.length >= 2 && value.startsWith("\\"") && value.endsWith("\\"")) value = value.slice(1, -1);
       const decoded = value.includes("%") ? __urlDecodeStrict(value) : value;
-      this.#names.push(name);
-      this.#values.push(decoded ?? value);
+      this.#cookies.set(name, decoded ?? value);
     }
   }
 
   get(name: string): string | null {
-    for (let i = 0; i < this.#names.length; i++) {
-      if (this.#names[i] === name) return this.#values[i];
-    }
-    return null;
+    return this.#cookies.get(name);
   }
 
   has(name: string): boolean {
-    return this.get(name) !== null;
+    return this.#cookies.has(name);
   }
 
   get size(): i64 {
-    return this.#names.length as i64;
+    return this.#cookies.size as i64;
   }
 
   forEach(callback: (value: string, name: string) => void) {
-    for (let i = 0; i < this.#names.length; i++) callback(this.#values[i], this.#names[i]);
+    for (const [name, value] of this.#cookies) callback(value, name);
   }
 
   // Sets a cookie, with Bun's defaults of path '/' and SameSite=Lax. A name must be an HTTP
@@ -437,9 +432,9 @@ class CookieMap {
   // encodeURIComponent does, so nothing in it can end the cookie or the header.
   set(this: Mut<this>, name: string, value: string, options?: CookieInit) {
     const line = __cookieLine(name, value, options);
-    this.#forget(name);
-    this.#names.push(name);
-    this.#values.push(value);
+    // Deleted first, so a cookie set again comes last, as Bun orders it.
+    this.#cookies.delete(name);
+    this.#cookies.set(name, value);
     this.#change(name, line);
   }
 
@@ -452,21 +447,8 @@ class CookieMap {
       domain = options.domain;
     }
     const line = __cookieLine(name, "", { path: path, domain: domain, expires: 0, maxAge: 0 });
-    this.#forget(name);
+    this.#cookies.delete(name);
     this.#change(name, line);
-  }
-
-  #forget(this: Mut<this>, name: string) {
-    let names: string[] = [];
-    let values: string[] = [];
-    for (let i = 0; i < this.#names.length; i++) {
-      if (this.#names[i] !== name) {
-        names.push(this.#names[i]);
-        values.push(this.#values[i]);
-      }
-    }
-    this.#names = names;
-    this.#values = values;
   }
 
   #change(this: Mut<this>, name: string, line: string) {
