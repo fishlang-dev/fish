@@ -540,14 +540,14 @@ test("the report lists each Node built-in with its files and what replaces it", 
       { module: "dgram", files: 2, equivalent: { name: "UDP sockets", planned: true } },
       { module: "crypto", files: 1, equivalent: { name: "Hashing", planned: true } },
       { module: "http", files: 1, equivalent: { name: "HTTP client", planned: true } },
-      { module: "net", files: 1, equivalent: { name: "TcpListener and TcpStream", planned: false } },
+      { module: "net", files: 1, equivalent: { name: "TcpListener, TcpStream, UnixListener and UnixStream", planned: false } },
       { module: "vm", files: 1 },
     ]);
     const text = formatReport(r);
     expect(text).toContain("  dgram               2 files  planned: UDP sockets");
     expect(text).toContain("  http                1 file   planned: HTTP client");
     expect(text).toContain("  vm                  1 file   nothing planned");
-    expect(text).toContain("  net                 1 file   in std: TcpListener and TcpStream");
+    expect(text).toContain("  net                 1 file   in std: TcpListener, TcpStream, UnixListener and UnixStream");
     expect(JSON.parse(fishc("survey", dir, "--json").stdout.toString()).builtins).toHaveLength(5);
   });
   project({ "a.ts": "import x from \"./x\";\n" }, (dir) => {
