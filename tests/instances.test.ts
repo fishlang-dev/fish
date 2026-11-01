@@ -6,7 +6,7 @@ import { newSession } from "../src/compilation.ts";
 import { unreached, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
 import { NodeMap } from "../src/nodes.ts";
-import { newTyping, type ClassType, type Type } from "../src/typing.ts";
+import { digest, newTyping, type ClassType, type Type } from "../src/typing.ts";
 
 const session = newSession();
 
@@ -54,4 +54,20 @@ test("a comparison can't reach an equals that isn't compiled", () => {
   const caller = { body: { name: "check" }, bindings: new Map(), calls: new NodeMap(), setters: new NodeMap(), types } as unknown as Instance;
   expect(() => unreached(equalities, [caller], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));
   expect(() => unreached(equalities, [caller], () => false)).not.toThrow();
+});
+
+// An instance's symbol is its name and the FNV-1a digest of its type arguments, so it is the same
+// in every process and every program, and differs when the arguments do.
+test("instance symbols are stable and tell type arguments apart", () => {
+  expect(digest("")).toBe((0xcbf29ce484222325n).toString(36).slice(-6));
+  expect(digest("a")).toBe((0xaf63dc4c8601ec8cn).toString(36).slice(-6));
+  const file = join(import.meta.dir, "programs", "generics.fsh");
+  const symbols = (ir: string) => [...ir.matchAll(/^define .*@"(fsh\.identity#[0-9a-z.]+)"/gm)].map((m) => m[1]!).sort();
+  const here = symbols(compile(session, readFileSync(file, "utf8"), file));
+  const src = (name: string) => JSON.stringify(join(import.meta.dir, "..", "src", name));
+  const script = `import { compile } from ${src("main.ts")}; import { newSession } from ${src("compilation.ts")}; import { readFileSync } from "node:fs"; console.log(compile(newSession(), readFileSync(${JSON.stringify(file)}, "utf8"), ${JSON.stringify(file)}));`;
+  const other = Bun.spawnSync(["bun", "-e", script]);
+  expect(symbols(other.stdout.toString())).toEqual(here);
+  expect(new Set(here).size).toBe(4);
+  expect(here.filter((s) => /#\w+\.\d+$/.test(s))).toEqual([]);
 });
