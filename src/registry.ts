@@ -113,10 +113,10 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       }
       if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
       const name = `${rec(c.type).name}.${f.name} initializer`;
-      const initializer: Body = {
+      const initializer = tables.arenas.addBody({
         id: nextId(ids), name, params: [], body: [{ id: nextId(ids), kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
         owner: c.type, scope: c.scope, start: f.start, end: f.end,
-      };
+      });
       const instance = instanceOf(initializer);
       checkBody(instance);
       return { name: f.name, type: widenEnum(instance.returns), access: f.access, ...readonly };

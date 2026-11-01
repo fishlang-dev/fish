@@ -51,7 +51,7 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
-  const { kindTests, asserts, computed, jsCrossings, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts, typing, ids } = instance.tables;
+  const { kindTests, asserts, computed, jsCrossings, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts, typing, ids, arenas } = instance.tables;
   const { field, holdsHandle, holdsMut, holdsPart, isCopy, optionRef, holdsRef, yieldsOf, lower, callableOf, keptByJs, partOfItself, rec } = typing;
   const isRef = (t: Type): t is RefType => typeof t !== "string" && rec(t).kind === "ref";
   const isUnion = (t: Type): t is UnionType => typeof t !== "string" && rec(t).kind === "union";
@@ -86,7 +86,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const last = lastUses(body, instance);
   const byId = new Map([...locals.values()].map((l) => [l.id, l]));
   // What `this` keeps stays held to the end of the body, and after it.
-  const kept: Local = { name: "this", type: "void", mutable: false, param: false, id: -1 };
+  const kept = arenas.addLocal({ name: "this", type: "void", mutable: false, param: false, id: -1 });
   last.set(kept, Infinity);
   // A reference parameter holds a borrow its caller made, of something outside this function.
   f.params.forEach((p, i) => {
@@ -285,7 +285,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (taken !== undefined && !isRef(taken) && (yieldsOf(taken) ?? yieldsOf(taken, true)) !== undefined) {
           expr(s.right, (p) => `'${p}' moved here: the 'for...of' loop takes the generator over, as JavaScript closes it when the loop ends; call 'next()' instead to keep it`);
           // What the generator borrows stays lent until the loop ends.
-          const holder = loopHolders.get(s) ?? { name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 };
+          const holder = loopHolders.get(s) ?? arenas.addLocal({ name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 });
           loopHolders.set(s, holder);
           last.set(holder, s.end);
           if (key(s.right) !== undefined) inherit(holder, s.right);
@@ -310,7 +310,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // An array reached through a reference keeps what that reference borrows lent until
           // the loop ends, and an element that is a reference holds it too.
           // One holder per loop, so passes over it reach the same state and the check settles.
-          const loop = loopHolders.get(s) ?? { name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 };
+          const loop = loopHolders.get(s) ?? arenas.addLocal({ name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 });
           loopHolders.set(s, loop);
           last.set(loop, s.end);
           inherit(loop, s.right);
@@ -1228,7 +1228,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // may be read from the holder itself, so the new holds are gathered first.
   function rehold(local: Local, e: Expr) {
     if (!state) return;
-    const gathering: Local = { ...local, id: -local.id - 1 };
+    const gathering = arenas.addLocal({ ...local, id: -local.id - 1 });
     hold(gathering, e);
     release(local);
     for (const [at, loan] of state.loans) {

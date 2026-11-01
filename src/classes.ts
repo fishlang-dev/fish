@@ -5,12 +5,15 @@ import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeN
 import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Instance } from "./check.ts";
+import type { BodyId, ClassId } from "./arenas.ts";
 import { NodeMap, nextId, NodeSet, type Ids, childrenOf, walk, type AnyNode, type NodeOf, type RootKind } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
 // and a method declared with `this: Mut<this>` may change it.
 export type Body = Span & Id & {
+  // Its place in the compilation's arena, apart from its node id.
+  bodyId: BodyId;
   name: string;
   params: Param[];
   body: Stmt[];
@@ -79,6 +82,7 @@ export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init:
 export type AbstractMember = Span & { name: string; table: "methods" | "getters" | "setters"; access: Access };
 
 export type ClassInfo = {
+  classId: ClassId;
   type: ClassType;
   abstracts: AbstractMember[];
   // For a concrete class, its copy of each template it runs, by the template.
@@ -115,7 +119,7 @@ export type ClassInfo = {
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
 export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
-  const { genericStatics, ids, rust, typing: { classType, rec } } = tables;
+  const { arenas, genericStatics, ids, rust, typing: { classType, rec } } = tables;
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   // A template is copied into each concrete class by the abstract class's one declaration, which a
   // generic class doesn't have.
@@ -208,7 +212,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     ...properties.map((f) => assignField(ids, f.name, { id: nextId(ids), kind: "ident", name: f.name, start: f.start, end: f.end }, f)),
     ...initializers,
   ];
-  const constructor: Body = {
+  const constructor = arenas.addBody({
     id: nextId(ids),
     name: `${name}.constructor`,
     scope,
@@ -221,11 +225,11 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     end: (ctor ?? node).end,
     ...(ctor && rustOf(rust, ctor)),
     ...(ctor?.throws && { throws: ctor.throws }),
-  };
+  });
   const required = new Set(fields.map((f) => f.name));
   const named = node.extends?.kind === "instantiation" ? node.extends.expr : node.extends;
   const baseName = named?.kind === "ident" ? named.name : undefined;
-  return { type, abstracts, copies: new NodeMap(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] };
+  return arenas.addClass({ type, abstracts, copies: new NodeMap(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] });
 
   // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
   function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
@@ -276,7 +280,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     if (m.kind === "set" && m.params.length !== 1) throw new CompileError("a setter takes exactly one parameter", m.start, m.end);
     if (m.kind === "set" && m.returnType) throw new CompileError("a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
     if (isStatic && m.params[0]?.pattern.kind === "ident" && m.params[0].pattern.name === "this") throw new CompileError("a static accessor has no 'this'", m.params[0].start, m.params[0].end);
-    table.set(key, {
+    table.set(key, arenas.addBody({
       id: nextId(ids),
       name: `${name}.${isStatic ? "static " : ""}${m.kind} ${m.name}`,
       scope,
@@ -289,7 +293,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
       access,
       start: m.start,
       end: m.end,
-    });
+    }));
   }
 
   function method(m: Extract<ClassMember, { kind: "method" }>) {
@@ -308,7 +312,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     if (receiver && isStatic) throw new CompileError("a static method has no 'this'", receiver.start, receiver.end);
     if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) namesClass(p.type);
     if (isStatic) classParamIn(m);
-    table.set(m.name, {
+    table.set(m.name, arenas.addBody({
       id: nextId(ids),
       // A static method has its own symbol, since an instance method may share its name.
       name: `${isStatic ? node.name : name}.${isStatic ? "static " : ""}${m.name}`,
@@ -327,7 +331,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
       end: m.end,
       ...rustOf(rust, m),
       ...((m as { signature?: true }).signature && { signature: true as const }),
-    });
+    }));
     // The implementation comes right after its signatures.
     const overloads = (m as { overloads?: ClassMember[] }).overloads;
     if (overloads) table.get(m.name)!.overloads = overloads.map((w) => table.get((w as typeof m).name as string)!);
@@ -560,9 +564,9 @@ export function implementAbstracts(tables: Tables, c: ClassInfo) {
 
 // A concrete class's copy of a template, made once: its own member when nothing overrides it,
 // and what `super.name()` runs in the class either way.
-export function copyFor({ ids, typing }: Tables, c: ClassInfo, f: Body): Body {
+export function copyFor({ arenas, ids, typing }: Tables, c: ClassInfo, f: Body): Body {
   let copy = c.copies.get(f);
-  if (!copy) c.copies.set(f, copy = { ...f, id: nextId(ids), name: `${typing.rec(c.type).name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, scope: c.scope, template: undefined, copyOf: f, declared: f.owner! });
+  if (!copy) c.copies.set(f, copy = arenas.addBody({ ...f, id: nextId(ids), name: `${typing.rec(c.type).name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, scope: c.scope, template: undefined, copyOf: f, declared: f.owner! }));
   return copy;
 }
 

@@ -1,3 +1,4 @@
+import { Arenas } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
 import type { Value } from "./comptime.ts";
 import type { Body } from "./classes.ts";
@@ -15,7 +16,8 @@ import type { DynTable } from "./values.ts";
 
 // One compilation of a program. Its front end, which keeps no state of its own, is handed the
 // counter node ids come from, the names its messages show as written, and the tables regexes are
-// compiled with; every check of the program shares its types, interned in `typing`, and `counts`.
+// compiled with; every check of the program shares its types, interned in `typing`, its instances,
+// bodies, locals and classes, kept in `arenas`, and `counts`.
 // Whatever starts a compilation makes one, so nothing one program makes reaches another; what
 // outlives it, the caches of a CLI run or a language server, is its `session`.
 // `upcasts` are the spans of the `equals` methods `@derive(Eq)` wrote over a base class. Their
@@ -30,7 +32,7 @@ import type { DynTable } from "./values.ts";
 // declaration it reaches takes in the program, to the name the file writes for it.
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
 export type Compilation = {
-  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string }[]; rust: RustTables;
+  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string }[]; rust: RustTables;
   enumInits: [usize, usize, string][]; fileNames: WeakMap<Stmt[], Map<usize, Map<string, string>>>; generated: WeakNodeSet<Id>;
 };
 
@@ -38,7 +40,7 @@ export type Compilation = {
 // whatever was compiled before it: its enums, which tells enums of one name apart, the generic
 // functions lifted out of bodies, destructuring assignments, macro expansions, and the constants
 // macros give values.
-export type Counts = { enums: usize; lifts: usize; destructures: usize; expansions: usize; constants: usize; instances: usize };
+export type Counts = { enums: usize; lifts: usize; destructures: usize; expansions: usize; constants: usize };
 
 // What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
 // the caches that spare later compilations the work earlier ones did.
@@ -65,17 +67,18 @@ export function newSession(): Session {
 }
 
 export function newCompilation(session: Session): Compilation {
-  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0, instances: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet() };
+  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet() };
 }
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
 // and for the passes after it: moves, comptime and codegen. `check` makes a fresh set, and every
 // instance it makes holds it, so nothing one program records reaches another.
 export type Tables = {
-  // What every check of the program shares: its types, the upcasts its macros wrote, the counter
-  // for the nodes checking makes, its counts, which number its instances, its regex tables, files
-  // and Rust names.
+  // What every check of the program shares: its types, its instances, bodies, locals and classes,
+  // the upcasts its macros wrote, the counter for the nodes checking makes, its counts, its regex
+  // tables, files and Rust names.
   typing: Typing;
+  arenas: Arenas;
   upcasts: Set<string>;
   ids: Ids;
   counts: Counts;
@@ -297,9 +300,10 @@ export type Tables = {
   computing: NodeSet<Instance>;
 };
 
-export function newTables({ typing, upcasts, ids, counts, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ typing, arenas, upcasts, ids, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
     typing,
+    arenas,
     upcasts,
     ids,
     counts,
