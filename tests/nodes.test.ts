@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bodyOf } from "../src/arenas.ts";
 import { check, compiledOf } from "../src/check.ts";
 import { newCompilation } from "../src/compilation.ts";
 import { cachedSession } from "../src/stdcache.ts";
@@ -89,7 +90,8 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
       expandMacros(compilation, loaded, false, (macros) => check(compilation, macros, false, true));
       written = flatten(compilation, loaded, false);
       problems.push(...audit([written, stdFor(compilation, written)], ids, p.name));
-      check(compilation, written);
+      const bodies = compiledOf(check(compilation, written)).map((i) => [bodyOf(i).params, bodyOf(i).body]);
+      problems.push(...stale(bodies, `${p.name}, compiled`));
     } catch (e) {
       if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
     }
@@ -98,6 +100,22 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
   }
   expect(problems.slice(0, 20)).toEqual([]);
 }, 120_000);
+
+// No node reachable from `roots` has been replaced: the rebuild put every replacement in place.
+function stale(roots: unknown, where: string): string[] {
+  const problems: string[] = [];
+  const visited = new Set<object>();
+  const visit = (v: unknown) => {
+    if (typeof v !== "object" || v === null || visited.has(v)) return;
+    visited.add(v);
+    if (Array.isArray(v)) return v.forEach(visit);
+    const n = v as Record<string, unknown>;
+    if (typeof n.id === "number" && latest(n as Id) !== n) problems.push(`${where}: a ${String(n.kind ?? "node")} at ${n.start} was replaced but is still in the tree`);
+    Object.values(n).forEach(visit);
+  };
+  visit(roots);
+  return problems;
+}
 
 // Every type reachable from `roots`, through the types it links to, is a primitive or the id of
 // a record in its program's arena.

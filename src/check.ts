@@ -9,7 +9,7 @@ import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, 
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, Rewrites, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
-import { rebuiltParam, rebuiltStmts } from "./rebuild.ts";
+import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
@@ -743,7 +743,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const given = site.types.get(arg);
     const member = recOf(given);
     if (member?.kind === "literal" && member.owner) return given!;
-    const tagged = comptimeArgument(site, arg);
+    // The interpreter reads a plain tree, and this body's replacements aren't in place yet.
+    const tagged = comptimeArgument(site, rebuiltExpr(arg, rewrites));
     const tag = tagged && typeof tagged === "object" && tagged.kind === "member" ? tagged.type : undefined;
     if (recOf(tag)?.kind === "literal") return tag!;
     const v = untagged(tagged);
