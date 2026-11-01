@@ -157,3 +157,45 @@ async function main(): Promise<void> throws IoError | AbortError {
   const res = await fetch("https://127.0.0.1:" + String(port) + "/", { tls: { ca: ca } });
   console.log("after:", res.status);
 }
+// case: tls_names
+// expect: localhost.: HTTP/1.1 200 OK
+// expect: evil.example.: ERR_TLS_CERT_ALTNAME_INVALID certificate verify failed: hostname mismatch
+// expect: localhost:443: 'localhost:443' isn't a host name or IP address a certificate can be checked against
+// expect: *: '*' isn't a host name or IP address a certificate can be checked against
+// expect: a..b: 'a..b' isn't a host name or IP address a certificate can be checked against
+// expect: [::1]: '[::1]' isn't a host name or IP address a certificate can be checked against
+// expect: 127.0.0.2: ERR_TLS_CERT_ALTNAME_INVALID certificate verify failed: IP address mismatch
+// expect: fetch [::1]: 200 https://[::1]:PORT/v6
+// A trailing dot names the same host; a name that matches nothing in the certificate, an address
+// it doesn't list, and text that isn't a host name at all are refused, never connected unchecked.
+// An IPv6 URL's host is checked as an address.
+import { readFileSync } from "node:fs";
+
+async function named(ca: string, port: i64, name: string): Promise<void> {
+  try {
+    const conn = await tls.connect("127.0.0.1", port, { ca: ca, serverName: name });
+    await conn.write(new TextEncoder().encode("GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n"));
+    const got = await conn.read(4096);
+    console.log(name + ": " + new TextDecoder().decode(got).split("\r\n")[0]);
+  } catch (e) {
+    if (e instanceof IoError) console.log(name + ": " + (e.code.length > 0 ? e.code + " " : "") + e.message);
+    else console.log(name + ": aborted");
+  }
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const dir = "tests/fixtures/tls/";
+  const ca = readFileSync(dir + "ca.pem", "utf8");
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  const keys = { cert: readFileSync(dir + "server.pem", "utf8"), key: readFileSync(dir + "server-key.pem", "utf8") };
+  spawn(serve({ port: 0, hostname: "::", tls: keys, onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    return new Response(req.url);
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const port = found.port.load();
+  for (const name of ["localhost.", "evil.example.", "localhost:443", "*", "a..b", "[::1]", "127.0.0.2"]) await named(ca, port, name);
+  const res = await fetch("https://[::1]:" + String(port) + "/v6", { tls: { ca: ca } });
+  const text = await res.text();
+  console.log("fetch [::1]:", res.status, text.replace(String(port), "PORT"));
+}
