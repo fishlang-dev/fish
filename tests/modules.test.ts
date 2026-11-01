@@ -13,6 +13,7 @@ const parsed = CHECKER.map((name) => {
 const lineOf = (text: string, at: number) => text.slice(0, at).split("\n").length;
 const declared = (s: Stmt): Stmt => (s.kind === "export" ? s.body : s);
 // A class declaration is a statement; a class expression is a class node.
+type Member = { kind: string; name?: unknown; type?: TypeNode; init?: Expr; start: number };
 const classAt = ({ of, node }: { of: string; node: unknown }) => (of === "classNode" || (of === "stmt" && (node as Stmt).kind === "class") ? (node as { name: string | undefined }) : undefined);
 
 // A module is a class whose methods take `this`, not a function returning its inner functions,
@@ -45,6 +46,8 @@ test("no top-level function in the checker returns an object of its own inner fu
 test("no code in the checker destructures a method out of a module class's instance", () => {
   const methods = new Map<string, Set<string>>();
   const fieldTypes = new Map<string, string>();
+  // What each method returns, when it names a class: a view is reached as `this.registry()`.
+  const returns = new Map<string, string>();
   const typeName = (t: TypeNode | undefined) => (t?.kind === "ref" ? t.name : undefined);
   for (const { program } of parsed) {
     // A host interface or object type a module is handed is held to the same rule.
@@ -54,12 +57,13 @@ test("no code in the checker destructures a method out of a module class's insta
       if (own.size > 0) methods.set((s as { name: string }).name, own);
     }
     walk("stmt", program, (n) => {
-      const c = classAt(n) as { name: string | undefined; members: { kind: string; name?: unknown; type?: TypeNode }[] } | undefined;
+      const c = classAt(n) as { name: string | undefined; members: { kind: string; name?: unknown; type?: TypeNode; returnType?: TypeNode }[] } | undefined;
       if (!c) return;
       if (!c.name) return;
       const own = new Set<string>();
       for (const m of c.members) {
         if (m.kind === "method" && typeof m.name === "string") own.add(m.name);
+        if (m.kind === "method" && typeof m.name === "string" && typeName(m.returnType)) returns.set(m.name, typeName(m.returnType)!);
         if (m.kind === "field" && typeof m.name === "string" && typeName(m.type)) fieldTypes.set(m.name, typeName(m.type)!);
       }
       methods.set(c.name, own);
@@ -84,6 +88,7 @@ test("no code in the checker destructures a method out of a module class's insta
       if (e?.kind === "new" && e.callee.kind === "ident") return e.callee.name;
       if (e?.kind === "ident") return typed.get(e.name);
       if (e?.kind === "member") return fieldTypes.get(e.name);
+      if (e?.kind === "call" && e.callee.kind === "member") return returns.get(e.callee.name);
       return undefined;
     };
     const check = (pattern: Pattern, of: string | undefined, at: number) => {
@@ -106,11 +111,9 @@ test("no code in the checker destructures a method out of a module class's insta
   expect(offenders).toEqual([]);
 });
 
-// A module that calls back into its host is made where it is used, over that host, and keeps
-// its lasting state in data the host owns. Owned as a field, its methods would run on the
-// field while the host is lent to them, which Fish refuses.
-test("no class in the checker holds, as a field, a module that calls back into its host", () => {
-  type Member = { kind: string; name?: unknown; type?: TypeNode; init?: Expr };
+// The checker's classes that call back into a host: one with a field typed as an interface with
+// methods, or lending a class mutably.
+function hostedModules() {
   const classes = new Map<string, Member[]>();
   const callable = new Set<string>();
   for (const { program } of parsed) {
@@ -131,19 +134,43 @@ test("no class in the checker holds, as a field, a module that calls back into i
     const t = unwrapped(m.type);
     return t?.kind === "ref" && (callable.has(t.name) || (t !== m.type && classes.has(t.name)));
   }) ? [name] : [])));
+  return { hosted, unwrapped };
+}
+
+// A module that calls back into its host is made where it is used, over that host, and keeps
+// its lasting state in data the host owns. Owned as a field, its methods would run on the
+// field while the host is lent to them, which Fish refuses.
+test("no class in the checker holds, as a field, a module that calls back into its host", () => {
+  const { hosted, unwrapped } = hostedModules();
   const offenders: string[] = [];
   for (const { name, text, program } of parsed) {
     walk("stmt", program, (n) => {
-      const c = classAt(n) as { name: string | undefined; members: (Member & { start: number })[] } | undefined;
+      const c = classAt(n) as { name: string | undefined; members: Member[] } | undefined;
       if (!c) return;
       for (const m of c.members) {
         if (m.kind !== "field") continue;
         // Lent as `Mut<Host>`, it is the host a view is made over, not owned.
-        const held = m.type?.kind === "ref" && m.type === unwrapped(m.type) ? m.type.name : m.init?.kind === "new" && m.init.callee.kind === "ident" ? m.init.callee.name : undefined;
-        if (held && hosted.has(held)) offenders.push(`${name}.ts:${lineOf(text, m.start)}: ${c.name}.${String(m.name)} holds ${held}`);
+        const types = m.type?.kind === "union" ? m.type.types : m.type ? [m.type] : [];
+        const held = [...types.flatMap((t) => (t.kind === "ref" && t === unwrapped(t) ? [t.name] : [])), ...(m.init?.kind === "new" && m.init.callee.kind === "ident" ? [m.init.callee.name] : [])];
+        for (const h of held) if (hosted.has(h)) offenders.push(`${name}.ts:${lineOf(text, m.start)}: ${c.name}.${String(m.name)} holds ${h}`);
       }
     });
   }
   expect(hosted.size).toBeGreaterThan(0);
+  expect(offenders).toEqual([]);
+});
+
+// A view is made anew at each use, so state of its own would silently start over each time; what
+// has to last lives in the data its host owns.
+test("no module that calls back into its host keeps state of its own", () => {
+  const { hosted } = hostedModules();
+  const offenders: string[] = [];
+  for (const { name, text, program } of parsed) {
+    walk("stmt", program, (n) => {
+      const c = classAt(n) as { name: string | undefined; members: Member[] } | undefined;
+      if (!c?.name || !hosted.has(c.name)) return;
+      for (const m of c.members) if (m.kind === "field" && m.init) offenders.push(`${name}.ts:${lineOf(text, m.start)}: ${c.name}.${String(m.name)}`);
+    });
+  }
   expect(offenders).toEqual([]);
 });
