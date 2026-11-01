@@ -119,7 +119,7 @@ export type ClassInfo = {
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
 export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
-  const { arenas, genericStatics, ids, rust, typing: { classType, rec } } = tables;
+  const { arenas, genericStatics, ids, rust, typing } = tables;
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   // A template is copied into each concrete class by the abstract class's one declaration, which a
   // generic class doesn't have.
@@ -134,8 +134,8 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   if (constructors.length > 1) throw new CompileError("a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
-  const type = classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
-  if (node.abstract) rec(type).abstract = true;
+  const type = typing.classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
+  if (node.abstract) typing.rec(type).abstract = true;
   const abstracts: AbstractMember[] = [];
   const methods = new Map<string, BodyId>();
   // A generic class's statics can't use its type parameters, so every instance shares one set.
@@ -414,15 +414,15 @@ function rustOf(rust: RustTables, m: ClassMember): { foreign?: true; rust?: Rust
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
 // a constructor of its own it passes its arguments on to the base's.
 export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (name: string) => Type) {
-  const { arenas, defaulted, prologues, ids, typing: { rec } } = tables;
+  const { arenas, defaulted, prologues, ids, typing } = tables;
   c.base = base.classId;
-  rec(c.type).base = base.type;
+  typing.rec(c.type).base = base.type;
   const constructor = arenas.bodyOf(c.constructor);
   const baseConstructor = arenas.bodyOf(base.constructor);
   for (let b: ClassInfo | undefined = base; b; b = arenas.classOf(b.base)) {
     const redeclared = c.fields.find((f) => b.fields.some((g) => g.name === f.name));
     if (redeclared) {
-      throw new CompileError(`'${redeclared.name}' is already a field of '${rec(b.type).name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${redeclared.name} = ...'`, redeclared.start, redeclared.end);
+      throw new CompileError(`'${redeclared.name}' is already a field of '${typing.rec(b.type).name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${redeclared.name} = ...'`, redeclared.start, redeclared.end);
     }
   }
   const explicit = c.node.members.find((m) => m.kind === "constructor");
@@ -443,7 +443,7 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   // such name is renamed apart into this constructor's own scope, standing for what it means there.
   const outer = baseConstructor.scope ?? new Map<string, Type>();
   const names = new Map([...new Set(baseConstructor.params.flatMap((p) => refNames(p.type)))]
-    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, `${n} of ${rec(base.type).name}`]));
+    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, `${n} of ${typing.rec(base.type).name}`]));
   if (names.size > 0) constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
   // Copies, so each constructor has its own parameters, and none of them is a property here.
   const params = baseConstructor.params.map((p) => {
@@ -492,13 +492,13 @@ export function inherited(arenas: Arenas, c: ClassInfo, table: "methods" | "stat
 // With embedding, a base's own use of `this.m` keeps reaching the base's `m`, where
 // TypeScript would reach an override. Overriding such a member is an error rather than a
 // silent change in meaning; overriding one the base never reaches through `this` is fine.
-export function checkOverrides(arenas: Arenas, { rec }: Typing, c: ClassInfo) {
+export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
   // A copied template is this class's only because a base declared it; the user wrote none of it.
   const own = [...c.methods, ...c.getters, ...c.setters].map(([name, m]): [string, Body] => [name, arenas.bodyOf(m)]).filter(([, m]) => m.copyOf === undefined);
   const templates: [string, Body][] = [];
   for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) for (const table of TABLES) for (const [name, f] of b[table]) if (arenas.bodyOf(f).template) templates.push([name, arenas.bodyOf(f)]);
   for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
-    const base = rec(b.type).name;
+    const base = typing.rec(b.type).name;
     for (const [name, m] of own) {
       if (b.fields.some((f) => f.name === name)) throw new CompileError(`'${name}' is already a field of '${base}'`, m.start, m.end);
       if (!b.methods.has(name) && !b.getters.has(name) && !b.setters.has(name)) continue;
@@ -538,7 +538,7 @@ const MEMBER_KINDS = { methods: "method", getters: "getter", setters: "setter" }
 // member, and gets its own copy of each template, which sees `this` as the concrete class, so
 // `this.area()` there runs the concrete class's `area`.
 export function implementAbstracts(tables: Tables, c: ClassInfo) {
-  const { arenas, typing: { rec } } = tables;
+  const { arenas, typing } = tables;
   const bases: ClassInfo[] = [];
   for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) bases.push(b);
   for (const b of [c, ...bases].filter((b) => b.node.abstract).reverse()) markTemplates(arenas, tables.typing, b);
@@ -546,13 +546,13 @@ export function implementAbstracts(tables: Tables, c: ClassInfo) {
   const abstracts = bases.flatMap((b) => b.abstracts.map((a) => ({ ...a, owner: b })));
   const missing = abstracts.filter((a) => inherited(arenas, c, a.table, a.name)!.abstract && !(a.table !== "methods" && [c, ...bases].some((b) => b.fields.some((f) => f.name === a.name))));
   if (missing.length > 0) {
-    const named = [...new Set(missing.map((a) => `${MEMBER_KINDS[a.table]} '${a.name}' of '${rec(a.owner.type).name}'`))];
-    throw new CompileError(`class '${rec(c.type).name}' must implement the abstract ${named.join(", ")}`, c.node.start, c.node.end);
+    const named = [...new Set(missing.map((a) => `${MEMBER_KINDS[a.table]} '${a.name}' of '${typing.rec(a.owner.type).name}'`))];
+    throw new CompileError(`class '${typing.rec(c.type).name}' must implement the abstract ${named.join(", ")}`, c.node.start, c.node.end);
   }
   for (const a of abstracts) {
     const f = inherited(arenas, c, a.table, a.name)!;
     if (!f.abstract && (f.access === "private" || (f.access === "protected" && a.access === "public"))) {
-      throw new CompileError(`'${a.name}' implements a ${a.access} abstract member of '${rec(a.owner.type).name}', so it must be ${a.access === "public" ? "public" : "public or protected"}`, f.start, f.end);
+      throw new CompileError(`'${a.name}' implements a ${a.access} abstract member of '${typing.rec(a.owner.type).name}', so it must be ${a.access === "public" ? "public" : "public or protected"}`, f.start, f.end);
     }
   }
   for (const b of bases.filter((b) => b.node.abstract)) {
@@ -576,7 +576,7 @@ export function copyFor({ arenas, ids, typing }: Tables, c: ClassInfo, f: Body):
 }
 
 // Marks an abstract class's templates, once its bases' are marked.
-function markTemplates(arenas: Arenas, { rec }: Typing, c: ClassInfo) {
+function markTemplates(arenas: Arenas, typing: Typing, c: ClassInfo) {
   const names = new Set<string>();
   for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) {
     b.abstracts.forEach((a) => names.add(a.name));
@@ -602,10 +602,10 @@ function markTemplates(arenas: Arenas, { rec }: Typing, c: ClassInfo) {
   const constructor = arenas.bodyOf(c.constructor);
   const early = [...names].find((n) => usesOnThis("stmt", constructor.body, n, true));
   if (early !== undefined) {
-    throw new CompileError(`'${rec(c.type).name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, constructor.start, constructor.end);
+    throw new CompileError(`'${typing.rec(c.type).name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, constructor.start, constructor.end);
   }
   if (thisEscapes(constructor.body)) {
-    throw new CompileError(`'${rec(c.type).name}' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet`, constructor.start, constructor.end);
+    throw new CompileError(`'${typing.rec(c.type).name}' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet`, constructor.start, constructor.end);
   }
 }
 

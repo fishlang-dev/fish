@@ -17,25 +17,24 @@ const PRIMITIVES: Record<Exclude<Type, object>, string> = {
 // literal struct of the base it embeds, if any, then its own fields in declaration order. A
 // union is its member's index, then enough 64-bit words for its largest member.
 export function layoutOf(typing: Typing): (t: Type) => string {
-  const { lower, rec } = typing;
   return function llvm(t: Type): string {
     if (typeof t === "string") return PRIMITIVES[t];
-    const r = rec(t);
+    const r = typing.rec(t);
     // A Rust type's handle is the pointer to its boxed value, the one field its class has.
     if (r.kind === "ref" || r.kind === "pointer" || r.kind === "handle" || r.kind === "shared" || r.kind === "block" || r.kind === "map" || r.kind === "regex" || r.kind === "recursive" || rustClassOf(typing, t)) return "ptr";
     if (r.kind === "array") return ARRAY;
     if (r.kind === "fixed") return `[${r.size} x ${llvm(r.element)}]`;
     if (r.kind === "dyn") return DYN;
-    if (r.kind === "union") return `{ i32, [${words(rec, t as UnionType)} x i64] }`;
+    if (r.kind === "union") return `{ i32, [${words(typing, t as UnionType)} x i64] }`;
     // Atomic instructions need whole bytes, so an atomic boolean is a byte.
-    if (r.kind === "interior") return r.which === "Lock" ? `{ i32, ${llvm(r.of)} }` : r.which === "Atomic" && lower(r.of) === "boolean" ? "i8" : llvm(r.of);
+    if (r.kind === "interior") return r.which === "Lock" ? `{ i32, ${llvm(r.of)} }` : r.which === "Atomic" && typing.lower(r.of) === "boolean" ? "i8" : llvm(r.of);
     const parts = [...(r.kind === "class" && r.base ? [llvm(r.base)] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.fields).map((f) => llvm(f.type))];
     return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
   };
 }
 
-function words(rec: Typing["rec"], t: UnionType): usize {
-  return Math.ceil(Math.max(...rec(t).members.map((m) => size(rec, m)[0])) / 8);
+function words(typing: Typing, t: UnionType): usize {
+  return Math.ceil(Math.max(...typing.rec(t).members.map((m) => size(typing, m)[0])) / 8);
 }
 
 // A type's size and alignment in bytes, as LLVM lays out its IR type on the 64-bit targets
@@ -46,13 +45,13 @@ export const ARRAY = "{ ptr, i64, i64 }";
 export const DYN = "{ ptr, ptr }";
 
 // A type's size in bytes as it is laid out.
-export const byteSize = ({ rec }: Typing, t: Type): usize => size(rec, t)[0];
+export const byteSize = (typing: Typing, t: Type): usize => size(typing, t)[0];
 
-function size(rec: Typing["rec"], t: Type): [usize, usize] {
-  const r = typeof t === "string" ? undefined : rec(t);
+function size(typing: Typing, t: Type): [usize, usize] {
+  const r = typeof t === "string" ? undefined : typing.rec(t);
   if (r?.kind === "array") return [24, 8];
   if (r?.kind === "fixed") {
-    const [bytes, align] = size(rec, r.element);
+    const [bytes, align] = size(typing, r.element);
     return [Math.ceil(bytes / align) * align * r.size, align];
   }
   if (r?.kind === "dyn") return [16, 8];
@@ -65,9 +64,9 @@ function size(rec: Typing["rec"], t: Type): [usize, usize] {
   if (r === undefined) return [0, 1];
   if (r.kind === "ref" || r.kind === "pointer" || r.kind === "handle" || r.kind === "shared" || r.kind === "block" || r.kind === "map" || r.kind === "regex" || r.kind === "recursive") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
-  if (r.kind === "union") return [8 + 8 * words(rec, t as UnionType), 8];
-  if (r.kind === "interior" && r.which !== "Lock") return size(rec, r.of);
-  const parts = r.kind === "interior" ? [[4, 4] as [usize, usize], size(rec, r.of)] : [...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.kind === "param" ? (r.bound ? rec(r.bound).fields : []) : r.fields).map((f) => f.type)].map((p) => size(rec, p));
+  if (r.kind === "union") return [8 + 8 * words(typing, t as UnionType), 8];
+  if (r.kind === "interior" && r.which !== "Lock") return size(typing, r.of);
+  const parts = r.kind === "interior" ? [[4, 4] as [usize, usize], size(typing, r.of)] : [...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.kind === "param" ? (r.bound ? typing.rec(r.bound).fields : []) : r.fields).map((f) => f.type)].map((p) => size(typing, p));
   const align = Math.max(1, ...parts.map(([, a]) => a));
   let bytes = 0;
   for (const [n, a] of parts) bytes = Math.ceil(bytes / a) * a + n;
@@ -82,11 +81,10 @@ function size(rec: Typing["rec"], t: Type): [usize, usize] {
 export type Slots = Builder & { typing: Typing; alloca(type: string): string; text(value: string): string; deep?(a: string, b: string, type: Type): string; inspect?(v: string, type: Type): string };
 
 // Whether values of a type compare part by part rather than as one word.
-export const compound = ({ rec }: Typing, t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(rec(t).kind);
+export const compound = (typing: Typing, t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(typing.rec(t).kind);
 
 export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
   const { emit, temp, label, startBlock, alloca, deep, typing } = b;
-  const { baseOf, field, fieldPath, isPlainJs, isSubclass, optionRef, unfold, membersFor, rec } = typing;
   const llvm = layoutOf(typing);
   return { convert, test, equals, unionField, holds, holdsWhere, eachMember };
 
@@ -104,8 +102,8 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     if (e.op === "instanceof") {
       const [type, c] = [typeOf(e.left), typeOf(e.right)];
       const v = value(e.left);
-      const r = typeof type === "string" ? undefined : rec(type);
-      return r?.kind === "union" ? holds(v, type as UnionType, r.members.filter((m) => isSubclass(m, c))) : String(isSubclass(type, c));
+      const r = typeof type === "string" ? undefined : typing.rec(type);
+      return r?.kind === "union" ? holds(v, type as UnionType, r.members.filter((m) => typing.isSubclass(m, c))) : String(typing.isSubclass(type, c));
     }
     if (e.op !== "===" && e.op !== "!==") return undefined;
     const kind = typeofTest(e);
@@ -113,9 +111,9 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     if (kind) {
       const [v, type] = [value(kind.operand), typeOf(kind.operand)];
       const name = (kind.name as { value: string }).value;
-      const r = typeof type === "string" ? undefined : rec(type);
-      const through = r?.kind === "ref" && isPlainJs(r.to);
-      if (isPlainJs(type) || through) {
+      const r = typeof type === "string" ? undefined : typing.rec(type);
+      const through = r?.kind === "ref" && typing.isPlainJs(r.to);
+      if (typing.isPlainJs(type) || through) {
         const [box, found] = [through ? temp() : v, temp()];
         if (through) emit(`${box} = load ptr, ptr ${v}`);
         emit(`${found} = call i32 @fsh_rt_js_typeof(ptr ${box}, ptr ${b.text(name)})`);
@@ -124,8 +122,8 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
       } else result = holdsWhere(v, type, (m) => category(typing, m) === name);
     } else {
       const [left, right] = [typeOf(e.left), typeOf(e.right)];
-      const unionLeft = typeof left !== "string" && rec(left).kind === "union";
-      if (!unionLeft && (typeof right === "string" || rec(right).kind !== "union")) return undefined;
+      const unionLeft = typeof left !== "string" && typing.rec(left).kind === "union";
+      if (!unionLeft && (typeof right === "string" || typing.rec(right).kind !== "union")) return undefined;
       const [u, o] = [value(e.left), value(e.right)];
       result = equals(u, left, o, right);
     }
@@ -140,7 +138,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
   // so two enum members that share a value are equal.
   function equals(a: string, aType: Type, b: string, bType: Type): string {
     // A member that holds itself is compared as what its block holds, unless both sides are it.
-    const [ar, br] = [typeof aType === "string" ? undefined : rec(aType), typeof bType === "string" ? undefined : rec(bType)];
+    const [ar, br] = [typeof aType === "string" ? undefined : typing.rec(aType), typeof bType === "string" ? undefined : typing.rec(bType)];
     if (ar?.kind === "recursive" && aType !== bType) {
       const loaded = temp();
       emit(`${loaded} = load ${llvm(ar.of)}, ptr ${a}`);
@@ -152,14 +150,14 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     }
     if (br?.kind === "union") return equals(b, bType, a, aType);
     const literal = (t: Type) => {
-      const r = typeof t === "string" ? undefined : rec(t);
+      const r = typeof t === "string" ? undefined : typing.rec(t);
       return r?.kind === "literal" ? r : undefined;
     };
     const value = (t: Type, v: string) => {
       const l = literal(t);
       return l ? String(l.value) : v;
     };
-    const base = (t: Type) => (literal(t) ? (baseOf(t as LiteralType) ?? t) : t);
+    const base = (t: Type) => (literal(t) ? (typing.baseOf(t as LiteralType) ?? t) : t);
     if (ar?.kind === "literal" && br?.kind === "literal") {
       return String(ar.value === br.value);
     }
@@ -190,8 +188,8 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
       // The checker found the field on every member, so each is an object or an instance.
       const holder = member as ObjectType | ClassType;
       const value = temp();
-      emit(`${value} = extractvalue ${llvm(member)} ${part}, ${fieldPath(holder, name).join(", ")}`);
-      return convert(value, field(holder, name)!.type, to);
+      emit(`${value} = extractvalue ${llvm(member)} ${part}, ${typing.fieldPath(holder, name).join(", ")}`);
+      return convert(value, typing.field(holder, name)!.type, to);
     });
   }
 
@@ -201,7 +199,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     const result = alloca(llvm(to));
     const tag = temp();
     emit(`${tag} = extractvalue ${llvm(union)} ${v}, 0`);
-    const { members } = rec(union);
+    const { members } = typing.rec(union);
     const cases = members.map(() => label());
     const end = label();
     emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
@@ -220,7 +218,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
   // Whether `v` holds a member `wanted` says yes to, looking into the block of a member that
   // holds itself, whose own members may answer differently.
   function holdsWhere(v: string, type: Type, wanted: (m: Type) => boolean): string {
-    const r = typeof type === "string" ? undefined : rec(type);
+    const r = typeof type === "string" ? undefined : typing.rec(type);
     if (r?.kind === "recursive") {
       const loaded = temp();
       emit(`${loaded} = load ${llvm(r.of)}, ptr ${v}`);
@@ -228,9 +226,9 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     }
     if (r?.kind !== "union") return String(wanted(type));
     const mixed = (m: Type) => {
-      const inner = unfold(m);
+      const inner = typing.unfold(m);
       if (inner === m || typeof inner === "string") return false;
-      const ir = rec(inner);
+      const ir = typing.rec(inner);
       return ir.kind === "union" && new Set(ir.members.map(wanted)).size > 1;
     };
     const nested = r.members.filter(mixed);
@@ -261,7 +259,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     const tag = temp();
     emit(`${tag} = extractvalue ${llvm(union)} ${v}, 0`);
     let result = "false";
-    const all = rec(union).members;
+    const all = typing.rec(union).members;
     for (const m of members) {
       const [is, next] = [temp(), temp()];
       emit(`${is} = icmp eq i32 ${tag}, ${all.indexOf(m)}`);
@@ -283,11 +281,11 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     // loaded, and a value meeting one moves into a new block.
     // A union holding the block itself takes it, or gives it, as is.
     const within = (t: Type, u: Type) => {
-      const r = typeof u === "string" ? undefined : rec(u);
+      const r = typeof u === "string" ? undefined : typing.rec(u);
       return r?.kind === "union" && r.members.includes(t);
     };
-    const fr = typeof from === "string" ? undefined : rec(from);
-    const tr = typeof to === "string" ? undefined : rec(to);
+    const fr = typeof from === "string" ? undefined : typing.rec(from);
+    const tr = typeof to === "string" ? undefined : typing.rec(to);
     if (fr?.kind === "recursive" && !within(from, to)) {
       const loaded = temp();
       emit(`${loaded} = load ${llvm(fr.of)}, ptr ${v}`);
@@ -314,14 +312,14 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     // An empty array literal holds no element to convert, and an array of JS values holds the
     // same boxes whichever shape each is declared to have.
     const js = (t: Type) => {
-      const r = typeof t === "string" ? undefined : rec(t);
+      const r = typeof t === "string" ? undefined : typing.rec(t);
       return r?.kind === "block" && r.which === "JsValue";
     };
     if (fr?.kind === "array" && tr?.kind === "array" && (fr.element === "never" || (js(fr.element) && js(tr.element)))) return v;
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
     // same pointer.
     // A reference going into a `Ref<T> | null` is its pointer, as the payload.
-    if (fr?.kind === "ref" && !optionRef(to)) {
+    if (fr?.kind === "ref" && !typing.optionRef(to)) {
       if (tr?.kind === "ref") return lend(v, fr.to, tr.to);
       const loaded = temp();
       emit(`${loaded} = load ${llvm(fr.to)}, ptr ${v}`);
@@ -357,10 +355,10 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     if (embeds) insert(convert(v, from, embeds), embeds, 0);
     target.fields.forEach((f, i) => {
       // An optional field the value leaves out is empty.
-      if (!field(from, f.name)) return insert(convert("zeroinitializer", "null", f.type), f.type, i + (embeds ? 1 : 0));
+      if (!typing.field(from, f.name)) return insert(convert("zeroinitializer", "null", f.type), f.type, i + (embeds ? 1 : 0));
       const part = temp();
-      emit(`${part} = extractvalue ${llvm(from)} ${v}, ${fieldPath(from as ObjectType | ClassType, f.name).join(", ")}`);
-      insert(convert(part, field(from, f.name)!.type, f.type), f.type, i + (embeds ? 1 : 0));
+      emit(`${part} = extractvalue ${llvm(from)} ${v}, ${typing.fieldPath(from as ObjectType | ClassType, f.name).join(", ")}`);
+      insert(convert(part, typing.field(from, f.name)!.type, f.type), f.type, i + (embeds ? 1 : 0));
     });
     return result;
   }
@@ -370,7 +368,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
   function lend(v: string, from: Type, to: Type): string {
     if (from === to) return v;
     // A reference to a place holding a recursive type's block lends the block itself.
-    const r = typeof from === "string" ? undefined : rec(from);
+    const r = typeof from === "string" ? undefined : typing.rec(from);
     if (r?.kind === "recursive" && to !== from) {
       const block = temp();
       emit(`${block} = load ptr, ptr ${v}`);
@@ -390,11 +388,11 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
 
   // Sets the tag of the member `from` goes into, and stores its value as the payload.
   function inject(v: string, from: Type, to: UnionType): string {
-    const member = membersFor(from, to)[0]!;
+    const member = typing.membersFor(from, to)[0]!;
     const slot = alloca(llvm(to));
-    emit(`store i32 ${rec(to).members.indexOf(member)}, ptr ${slot}`);
+    emit(`store i32 ${typing.rec(to).members.indexOf(member)}, ptr ${slot}`);
     const value = convert(v, from, member);
-    if (typeof member === "string" || rec(member).kind !== "literal") {
+    if (typeof member === "string" || typing.rec(member).kind !== "literal") {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(to)}, ptr ${slot}, i32 0, i32 1`);
       // The payload is i64 words, aligned to 8 however wide a member is.
@@ -407,7 +405,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
 
   // The payload of a union known to hold a member of type `to`, or a union of some members.
   function payload(v: string, from: UnionType, to: Type): string {
-    if (typeof to !== "string" && rec(to).kind === "literal") return "zeroinitializer";
+    if (typeof to !== "string" && typing.rec(to).kind === "literal") return "zeroinitializer";
     const slot = alloca(llvm(from));
     emit(`store ${llvm(from)} ${v}, ptr ${slot}`);
     const at = temp();
@@ -426,13 +424,13 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     emit(`${tag} = extractvalue ${llvm(from)} ${v}, 0`);
     // A member that holds itself, which narrowing opened up, gives the member its block holds.
     const opened = (m: Type) => {
-      const r = typeof m === "string" ? undefined : rec(m);
-      if (r?.kind !== "recursive" || membersFor(m, to).length > 0 || typeof r.of === "string") return false;
-      const of = rec(r.of);
-      return of.kind === "union" && of.members.some((x) => membersFor(x, to).length > 0);
+      const r = typeof m === "string" ? undefined : typing.rec(m);
+      if (r?.kind !== "recursive" || typing.membersFor(m, to).length > 0 || typeof r.of === "string") return false;
+      const of = typing.rec(r.of);
+      return of.kind === "union" && of.members.some((x) => typing.membersFor(x, to).length > 0);
     };
-    const { members } = rec(from);
-    const held = members.filter((m) => membersFor(m, to).length > 0 || opened(m));
+    const { members } = typing.rec(from);
+    const held = members.filter((m) => typing.membersFor(m, to).length > 0 || opened(m));
     const cases = held.map(() => label());
     const end = label();
     emit(`switch i32 ${tag}, label %${end} [ ${held.map((m, i) => `i32 ${members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);

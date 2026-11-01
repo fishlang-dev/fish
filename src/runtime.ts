@@ -308,7 +308,6 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
 // A value of a type with no printed form, like an object, prints as its type's name.
 export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slots, convert: Convert) {
   const { emit, temp, label, startBlock, cString, typing } = b;
-  const { show, rec } = typing;
   const llvm = layoutOf(typing);
   let format = "";
   let values: string[] = [];
@@ -326,10 +325,10 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
     // Objects, arrays, Maps, Sets and unions holding them print as Node's util.inspect would.
     const plain = (t: Type): boolean => {
       if (typeof t === "string") return true;
-      const r = rec(t);
+      const r = typing.rec(t);
       return r.kind === "literal" || r.kind === "pattern" || (r.kind === "union" && r.members.every(plain));
     };
-    const r = typeof type === "string" ? undefined : rec(type);
+    const r = typeof type === "string" ? undefined : typing.rec(type);
     if (!plain(type) && b.inspect) {
       flush();
       const text = b.inspect(v, type);
@@ -354,7 +353,7 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
     } else if (type === "null") {
       format += "null";
     } else if (r !== undefined && r.kind !== "union") {
-      format += escape(show(type));
+      format += escape(typing.show(type));
     } else if (type === "boolean") {
       const text = temp();
       emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);

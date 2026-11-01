@@ -119,29 +119,29 @@ export function holesOf(typing: Typing, q: Quote, types: Record<Category, Type>,
 
 // The member of a union a node is: the object of its kind with all its fields, a string, an
 // array or a number.
-function memberFor({ unfold, field, rec }: Typing, node: unknown, union: UnionType): Type | undefined {
-  const all = rec(union).members;
-  const members = all.map(unfold);
+function memberFor(typing: Typing, node: unknown, union: UnionType): Type | undefined {
+  const all = typing.rec(union).members;
+  const members = all.map((t) => typing.unfold(t));
   if (node === null || node === undefined) return members.includes("null") ? "null" : undefined;
   if (Array.isArray(node)) return all.find((m) => {
-    const u = unfold(m);
-    return typeof u !== "string" && rec(u).kind === "array";
+    const u = typing.unfold(m);
+    return typeof u !== "string" && typing.rec(u).kind === "array";
   });
   if (typeof node === "string") return all.find((m) => {
     if (m === "string") return true;
-    const r = typeof m === "string" ? undefined : rec(m);
+    const r = typeof m === "string" ? undefined : typing.rec(m);
     return r?.kind === "literal" && r.value === node;
   });
   if (typeof node !== "object") return all.find((m) => typeof m === "string" && m !== "null");
   const n = node as Record<string, unknown>;
   return all.find((m) => {
-    const o = unfold(m);
+    const o = typing.unfold(m);
     if (typeof o === "string") return false;
-    if (rec(o).kind !== "object") return false;
-    const kind = field(o, "kind")?.type;
-    const kr = kind === undefined || typeof kind === "string" ? undefined : rec(kind);
+    if (typing.rec(o).kind !== "object") return false;
+    const kind = typing.field(o, "kind")?.type;
+    const kr = kind === undefined || typeof kind === "string" ? undefined : typing.rec(kind);
     if (typeof n.kind === "string" && (kr?.kind !== "literal" || kr.value !== n.kind)) return false;
-    return Object.keys(n).every((k) => k === "id" || field(o, k) !== undefined);
+    return Object.keys(n).every((k) => k === "id" || typing.field(o, k) !== undefined);
   });
 }
 
@@ -183,10 +183,10 @@ function spliceIn(typing: Typing, node: unknown, t: UnionType, types: Record<Cat
   return undefined;
 }
 
-function isUnionOf({ unfold, rec }: Typing, t: Type, category: Type): boolean {
-  const c = unfold(category);
+function isUnionOf(typing: Typing, t: Type, category: Type): boolean {
+  const c = typing.unfold(category);
   if (typeof t === "string" || typeof c === "string") return false;
-  const [tr, cr] = [rec(t), rec(c)];
+  const [tr, cr] = [typing.rec(t), typing.rec(c)];
   return tr.kind === "union" && cr.kind === "union" && cr.members.every((m) => tr.members.includes(m));
 }
 

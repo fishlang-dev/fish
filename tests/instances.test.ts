@@ -7,7 +7,7 @@ import { cachedSession } from "../src/stdcache.ts";
 import { unreached, type Body, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
 import { NodeMap } from "../src/nodes.ts";
-import { newTyping, TypeMap, type ClassType, type Type, digest } from "../src/typing.ts";
+import { Typing, TypeMap, type ClassType, type Type, digest } from "../src/typing.ts";
 
 const session = cachedSession();
 
@@ -42,10 +42,9 @@ test("abstract classes compile no call to what isn't compiled", () => {
 // to compare, so the net under them is tested directly: a comparison reaching an `equals`
 // that isn't compiled, through an object holding the class, is refused at its span.
 test("a comparison can't reach an equals that isn't compiled", () => {
-  const typing = newTyping();
-  const { classType, objectType, rec } = typing;
-  const shape = classType("Shape");
-  rec(shape).abstract = true;
+  const typing = new Typing();
+  const shape = typing.classType("Shape");
+  typing.rec(shape).abstract = true;
   const arenas = new Arenas();
   const body = (b: object) => arenas.addBody(b as Body).bodyId;
   const equals = arenas.addInstance({ body: body({ name: "Shape.equals", owner: shape }), bindings: new Map(), tables: { arenas } } as unknown as Omit<Instance, "id">);
@@ -53,7 +52,7 @@ test("a comparison can't reach an equals that isn't compiled", () => {
   const at = { start: 10, end: 20 };
   const [left, right] = [{ id: 1, kind: "ident", name: "a", ...at }, { id: 2, kind: "ident", name: "b", ...at }] as Expr[];
   const compare = { id: 3, kind: "binary", op: "===", left, right, ...at } as Expr;
-  const held = objectType([{ name: "s", type: shape }]);
+  const held = typing.objectType([{ name: "s", type: shape }]);
   const types = new NodeMap<Expr, Type>([[left!, held], [right!, held], [compare, "boolean"]]);
   const caller = arenas.addInstance({ body: body({ name: "check" }), bindings: new Map(), calls: new NodeMap(), setters: new NodeMap(), types, tables: { arenas } } as unknown as Omit<Instance, "id">);
   expect(() => unreached(typing, equalities, arenas, [caller.id], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));

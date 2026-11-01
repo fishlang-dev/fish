@@ -14,11 +14,11 @@ export type Guard = { yes: Facts; no: Facts };
 
 // What `typeof` says for a value of each type. Every sized number is "number", as in
 // TypeScript, and every object and instance "object".
-export function category({ rec }: Typing, t: Type): string {
+export function category(typing: Typing, t: Type): string {
   if (isNumeric(t)) return "number";
   if (t === "null") return "undefined";
   if (typeof t === "string") return t;
-  const r = rec(t);
+  const r = typing.rec(t);
   if (r.kind === "literal") return typeof r.value === "bigint" ? "number" : typeof r.value;
   if (r.kind === "pattern") return "string";
   return "object";
@@ -26,10 +26,10 @@ export function category({ rec }: Typing, t: Type): string {
 
 export type Kind = "Map" | "Set" | "Array";
 
-export function ofKind({ rec, unfold }: Typing, t: Type, kind: Kind): boolean {
-  const held = unfold(t);
+export function ofKind(typing: Typing, t: Type, kind: Kind): boolean {
+  const held = typing.unfold(t);
   if (typeof held === "string") return false;
-  const r = rec(held);
+  const r = typing.rec(held);
   return kind === "Array" ? r.kind === "array" : r.kind === "map" && r.set === (kind === "Set");
 }
 
@@ -62,13 +62,12 @@ export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usiz
 export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, LocalId>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const { kindTests, typing, rewrites } = tables;
   const e = rewrites.current(written);
-  const { fieldsOf, holdsPlainJs, isSubclass, rec, unfold, fits, refType, unionType } = typing;
   const nothing: Guard = { yes: new Map(), no: new Map() };
   const of = (x: Expr) => guard(tables, x, types, locals, narrowable, predicate);
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
   const proved = e.kind === "call" && predicate ? predicate(e) : undefined;
   if (proved && e.kind === "call" && e.args[proved.index]) {
-    const facts = split(e.args[proved.index]!, (m) => (fits(m, proved.type) ? "yes" : "no"), true);
+    const facts = split(e.args[proved.index]!, (m) => (typing.fits(m, proved.type) ? "yes" : "no"), true);
     proved.narrows(facts.yes.size > 0, facts.no.size > 0);
     return facts;
   }
@@ -87,7 +86,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
   }
   if (e.op === "instanceof") {
     const c = types.get(e.right);
-    return split(e.left, (m) => (c !== undefined && isSubclass(m, c) ? "yes" : "no"), true);
+    return split(e.left, (m) => (c !== undefined && typing.isSubclass(m, c) ? "yes" : "no"), true);
   }
   if (e.op !== "===" && e.op !== "!==") return nothing;
   const test = typeofTest(e);
@@ -97,11 +96,11 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     // A JsValue that is a string, number or boolean is read as a Fish one where that is known.
     const read = name && JS_READS[name];
     const tested = types.get(test.operand);
-    if (local && read && tested && holdsPlainJs(tested) && narrowable(local)) {
+    if (local && read && tested && typing.holdsPlainJs(tested) && narrowable(local)) {
       const facts: Guard = { yes: new Map([[local.localId, read]]), no: new Map() };
       return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
     }
-    if (local && tested && holdsPlainJs(tested)) return nothing;
+    if (local && tested && typing.holdsPlainJs(tested)) return nothing;
     return name ? split(test.operand, (m) => (category(typing, m) === name ? "yes" : "no"), e.op === "===") : nothing;
   }
   for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
@@ -114,11 +113,11 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     if (subject.kind === "ident") return split(subject, (m) => (is(m, value) ? "yes" : "no"), e.op === "===");
     if (subject.kind === "member") {
       return split(subject.object, (m) => {
-        const kind = typeof m === "string" ? undefined : fieldsOf(m).find((f) => f.name === subject.name)?.type;
+        const kind = typeof m === "string" ? undefined : typing.fieldsOf(m).find((f) => f.name === subject.name)?.type;
         if (kind && is(kind, value)) return "yes";
-        const r = kind === undefined || typeof kind === "string" ? undefined : rec(kind);
+        const r = kind === undefined || typeof kind === "string" ? undefined : typing.rec(kind);
         // A `kind` that is one of several literals is that literal only when it is among them.
-        if (r?.kind === "union" && r.members.every((k) => typeof k !== "string" && rec(k).kind === "literal")) {
+        if (r?.kind === "union" && r.members.every((k) => typeof k !== "string" && typing.rec(k).kind === "literal")) {
           return r.members.some((k) => is(k, value)) ? "both" : "no";
         }
         return r?.kind === "literal" ? "no" : "both";
@@ -129,7 +128,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
 
   function is(t: Type, value: unknown): boolean {
     if (typeof t === "string") return false;
-    const r = rec(t);
+    const r = typing.rec(t);
     return r.kind === "literal" && r.value === value;
   }
 
@@ -140,15 +139,15 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     if (!local || !type || !narrowable(local)) return nothing;
     // A reference narrows to a reference to fewer members; a mutable one only to a single
     // member, which it can point to inside the union.
-    const t = typeof type === "string" ? undefined : rec(type);
+    const t = typeof type === "string" ? undefined : typing.rec(type);
     const ref = t?.kind === "ref" ? t : undefined;
     const held = ref ? ref.to : type;
-    const h = typeof held === "string" ? undefined : rec(held);
+    const h = typeof held === "string" ? undefined : typing.rec(held);
     // A member that holds itself stands for its own members, which the check may tell apart.
     const members = (h?.kind === "union" ? h.members : [held]).flatMap((m) => {
-      const inner = unfold(m);
+      const inner = typing.unfold(m);
       if (inner === m || typeof inner === "string") return [m];
-      const r = rec(inner);
+      const r = typing.rec(inner);
       if (r.kind !== "union") return [m];
       const verdicts = new Set(r.members.map(check));
       return verdicts.size > 1 ? r.members : [m];
@@ -158,7 +157,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
       if (left.length === 0) return new Map();
       // A mutable reference can point at one member inside the union, but to several only
       // through a shared copy.
-      return new Map([[local.localId, ref ? refType(unionType(left), ref.mutable && left.length === 1) : unionType(left)]]);
+      return new Map([[local.localId, ref ? typing.refType(typing.unionType(left), ref.mutable && left.length === 1) : typing.unionType(left)]]);
     };
     const [yes, no] = [facts("no"), facts("yes")];
     return positive ? { yes, no } : { yes: no, no: yes };
@@ -170,11 +169,11 @@ export const isEmpty = (e: Expr, locals: NodeMap<Expr, LocalId>) => e.kind === "
 
 
 // A variable either of two branches narrowed has, after them, whichever type it had.
-export function either({ unionType }: Typing, x: Facts, y: Facts): Facts {
+export function either(typing: Typing, x: Facts, y: Facts): Facts {
   const out: Facts = new Map();
   for (const [local, t] of x) {
     const other = y.get(local);
-    if (other) out.set(local, unionType([t, other]));
+    if (other) out.set(local, typing.unionType([t, other]));
   }
   return out;
 }

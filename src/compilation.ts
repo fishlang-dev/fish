@@ -9,7 +9,7 @@ import type { RegexTables } from "./regex.ts";
 import type { RustTables } from "./rust.ts";
 import type { Locking } from "./dependencies.ts";
 import type { Unit } from "./mathlib.ts";
-import { TypeMap, newTyping, type ClassType, type DynType, type LiteralType, type Type, type Typing } from "./typing.ts";
+import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
 // One compilation of a program. Its front end, which keeps no state of its own, is handed the
@@ -66,7 +66,7 @@ export function newSession(): Session {
 }
 
 export function newCompilation(session: Session): Compilation {
-  return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet() };
+  return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: new Typing(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet() };
 }
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
