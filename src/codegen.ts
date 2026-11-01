@@ -3959,16 +3959,23 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       jsonRaw(w, "]");
       return;
     }
-    jsonObject(w, v, t, typing.rec(object).fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined })));
+    jsonObject(w, v, t, objectJsonFields(object, as));
   }
 
   // A class's fields JSON writes, a base's first, each with where it sits in the instance.
+  // An object's fields as JSON writes them, typed and marked optional as the object was written.
+  function objectJsonFields(object: ObjectType, as: Field[]) {
+    const { fields } = typing.rec(object);
+    return fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined }));
+  }
+
   function jsonFields(c: ClassType): { name: string; type: Type; path: usize[]; omit?: boolean }[] {
     return typing.rec(c).base ? [...jsonFields(typing.rec(c).base!).map((f) => ({ ...f, path: [0, ...f.path] })), ...ownJsonFields(c, 1)] : ownJsonFields(c, 0);
   }
 
   function ownJsonFields(c: ClassType, offset: usize) {
-    return typing.rec(c).fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i], omit: f.optional !== undefined }]));
+    const { fields } = typing.rec(c);
+    return fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i], omit: f.optional !== undefined }]));
   }
 
   // An object's fields; one spelled `x?: T` is left out while empty, so whether a comma is
@@ -4474,7 +4481,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       }
       return node;
     }
-    const fields = r.kind === "class" ? jsonFields((writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)) : typing.rec(object).fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined }));
+    const fields = r.kind === "class" ? jsonFields((writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)) : objectJsonFields(object, as);
     if (r.kind === "class" && errorClass(t as ClassType)) return errorTree(v, t as ClassType, fields, next);
     const name = r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "";
     const node = temp();
@@ -4589,7 +4596,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     }
     const spelled = writtenShape(written, t) as ObjectType | undefined;
     const as = recOf(spelled)?.fields.length === typing.rec(object).fields.length ? typing.rec(spelled!).fields : typing.rec(object).fields;
-    const fields = r.kind === "class" ? jsonFields((spelled as ClassType | undefined) ?? (t as ClassType)) : typing.rec(object).fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined }));
+    const fields = r.kind === "class" ? jsonFields((spelled as ClassType | undefined) ?? (t as ClassType)) : objectJsonFields(object, as);
     // Past the depth, an Error is its header alone, or its class's name when it has more to show.
     if (r.kind === "class" && errorClass(t as ClassType)) return errorTree(v, t as ClassType, fields, "0", true);
     emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "")})`);

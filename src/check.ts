@@ -451,7 +451,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   declarations: Tables["declarations"];
   equalities: Tables["equalities"];
   madeArrows: Tables["madeArrows"];
-  files: Map<number, Map<string, string>> | undefined;
+  files: Map<usize, Map<string, string>> | undefined;
   program: Stmt[];
   funcs: (Func & Body)[];
   classes: Map<string, ClassId>;
@@ -1715,7 +1715,8 @@ class BodyChecker implements Context, Outer, Sight {
     // In a member of a generic class's instance, `this` is the class made from the type
     // parameters as this body sees them, so it reads through their bounds as the definition did.
     const generic = this.f.self && this.cx.typing.rec(this.f.self.type).generic;
-    const viewed = generic && this.cx.genericClasses().classNamed(generic.name, this.cx.registry().classOf(this.f.self!.type).node.typeParams.map((p) => this.cx.resolver().resolveType({ id: nextId(this.cx.ids), kind: "ref", name: p.name, args: [], start: this.f.start, end: this.f.start })), this.f)!;
+    const resolver = this.cx.resolver();
+    const viewed = generic && this.cx.genericClasses().classNamed(generic.name, this.cx.registry().classOf(this.f.self!.type).node.typeParams.map((p) => resolver.resolveType({ id: nextId(this.cx.ids), kind: "ref", name: p.name, args: [], start: this.f.start, end: this.f.start })), this.f)!;
     this.enclosing = this.f.closure && selfOf(this.cx.arenas, this.f);
     this.self = this.f.closure ? this.enclosing && { ...this.enclosing, constructor: false, mutable: false, owned: false } : this.f.self && { ...this.f.self, type: viewed ?? this.f.self.type };
     this.captures = this.instance.captures;
