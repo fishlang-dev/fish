@@ -63,7 +63,7 @@ export function storable(typing: Typing, written: Type, at: Span): Type {
 // names in sight at an offset, for suggestions.
 export interface ResolverHost {
   classNamed(this: Mut<this>, name: string, args: Type[], at: Span): ClassType | undefined;
-  layout(this: Mut<this>, c: ClassType): boolean;
+  fieldsLaid(this: Mut<this>, c: ClassType): boolean;
   valueType(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type;
   conforms(this: Mut<this>, from: Type, to: Type, at: Span): boolean;
   typeNames(at: usize): string[];
@@ -113,7 +113,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   fieldsKnown(this: Mut<this>, c: ClassType): boolean {
     this.layouts.push(new Set(this.resolving));
     try {
-      return this.withSight(undefined, () => this.host.layout(c));
+      return this.withSight(undefined, () => this.host.fieldsLaid(c));
     } finally {
       this.layouts.pop();
     }

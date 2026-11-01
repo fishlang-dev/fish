@@ -343,13 +343,13 @@ const IN_PLACE = [
   // the spans of nodes just made, before any tree holds them;
   "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
   // a Body's overloads, given as ids, an enum's record and a Body's template mark, which are no nodes;
-  "check.ts: for (const f of funcs) if (f.overloads) f.overloads =", "check.ts: for (const e of enums.values())", "classes.ts: f.template = true",
+  "check.ts: for (const f of this.funcs) if (f.overloads) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true",
   // the rebuild itself, putting replacements in place once a body is checked;
-  "check.ts: for (let i = 0; i < f.params.length; i++) f.params[i] = rebuiltParam",
+  "check.ts: for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam",
   // lists of statements, which have no id to key a replacement by: a statement that becomes
   // several, nested functions hoisted, a local declaration hoisted out, and an export a library
   // lists, each where the list is read next.
-  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(ids), kind: \"block\"", "check.ts: place.list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
+  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(this.cx.ids), kind: \"block\"", "check.ts: place.list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
   "modules.ts: l.body[at] =", "macros.ts: statements.splice(",
 ];
 
