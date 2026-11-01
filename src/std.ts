@@ -492,7 +492,7 @@ function __cookieLine(name: string, value: string, options: CookieInit | null): 
   let sameSite = "Lax";
   if (options !== null) {
     const domain = options.domain;
-    if (domain !== null) line = line + "; Domain=" + __cookieAttribute(name, "domain", domain);
+    if (domain !== null && domain.length > 0) line = line + "; Domain=" + __cookieAttribute(name, "domain", domain);
     const p = options.path;
     if (p !== null) path = __cookieAttribute(name, "path", p);
     const s = options.sameSite;
@@ -501,7 +501,11 @@ function __cookieLine(name: string, value: string, options: CookieInit | null): 
   if (path.length > 0) line = line + "; Path=" + path;
   if (options !== null) {
     const expires = options.expires;
-    if (expires !== null) line = line + "; Expires=" + __cookieDate(expires);
+    if (expires !== null) {
+      // An HTTP date has a four-digit year, so 0000-01-01 to 9999-12-31 can be written.
+      assert(expires >= -62167219200000 && expires <= 253402300799999, "cookie '" + name + "' can't expire at " + String(expires) + "; give milliseconds since the epoch within the years 0000 to 9999");
+      line = line + "; Expires=" + __cookieDate(expires);
+    }
     const maxAge = options.maxAge;
     if (maxAge !== null) line = line + "; Max-Age=" + String(maxAge);
     if (options.secure === true) line = line + "; Secure";

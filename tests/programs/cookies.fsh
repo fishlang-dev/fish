@@ -233,3 +233,30 @@ function main() {
   const c = new RequestCookies();
   c.set("a", "b");
 }
+// case: cookies_edge_dates
+// expect: a=; Expires=Sat, 01 Jan 0000 00:00:00 GMT; SameSite=Lax
+// expect: a=; Expires=Fri, 31 Dec 9999 23:59:59 GMT; SameSite=Lax
+// expect: b=; Path=/; SameSite=Lax
+// The first and last moments an HTTP date can write, and an empty domain left out as an empty
+// path is.
+function main() {
+  let jar = new CookieMap();
+  jar.set("a", "", { path: "", expires: -62167219200000 });
+  console.log(jar.toSetCookieHeaders()[0]);
+  jar.set("a", "", { path: "", expires: 253402300799999 });
+  console.log(jar.toSetCookieHeaders()[0]);
+  jar.set("b", "", { domain: "" });
+  console.log(jar.toSetCookieHeaders()[1]);
+}
+// case: cookies_expires_too_late
+// panic: cookie 'a' can't expire at 253402300800000; give milliseconds since the epoch within the years 0000 to 9999
+function main() {
+  let jar = new CookieMap();
+  jar.set("a", "", { expires: 253402300800000 });
+}
+// case: cookies_expires_too_early
+// panic: cookie 'a' can't expire at -62167219200001; give milliseconds since the epoch within the years 0000 to 9999
+function main() {
+  let jar = new CookieMap();
+  jar.set("a", "", { expires: -62167219200001 });
+}
