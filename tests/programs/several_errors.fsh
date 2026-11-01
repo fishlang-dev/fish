@@ -126,3 +126,31 @@ function f(s: Shape): i64 { return s.area(); }
 function a(): i64 { return f(new Sq()); }
 function b(): i64 { return f(new Sq()) + 1; }
 function main() { console.log(a(), b()); }
+// case: errors_refused_implements_boxed
+// A class refused for the interface it implements, boxed as a Dyn of it, is reported at the class.
+// error: errors_refused_implements_boxed.fsh:4:21: error[E0702]: class 'Sq' incorrectly implements 'Shape': method 'area' is missing
+interface Shape { area(): i64; }
+class Sq implements Shape { constructor() {} aria(): i64 { return 1; } }
+function f(s: Dyn<Shape>): i64 { return s.area(); }
+function main() { const d: Dyn<Shape> = new Sq(); console.log(f(d)); }
+// case: errors_refused_implements_field_boxed
+// error: errors_refused_implements_field_boxed.fsh:3:20: error[E0702]: class 'P' incorrectly implements 'Named': property 'name' is missing
+interface Named { name: string; }
+class P implements Named { nam: string = "a"; constructor() {} }
+function f(n: Named): string { return n.name; }
+function main() { const d: Dyn<Named> = new P(); console.log(d.name); console.log(f(new P())); }
+// case: errors_try_around_failed_function
+// A 'try' around a call of a function whose body failed isn't refused for throwing nothing: the
+// function's throws aren't known.
+// error: errors_try_around_failed_function.fsh:4:39: error[E0101]: type 'i64' is not assignable to type 'string'
+function f(): i64 { const s: string = 5; if (s === "a") { throw new Error("x"); } return 1; }
+function main(): void {
+  try { console.log(f()); } catch (e) { console.log("caught"); }
+}
+// case: errors_try_around_failed_method
+// error: errors_try_around_failed_method.fsh:2:40: error[E0101]: type 'i64' is not assignable to type 'string'
+class C { m(): i64 { const s: string = 5; if (s === "a") { throw new Error("x"); } return 1; } }
+function main(): void {
+  const c = new C();
+  try { console.log(c.m()); } catch (e) { console.log("caught"); }
+}

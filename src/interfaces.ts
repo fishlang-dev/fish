@@ -15,9 +15,9 @@ export type Members = {
   typing: Typing;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
   assuming: Set<string>;
-  // The pairs whose class's `implements` claim was refused already, each taken as satisfied after,
-  // so the one mistake isn't reported again at each use.
-  refused: Set<string>;
+  // Each class whose `implements` claim was refused, as shown, with why, which an error at a use
+  // of it repeats.
+  refused: { type: string; reason: string }[];
 };
 
 // Why the generic function `f` can't be given where the generic function type `family` is, or
@@ -70,11 +70,11 @@ function sameBounds({ keyOf }: Typing, a: Type, b: Type): boolean {
 // and a public method taking exactly its parameter types and returning a fitting type for
 // each of its methods. `implements` is never needed.
 export function unsatisfied(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
-  const { assuming, refused, typing: { keyOf } } = members;
+  const { assuming, typing: { keyOf } } = members;
   // An interface can name itself, as a builder's methods return the builder, so a pair already
   // being checked is taken as satisfied rather than checked again forever.
   const key = `${keyOf(type)} ${keyOf(trait)}`;
-  if (assuming.has(key) || refused.has(key)) return undefined;
+  if (assuming.has(key)) return undefined;
   assuming.add(key);
   try {
     return check(type, trait, members, at);

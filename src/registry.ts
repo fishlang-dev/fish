@@ -145,7 +145,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       const reason = typeof trait !== "string" && trait.kind === "interface" ? unsatisfied(c.type, trait, members, node)
         : fits(c.type, trait) ? undefined : `type '${c.type.name}' doesn't fit '${show(trait)}'`;
       if (!reason) continue;
-      if (typeof trait !== "string" && trait.kind === "interface") members.refused.add(`${typing.keyOf(c.type)} ${typing.keyOf(trait)}`);
+      members.refused.push({ type: show(c.type), reason });
       throw new CompileError("E0702", `class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
     }
   }

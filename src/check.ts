@@ -427,9 +427,18 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (e.code === "E0113") unending = true;
     if (!errors.some((x) => x.start === e.start && x.end === e.end && x.message === e.message)) errors.push(e);
   };
+  // Errors a recorded mistake makes elsewhere: a use repeating why a class's `implements` claim
+  // was refused, or a `try` that can't throw only because a function it calls failed before its
+  // throws were known.
+  const claimErrors = new Set<CompileError>();
+  const refused: Members["refused"] = [];
+  const tryCallees = new Map<CompileError, Body[]>();
+  const followsOn = (e: CompileError) =>
+    (!claimErrors.has(e) && refused.some(({ type, reason }) => e.message.includes(`'${type}'`) && e.message.includes(reason))) || (tryCallees.get(e)?.some((b) => failed.has(b) && !b.throws) ?? false);
   const stopOnErrors = () => {
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) throw new CompileErrors(errors.sort((a, b) => a.start - b.start || a.end - b.end));
+    const reported = errors.filter((e) => !followsOn(e));
+    if (reported.length === 1) throw reported[0];
+    if (reported.length > 1) throw new CompileErrors(reported.sort((a, b) => a.start - b.start || a.end - b.end));
   };
   written = lowerOverloads(ids, written);
   written = [...written, ...hoistLocals(compilation, written)];
@@ -598,7 +607,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     },
     typing,
     assuming: new Set(),
-    refused: new Set(),
+    refused,
   };
   const { register, settle, claims, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
     tables, classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
@@ -786,6 +795,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     try {
       claims(c);
     } catch (e) {
+      if (e instanceof CompileError) claimErrors.add(e);
       recover(e);
     }
   }
@@ -2498,7 +2508,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           handlers.push([]);
           scoped(s.block);
           const sites = handlers.pop()!;
-          if (sites.length === 0) throw new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
+          if (sites.length === 0) {
+            const never = new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
+            tryCallees.set(never, [...instance.calls].filter(([x]) => x.start >= s.start && x.end <= s.end).map(([, i]) => i.body));
+            throw never;
+          }
           const caught = unionType(sites.map(([, t]) => t));
           for (const [at, from] of sites) instance.raises.set(at, { from, to: caught });
           instance.caught.set(s, caught);
