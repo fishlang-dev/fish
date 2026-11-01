@@ -49,7 +49,7 @@ export function typeParamsOf(f: Body): TypeParam[] {
 // Binds the type parameters `node` names by matching it against an argument's type, looking
 // through the check's type aliases.
 export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
-  const { aliases, expanding, typing: { sameCallable, heldArgument, sameLowered, show, yieldsOf, withoutNull, arrayType } } = tables;
+  const { aliases, expanding, typing: { sameCallable, heldArgument, sameLowered, show, yieldsOf, withoutNull, arrayType, unionType } } = tables;
   arg = unfold(arg);
   // `Pair<T>` naming a generic alias matches what the alias stands for, its parameters given
   // as written.
@@ -83,6 +83,20 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
       throw new CompileError(`the type argument for '${node.name}' can't be both '${show(earlier)}' and '${show(arg)}'`, at.start, at.end);
     }
     bindings.set(node.name, arg);
+    return;
+  }
+  // `T | null`, `Option<T>` and `T | string` against a value: the members the written ones
+  // already cover say nothing, and the rest are T, as TypeScript infers. Absence alone gives no T.
+  const option = node.kind === "ref" && node.name === "Option" && node.args.length === 1 && !names.has(node.name);
+  const members = node.kind === "union" ? node.types : option ? node.args : undefined;
+  if (members) {
+    const open = members.filter((n) => holdsNode(n, (x) => x.kind === "ref" && names.has(x.name as string)));
+    if (open.length !== 1) return;
+    const covers = (n: TypeNode, m: Type) =>
+      (n.kind === "ref" && n.args.length === 0 && (m === "null" ? n.name === "null" || n.name === "undefined" : n.name === show(m) || n.name === show(widenLet(m)))) ||
+      (n.kind === "literal" && typeof m !== "string" && m.kind === "literal" && "value" in n.value && n.value.value === m.value);
+    const rest = (typeof arg !== "string" && arg.kind === "union" ? arg.members : [arg]).filter((m) => !(option && m === "null") && !members.some((n) => n !== open[0] && covers(n, m)));
+    if (rest.length > 0) infer(tables, open[0]!, rest.length === 1 ? rest[0]! : unionType(rest), names, bindings, at);
     return;
   }
   // `Ref<T>` against a value or a reference borrows a T.

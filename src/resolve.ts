@@ -1,6 +1,5 @@
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
-import { STD_BASE } from "./std.ts";
 import { didYouMean } from "./suggest.ts";
 import { holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
@@ -504,10 +503,6 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     const t = resolveType(node);
     if (t === "void") throw new CompileError("'void' can't be a union member", node.start, node.end);
     if (typeof t !== "string" && t.kind === "interface") throw new CompileError(`an interface can't be a union member; '${t.name}' describes values without being one`, node.start, node.end);
-    // A generic alias checked before any use holds its parameters anywhere; each use gives them types.
-    // Std's own helpers, like the generators' 'find', return one only to give back a value
-    // they hold or nothing, which needs no narrowing against the placeholder.
-    if (typeof t !== "string" && t.kind === "param" && deferring === 0 && node.start < STD_BASE) throw unsupported("unions holding a type parameter", node);
     // A union holds a value, so a function type in one is a stored callable.
     if (typeof t !== "string" && t.kind === "function" && t.generic) throw new CompileError(familyHeld("a union"), node.start, node.end);
     if (typeof t !== "string" && t.kind === "function") return stored(t);
