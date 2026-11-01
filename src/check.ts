@@ -454,7 +454,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   });
   lowerDefaults(tables, written);
   if (!library) timersRunAsync(ids, written, timerMains);
-  const program = [...stdFor(compilation, written), ...written];
+  const program = [...lowerOverloads(ids, stdFor(compilation, written)), ...written];
   const funcs: Func[] = [];
   const { aliases } = tables;
   const classes = new Map<string, ClassInfo>();
