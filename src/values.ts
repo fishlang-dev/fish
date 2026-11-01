@@ -872,11 +872,11 @@ export class Expressions implements Union {
   }
 
   // A place as a path: its variable or `this`, then its fields, cut where an element is read,
-  // since writing any element of an array may change any other.
+  // since writing any element of an array may change any other. A redundant `!` is no step.
   private path(e: Expr): string[] | undefined {
-    e = this.rewrites.current(e);
+    e = this.bare(e);
     const parts: string[] = [];
-    for (; e.kind === "member" || e.kind === "index"; e = e.object) parts.unshift(e.kind === "member" ? e.name : "[]");
+    for (; e.kind === "member" || e.kind === "index"; e = this.bare(e.object)) parts.unshift(e.kind === "member" ? e.name : "[]");
     const root = e.kind === "ident" ? e.name : e.kind === "this" ? "this" : undefined;
     if (root === undefined) return undefined;
     const all = [root, ...parts];
@@ -886,7 +886,7 @@ export class Expressions implements Union {
   // The names an index in a place reads.
   private indexNames(place: Expr): Set<string> {
     const names = new Set<string>();
-    for (let at = place; at.kind === "member" || at.kind === "index"; at = at.object) if (at.kind === "index" && at.index.kind === "ident") names.add(at.index.name);
+    for (let at = this.bare(place); at.kind === "member" || at.kind === "index"; at = this.bare(at.object)) if (at.kind === "index" && at.index.kind === "ident") names.add(at.index.name);
     return names;
   }
 
@@ -936,9 +936,9 @@ export class Expressions implements Union {
 
   // A place reading it again reads the same value: no part of it runs code.
   private steady(this: Mut<this>, e: Expr): boolean {
-    e = this.rewrites.current(e);
+    e = this.bare(e);
     if (!this.place(e)) return false;
-    for (let at = e; at.kind === "member" || at.kind === "index"; at = at.object) {
+    for (let at = e; at.kind === "member" || at.kind === "index"; at = this.bare(at.object)) {
       if (at.kind === "index" && at.index.kind !== "int" && at.index.kind !== "ident") return false;
     }
     return true;

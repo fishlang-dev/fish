@@ -437,3 +437,13 @@ function main() {
   console.log(xs |> %.length + (xs = ["c"]).length + %.length);
 }
 // error: cannot change 'xs' while '%' borrows 'xs' and is used later
+
+// case: pipe_over_redundant_bang
+// expect: 2 3
+function main() {
+  const fs: (() => i64)[] = [() => 1, () => 2];
+  const xs = [1, 2, 3];
+  const c = fs[1]! |> %();
+  const d = xs[2]! |> % + 0;
+  console.log(c, d);
+}
