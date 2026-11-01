@@ -2,6 +2,7 @@ import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { RustName, RustTables } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import { rebuiltParam } from "./walk.ts";
 import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
@@ -309,7 +310,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     const [first, ...rest] = m.params;
     const receiver = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
     if (receiver && isStatic) throw new CompileError("a static method has no 'this'", receiver.start, receiver.end);
-    if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) namesClass(p.type);
+    if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) rebuiltParam(namesClass(p), tables.rewrites);
     if (isStatic) classParamIn(m);
     table.set(m.name, arenas.addBody({
       id: nextId(ids),
@@ -355,12 +356,13 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   }
 
   // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
-  function namesClass(t: TypeNode) {
-    walk("typeNode", t, ({ of, node: n }) => {
+  function namesClass(p: Param): Param {
+    walk("typeNode", p.type, ({ of, node: n }) => {
       if (of !== "typeNode" || n.kind !== "ref" || n.name !== "this" || n.args.length !== 0) return;
-      Object.assign(n, { name: node.name, args: node.typeParams.map((p) => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
+      tables.rewrites.replace(n, { ...n, name: node.name, args: node.typeParams.map((p): TypeNode => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
       return false;
     });
+    return p;
   }
 
   function add(f: FieldDecl): FieldDecl {

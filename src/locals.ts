@@ -1,6 +1,8 @@
 import { CompileError, type Names } from "./diag.ts";
 import type { Expr, Param, Pattern, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import { Rewrites } from "./ids.ts";
 import { childrenOf, forEachChild, nextId, NodeMap, NodeSet, someNode, walk, type AnyNode, type Ids } from "./nodes.ts";
+import { rebuiltStmts } from "./walk.ts";
 
 // Local declarations: a `type`, `interface`, `enum` or `class` written in a body is a
 // declaration of the program's own, under a name only its scope can write. The uses in its scope
@@ -22,11 +24,13 @@ const BODIED = new Set(["function", "arrow", "method", "constructor", "get", "se
 export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program: Stmt[], captured?: (local: Local, name: string) => void): Stmt[] {
   const hoisted: Stmt[] = [];
   let count = 0;
+  const rewrites = new Rewrites();
 
   // Inside a body, each list of statements is a block.
-  const visit = (node: AnyNode, ctx: Context | undefined, seen: Set<unknown> = new Set<unknown>()) => {
-    if (seen.has(node.node)) return;
-    seen.add(node.node);
+  const visit = (written: AnyNode, ctx: Context | undefined, seen: Set<unknown> = new Set<unknown>()) => {
+    if (seen.has(written.node)) return;
+    seen.add(written.node);
+    const node = current(rewrites, written);
     if (node.of === "stmts" && ctx) return list(node.node, ctx);
     // A case's test is no block's, and runs nothing a local is declared in.
     if (node.of === "switchCase" && ctx) return list(node.node.body, ctx);
@@ -82,12 +86,14 @@ export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program:
       }
       const args: TypeNode[] = params.map((p): TypeNode => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: local.start, end: local.start }));
       const own = local.typeParams?.length ?? 0;
-      Object.assign(local, { name: mangled, typeParams: [...params.map((p) => ({ ...p, id: nextId(ids) })), ...(local.typeParams ?? [])] });
+      rewrites.replace(local, { ...local, name: mangled, typeParams: [...params.map((p) => ({ ...p, id: nextId(ids) })), ...(local.typeParams ?? [])] } as Local);
       return { name, mangled, args, own, values: local.kind === "class" || local.kind === "enum" };
     });
-    for (const r of renames) for (const s of stmts) rename({ of: "stmt", node: s }, r);
+    for (const r of renames) for (const s of stmts) rename({ of: "stmt", node: s }, r, rewrites);
+    // The blocks inside read the uses as renamed.
+    rebuiltStmts(stmts, rewrites);
     for (const s of stmts) visit({ of: "stmt", node: s }, ctx);
-    for (const local of locals) {
+    for (const local of locals.map((l) => rewrites.current(l))) {
       hoisted.push(local);
       stmts[stmts.indexOf(local)] = { id: nextId(ids), kind: "empty", start: local.start, end: local.end };
     }
@@ -95,7 +101,13 @@ export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program:
 
   const seen = new Set<unknown>();
   for (const s of program) visit({ of: "stmt", node: s }, undefined, seen);
-  return hoisted;
+  rebuiltStmts(program, rewrites);
+  return rebuiltStmts(hoisted, rewrites);
+}
+
+// A node as the pass has it so far.
+function current(rewrites: Rewrites, n: AnyNode): AnyNode {
+  return n.of === "stmts" ? n : ({ of: n.of, node: rewrites.current(n.node as Stmt) } as AnyNode);
 }
 
 // The outer type parameters each local uses, itself or through a local it names, in the order
@@ -152,28 +164,32 @@ function declares(s: Stmt, r: Rename): boolean {
 
 // Every use of the name under `node`, as a type or, for a class or enum, a value, made a use of
 // the hoisted name, the outer type parameters given first among its type arguments.
-function rename(node: AnyNode, r: Rename, seen: Set<unknown> = new Set<unknown>()) {
-  if (seen.has(node.node)) return;
-  seen.add(node.node);
-  if (node.of === "stmts" && node.node.some((s) => declares(s, r))) return;
+function rename(written: AnyNode, r: Rename, rewrites: Rewrites, seen: Set<unknown> = new Set<unknown>()) {
+  if (seen.has(written.node)) return;
+  seen.add(written.node);
+  if (written.of === "stmts" && written.node.some((s) => declares(rewrites.current(s), r))) return;
+  let node = current(rewrites, written);
   const { name: from, mangled: to, args, own } = r;
-  const n = node.node as { kind?: string; name?: unknown; args?: TypeNode[]; typeArgs?: TypeNode[]; callee?: Expr; expr?: Expr };
-  if (n.kind === "ref" && n.name === from) {
-    n.name = to;
-    n.args = [...args, ...(n.args ?? [])];
-  } else if (r.values && (n.kind === "new" || n.kind === "instantiation") && args.length > 0) {
+  let n = node.node as { kind?: string; name?: unknown; args?: TypeNode[]; typeArgs?: TypeNode[]; callee?: Expr; expr?: Expr };
+  // A node given more type arguments is replaced by one holding them.
+  const given = (more: Partial<typeof n>) => {
+    n = rewrites.replace(n as Expr, { ...(n as Expr), ...more } as Expr) as typeof n;
+    node = { of: node.of, node: n } as AnyNode;
+  };
+  if (n.kind === "ref" && n.name === from) given({ name: to, args: [...args, ...(n.args ?? [])] });
+  else if (r.values && (n.kind === "new" || n.kind === "instantiation") && args.length > 0) {
     const target = n.kind === "new" ? n.callee : n.expr;
     if (target?.kind === "ident" && target.name === from) {
       if ((n.typeArgs ?? []).length === 0 && own > 0) {
         throw new CompileError(`'${from}' is generic over the function's type parameters as well as its own, so write its type arguments here`, (n as unknown as Expr).start, (n as unknown as Expr).end);
       }
-      n.typeArgs = [...args, ...(n.typeArgs ?? [])];
+      given({ typeArgs: [...args, ...(n.typeArgs ?? [])] });
     }
   }
   if (r.values && n.kind === "ident" && n.name === from) n.name = to;
   // A dotted name, as an enum member's type or a match pattern's variant, names it first.
   if ((n.kind === "ref" || n.kind === "variant") && typeof n.name === "string" && n.name.startsWith(`${from}.`)) n.name = `${to}${n.name.slice(from.length)}`;
-  forEachChild(node, (c) => rename(c, r, seen));
+  forEachChild(node, (c) => rename(c, r, rewrites, seen));
 }
 
 // Whether a node names a declaration, as a type, a value or an enum member's type.

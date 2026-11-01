@@ -10,6 +10,7 @@ import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, Obje
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
 import { rebuiltParam, rebuiltStmts } from "./walk.ts";
+import { Rewrites } from "./ids.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
@@ -339,10 +340,11 @@ function timersRunAsync(ids: Ids, written: Stmt[], timerMains: Tables["timerMain
   const declared = new Set(top.map((f) => f.name));
   const timers = holdsNode("stmt", written, (n) => n.kind === "call" && (n as { callee?: { kind?: string; name?: string } }).callee?.kind === "ident" && TIMER_GLOBALS.has((n as { callee: { name: string } }).callee.name) && !declared.has((n as { callee: { name: string } }).callee.name));
   if (!timers) return;
-  main.async = true;
-  timerMains.add(main);
   const returns = main.returnType;
-  if (returns?.kind === "ref" && returns.name === "void") main.returnType = { id: nextId(ids), kind: "ref", name: "Promise", args: [returns], start: returns.start, end: returns.end };
+  const returnType: TypeNode | undefined = returns?.kind === "ref" && returns.name === "void" ? { id: nextId(ids), kind: "ref", name: "Promise", args: [returns], start: returns.start, end: returns.end } : returns;
+  const rewrites = new Rewrites();
+  timerMains.add(rewrites.replace(main, { ...main, async: true, returnType }));
+  rebuiltStmts(written, rewrites);
 }
 const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
 

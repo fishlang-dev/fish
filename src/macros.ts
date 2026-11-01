@@ -4,11 +4,13 @@ import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts
 import type { Compilation, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
-import { parse, type ClassMember, type Expr, type Func, type Stmt } from "./parser.ts";
+import { parse, type ClassMember, type Expr, type Func, type Param, type Stmt } from "./parser.ts";
 import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
+import { Rewrites, type Id } from "./ids.ts";
 import { nextId, NodeMap, NodeSet, renumber, walk, type Ids } from "./nodes.ts";
+import { rebuiltStmts } from "./walk.ts";
 import { markGenerated } from "./warnings.ts";
 
 // Macros on declarations: `@name` before a top-level declaration runs `macro function name` on
@@ -125,8 +127,7 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
     if (t.kind !== "ident" || (t.name !== "Eq" && t.name !== "Json")) throw new CompileError(`'derive' knows 'Eq' and 'Json' so far; '${t.kind === "ident" ? t.name : "this"}' isn't one it can derive yet`, t.start, t.end);
     return t.name;
   });
-  const decl = { ...d, id: nextId(ids), decorators: (d.decorators ?? []).slice(0, -1) } as Decl;
-  if (decl.kind === "class" || decl.kind === "enum") decl.derives = [...(decl.derives ?? []), ...names];
+  let decl = { ...d, id: nextId(ids), decorators: (d.decorators ?? []).slice(0, -1), derives: [...(d.derives ?? []), ...names] } as Decl;
   if (decl.kind === "class" && names.includes("Eq") && !decl.members.some((m) => m.kind === "method" && m.name === "equals" && !m.modifiers.includes("static"))) {
     const fields = decl.members.flatMap((m) => {
       if (m.kind === "field" && typeof m.name === "string" && !m.modifiers.includes("static")) return [m.name];
@@ -141,7 +142,7 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
     respan(method, at);
     markGenerated(generated, method);
     upcasts.add(`${at.start}:${at.end}`);
-    decl.members = [...decl.members, method];
+    decl = { ...decl, members: [...decl.members, method] };
   }
   return [exported ? ({ id: nextId(ids), kind: "export", body: decl, start: decl.start, end: decl.end } as Stmt) : decl];
 }
@@ -451,7 +452,9 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   if (pending.where !== "own" && !bodies.some((d) => d.kind === decl.kind)) {
     throw new CompileError(`a macro on a ${pending.where === "member" ? "member gives the class back" : "parameter gives the function back"}, changed as it likes, but '${written(macro.name)}' gave none`, nearest.start, nearest.end);
   }
-  restore(bodies);
+  const restored = new Rewrites();
+  restore(bodies, restored);
+  rebuiltStmts(given, restored);
   const name = namesOf(decl)[0];
   return given.map((decl) => {
     // On an exported declaration, what the macro gives under names the program can see is
@@ -464,7 +467,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
 
 // A declaration without its decorators, and how to put back those still to apply on what a
 // macro gives in its place.
-function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore(given: Decl[]): void } {
+function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore(given: Decl[], rewrites: Rewrites): void } {
   const own = pending.where === "own" ? (decl.decorators ?? []).slice(0, -1) : (decl.decorators ?? []);
   const later = <T extends { decorators: Expr[] }>(x: T, i: usize, where: Pending["where"]) => (pending.where === where && pending.index === i ? x.decorators.slice(0, -1) : x.decorators);
   const members = decl.kind === "class" ? decl.members.map((m, i) => later(m, i, "member")) : [];
@@ -474,7 +477,8 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
     : decl.kind === "function" ? { ...decl, id: nextId(ids), decorators: undefined, params: decl.params.map(clear) }
     : { ...decl, id: nextId(ids), decorators: undefined };
   const name = namesOf(decl)[0];
-  const restore = (given: Decl[]) => {
+  // Each declaration given decorators back is replaced through `rewrites` by one holding them.
+  const restore = (given: Decl[], rewrites: Rewrites) => {
     const named = given.find((d) => d.kind === decl.kind && namesOf(d)[0] === name);
     const same = named ?? given.find((d) => d.kind === decl.kind) ?? (pending.where === "own" ? given[0] : undefined);
     const waiting = [...members, ...params].some((x) => x.length > 0);
@@ -484,10 +488,10 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
       throw new CompileError(`a macro gave no '${name}' back, so the decorators still to apply to its ${decl.kind === "class" ? "members" : "parameters"} have nowhere to go`, at.start, at.end);
     }
     if (!same) return;
-    if (own.length > 0) Object.assign(same, { decorators: [...own, ...(same.decorators ?? [])] });
+    if (own.length > 0) rewrites.replace(same, { ...same, decorators: [...own, ...(same.decorators ?? [])] } as Stmt);
     // Each goes back to the member of the same kind and name, or the same kind when it has none,
     // or else the same place, a member taking one member's decorators.
-    const back = <T extends { decorators: Expr[] }>(list: T[], before: T[], saved: Expr[][], key: (x: T) => string) => {
+    const back = <T extends Id & { decorators: Expr[] }>(list: T[], before: T[], saved: Expr[][], key: (x: T) => string) => {
       const taken = new Set<T>();
       saved.forEach((decorators, i) => {
         if (decorators.length === 0) return;
@@ -496,7 +500,7 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
         const at = list.find((x) => !taken.has(x) && key(x) === want) ?? (place && !taken.has(place) && kindOf(place) === kindOf(before[i]!) ? place : undefined);
         if (!at) throw new CompileError("a macro took away what these decorators were waiting to apply to", decorators[0]!.start, decorators[0]!.end);
         taken.add(at);
-        at.decorators = [...decorators, ...at.decorators];
+        rewrites.replace(at, { ...at, decorators: [...decorators, ...at.decorators] } as unknown as Param);
       });
     };
     const kindOf = (x: unknown) => (x as { kind?: string }).kind ?? "param";
