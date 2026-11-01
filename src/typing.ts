@@ -225,7 +225,7 @@ export function jsShape(t: Type): InterfaceType | ObjectType | undefined {
 // `AbortController` and its `AbortSignal`s are handles to one block.
 // A FileJob is a file read or write handed to the runtime's blocking pool.
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
-export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
+export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
 
 // A JsValue a program holds without knowing its type, not a package's handle of a known shape.
 export const isPlainJs = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue" && t.of === "void";
@@ -865,8 +865,8 @@ export function newTyping() {
     if (!t) {
       const frame: Field[] = [{ name: "state", type: "i32" }, ...LEAF_FRAMES[method](of)];
       if (signal) frame.push({ name: "signal", type: blockType("AbortSignal") }, { name: "waiting", type: "i32" });
-      const gives: Type = method === "acquire" ? blockType("Permit") : method === "receive" || method === "timerNext" ? unionType([of, "null"]) : method === "bind" ? blockType("TcpListener")
-        : method === "connect" || method === "accept" ? blockType("TcpStream") : method === "read" || method === "readFile" ? arrayType("u8") : method === "jsAwait" ? of
+      const gives: Type = method === "acquire" ? blockType("Permit") : method === "receive" || method === "timerNext" ? unionType([of, "null"]) : method === "bind" ? (of === "void" ? blockType("TcpListener") : of)
+        : method === "connect" || method === "accept" ? (of === "void" ? blockType("TcpStream") : of) : method === "read" || method === "readFile" ? arrayType("u8") : method === "jsAwait" ? of
         : method === "next" ? nextResult((of as GeneratorType).yields) : "void";
       t = { kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true };
       leaves.set(key, t);

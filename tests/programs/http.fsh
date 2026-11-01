@@ -696,6 +696,92 @@ async function main(): Promise<void> throws IoError | AbortError {
   const steady = await trickle(body, ["POST / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: 8\r\n\r\n", "ab", "cd", "ef", "gh"], 150);
   console.log("steady body|" + steady.split("\r\n")[0] + "|" + steady.split("\r\n\r\n")[1]);
 }
+// case: http_unix
+// expect: listening on the path, port 0
+// expect: hello|HTTP/1.1 200 OK|GET http://h/hello
+// expect: no host|HTTP/1.1 400 Bad Request
+// expect: http/1.0 no host|HTTP/1.1 200 OK|GET http://localhost/old
+// expect: big body|HTTP/1.1 413 Content Too Large
+// expect: idle|closed with nothing sent
+// expect: serve returned, file gone true
+// serve on a socket path answers as on a port, with its limits and timeouts, and removes the
+// socket file when it stops.
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
+
+async function readAll(conn: Ref<UnixStream>): Promise<string> throws IoError {
+  let all: u8[] = [];
+  while (true) {
+    const got = await conn.read(4096);
+    if (got.length === 0) break;
+    for (const b of got) all.push(b);
+  }
+  return all.length === 0 ? "closed with nothing sent" : new TextDecoder().decode(all);
+}
+
+async function ask(path: string, raw: string): Promise<string> throws IoError {
+  const conn = await UnixStream.connect(path);
+  await conn.write(new TextEncoder().encode(raw));
+  const text = await readAll(conn);
+  return text;
+}
+
+async function main(): Promise<void> throws IoError {
+  const dir = mkdtempSync("/tmp/fish-unix-");
+  const path = dir + "/http.sock";
+  const state = shared({ ready: new Atomic(0) });
+  const seen = state.clone();
+  const expected = path.clone();
+  const ctl = new AbortController();
+  const server = spawn(serve({ unix: path, signal: ctl.signal, maxBodySize: 10, idleTimeout: 200, onListen: (info: ServeInfo) => {
+    if (info.hostname === expected && info.port === 0) seen.ready.store(1);
+    else seen.ready.store(2);
+  } }, async (req: Request) => new Response(req.method + " " + req.url)));
+  while (state.ready.load() === 0) await sleep(1);
+  if (state.ready.load() === 1) console.log("listening on the path, port 0");
+  const hello = await ask(path, "GET /hello HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
+  const lines = hello.split("\r\n");
+  console.log("hello|" + lines[0] + "|" + lines[lines.length - 1]);
+  const bare = await ask(path, "GET / HTTP/1.1\r\n\r\n");
+  console.log("no host|" + bare.split("\r\n")[0]);
+  const old = await ask(path, "GET /old HTTP/1.0\r\n\r\n");
+  const oldLines = old.split("\r\n");
+  console.log("http/1.0 no host|" + oldLines[0] + "|" + oldLines[oldLines.length - 1]);
+  const big = await ask(path, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 11\r\n\r\nhello world");
+  console.log("big body|" + big.split("\r\n")[0]);
+  const idle = await UnixStream.connect(path);
+  const quiet = await readAll(idle);
+  console.log("idle|" + quiet);
+  ctl.abort();
+  await server;
+  console.log("serve returned, file gone", !existsSync(path));
+  rmSync(dir, { recursive: true });
+}
+// case: http_unix_options
+// expect: serve takes either a 'unix' socket path or a 'port' and 'hostname', not both
+// expect: serve takes either a 'unix' socket path or a 'port' and 'hostname', not both
+// expect: in use: EADDRINUSE true
+// unix with a port or hostname is refused before anything is bound, and a path already taken
+// is the system's error, its file left alone.
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+
+async function attempt(options: ServeOptions): Promise<void> {
+  try {
+    await serve(options, async (req: Request) => new Response("hi"));
+    console.log("served");
+  } catch (e) {
+    if (e.code === "") console.log(e.message);
+    else console.log("in use: " + e.code, existsSync(e.path ?? ""));
+  }
+}
+
+async function main(): Promise<void> throws IoError {
+  await attempt({ unix: "/tmp/fish-never.sock", port: 0 });
+  await attempt({ unix: "/tmp/fish-never.sock", hostname: "127.0.0.1" });
+  const dir = mkdtempSync("/tmp/fish-unix-");
+  writeFileSync(dir + "/taken", "x");
+  await attempt({ unix: dir + "/taken" });
+  rmSync(dir, { recursive: true });
+}
 // case: http_user_builtins
 // expect: 3 4
 // expect: 200

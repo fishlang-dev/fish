@@ -385,3 +385,33 @@ async function main(): Promise<void> throws IoError | AbortError {
   const moved = await fetch(base + "/moved");
   console.log(moved.status, moved.ok, moved.headers.get("location"));
 }
+// case: fetch_unix
+// expect: 200 POST http://example.test/data q
+// expect: missing: ENOENT
+// fetch with unix sends the request over a socket path, the URL's host in the Host header.
+import { mkdtempSync, rmSync } from "node:fs";
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const dir = mkdtempSync("/tmp/fish-unix-");
+  const path = dir + "/f.sock";
+  const state = shared({ ready: new Atomic(0) });
+  const seen = state.clone();
+  const ctl = new AbortController();
+  const server = spawn(serve({ unix: path, signal: ctl.signal, onListen: (info: ServeInfo) => { seen.ready.store(1); } }, async (req: Request) => {
+    const body = await req.text();
+    return new Response(req.method + " " + req.url + " " + body);
+  }));
+  while (state.ready.load() === 0) await sleep(1);
+  const res = await fetch("http://example.test/data", { method: "POST", body: "q", unix: path });
+  const text = await res.text();
+  console.log(res.status, text);
+  try {
+    const none = await fetch("http://example.test/", { unix: dir + "/none.sock" });
+  } catch (e) {
+    if (e instanceof IoError) console.log("missing: " + e.code);
+    else console.log("aborted");
+  }
+  ctl.abort();
+  await server;
+  rmSync(dir, { recursive: true });
+}
