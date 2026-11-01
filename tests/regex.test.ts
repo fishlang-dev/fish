@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { buildAsync } from "../src/main.ts";
 import { compile, parsePattern, RegexSyntaxError, type RegexTables } from "../src/regex.ts";
 
-const session = newSession();
+const session = cachedSession();
 const tables: RegexTables = { properties: new Map(), folds: new Map() };
 
 // The pattern parser accepts exactly what the engine running the compiler accepts, over

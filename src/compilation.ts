@@ -48,8 +48,8 @@ export type Counts = { enums: usize; lifts: usize; destructures: usize; expansio
 // `digests`: each source a cached object depends on, hashed, by path, size and modification time.
 // `compiling`: the objects being compiled without blocking, so each is compiled once.
 // `mathUnits`: the Math runtime's objects to compile.
-// `std`: std's parsed tree, serialized, by the path it is cached at; the key naming it, null when
-// no compiler source can be read; and how many times std was parsed rather than loaded.
+// `std`: what gives std's statements, each call a fresh copy, without which each compilation parses
+// std's source; and how many times std was parsed rather than loaded.
 export type Session = {
   locking: Locking;
   engineHook: boolean;
@@ -57,7 +57,7 @@ export type Session = {
   digests: Map<string, string>;
   compiling: Map<string, Promise<string>>;
   mathUnits?: Unit[];
-  std: { key?: string | null; tree?: { path: string | null; bytes: Uint8Array }; parses: usize };
+  std: { load?: () => Stmt[]; parses: usize };
 };
 
 export function newSession(): Session {

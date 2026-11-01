@@ -6,7 +6,8 @@ import { parseArgs } from "node:util";
 import { bodyOf } from "./arenas.ts";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
-import { newCompilation, newSession, type Compilation, type Session } from "./compilation.ts";
+import { newCompilation, type Compilation, type Session } from "./compilation.ts";
+import { cachedSession } from "./stdcache.ts";
 import { CompileError, formatError, named, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
 import { resolvePackages } from "./dependencies.ts";
@@ -463,7 +464,7 @@ function checkProject(dir: string) {
 
 if (import.meta.main && Bun.argv.length === 3 && Bun.argv[2] === "lsp") serveLsp();
 else if (import.meta.main) {
-  const session = newSession();
+  const session = cachedSession();
   // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = (() => {
     try {

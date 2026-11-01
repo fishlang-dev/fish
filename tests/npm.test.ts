@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { formatError } from "../src/diag.ts";
 import { compile } from "../src/main.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // What stops a program that type-checks with a package's declarations: a form that can't run
 // yet, or a package with no JS to bundle, as these fixtures have only declarations.

@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { load } from "../src/modules.ts";
 import { exportsOf, findTypings } from "../src/typings.ts";
 
@@ -177,7 +178,7 @@ test("an import from a package that doesn't have the name is refused saying what
   }, (dir) => {
     const error = (file: string) => {
       try {
-        load(newCompilation(newSession()), join(dir, file));
+        load(newCompilation(cachedSession()), join(dir, file));
       } catch (e) {
         return (e as Error).message;
       }
@@ -291,7 +292,7 @@ test("a Node built-in Fish lacks is named as one, and a re-export that can't be 
   }, (dir) => {
     const error = (file: string) => {
       try {
-        load(newCompilation(newSession()), join(dir, file));
+        load(newCompilation(cachedSession()), join(dir, file));
       } catch (e) {
         return (e as Error).message;
       }

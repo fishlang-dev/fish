@@ -4,7 +4,8 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { newSession, type Session } from "../src/compilation.ts";
+import { type Session } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { CompileError } from "../src/diag.ts";
 import { analyze } from "../src/main.ts";
 
@@ -19,7 +20,7 @@ export function survey(src = join(import.meta.dir, "..", "src")): Record<string,
   try {
     for (const f of files) mirrored(join(src, f), mirror);
     // Messages name the mirror's paths, which differ each run, so they name them from it.
-    const session = newSession();
+    const session = cachedSession();
     return Object.fromEntries(files.map((f) => [f, firstError(session, join(mirror, f.replace(/\.ts$/, ".fsh")))?.replaceAll(mirror + "/", "").replaceAll(mirror, "src") ?? null]));
   } finally {
     rmSync(mirror, { recursive: true, force: true });

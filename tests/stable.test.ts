@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { bodyOf } from "../src/arenas.ts";
 import { analyze, compile } from "../src/main.ts";
 import { STD_BASE } from "../src/std.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // Codegen names what it generates from what it stands for, so editing a program leaves the IR
 // of std's functions, and of the constants and glue they use, exactly as it was.

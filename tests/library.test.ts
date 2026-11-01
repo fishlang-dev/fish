@@ -3,11 +3,12 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { check } from "../src/check.ts";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { buildLibrary } from "../src/main.ts";
 import { parse } from "../src/parser.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // `src` checked as a program of its own, its nodes numbered by its compilation.
 const checkSource = (src: string, library = false) => {
