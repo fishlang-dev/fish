@@ -6775,6 +6775,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         if (!types.has(e)) pending.push({ v: made, type: blockType("AbortSignal") });
         return made;
       }
+      if (e.callee.kind === "ident" && e.callee.name === "unixUnlink" && !calls.has(e)) return void emit(`call void @fsh_rt_unix_unlink(ptr ${value(e.args[0]!)})`);
       if (e.callee.kind === "ident" && e.callee.name === "httpDate" && !calls.has(e)) {
         const made = temp();
         emit(`${made} = call ptr @fsh_rt_http_date()`);

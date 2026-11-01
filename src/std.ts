@@ -745,7 +745,8 @@ function __sseLine(value: string): string {
 
 type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
-type ServeOptions = { port?: i64; hostname?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
+// unix is a socket path to serve on in place of a port, removed when serve stops.
+type ServeOptions = { port?: i64; hostname?: string; unix?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
 type ServeHandler = (req: Request) => Promise<Response>;
 // What serve's options settle for each connection, under a name no program can write.
 type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64 };
@@ -759,8 +760,10 @@ type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHan
 // A router's routes and middleware, shared so each middleware's next can hold them.
 type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
-// Serves HTTP/1.1 on hostname and port, each connection on a task of its own.
+// Serves HTTP/1.1 on hostname and port, or a socket path, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
+  const unix = options.unix;
+  if (unix !== null && (options.port !== null || options.hostname !== null)) throw new IoError("serve takes either a 'unix' socket path or a 'port' and 'hostname', not both");
   let hostname = "0.0.0.0";
   const h = options.hostname;
   if (h !== null) hostname = h;
@@ -779,13 +782,16 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   const live = shared({ count: new Atomic(0) });
   {
     // The listener closes as this block ends, so no one new waits while connections drain.
-    const listener = await TcpListener.bind(hostname, port);
+    let listener: TcpListener;
+    if (unix !== null) listener = await TcpListener.unix(unix);
+    else listener = await TcpListener.bind(hostname, port);
     const bound = listener.port;
     const listen = options.onListen;
-    if (listen !== null) listen({ hostname: hostname, port: bound });
+    if (listen !== null) listen({ hostname: unix ?? hostname, port: bound });
     const boxed: ServeHandler = handler;
-    // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL.
-    const host = (hostname.includes(":") ? "[" + hostname + "]" : hostname) + ":" + String(bound);
+    // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL,
+    // or localhost, as curl sends over a socket.
+    const host = unix !== null ? "localhost" : (hostname.includes(":") ? "[" + hostname + "]" : hostname) + ":" + String(bound);
     while (true) {
       try {
         const conn = await listener.accept(stop);
@@ -798,6 +804,7 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
       }
     }
   }
+  if (unix !== null) unixUnlink(unix);
   // ponytail: polls until the last connection ends; a wait group would wake at once.
   while (live.count.load() > 0) await sleep(10);
 }

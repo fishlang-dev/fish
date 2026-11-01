@@ -131,3 +131,8 @@ async function main(): Promise<void> throws IoError {
 function main() {
   const c = UnixStream.connect("/tmp/x.sock");
 }
+// case: unix_tcp_static
+// error: 'TcpListener' has no static method 'unix'; it has 'bind'
+async function main(): Promise<void> throws IoError {
+  const l = await TcpListener.unix("/tmp/x.sock");
+}

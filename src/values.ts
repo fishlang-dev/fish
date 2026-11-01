@@ -1270,6 +1270,11 @@ export function expressions(ctx: Context) {
     }
     // The time as an HTTP Date header gives it, for the std HTTP server alone.
     if (callee.kind === "ident" && callee.name === "httpDate" && e.start >= STD_BASE && e.args.length === 0) return { type: "string", what: "'httpDate'" };
+    // Removes serve's socket file once it stops listening.
+    if (callee.kind === "ident" && callee.name === "unixUnlink" && e.start >= STD_BASE && e.args.length === 1) {
+      value(e.args[0]!);
+      return { type: "void", what: "'unixUnlink'" };
+    }
     // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
     if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
     // The signal the first SIGINT or SIGTERM aborts, for node:process's 'shutdown' and the HTTP server.
