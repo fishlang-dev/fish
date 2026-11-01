@@ -7665,6 +7665,23 @@ static fsh_str *fsh_tls_said(const char *text) {
   return fsh_rt_str_from_cstring(text);
 }
 
+// Whether a name is a DNS host name: dot-separated labels of 1 to 63 letters, digits, hyphens and
+// underscores, at most 253 bytes. Checked here so OpenSSL 3 and 4, which differ on what they
+// take, refuse the same names.
+static int fsh_tls_host_name(const char *host) {
+  size_t length = strlen(host), label = 0;
+  if (length == 0 || length > 253) return 0;
+  for (const char *c = host; *c; c++) {
+    if (*c == '.') {
+      if (label == 0) return 0;
+      label = 0;
+    } else if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '-' || *c == '_') {
+      if (++label > 63) return 0;
+    } else return 0;
+  }
+  return label > 0;
+}
+
 // Starts TLS as the client on a connected stream, verifying the server's certificate for name, a
 // host name or an IP address, against the PEM certificates in ca, or the system's when ca is
 // empty, as Node's ca option does. Gives why it can't, or an empty string.
@@ -7708,13 +7725,24 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
   }
   SSL_set_fd(ssl, s->fd);
   SSL_set_connect_state(ssl);
-  // An address is checked against the certificate's IP addresses and isn't sent as SNI, which
-  // takes only names.
+  // An absolute name's trailing dot names the same host, as Node takes it. An address is checked
+  // against the certificate's IP addresses and isn't sent as SNI, which takes only names. Any
+  // name OpenSSL can't check against fails here, since a connection without the check would
+  // take any certificate a trusted CA signed.
+  size_t length = strlen(host);
+  if (length > 1 && host[length - 1] == '.') host[--length] = 0;
   unsigned char address[16];
-  if (inet_pton(AF_INET, host, address) == 1 || inet_pton(AF_INET6, host, address) == 1) X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), host);
-  else {
-    SSL_set_tlsext_host_name(ssl, host);
-    SSL_set1_host(ssl, host);
+  int checked;
+  if (inet_pton(AF_INET, host, address) == 1 || inet_pton(AF_INET6, host, address) == 1) checked = X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), host);
+  else checked = fsh_tls_host_name(host) && SSL_set_tlsext_host_name(ssl, host) && X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), host, 0);
+  if (!checked) {
+    char text[400];
+    snprintf(text, sizeof text, "'%.200s' isn't a host name or IP address a certificate can be checked against", host);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    fsh_rt_free(host);
+    ERR_clear_error();
+    return fsh_tls_said(text);
   }
   fsh_rt_free(host);
   s->tls = fsh_tls_new(ctx, ssl);
