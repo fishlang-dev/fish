@@ -799,6 +799,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const kept = unsettled.filter((c) => declaredClasses.has(c));
       unsettled.length = 0;
       unsettled.push(...kept);
+      if (unsettled.length === 0 && pending.length === 0) break;
     }
     try {
       if (unsettled.length > 0) settle(unsettled.shift()!, (run) => {
