@@ -1,6 +1,6 @@
 import { declareClass, extend, inherited, isLifetime, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
-import { newTables, type Compilation, type Tables } from "./compilation.ts";
+import { newTables, timed, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError, CompileErrors, named } from "./diag.ts";
 import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
@@ -26,7 +26,6 @@ import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { lowerOverloads } from "./overloads.ts";
 import { checkMoves } from "./moves.ts";
-import { timed } from "./timings.ts";
 import { NATIVE } from "./native.ts";
 import { MATH_RUNTIME } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";

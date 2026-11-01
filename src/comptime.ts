@@ -5,8 +5,7 @@ import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
-import type { Tables } from "./compilation.ts";
-import { timed } from "./timings.ts";
+import { timed, type Tables } from "./compilation.ts";
 import { baseOf, elementsOf, isSubclass, isTuple, field, INTEGERS, range, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes

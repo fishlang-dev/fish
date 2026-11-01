@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
-import { newCompilation, newSession, type Compilation, type Session } from "./compilation.ts";
+import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, timed, type Compilation, type Session } from "./compilation.ts";
 import { CompileError, formatError, named, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
 import { resolvePackages } from "./dependencies.ts";
@@ -34,7 +34,6 @@ import { split } from "./split.ts";
 import { withDebugInfo } from "./debuginfo.ts";
 import { watchProgram } from "./watch.ts";
 import { STD_BASE } from "./std.ts";
-import { formatTimings, FRONT_END, NATIVE_STAGES, newTimings, objectsNote, timed } from "./timings.ts";
 
 export type Panic = "unwind" | "abort";
 
@@ -490,7 +489,7 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
 
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
 // already, linked with `objects`.
-function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = HOST_TARGET, program = ["-x", "ir", "-"]): string[] {
+function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = HOST_TARGET, program: string[] = ["-x", "ir", "-"]): string[] {
   return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
 }
 
