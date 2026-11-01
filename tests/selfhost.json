@@ -62,9 +62,8 @@
     "typing.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "typings.ts": "generator methods are not supported yet",
     "unions.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
-    "unsupported.ts": "an indexed access type takes an object type or a class, not 'Expr'",
     "values.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet"
   },
-  "count": 65
+  "count": 64
 }

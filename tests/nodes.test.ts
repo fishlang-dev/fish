@@ -6,11 +6,13 @@ import { check } from "../src/check.ts";
 import { newCompilation, newSession } from "../src/compilation.ts";
 import { CompileError } from "../src/diag.ts";
 import { expandMacros } from "../src/macros.ts";
+import { analyze } from "../src/main.ts";
 import { flatten, load } from "../src/modules.ts";
 import { NodeMap, NodeSet, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
 import { parse, type Stmt } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
+import { newTyping, TypeMap, TypeSet, type Type, type Typing } from "../src/typing.ts";
 
 const src = join(import.meta.dir, "..", "src");
 const programs = join(import.meta.dir, "programs");
@@ -94,6 +96,82 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
   expect(problems.slice(0, 20)).toEqual([]);
 }, 120_000);
 
+// Every type reachable from `roots`, through the types it links to, is a primitive or the id of
+// a record in its program's arena.
+function auditTypes(roots: Type[], typing: Typing, where: string): string[] {
+  const problems: string[] = [];
+  const seen = new Set<Type>();
+  const visit = (t: Type) => {
+    if (typeof t === "string" || seen.has(t)) return;
+    seen.add(t);
+    if (typing.typeOf(t) === undefined) return void problems.push(`${where}: ${t} is no type of its arena`);
+    typing.links(t).forEach(visit);
+  };
+  roots.forEach(visit);
+  return problems;
+}
+
+test("every type of the checked test programs is in its arena", () => {
+  const session = newSession();
+  const problems: string[] = [];
+  let types = 0;
+  for (const p of corpus()) {
+    if (p.src.includes("// mode: parse")) continue;
+    try {
+      const { checked } = analyze(session, p.src, p.file);
+      const roots: Type[] = checked.instances.flatMap((i) => [...i.types.values(), ...i.coercions.values(), ...i.bindings.values(), i.returns, ...(i.throws ? [i.throws] : [])]);
+      types += roots.length;
+      problems.push(...auditTypes(roots, checked.compilation.typing, p.name));
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  expect(types).toBeGreaterThan(100_000);
+  expect(problems.slice(0, 20)).toEqual([]);
+}, 240_000);
+
+// The records of an arena, by id: the module constants', then those the program made.
+function records(typing: Typing): [number, Record<string, unknown>][] {
+  const found: [number, Record<string, unknown>][] = [];
+  for (let id = 21; typing.typeOf(id) !== undefined; id++) found.push([id, typing.typeOf(id) as unknown as Record<string, unknown>]);
+  return found;
+}
+
+// Every Field array and Field object a record holds, in `fields`, a future's or generator's
+// `params` and `frame`, is its own: no two records share one, so each record can be a value.
+function sharedFields(typing: Typing, where: string): string[] {
+  const owners = new Map<object, number>();
+  const problems: string[] = [];
+  const own = (o: object, id: number, what: string) => {
+    const was = owners.get(o);
+    if (was !== undefined && was !== id) problems.push(`${where}: a ${(typing.typeOf(id) as { kind: string }).kind} type shares a ${what} with a ${(typing.typeOf(was) as { kind: string }).kind} type`);
+    else owners.set(o, id);
+  };
+  for (const [id, r] of records(typing)) {
+    for (const list of (r.kind === "future" || r.kind === "generator" ? [r.fields, r.params, r.frame] : [r.fields]) as object[][]) {
+      own(list, id, "Field array");
+      for (const f of list as object[]) own(f, id, "Field");
+    }
+  }
+  return problems;
+}
+
+test("no two types of the checked test programs share a Field array or Field", () => {
+  const session = newSession();
+  const problems: string[] = [];
+  for (const p of corpus()) {
+    if (p.src.includes("// mode: parse")) continue;
+    try {
+      problems.push(...sharedFields(analyze(session, p.src, p.file).checked.compilation.typing, p.name));
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  const kinds = new Map<string, number>();
+  for (const p of problems) kinds.set(p.replace(/^[^:]*: /, ""), (kinds.get(p.replace(/^[^:]*: /, "")) ?? 0) + 1);
+  expect([...kinds]).toEqual([]);
+}, 240_000);
+
 test("a node table refuses a second node with an id already in use", () => {
   const a = { id: 1, kind: "a" };
   const b = { id: 1, kind: "b" };
@@ -129,3 +207,74 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by an AST node", () => {
   }
   expect(offenders).toEqual([]);
 });
+
+test("a type table keys primitives and types by id, in the order they were added", () => {
+  const typing = newTyping();
+  const a = typing.arrayType("i64");
+  const map = new TypeMap<Type, string>([["i64", "int"], [a, "a"]]);
+  expect([map.get("i64"), map.get("string"), map.get(a)]).toEqual(["int", undefined, "a"]);
+  expect([...map.keys()]).toEqual(["i64", a]);
+  expect([...new TypeSet<Type>(["bigint", a, "bigint"])]).toEqual(["bigint", a]);
+});
+
+// The types a table may not be keyed by: `Type`, `Bound`, each kind's id and record in
+// src/typing.ts, and any alias a file gives one, as `type Shape = ObjectType | UnionType`. A type
+// keys by its id through TypeMap and TypeSet, which give a primitive its own integer.
+test("no Map, WeakMap, Set or WeakSet in src is keyed by a type", () => {
+  const typing = readFileSync(join(src, "typing.ts"), "utf8");
+  const kinds = [...typing.matchAll(/^export type (\w+Type) = TypeId<(\w+Record)>;/gm)].flatMap((m) => [m[1]!, m[2]!]);
+  expect(kinds).toContain("ObjectType");
+  expect(kinds.length).toBe(48);
+  const types = ["Type", "Bound", "TypeRecord", ...kinds];
+  const offenders: string[] = [];
+  for (const f of readdirSync(src).filter((f) => f.endsWith(".ts"))) {
+    const text = readFileSync(join(src, f), "utf8");
+    const names = [...types];
+    const alias = new RegExp(`\\btype (\\w+) = (?:(?:Extract|Exclude)<(?:${names.join("|")})\\b|(?:${names.join("|")})(?: [&|]|;))`, "g");
+    for (const m of text.matchAll(alias)) names.push(m[1]!);
+    const keyed = new RegExp(`\\b(?:Weak)?(?:Map|Set)<\\s*(?:(?:Extract|Exclude)<\\s*)?(?:${names.join("|")})\\b(?![\\[.])`, "g");
+    for (const m of text.matchAll(keyed)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
+
+
+// The checker's other records a table may not be keyed by: an Instance, a Body, a Local and a
+// ClassInfo, and a list of type parameters. Instances, bodies and locals key by their ids, a class
+// by its type's, and a list by its first parameter.
+test("no Map, WeakMap, Set or WeakSet in src is keyed by an instance, body, local, class or type parameter list", () => {
+  const offenders: string[] = [];
+  for (const f of readdirSync(src).filter((f) => f.endsWith(".ts"))) {
+    const text = readFileSync(join(src, f), "utf8");
+    for (const m of text.matchAll(/\b(?:Weak)?(?:Map|Set)<\s*(?:Instance|Body|Local|ClassInfo|TypeParam\[\])(?![\w.])/g)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
+
+// The checker's files: the checker, codegen and what they share.
+const CHECKER = ["check", "values", "classes", "resolve", "typefns", "operators", "typing", "generics", "interfaces", "flow", "narrow", "match", "moves", "comptime", "unions", "enums", "registry", "unsupported", "compilation", "codegen", "layout", "arithmetic", "runtime", "locals", "warnings"];
+
+// Tables still keyed by objects, each until it is given a key of its own: a walk's set of the
+// values it has visited, the quote, call and scope tables keyed by tree nodes without ids, and
+// refusals held aside.
+const OBJECT_KEYED = [
+  "check.ts: Set<unknown", "locals.ts: Set<unknown", "warnings.ts: Set<unknown",
+  "compilation.ts: WeakMap<Stmt[]", "compilation.ts: WeakMap<object", "codegen.ts: WeakSet<object", "typing.ts: WeakSet<CompileError",
+];
+
+// Fish's Map and Set key on strings and integers, so every table the checker keeps does: by a
+// string, an integer, a string-literal union, or through NodeMap, TypeMap and their kin, which key
+// by id. Type parameters, `K` and `T`, are a generic table's own.
+test("no Map, WeakMap, Set or WeakSet in the checker is keyed by anything but strings or integers", () => {
+  const offenders: string[] = [];
+  for (const f of CHECKER.map((name) => `${name}.ts`)) {
+    const text = readFileSync(join(src, f), "utf8");
+    for (const m of text.matchAll(/\b(?:Weak)?(?:Map|Set)<\s*([A-Za-z_][\w.]*(?:\[\])?|"[^"]*")/g)) {
+      if (/^(?:string|usize|isize|[iu](?:8|16|32|64|128)|f32|f64|number|bigint|boolean|BinaryOp|[KT]|"[^"]*")$/.test(m[1]!)) continue;
+      const at = `${f}: ${m[0]}`;
+      if (!OBJECT_KEYED.includes(at)) offenders.push(at);
+    }
+  }
+  expect(offenders).toEqual([]);
+});
+

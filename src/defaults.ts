@@ -2,7 +2,7 @@ import type { Tables } from "./compilation.ts";
 import { nextId, walk, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
-import type { Type } from "./typing.ts";
+import type { Type, Typing } from "./typing.ts";
 
 // Default parameter values, lowered before checking. A parameter `x: T = v` becomes an optional
 // parameter under a name no source can write, and the body starts with `const x: T = <it> ?? v`,
@@ -83,6 +83,8 @@ export function writtenName(tables: Tables, p: Param): string {
 }
 
 // Whether a type is `null` or an Option, which a call may pass in place of a default.
-export function holdsNull(t: Type): boolean {
-  return t === "null" || (typeof t !== "string" && t.kind === "union" && t.members.includes("null"));
+export function holdsNull({ rec }: Typing, t: Type): boolean {
+  if (typeof t === "string") return t === "null";
+  const r = rec(t);
+  return r.kind === "union" && r.members.includes("null");
 }

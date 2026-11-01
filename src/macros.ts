@@ -399,7 +399,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   if (!instance) throw new CompileError("a macro's parameters can't be object types or interfaces yet, which make it generic; use a class", macro.start, macro.end);
   const param = macro.params[0]!;
   const returns = instance.returns;
-  if (typeof returns === "string" || returns.kind === "literal") throw new CompileError(`a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${returns}'`, macro.start, macro.end);
+  if (typeof returns === "string" || instance.tables.typing.rec(returns).kind === "literal") throw new CompileError(`a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${instance.tables.typing.show(returns)}'`, macro.start, macro.end);
   const input = instance.locals.get(param)!.type;
   const { bare, restore } = stripped(ids, decl, pending);
   const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;

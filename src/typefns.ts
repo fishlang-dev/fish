@@ -1,21 +1,22 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { allFields, isNumeric, type ClassType, type Field, type Hole, type ParamType, type Type, type Typing } from "./typing.ts";
+import { TypeSet, isNumeric, type ClassType, type Field, type Hole, type ParamType, type Type, type Typing } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
 
 // The type parameter `t` is, or with `deep` the first anywhere in it, standing for no type yet.
-export function openParam(typing: Typing, t: Type, deep: boolean, seen: Set<Type> = new Set<Type>()): ParamType | undefined {
+export function openParam(typing: Typing, t: Type, deep: boolean, seen: TypeSet<Type> = new TypeSet<Type>()): ParamType | undefined {
   // A type holding itself is looked into once.
   if (typeof t === "string" || seen.has(t)) return undefined;
   seen.add(t);
-  if (t.kind === "param") return t.concrete ? openParam(typing, t.concrete, deep, seen) : t;
+  const r = typing.rec(t);
+  if (r.kind === "param") return r.concrete ? openParam(typing, r.concrete, deep, seen) : (t as ParamType);
   if (!deep) return undefined;
   const promised = typing.promiseElement(t);
-  const parts = promised ? [promised] : t.kind === "union" ? t.members : t.kind === "array" ? [t.element] : t.kind === "ref" ? [t.to]
-    : t.kind === "object" ? t.fields.map((f) => f.type) : t.kind === "class" ? (t.generic?.args ?? [])
-    : t.kind === "function" || t.kind === "closure" ? [...t.params, t.returns] : [];
+  const parts = promised ? [promised] : r.kind === "union" ? r.members : r.kind === "array" ? [r.element] : r.kind === "ref" ? [r.to]
+    : r.kind === "object" ? r.fields.map((f) => f.type) : r.kind === "class" ? (r.generic?.args ?? [])
+    : r.kind === "function" || r.kind === "closure" ? [...r.params, r.returns] : [];
   for (const part of parts) {
     const open = openParam(typing, part, deep, seen);
     if (open) return open;
@@ -31,7 +32,7 @@ export function standIn(typing: Typing, types: Type[], what: string, at: Span, d
     const open = openParam(typing, t, deep);
     if (!open) continue;
     if (deferring()) return open;
-    throw new CompileError(`${what} of the type parameter '${open.name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
+    throw new CompileError(`${what} of the type parameter '${typing.rec(open).name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
   }
   return undefined;
 }
@@ -41,17 +42,19 @@ export function standIn(typing: Typing, types: Type[], what: string, at: Span, d
 // `layout` does when first asked, saying whether they are known yet.
 // `conforms` is whether a type fits another, an interface by shape, as `extends` asks.
 export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean, deferring: () => boolean, conforms: (from: Type, to: Type, at: Span) => boolean) {
-  const { show, unionType, literalType, objectType, optionalField, withoutNull, promiseElement, patternType } = typing;
+  const { allFields, show, unionType, literalType, objectType, optionalField, withoutNull, promiseElement, patternType, rec } = typing;
+  const recOf = (t: Type) => (typeof t === "string" ? undefined : rec(t));
   // The fields a type-level function reads: an object type's, or a class's public fields, which
   // are its data (a class's methods aren't values in Fish).
   function fieldsOf(t: Type, what: string, at: Span): Field[] {
-    if (typeof t !== "string" && t.kind === "object") return t.fields;
-    if (typeof t !== "string" && t.kind === "class") {
-      if (!layout(t)) throw new CompileError(`${what} of '${t.name}' is needed while the field types of '${t.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
-      return allFields(t).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
+    const r = recOf(t);
+    if (r?.kind === "object") return r.fields;
+    if (r?.kind === "class") {
+      if (!layout(t as ClassType)) throw new CompileError(`${what} of '${r.name}' is needed while the field types of '${r.name}' are being worked out, so it can't be computed yet`, at.start, at.end);
+      return allFields(t as ClassType).filter((f) => (f.access ?? "public") === "public").map(({ name, type, readonly, optional }) => ({ name, type, ...(readonly && { readonly }), ...(optional && { optional }) }));
     }
-    if (typeof t !== "string" && t.kind === "param" && t.concrete) return fieldsOf(t.concrete, what, at);
-    if (typeof t !== "string" && t.kind === "interface") {
+    if (r?.kind === "param" && r.concrete) return fieldsOf(r.concrete, what, at);
+    if (r?.kind === "interface") {
       throw new CompileError(`${what} takes an object type or a class, not the interface '${show(t)}', whose methods aren't values in Fish; write its fields as a 'type'`, at.start, at.end);
     }
     throw new CompileError(`${what} takes an object type or a class, not '${show(t)}'`, at.start, at.end);
@@ -59,9 +62,10 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
 
   // The keys a type names: a string literal, or a union of them.
   function keysOf(k: Type, what: string, at: Span): string[] {
-    if (typeof k !== "string" && k.kind === "param" && k.concrete) return keysOf(k.concrete, what, at);
-    const members = typeof k !== "string" && k.kind === "union" ? k.members : [k];
-    if (members.every((m) => typeof m !== "string" && m.kind === "literal" && typeof m.value === "string")) {
+    const r = recOf(k);
+    if (r?.kind === "param" && r.concrete) return keysOf(r.concrete, what, at);
+    const members = (r?.kind === "union" ? r.members : [k]).map(recOf);
+    if (members.every((m) => m?.kind === "literal" && typeof m.value === "string")) {
       return members.map((m) => (m as { value: string }).value);
     }
     throw new CompileError(`${what} takes keys written as string literals, like '"a" | "b"', not '${show(k)}'`, at.start, at.end);
@@ -81,16 +85,18 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
   function indexedType(t: Type, k: Type, at: Span, keyAt: Span): Type {
     const held = standIn(typing, [t, k], "an indexed access type", at, false, deferring);
     if (held) return held;
-    if (typeof t !== "string" && t.kind === "param" && t.concrete) return indexedType(t.concrete, k, at, keyAt);
-    if (typeof t !== "string" && t.kind === "array") {
-      if (isNumeric(k)) return t.element;
-      throw new CompileError(`an array type is indexed by 'number', which gives its element type, here '${show(t.element)}'`, keyAt.start, keyAt.end);
+    const r = recOf(t);
+    if (r?.kind === "param" && r.concrete) return indexedType(r.concrete, k, at, keyAt);
+    if (r?.kind === "array") {
+      if (isNumeric(k)) return r.element;
+      throw new CompileError(`an array type is indexed by 'number', which gives its element type, here '${show(r.element)}'`, keyAt.start, keyAt.end);
     }
     const names = keysOf(k, "an indexed access type", keyAt);
     // As in TypeScript, a union gives the union of each member's field, which every member must have.
-    if (typeof t !== "string" && t.kind === "union") {
-      return unionType(t.members.flatMap((m) => {
-        if (typeof m === "string" || (m.kind !== "object" && m.kind !== "class" && m.kind !== "param")) {
+    if (r?.kind === "union") {
+      return unionType(r.members.flatMap((m) => {
+        const kind = recOf(m)?.kind;
+        if (kind !== "object" && kind !== "class" && kind !== "param") {
           throw new CompileError(`an indexed access type of a union takes object types or classes, but '${show(t)}' has the member '${show(m)}'`, at.start, at.end);
         }
         return fieldTypes(m, names, at, keyAt, t);
@@ -141,8 +147,9 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
 
   // The members of a union, or the one type that isn't one.
   const membersOf = (t: Type, what: string, at: Span): Type[] => {
-    if (typeof t !== "string" && t.kind === "param" && t.concrete) return membersOf(t.concrete, what, at);
-    return typeof t !== "string" && t.kind === "union" ? t.members : [t];
+    const r = recOf(t);
+    if (r?.kind === "param" && r.concrete) return membersOf(r.concrete, what, at);
+    return r?.kind === "union" ? r.members : [t];
   };
   const kept = (members: Type[]): Type => (members.length === 0 ? "never" : unionType(members));
 
@@ -158,16 +165,18 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
   // `ReturnType<F>`: what a function of type F returns.
   const returnType: Utility = ([given], at) => {
     const f = given!;
-    if (typeof f !== "string" && f.kind === "param" && f.concrete) return returnType([f.concrete], at, []);
-    if (typeof f !== "string" && (f.kind === "function" || f.kind === "closure")) return f.returns;
+    const r = recOf(f);
+    if (r?.kind === "param" && r.concrete) return returnType([r.concrete], at, []);
+    if (r?.kind === "function" || r?.kind === "closure") return r.returns;
     throw new CompileError(`'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${show(f)}'`, at.start, at.end);
   };
 
   // `Awaited<T>`: what awaiting a T gives, through promises of promises; any other type is itself.
   const awaitedType: Utility = ([given], at) => {
     const t = given!;
-    if (typeof t !== "string" && t.kind === "param" && t.concrete) return awaitedType([t.concrete], at, []);
-    const gives = promiseElement(t) ?? (typeof t !== "string" && t.kind === "future" ? t.gives : undefined);
+    const r = recOf(t);
+    if (r?.kind === "param" && r.concrete) return awaitedType([r.concrete], at, []);
+    const gives = promiseElement(t) ?? (r?.kind === "future" ? r.gives : undefined);
     return gives === undefined ? t : awaitedType([gives], at, []);
   };
 
@@ -179,11 +188,13 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
     // A hole of `never` spells nothing, and `boolean` is `true | false`.
     if (holes.includes("never")) return "never";
     holes.forEach((hole, i) => {
-      const members = hole === "boolean" ? [literalType(true), literalType(false)] : typeof hole !== "string" && hole.kind === "union" ? hole.members : [hole];
+      const h = recOf(hole);
+      const members = hole === "boolean" ? [literalType(true), literalType(false)] : h?.kind === "union" ? h.members : [hole];
       const pieces = members.map((m): { quasis: string[]; holes: Hole[] } => {
-        if (typeof m !== "string" && m.kind === "literal") return { quasis: [String(m.value)], holes: [] };
+        const r = recOf(m);
+        if (r?.kind === "literal") return { quasis: [String(r.value)], holes: [] };
         if (m === "string" || isNumeric(m)) return { quasis: ["", ""], holes: [m] };
-        if (typeof m !== "string" && m.kind === "pattern") return { quasis: m.quasis, holes: m.holes };
+        if (r?.kind === "pattern") return { quasis: r.quasis, holes: r.holes };
         throw new CompileError(`a template literal type's hole takes a string, a number type, or string, number or boolean literals, not '${show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
       });
       if (spelled.length * pieces.length > 10_000) throw new CompileError("this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
@@ -200,7 +211,8 @@ export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean,
 
   // `Uppercase<S>` and its kin: each string literal of S changed as JavaScript changes it.
   const intrinsic = (what: string, change: (s: string) => string): Utility => ([s], at) => kept(membersOf(s!, `'${what}'`, at).map((m) => {
-    if (typeof m !== "string" && m.kind === "literal" && typeof m.value === "string") return literalType(change(m.value));
+    const r = recOf(m);
+    if (r?.kind === "literal" && typeof r.value === "string") return literalType(change(r.value));
     throw new CompileError(`'${what}' takes string literals, like '${what}<"a" | "b">', not '${show(m)}'`, at.start, at.end);
   }));
 

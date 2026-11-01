@@ -267,6 +267,13 @@ macro function m(input: Ast): i64 {
 }
 @m function f() {}
 function main() {}
+// case: macro_literal_result_type
+// error: a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '"x"'
+macro function m(input: Ast): "x" {
+  return "x";
+}
+@m function f() {}
+function main() {}
 // case: macro_user_ast_name
 // expect: num
 type AstExpr = { kind: "num" };
