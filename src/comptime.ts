@@ -1,5 +1,4 @@
 import type { Instance } from "./check.ts";
-import type { Narrowing } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
@@ -560,7 +559,7 @@ function interpreter(tables: Tables) {
         return expr(f, e.expr);
       case "nonNull": {
         // An overload's body narrows the implementation's value to the signature's return type.
-        if ((e as Narrowing).narrows) {
+        if (e.narrows) {
           const [from, to] = [f.instance.types.get(e.expr), type];
           const held = expr(f, e.expr);
           if (from === to) return held;

@@ -43,7 +43,7 @@ type AstExpr =
   | { start: i64; end: i64; kind: "instantiation"; expr: AstExpr; typeArgs: AstType[] }
   | { start: i64; end: i64; kind: "meta"; name: "import.meta" | "new.target" }
   | { start: i64; end: i64; kind: "import"; args: AstExpr[] }
-  | { start: i64; end: i64; kind: "nonNull"; expr: AstExpr }
+  | { start: i64; end: i64; kind: "nonNull"; expr: AstExpr; narrows?: AstType }
   | { start: i64; end: i64; kind: "throw"; value: AstExpr }
   | { start: i64; end: i64; name: string | null; abstract: boolean; decorators: AstExpr[]; typeParams: AstTypeParam[]; extends: AstExpr | null; implements: AstType[]; members: AstClassMember[]; derives?: string[]; kind: "class" }
   | { start: i64; end: i64; kind: "privateName"; name: string }

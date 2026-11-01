@@ -1,6 +1,6 @@
 import { CompileError, type Names } from "./diag.ts";
 import type { Expr, Param, Pattern, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { nextId, NodeMap, NodeSet, type Ids } from "./nodes.ts";
+import { childrenOf, forEachChild, nextId, NodeMap, NodeSet, someNode, walk, type AnyNode, type Ids } from "./nodes.ts";
 
 // Local declarations: a `type`, `interface`, `enum` or `class` written in a body is a
 // declaration of the program's own, under a name only its scope can write. The uses in its scope
@@ -15,8 +15,6 @@ type Context = { typeParams: TypeParam[]; declared: Set<string> };
 
 const LOCAL_KINDS = new Set(["typeAlias", "interface", "class", "enum"]);
 const BODIED = new Set(["function", "arrow", "method", "constructor", "get", "set"]);
-// The fields of a statement that hold statement lists, each a scope of its own.
-const LISTS = ["body", "then", "else", "block", "handler", "finalizer"];
 
 // Each name made is noted in `names`, and each node made numbered from `ids`. `captured`, when
 // given, is told of each local class or enum using a variable around it, which is otherwise an
@@ -25,36 +23,35 @@ export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program:
   const hoisted: Stmt[] = [];
   let count = 0;
 
-  const visit = (node: unknown, ctx: Context | undefined, seen: Set<unknown> = new Set<unknown>()) => {
-    if (!node || typeof node !== "object" || seen.has(node)) return;
-    seen.add(node);
-    if (Array.isArray(node)) return node.forEach((x) => visit(x, ctx, seen));
-    const n = node as { kind?: string; typeParams?: TypeParam[]; params?: Param[]; body?: unknown };
+  // Inside a body, each list of statements is a block.
+  const visit = (node: AnyNode, ctx: Context | undefined, seen: Set<unknown> = new Set<unknown>()) => {
+    if (seen.has(node.node)) return;
+    seen.add(node.node);
+    if (node.of === "stmts" && ctx) return list(node.node, ctx);
+    // A case's test is no block's, and runs nothing a local is declared in.
+    if (node.of === "switchCase" && ctx) return list(node.node.body, ctx);
+    const n = node.node as { kind?: string; typeParams?: TypeParam[]; params?: Param[]; body?: Expr | Stmt[] };
     // A function, an arrow or a member with a body starts a context of its own.
     if (BODIED.has(n.kind!) && n.body) {
       const inner: Context = {
         typeParams: shadowed(ctx?.typeParams ?? [], n.typeParams ?? []),
         declared: new Set([...(ctx?.declared ?? []), ...(n.params ?? []).flatMap((p) => namesIn(p.pattern))]),
       };
-      if (Array.isArray(n.body)) list(n.body as Stmt[], inner);
-      else visit(n.body, inner, seen);
-      for (const p of n.params ?? []) visit(p, inner, seen);
+      if (Array.isArray(n.body)) list(n.body, inner);
+      else visit({ of: "expr", node: n.body }, inner, seen);
+      for (const p of n.params ?? []) visit({ of: "param", node: p }, inner, seen);
       return;
     }
     // A class's members see its type parameters.
     if (n.kind === "class" && Array.isArray(n.typeParams)) {
       const inner: Context = { typeParams: shadowed(ctx?.typeParams ?? [], n.typeParams), declared: ctx?.declared ?? new Set() };
-      for (const [k, v] of Object.entries(n)) if (k !== "typeParams") visit(v, inner, seen);
+      forEachChild(node, (c) => c.of !== "typeParam" && visit(c, inner, seen));
       return;
     }
     // A loop's head and a catch clause bind names for what follows them.
     const head = ctx && headNames(n);
     const here = head && head.length > 0 ? { ...ctx, declared: new Set([...ctx.declared, ...head]) } : ctx;
-    for (const [k, v] of Object.entries(n)) {
-      if (here && LISTS.includes(k) && Array.isArray(v) && v.every(isStmt)) list(v as Stmt[], here);
-      else if (here && k === "cases" && Array.isArray(v)) for (const c of v as { body: Stmt[] }[]) list(c.body, here);
-      else visit(v, here, seen);
-    }
+    forEachChild(node, (c) => visit(c, here, seen));
   };
 
   // A block's statements. Each local declaration in it is renamed throughout the block, as
@@ -88,15 +85,16 @@ export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program:
       Object.assign(local, { name: mangled, typeParams: [...params.map((p) => ({ ...p, id: nextId(ids) })), ...(local.typeParams ?? [])] });
       return { name, mangled, args, own, values: local.kind === "class" || local.kind === "enum" };
     });
-    for (const r of renames) for (const s of stmts) rename(s, r);
-    for (const s of stmts) visit(s, ctx);
+    for (const r of renames) for (const s of stmts) rename({ of: "stmt", node: s }, r);
+    for (const s of stmts) visit({ of: "stmt", node: s }, ctx);
     for (const local of locals) {
       hoisted.push(local);
       stmts[stmts.indexOf(local)] = { id: nextId(ids), kind: "empty", start: local.start, end: local.end };
     }
   };
 
-  visit(program, undefined);
+  const seen = new Set<unknown>();
+  for (const s of program) visit({ of: "stmt", node: s }, undefined, seen);
   return hoisted;
 }
 
@@ -142,10 +140,6 @@ function headNames(n: { kind?: string }): string[] {
   return stmt.kind === "try" ? namesIn(stmt.param) : [];
 }
 
-function isStmt(x: unknown): boolean {
-  return !!x && typeof x === "object" && typeof (x as { kind?: unknown }).kind === "string";
-}
-
 // Renames a local declaration in the statements after it, until one declares the name again.
 type Rename = { name: string; mangled: string; args: TypeNode[]; own: usize; values: boolean };
 
@@ -158,16 +152,12 @@ function declares(s: Stmt, r: Rename): boolean {
 
 // Every use of the name under `node`, as a type or, for a class or enum, a value, made a use of
 // the hoisted name, the outer type parameters given first among its type arguments.
-function rename(node: unknown, r: Rename, seen: Set<unknown> = new Set<unknown>()) {
-  if (!node || typeof node !== "object" || seen.has(node)) return;
-  seen.add(node);
-  if (Array.isArray(node)) {
-    if (node.every(isStmt) && node.some((s) => declares(s as Stmt, r))) return;
-    for (const x of node) rename(x, r, seen);
-    return;
-  }
+function rename(node: AnyNode, r: Rename, seen: Set<unknown> = new Set<unknown>()) {
+  if (seen.has(node.node)) return;
+  seen.add(node.node);
+  if (node.of === "stmts" && node.node.some((s) => declares(s, r))) return;
   const { name: from, mangled: to, args, own } = r;
-  const n = node as { kind?: string; name?: unknown; args?: TypeNode[]; typeArgs?: TypeNode[]; callee?: Expr; expr?: Expr };
+  const n = node.node as { kind?: string; name?: unknown; args?: TypeNode[]; typeArgs?: TypeNode[]; callee?: Expr; expr?: Expr };
   if (n.kind === "ref" && n.name === from) {
     n.name = to;
     n.args = [...args, ...(n.args ?? [])];
@@ -183,68 +173,56 @@ function rename(node: unknown, r: Rename, seen: Set<unknown> = new Set<unknown>(
   if (r.values && n.kind === "ident" && n.name === from) n.name = to;
   // A dotted name, as an enum member's type or a match pattern's variant, names it first.
   if ((n.kind === "ref" || n.kind === "variant") && typeof n.name === "string" && n.name.startsWith(`${from}.`)) n.name = `${to}${n.name.slice(from.length)}`;
-  for (const v of Object.values(n)) rename(v, r, seen);
+  forEachChild(node, (c) => rename(c, r, seen));
 }
 
 // Whether a node names a declaration, as a type, a value or an enum member's type.
-function mentions(node: unknown, name: string, seen: Set<unknown> = new Set<unknown>()): boolean {
-  if (!node || typeof node !== "object" || seen.has(node)) return false;
-  seen.add(node);
-  if (Array.isArray(node)) return node.some((x) => mentions(x, name, seen));
-  const n = node as { kind?: string; name?: unknown };
-  if ((n.kind === "ref" || n.kind === "ident" || n.kind === "variant") && typeof n.name === "string" && (n.name === name || n.name.startsWith(`${name}.`))) return true;
-  return Object.values(n).some((v) => mentions(v, name, seen));
+function mentions(local: Local, name: string): boolean {
+  return someNode("stmt", local, ({ node }) => {
+    const n = node as { kind?: string; name?: unknown };
+    return (n.kind === "ref" || n.kind === "ident" || n.kind === "variant") && typeof n.name === "string" && (n.name === name || n.name.startsWith(`${name}.`));
+  });
 }
 
 // Whether a statement uses a value by name as it runs, not from a function it only defines.
-function runsUse(node: unknown, name: string): boolean {
-  if (!node || typeof node !== "object") return false;
-  if (Array.isArray(node)) return node.some((x) => runsUse(x, name));
-  const n = node as { kind?: string; name?: unknown };
-  if (BODIED.has(n.kind!) || n.kind === "class") return false;
-  // An inner block, loop or catch clause binding the name hides it.
-  if (headNames(n).includes(name) || Object.values(n).some((v) => Array.isArray(v) && v.every(isStmt) && v.some((s) => valueNames(s as Stmt).includes(name)))) return false;
-  if (n.kind === "ident" && n.name === name) return true;
-  return Object.values(n).some((v) => runsUse(v, name));
+function runsUse(s: Stmt, name: string): boolean {
+  const runs = (node: AnyNode): boolean => {
+    if (node.of === "stmts") return node.node.some((s) => runs({ of: "stmt", node: s }));
+    const n = node.node as { kind?: string; name?: unknown };
+    if (BODIED.has(n.kind!) || n.kind === "class") return false;
+    // An inner block, loop or catch clause binding the name hides it.
+    const children = childrenOf(node);
+    if (headNames(n).includes(name) || children.some((c) => c.of === "stmts" && c.node.some((s) => valueNames(s).includes(name)))) return false;
+    if (n.kind === "ident" && n.name === name) return true;
+    return children.some(runs);
+  };
+  return runs({ of: "stmt", node: s });
 }
 
-function refersTo(node: unknown, name: string, seen: Set<unknown> = new Set<unknown>()): boolean {
-  if (!node || typeof node !== "object" || seen.has(node)) return false;
-  seen.add(node);
-  if (Array.isArray(node)) return node.some((x) => refersTo(x, name, seen));
-  const n = node as { kind?: string; name?: unknown };
-  if (n.kind === "ref" && n.name === name) return true;
-  return Object.values(n).some((v) => refersTo(v, name, seen));
+function refersTo(local: Local, name: string): boolean {
+  return someNode("stmt", local, ({ of, node }) => of === "typeNode" && node.kind === "ref" && node.name === name);
 }
 
 // The value names a declaration reads.
-function namesUsed(node: unknown, found: Set<string> = new Set<string>(), seen: Set<unknown> = new Set<unknown>()): Set<string> {
-  if (!node || typeof node !== "object" || seen.has(node)) return found;
-  seen.add(node);
-  if (Array.isArray(node)) {
-    for (const x of node) namesUsed(x, found, seen);
-    return found;
-  }
-  const n = node as { kind?: string; name?: unknown };
-  if ((n.kind === "ident" || n.kind === "shorthand") && typeof n.name === "string") found.add(n.name);
-  for (const v of Object.values(n)) namesUsed(v, found, seen);
+function namesUsed(local: Local): Set<string> {
+  const found = new Set<string>();
+  walk("stmt", local, ({ of, node }) => {
+    if ((of === "expr" || of === "pattern") && node.kind === "ident") found.add(node.name);
+    if (of === "objectProp" && node.kind === "shorthand") found.add(node.name);
+  });
   return found;
 }
 
 // The names declared inside a declaration: its methods' parameters and locals.
-function declaredWithin(node: unknown, found: Set<string> = new Set<string>(), seen: Set<unknown> = new Set<unknown>()): Set<string> {
-  if (!node || typeof node !== "object" || seen.has(node)) return found;
-  seen.add(node);
-  if (Array.isArray(node)) {
-    for (const x of node) declaredWithin(x, found, seen);
-    return found;
-  }
-  const n = node as { kind?: string; params?: Param[]; body?: unknown; declarations?: { target: Pattern }[]; name?: unknown; param?: Pattern };
-  for (const p of n.params ?? []) for (const x of namesIn(p.pattern)) found.add(x);
-  if (n.kind === "let") for (const d of n.declarations ?? []) for (const x of namesIn(d.target)) found.add(x);
-  if (n.kind === "function" && typeof n.name === "string") found.add(n.name);
-  if (n.kind === "try" && n.param) for (const x of namesIn(n.param)) found.add(x);
-  for (const v of Object.values(n)) declaredWithin(v, found, seen);
+function declaredWithin(local: Local): Set<string> {
+  const found = new Set<string>();
+  walk("stmt", local, ({ node }) => {
+    const n = node as { kind?: string; params?: Param[]; declarations?: { target: Pattern }[]; name?: unknown; param?: Pattern };
+    for (const p of n.params ?? []) for (const x of namesIn(p.pattern)) found.add(x);
+    if (n.kind === "let") for (const d of n.declarations ?? []) for (const x of namesIn(d.target)) found.add(x);
+    if (n.kind === "function" && typeof n.name === "string") found.add(n.name);
+    if (n.kind === "try" && n.param) for (const x of namesIn(n.param)) found.add(x);
+  });
   return found;
 }
 

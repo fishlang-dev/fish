@@ -8,7 +8,7 @@ import { FILE_SPAN } from "./modules.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
-import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, type Ids } from "./nodes.ts";
+import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
@@ -172,14 +172,13 @@ function freeNames(fn: Extract<Stmt, { kind: "function" }>): Set<string> {
 }
 
 // Every name written in a piece of syntax.
-function identifiers(node: unknown, found: Set<string> = new Set<string>()): Set<string> {
-  if (Array.isArray(node)) for (const x of node) identifiers(x, found);
-  else if (node && typeof node === "object") {
-    const n = node as { kind?: string; name?: unknown };
+function identifiers(body: Stmt[] | undefined): Set<string> {
+  const found = new Set<string>();
+  walk("stmt", body, ({ of, node }) => {
+    if ((of === "expr" || of === "pattern") && node.kind === "ident") found.add(node.name);
     // A shorthand property `{ x }` reads `x` too.
-    if ((n.kind === "ident" || n.kind === "shorthand") && typeof n.name === "string") found.add(n.name);
-    for (const v of Object.values(node)) if (v && typeof v === "object") identifiers(v, found);
-  }
+    if (of === "objectProp" && node.kind === "shorthand") found.add(node.name);
+  });
   return found;
 }
 
@@ -272,10 +271,10 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   instance.body.params.forEach((p) => add(instance.locals.get(p)!));
   // A local generic function's name holds nothing.
   [...new Set(instance.locals.values())].filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
-  const visit = (node: unknown) => {
-    if (!node || typeof node !== "object" || (node as Expr).kind === "arrow") return;
+  walk("stmt", instance.body.body, ({ of, node }) => {
+    if (of === "expr" && node.kind === "arrow") return false;
     const s = node as Stmt;
-    if (s.kind === "forOf") {
+    if (of === "stmt" && s.kind === "forOf") {
       loops.set(s, fields.length);
       const kept = iterated(instance, s.right);
       const held = isRef(kept) ? kept.to : kept;
@@ -291,13 +290,11 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
       } else fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" });
     }
     const e = node as Expr;
-    if (isAwait(e)) {
+    if (of === "expr" && isAwait(e)) {
       awaits.set(e, fields.length);
       fields.push({ name: "await", type: instance.types.get(e.operand)! });
     }
-    Object.values(node).forEach(visit);
-  };
-  visit(instance.body.body);
+  });
   generator.frame = fields;
   instance.frame = { locals, loops, awaits };
 }
@@ -326,7 +323,7 @@ function timersRunAsync(ids: Ids, written: Stmt[], timerMains: Tables["timerMain
   const main = top.find((f) => f.name === "main");
   if (!main || main.async) return;
   const declared = new Set(top.map((f) => f.name));
-  const timers = holdsNode(written, (n) => n.kind === "call" && (n as { callee?: { kind?: string; name?: string } }).callee?.kind === "ident" && TIMER_GLOBALS.has((n as { callee: { name: string } }).callee.name) && !declared.has((n as { callee: { name: string } }).callee.name));
+  const timers = holdsNode("stmt", written, (n) => n.kind === "call" && (n as { callee?: { kind?: string; name?: string } }).callee?.kind === "ident" && TIMER_GLOBALS.has((n as { callee: { name: string } }).callee.name) && !declared.has((n as { callee: { name: string } }).callee.name));
   if (!timers) return;
   main.async = true;
   timerMains.add(main);
@@ -336,12 +333,17 @@ function timersRunAsync(ids: Ids, written: Stmt[], timerMains: Tables["timerMain
 const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
 
 // Whether a piece of syntax holds a node `found` picks out.
-export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unknown }) => boolean, seen: Set<unknown> = new Set<unknown>()): boolean {
-  if (!node || typeof node !== "object" || seen.has(node)) return false;
-  seen.add(node);
-  if (Array.isArray(node)) return node.some((x) => holdsNode(x, found, seen));
-  if (found(node as { kind?: unknown })) return true;
-  return Object.values(node).some((x) => holdsNode(x, found, seen));
+// A node shared by several parents is tried once.
+export function holdsNode<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K>[] | undefined, found: (n: { kind?: unknown; name?: unknown }) => boolean): boolean {
+  const seen = new Set<unknown>();
+  let hit = false;
+  walk(of, roots, ({ node }) => {
+    if (hit || seen.has(node)) return false;
+    seen.add(node);
+    hit = found(node as { kind?: unknown });
+    return !hit;
+  });
+  return hit;
 }
 
 // Every name the body of a function declares anywhere, as a variable, a function, a class or a
@@ -349,7 +351,7 @@ export function holdsNode(node: unknown, found: (n: { kind?: unknown; name?: unk
 function declaredIn(f: { params: Param[]; body?: Stmt[]; typeParams?: TypeParam[] }): Set<string> {
   const names = new Set<string>(f.params.flatMap((p) => namesIn(p.pattern)));
   for (const p of f.typeParams ?? []) names.add(p.name);
-  holdsNode(f.body, (n) => {
+  holdsNode("stmt", f.body, (n) => {
     const s = n as Stmt | Expr;
     if (s.kind === "let") for (const d of s.declarations) for (const x of namesIn(d.target)) names.add(x);
     if ((s.kind === "function" || s.kind === "class") && typeof s.name === "string") names.add(s.name);
@@ -407,7 +409,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const { jsBodies, jsCalledAt, jsCalls, jsClasses, jsGiven, jsonCalls, jsUses, printed, presetParams, restStarts, substituted, timerWrappers, defaulted, prologues, asserts, declarations, equalities, madeArrows } = tables;
   const files = compilation.fileNames.get(written);
   // A macro applies only to a top-level declaration; the top-level ones are expanded already.
-  holdsNode(written, (n) => {
+  holdsNode("stmt", written, (n) => {
     const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
     if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw new CompileError("a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
     // A member's decorator a top-level class's expansion didn't reach is on a class no macro runs on.
@@ -417,7 +419,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   });
   written = lowerOverloads(ids, written);
   written = [...written, ...hoistLocals(compilation, written)];
-  holdsNode(written, (n) => {
+  holdsNode("stmt", written, (n) => {
     if (n.kind === "get" && typeof (n as { name?: unknown; key?: unknown }).name === "string") getterNames.add((n as { name: string }).name);
     if (n.kind === "get" && typeof (n as { key?: unknown }).key === "string") getterNames.add((n as { key: string }).key);
     return false;
@@ -857,17 +859,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // The lifetime names an annotation writes: on references, and in classes' lifetime slots.
   function named(t: TypeNode | undefined): Set<string> {
     const found = new Set<string>();
-    const visit = (n: unknown): void => {
-      if (!n || typeof n !== "object") return;
-      const node = n as { kind?: string; name?: string; args?: (TypeNode & { name?: string })[] };
-      if (node.kind === "ref" && node.args) {
-        if ((node.name === "Ref" || node.name === "Mut") && node.args.length === 2) found.add(node.args[1]!.name!);
-        const lifetime = slots.get(node.name!);
-        if (lifetime && node.args.length === lifetime.length) node.args.forEach((a, i) => lifetime[i] && found.add(a.name!));
-      }
-      for (const v of Object.values(n)) if (v && typeof v === "object") visit(v);
-    };
-    visit(t);
+    walk("typeNode", t, ({ of, node }) => {
+      if (of !== "typeNode" || node.kind !== "ref") return;
+      const args = node.args as (TypeNode & { name?: string })[];
+      if ((node.name === "Ref" || node.name === "Mut") && args.length === 2) found.add(args[1]!.name!);
+      const lifetime = slots.get(node.name);
+      if (lifetime && args.length === lifetime.length) args.forEach((a, i) => lifetime[i] && found.add(a.name!));
+    });
     return found;
   }
 
@@ -886,18 +884,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // Every lifetime a body writes must be one it declares.
   function lifetimes(f: Body) {
     const declared = new Set([...(f.typeParams ?? []), ...(f.owner ? classNode(f.owner.name)?.typeParams ?? [] : [])].filter(isLifetime).map((p) => p.name));
-    const visit = (t: unknown): void => {
-      if (!t || typeof t !== "object") return;
-      const node = t as { kind?: string; name?: string; args?: TypeNode[] };
-      const lives = node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args?.length === 2 ? [node.args[1]!]
-        : node.kind === "ref" && slots.get(node.name!)?.length === node.args?.length ? node.args!.filter((_, i) => slots.get(node.name!)![i]) : [];
+    const types = [...f.params.flatMap((p) => p.type ?? []), ...(f.returnType ? [f.returnType] : [])];
+    walk("typeNode", types, ({ of, node }) => {
+      if (of !== "typeNode" || node.kind !== "ref") return;
+      const lives = (node.name === "Ref" || node.name === "Mut") && node.args.length === 2 ? [node.args[1]!]
+        : slots.get(node.name)?.length === node.args.length ? node.args.filter((_, i) => slots.get(node.name)![i]) : [];
       for (const life of lives as (Span & { name: string })[]) {
         if (!declared.has(life.name)) throw new CompileError(`cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
       }
-      for (const v of Object.values(t)) if (v && typeof v === "object") visit(v);
-    };
-    f.params.forEach((p) => visit(p.type));
-    visit(f.returnType);
+    });
   }
 
   // The lifetimes a method's class declares.
@@ -1716,7 +1711,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (target.kind === "member" && target.object.kind === "this" && f.self) return allFields(f.self.type as ClassType).find((x) => x.name === target.name)?.type;
       // A target with only a setter can't be read for its type; its part keeps its own.
       try {
-        const t = value(renumber(structuredClone(target), () => nextId(ids)));
+        const t = value(renumber("expr", structuredClone(target), () => nextId(ids)));
         return typeof t !== "string" && t.kind === "ref" ? undefined : t;
       } catch (err) {
         if (err instanceof CompileError) return undefined;
@@ -2642,7 +2637,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // names it in messages.
     function lifted(key: Stmt | Expr, name: string, fn: Func, who: string): Func {
       const own = fn as Extract<Stmt, { kind: "function" }>;
-      if (holdsNode(fn.body, (n) => n.kind === "this")) {
+      if (holdsNode("stmt", fn.body, (n) => n.kind === "this")) {
         throw new CompileError(`${who} is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter`, fn.start, fn.end);
       }
       // It is checked apart from the body around it, so a name that body declares anywhere,
@@ -2652,14 +2647,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       for (const n of freeNames(own)) {
         if (n !== name && (around.has(n) || lookup(n))) throw new CompileError(`${who} is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
       }
-      const typed = holdsNode([fn.params, fn.returnType, fn.body], (n) => n.kind === "ref" && typeof n.name === "string" && around.has(n.name) && !(fn.typeParams ?? []).some((p) => p.name === n.name));
+      const outer = (n: { kind?: unknown; name?: unknown }) => n.kind === "ref" && typeof n.name === "string" && around.has(n.name) && !(fn.typeParams ?? []).some((p) => p.name === n.name);
+      const typed = holdsNode("param", fn.params, outer) || holdsNode("typeNode", fn.returnType, outer) || holdsNode("stmt", fn.body, outer);
       if (typed) throw new CompileError(`${who} is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
       let lifted = liftedFunctions.get(key);
       if (!lifted) {
         lifted = { name, fn: { ...fn, id: nextId(ids), name: `${f.name}.${name || "arrow"}#${counts.lifts++}` } };
         // Its calls of itself call what it was lifted to.
         const symbol = lifted.fn.name;
-        holdsNode(fn.body, (n) => {
+        holdsNode("stmt", fn.body, (n) => {
           const c = n as Expr;
           if (c.kind === "call" && c.callee.kind === "ident" && c.callee.name === name) c.callee.name = symbol;
           return false;
