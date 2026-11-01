@@ -10,9 +10,13 @@ const MAIN = join(import.meta.dir, "..", "src", "main.ts");
 const root = realpathSync(mkdtempSync(join(tmpdir(), "fish-cli-")));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
+// The environment without the variables that decide whether output is coloured, so a test sets
+// its own.
+const { FORCE_COLOR: _force, NO_COLOR: _no, ...uncoloured } = process.env;
+
 // Runs `fishc` with `args` in the directory `cwd`.
 function fishc(cwd: string, ...args: string[]) {
-  const run = Bun.spawnSync(["bun", MAIN, ...args], { cwd });
+  const run = Bun.spawnSync(["bun", MAIN, ...args], { cwd, env: uncoloured });
   return { code: run.exitCode, out: run.stdout.toString(), err: run.stderr.toString() };
 }
 
@@ -95,7 +99,7 @@ const manifestOf = (name: string, extra = "") => `[package]\nname = "${name}"\nv
 test("a TS-compat package's files are refused by build and test, at each file's first line", () => {
   const pkg = dir("compat-pkg", { "fish.toml": manifestOf("compat-pkg", 'edition = "ts-compat"\n'), "src/main.fsh": 'function main() {\n  console.log("hi");\n}\n' });
   expect(fishc(pkg, "build")).toEqual({ code: 1, out: "", err: `src/main.fsh:1:1: error[E0006]: ${COMPAT}\n 1 | function main() {\n   | ^^^^^^^^^^^^^^^^^\n` });
-  const tested = Bun.spawnSync(["bun", MAIN, "test"], { cwd: pkg });
+  const tested = Bun.spawnSync(["bun", MAIN, "test"], { cwd: pkg, env: uncoloured });
   expect(tested.exitCode).toBe(1);
   expect(tested.stderr.toString()).toBe(`src/main.fsh:1:1: error[E0006]: ${COMPAT}\n 1 | function main() {\n   | ^^^^^^^^^^^^^^^^^\n`);
 });
@@ -177,7 +181,7 @@ test("fishc check reports every error, with a closing count, painted only when a
     "main.fsh:5:21: error[E0101]: type 'i64' is not assignable to type 'string'",
     "error: could not compile due to 2 previous errors",
   ]);
-  const env = (vars: Record<string, string>) => Bun.spawnSync(["bun", MAIN, "check", "main.fsh"], { cwd: p, env: { ...process.env, ...vars } }).stderr.toString();
+  const env = (vars: Record<string, string>) => Bun.spawnSync(["bun", MAIN, "check", "main.fsh"], { cwd: p, env: { ...uncoloured, ...vars } }).stderr.toString();
   expect(env({ FORCE_COLOR: "1" })).toContain("\x1b[1mmain.fsh:2:10:\x1b[0m \x1b[1;31merror[E0101]\x1b[0m");
   expect(env({ FORCE_COLOR: "0" })).toBe(plain.err);
   expect(env({ NO_COLOR: "1" })).toBe(plain.err);
