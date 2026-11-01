@@ -73,6 +73,9 @@ test("each definition in the IR is marked for the sanitizer, and an unsanitized 
   expect(instrumented(ir, { ...HOST_TARGET, sanitize: "thread" })).toBe('define internal void @"fsh.constants"() sanitize_thread {\ndefine internal { i64, ptr } @"fsh.f"(ptr %p) sanitize_thread uwtable personality ptr @__gcc_personality_v0 {\ndeclare void @free(ptr)\n  ; define x {');
   expect(instrumented(ir, { ...HOST_TARGET, sanitize: "address" })).toContain("sanitize_address uwtable personality");
   expect(instrumented(ir, HOST_TARGET)).toBe(ir);
+  // A symbol can hold a space, and so the word itself.
+  const named = 'define internal i64 @"fsh.C.static uwtable"() uwtable personality ptr @__gcc_personality_v0 {';
+  expect(instrumented(named, { ...HOST_TARGET, sanitize: "address" })).toBe('define internal i64 @"fsh.C.static uwtable"() sanitize_address uwtable personality ptr @__gcc_personality_v0 {');
 });
 
 test("an instrumented runtime is cached apart from a plain one", () => {

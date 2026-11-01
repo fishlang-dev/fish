@@ -130,5 +130,5 @@ export function sanitizedTarget(target: Target, kinds: string[], host: string | 
 export function instrumented(ir: string, target: Target): string {
   if (!target.sanitize) return ir;
   const attribute = target.sanitize === "address" ? "sanitize_address" : "sanitize_thread";
-  return ir.replace(/^(define [^\n]*?)( uwtable| \{$)/gm, `$1 ${attribute}$2`);
+  return ir.replace(/^(define [^\n]*\))( uwtable| \{$)/gm, `$1 ${attribute}$2`);
 }
