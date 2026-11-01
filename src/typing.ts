@@ -225,7 +225,7 @@ export function jsShape(t: Type): InterfaceType | ObjectType | undefined {
 // `AbortController` and its `AbortSignal`s are handles to one block.
 // A FileJob is a file read or write handed to the runtime's blocking pool.
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
-export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
+export type BlockType = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
 
 // A JsValue a program holds without knowing its type, not a package's handle of a known shape.
 export const isPlainJs = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue" && t.of === "void";
@@ -237,7 +237,7 @@ export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.ki
 // `send` the value going in. One given an AbortSignal ends with a count on it and whether it is
 // waiting on it, and throws the `AbortError` it is given. `leafOf` names each one's method and
 // what it carries.
-export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "readFile" | "writeFile" | "timerNext" | "jsAwait" | "next";
+export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "sendTo" | "receiveFrom" | "udpConnect" | "readFile" | "writeFile" | "timerNext" | "jsAwait" | "next";
 
 // A spawned task's `JoinHandle<T>`: what its future gives and may throw, awaited like it. A
 // counted pointer to the task; dropping it detaches the task.
@@ -846,6 +846,10 @@ export function newTyping() {
     accept: () => [{ name: "block", type: blockType("TcpListener") }],
     read: () => [{ name: "block", type: blockType("TcpStream") }, { name: "max", type: "i64" }],
     write: () => [{ name: "block", type: blockType("TcpStream") }, { name: "bytes", type: arrayType("u8") }, { name: "written", type: "i64" }],
+    // A UDP socket's waits; a send with no host goes to the connected peer.
+    sendTo: () => [{ name: "block", type: blockType("UdpSocket") }, { name: "bytes", type: arrayType("u8") }, { name: "host", type: "string" }, { name: "port", type: "i64" }],
+    receiveFrom: () => [{ name: "block", type: blockType("UdpSocket") }],
+    udpConnect: () => [{ name: "block", type: blockType("UdpSocket") }, { name: "host", type: "string" }, { name: "port", type: "i64" }],
     readFile: () => [{ name: "path", type: "string" }, { name: "job", type: blockType("FileJob") }],
     writeFile: () => [{ name: "path", type: "string" }, { name: "bytes", type: arrayType("u8") }, { name: "job", type: blockType("FileJob") }],
     timerNext: () => [],
@@ -867,7 +871,7 @@ export function newTyping() {
       if (signal) frame.push({ name: "signal", type: blockType("AbortSignal") }, { name: "waiting", type: "i32" });
       const gives: Type = method === "acquire" ? blockType("Permit") : method === "receive" || method === "timerNext" ? unionType([of, "null"]) : method === "bind" ? (of === "void" ? blockType("TcpListener") : of)
         : method === "connect" || method === "accept" ? (of === "void" ? blockType("TcpStream") : of) : method === "read" || method === "readFile" ? arrayType("u8") : method === "jsAwait" ? of
-        : method === "next" ? nextResult((of as GeneratorType).yields) : "void";
+        : method === "next" ? nextResult((of as GeneratorType).yields) : method === "receiveFrom" ? (of === "void" ? datagram() : arrayType("u8")) : "void";
       t = { kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true };
       leaves.set(key, t);
       keys.set(t, `leaf ${key}`);
@@ -1142,6 +1146,11 @@ export function newTyping() {
   }
 
   // What `next()` gives: the next value, or that the generator has finished.
+  // What `receiveFrom()` gives: a datagram's bytes and its sender, named as `sendTo` takes them.
+  function datagram(): ObjectType {
+    return objectType([{ name: "bytes", type: arrayType("u8") }, { name: "host", type: "string" }, { name: "port", type: "i64" }]);
+  }
+
   function nextResult(t: Type): Type {
     return unionType([objectType([{ name: "done", type: literalType(false) }, { name: "value", type: t }]), objectType([{ name: "done", type: literalType(true) }])]);
   }
