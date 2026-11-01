@@ -2069,6 +2069,12 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       startBlock(done);
       return undefined;
     }
+    if (callee.name === "startTls" || callee.name === "listenTls") {
+      const made = temp();
+      emit(`${made} = call ptr @fsh_rt_tls_${callee.name === "startTls" ? "client" : "listen"}(ptr ${handle}, ptr ${value(e.args[0]!)}, ptr ${value(e.args[1]!)})`);
+      if (!types.has(e)) pending.push({ v: made, type: "string" });
+      return made;
+    }
     if (callee.name === "available" || callee.name === "close") {
       const result = temp();
       if (callee.name === "close") return void emit(`call void @fsh_rt_channel_close(ptr ${handle})`);

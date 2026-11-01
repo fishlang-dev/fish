@@ -5373,8 +5373,18 @@ void fsh_rt_file_job_release(struct fsh_file_job *job);
 // A socket's block: its count and its file descriptor, closed with the last count. A connect
 // waiting on a host name's lookup has no descriptor yet, only the lookup's job; once looked up,
 // it keeps the job while connecting to its tried-th address, to fall back to the next, and the
-// time after which that attempt gives way to the next address, or 0.
-typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; } fsh_socket;
+// time after which that attempt gives way to the next address, or 0. A TLS stream, or a listener
+// whose connections are, also has its TLS state and the TLS runtime's calls for it, which only
+// that runtime sets, so a program without TLS links no TLS library.
+struct fsh_tls_ops;
+typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; void *tls; const struct fsh_tls_ops *tls_ops; } fsh_socket;
+typedef struct fsh_tls_ops {
+  int32_t (*read)(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *out, fsh_str **message);
+  int32_t (*write)(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message);
+  // Gives a listener's new connection its TLS state, or 0 when it can't.
+  int (*accepted)(fsh_socket *listener, fsh_socket *conn);
+  void (*release)(fsh_socket *s);
+} fsh_tls_ops;
 
 // Linux marks a new socket close-on-exec as it makes it, so a child spawned on another thread
 // meanwhile can't inherit it; macOS can't, and its spawns close what they don't name instead.
@@ -5400,11 +5410,14 @@ static fsh_socket *fsh_socket_new(int fd) {
   s->tried = 0;
   s->deadline = 0;
   s->lookup = NULL;
+  s->tls = NULL;
+  s->tls_ops = NULL;
   return s;
 }
 
 void fsh_rt_socket_release(fsh_socket *s) {
   if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (s->tls) s->tls_ops->release(s);
   if (s->fd >= 0) {
     if (fsh_poller >= 0) fsh_io_forget(s->fd);
     close(s->fd);
@@ -6234,6 +6247,10 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
   while ((fd = FSH_ACCEPT(listener->fd)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
   if (fd >= 0) {
     *out = fsh_socket_new(fd);
+    if (listener->tls && !listener->tls_ops->accepted(listener, *out)) {
+      fsh_rt_socket_release(*out);
+      return fsh_io_parts(message, "can't start TLS on a new connection", "ENOMEM", "accept", NULL);
+    }
     return 1;
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -6269,6 +6286,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
     snprintf(text, sizeof text, "'read' needs room for at least 1 byte, not %lld", (long long)max);
     return fsh_io_parts(message, text, "EINVAL", "read", NULL);
   }
+  if (s->tls) return s->tls_ops->read(s, max, task, out, message);
   // Received onto the stack, so the array holds just what came, however much room was asked for.
   char buffer[65536];
   ssize_t n = recv(s->fd, buffer, (size_t)(max < (int64_t)sizeof buffer ? max : (int64_t)sizeof buffer), 0);
@@ -6291,6 +6309,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
 
 // Polls 'write(bytes)': sends what is left past *written, waiting while the socket is full.
 int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message) {
+  if (s->tls) return s->tls_ops->write(s, bytes, written, task, message);
   while (*written < bytes->length) {
 #ifdef MSG_NOSIGNAL
     ssize_t n = send(s->fd, bytes->data + *written, (size_t)(bytes->length - *written), MSG_NOSIGNAL);
@@ -6380,10 +6399,9 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
       job->task = task;
       s = *socket_at = fsh_rt_alloc(sizeof(fsh_socket));
+      memset(s, 0, sizeof *s);
       s->count = 1;
       s->fd = -1;
-      s->tried = 0;
-      s->deadline = 0;
       s->lookup = job;
       fsh_pool_submit(job);
       return 0;

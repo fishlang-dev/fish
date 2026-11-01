@@ -18,6 +18,7 @@ import { parse, parseWithComments, type Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
+import { findOpenSsl, TLS_NATIVE, tlsStub } from "./tls_native.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjects, mathObjectsAsync, type Unit } from "./mathlib.ts";
 import { dockerfile, dockerfilePath, HOST_TARGET, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
@@ -162,7 +163,7 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
+      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
     } else {
       run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
       const archive = shim ? join(dir, "fish.a") : at(`lib${name}.a`);
@@ -254,7 +255,8 @@ function linked(session: Session, ir: string, instances: Instance[], out: string
     const done = Bun.spawnSync(args, stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) });
     if (done.exitCode !== 0) throw new Error(`clang failed:\n${done.stderr.toString()}`);
   };
-  if (!timings) return clang([...clangArgs(out, release, links, objects, shim, target), ...g], program);
+  const tls = runtimeLinks(ir, target);
+  if (!timings) return clang([...clangArgs(out, release, links, objects, shim, target), ...tls, ...g], program);
   // Timed, the program is compiled and linked by two clang calls, so each is measured on its own.
   timings.notes.set("runtime", objectsNote(timings));
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
@@ -262,7 +264,7 @@ function linked(session: Session, ir: string, instances: Instance[], out: string
     const object = join(dir, "program.o");
     timed(timings, "compile", () => clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", release ? "-O2" : "-O0", ...g], program));
     timed(timings, "link", () => {
-      clang([...clangArgs(out, release, links, objects, shim, target, [object]), ...g]);
+      clang([...clangArgs(out, release, links, objects, shim, target, [object]), ...tls, ...g]);
       // On macOS the debug info stays in the object, deleted below; clang gathers it into a .dSYM
       // only when it compiles and links in one call, so it is gathered here.
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
@@ -278,7 +280,7 @@ export async function buildAsync(session: Session, file: string, out: string, re
   const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false);
   const { std, program } = parts(ir, instances, release);
   const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map((u) => cachedObjectAsync(session, u)), mathObjectsAsync(session)])).flat();
-  const clang = Bun.spawn(clangArgs(out, release, links, objects, shim()), { stdin: new TextEncoder().encode(program), stderr: "pipe" });
+  const clang = Bun.spawn([...clangArgs(out, release, links, objects, shim()), ...runtimeLinks(ir, HOST_TARGET)], { stdin: new TextEncoder().encode(program), stderr: "pipe" });
   const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
   return warnings;
@@ -482,15 +484,30 @@ export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa
 // Whether the IR calls into the JS engine: an instruction, not a declaration or a string's bytes.
 export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/m.test(ir);
 
+// Whether the IR calls into the TLS runtime, as fetch, serve and the tls module do.
+export const callsTls = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_tls_/m.test(ir);
+
+// What links OpenSSL into a program calling the TLS runtime, when it was found; without it the
+// runtime's TLS calls say how to install it.
+function runtimeLinks(ir: string, target: Target): string[] {
+  if (!callsTls(ir)) return [];
+  const openssl = findOpenSsl(target);
+  return "link" in openssl ? openssl.link : [];
+}
+
 // The C half of the runtime as cached objects, with the engine's glue and sources when the
-// program's IR calls the engine. They are built with unwind tables so a panic can unwind through
+// program's IR calls the engine, and the TLS half when it calls that. They are built with unwind tables so a panic can unwind through
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
 export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = HOST_TARGET, leaks = false): Unit[] {
   const js = callsEngine(ir);
+  const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
   const flags = [...target.compile, "-funwind-tables", "-pthread", release ? "-O2" : "-O0", ...(pic ? ["-fPIC"] : []), ...(js ? ["-I", ENGINE] : [])];
-  const name = `${js ? "runtime-js" : "runtime"}${leaks ? "-leaks" : ""}`;
-  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...(leaks ? ["-DFSH_LEAK_SITES"] : [])], stdin: js ? `${NATIVE}\n${JS_NATIVE}` : NATIVE, inputs: js ? files(ENGINE) : [] };
+  const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
+  const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
+  const source = [NATIVE, ...(js ? [JS_NATIVE] : []), ...(openssl === undefined ? [] : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
+  const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : [];
+  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : [])], stdin: source, inputs: js ? files(ENGINE) : [] };
   const engine = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
   return [runtime, ...engine];
 }
