@@ -54,6 +54,8 @@ function main() {
   let h = new Holder(new Counter(1))
   h.copy.n = 5
 }
+// errors: 2
+// error: 'this.inner' can't be moved out of 'this', since it is only borrowed here
 // error: can only assign to a variable or a field
 // case: class_getter_paths
 class Counter {
