@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { buildAsync, compile, ENGINE, runtimeUnits } from "../src/main.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjectsAsync } from "../src/mathlib.ts";
 import { STD_SOURCE } from "../src/std.ts";
+import { newSession } from "../src/compilation.ts";
 import { cachedSession, stdKey } from "../src/stdcache.ts";
 
 const session = cachedSession();
@@ -348,6 +349,21 @@ test("compiling the same programs again in one process gives identical IR", () =
     expect({ file: p.file, ir: rounds[1]![i] }).toEqual({ file: p.file, ir: rounds[0]![i] });
     expect({ file: p.file, ir: rounds[2]![i] }).toEqual({ file: p.file, ir: rounds[0]![i] });
   }
+});
+
+// A session with no loader, as a compiler running without Bun makes, parses std each time a
+// program is checked, more than once for a program with macros, and gets what the cached
+// tree gives.
+test("a session that parses std each check gives the cached session's IR", () => {
+  const programs = sampled();
+  const plain = newSession();
+  const cached = cachedSession();
+  const load = cached.std.load!;
+  let loads = 0;
+  cached.std.load = () => (loads++, load());
+  for (const p of programs) expect({ file: p.file, ir: compile(plain, p.src, p.file) }).toEqual({ file: p.file, ir: compile(cached, p.src, p.file) });
+  expect(plain.std.parses).toBeGreaterThanOrEqual(programs.length);
+  expect(plain.std.parses).toBe(loads);
 });
 
 // A process that builds many times, as a test runner or a daemon does, gives std's part the same
