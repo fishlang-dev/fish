@@ -15,7 +15,7 @@ import { latest, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet } from "../src/nodes
 import { parse, type Stmt } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
-import { newTyping, TypeMap, TypeSet, type Type, type Typing } from "../src/typing.ts";
+import { Typing, TypeMap, TypeSet, type Type } from "../src/typing.ts";
 
 const src = join(import.meta.dir, "..", "src");
 const programs = join(import.meta.dir, "programs");
@@ -230,7 +230,7 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by an AST node", () => {
 });
 
 test("a type table keys primitives and types by id, in the order they were added", () => {
-  const typing = newTyping();
+  const typing = new Typing();
   const a = typing.arrayType("i64");
   const map = new TypeMap<Type, string>([["i64", "int"], [a, "a"]]);
   expect([map.get("i64"), map.get("string"), map.get(a)]).toEqual(["int", undefined, "a"]);

@@ -33,7 +33,6 @@ type Checker = {
 
 export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
   const { typing, ids, arenas } = tables;
-  const { fieldsOf, widenEnum, optionalField, holdsPattern, fits, show, blockFor, rec } = typing;
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new TypeMap<ClassType, ClassId>();
   const unsettled: ClassId[] = [];
@@ -69,7 +68,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       linked.add(c.type);
       return;
     }
-    if (path.has(c.type)) throw new CompileError(`class '${rec(c.type).name}' embeds itself through 'extends'`, c.node.start, c.node.end);
+    if (path.has(c.type)) throw new CompileError(`class '${typing.rec(c.type).name}' embeds itself through 'extends'`, c.node.start, c.node.end);
     const base = baseOf(c, c.baseName);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
     const rust = rustClassOf(typing, base.type);
@@ -106,28 +105,28 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     laidOut.add(c.type);
     laying.set(c.type, c.classId);
     if (c.base !== undefined) layout(arenas.classOf(c.base));
-    rec(c.type).fields = c.fields.map((f) => {
+    typing.rec(c.type).fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
       if (f.type) {
         const type = storable(typing, withScope(c.scope, () => resolveType(f.type!)), f);
-        const optional = f.written ? optionalField(f.name, withScope(c.scope, () => resolveType(f.written!))).optional : f.undefinedSpelled && ("undefined" as const);
+        const optional = f.written ? typing.optionalField(f.name, withScope(c.scope, () => resolveType(f.written!))).optional : f.undefinedSpelled && ("undefined" as const);
         return { name: f.name, type, access: f.access, ...readonly, ...(optional && { optional }) };
       }
       if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
-      const name = `${rec(c.type).name}.${f.name} initializer`;
+      const name = `${typing.rec(c.type).name}.${f.name} initializer`;
       const initializer = tables.arenas.addBody({
         id: nextId(ids), name, params: [], body: [{ id: nextId(ids), kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
         owner: c.type, scope: c.scope, start: f.start, end: f.end,
       });
       const instance = instanceOf(initializer);
       checkBody(instance);
-      return { name: f.name, type: widenEnum(instance.returns), access: f.access, ...readonly };
+      return { name: f.name, type: typing.widenEnum(instance.returns), access: f.access, ...readonly };
     });
     // A class is laid out as written, so a pattern in a field would reach the binary; one coming
     // from a generic class's type argument goes when the class is made from the lowered argument.
-    const laid = rec(c.type);
-    const patterned = laid.fields.findIndex((f) => holdsPattern(f.type));
-    if (patterned >= 0 && !laid.generic?.args.some(holdsPattern)) throw unsupported("template literal pattern types in class fields", c.fields[patterned]!);
+    const laid = typing.rec(c.type);
+    const patterned = laid.fields.findIndex((f) => typing.holdsPattern(f.type));
+    if (patterned >= 0 && !laid.generic?.args.some((t) => typing.holdsPattern(t))) throw unsupported("template literal pattern types in class fields", c.fields[patterned]!);
     laying.delete(c.type);
     // Before any body reads its fields, a class that contains itself holds itself in a block.
     if (contains(c.type, c.type, new TypeSet())) holdItself(c.type);
@@ -142,11 +141,11 @@ export function registry({ tables, classes, templates, members, resolveType, wit
         continue;
       }
       const trait = withScope(c.scope, () => resolveType(node));
-      const named = typeof trait === "string" ? undefined : rec(trait);
-      const name = rec(c.type).name;
+      const named = typeof trait === "string" ? undefined : typing.rec(trait);
+      const name = typing.rec(c.type).name;
       const reason = named?.kind === "interface" ? unsatisfied(c.type, trait as InterfaceType, members, node)
-        : fits(c.type, trait) ? undefined : `type '${name}' doesn't fit '${show(trait)}'`;
-      if (reason) throw new CompileError(`class '${name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
+        : typing.fits(c.type, trait) ? undefined : `type '${name}' doesn't fit '${typing.show(trait)}'`;
+      if (reason) throw new CompileError(`class '${name}' incorrectly implements '${typing.show(trait)}': ${reason}`, node.start, node.end);
     }
   }
 
@@ -161,11 +160,11 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       if (node.args.length !== 1) throw new CompileError("'From' takes the type it wraps, like 'From<DbError>'", node.start, node.end);
       const x = withScope(c.scope, () => resolveType(node.args[0]!));
       const from = arenas.bodyOf(c.statics.get("from"));
-      const name = rec(c.type).name;
-      const wanted = `class '${name}' implements 'From<${show(x)}>', so it needs 'static from(e: ${show(x)}): ${name}'`;
+      const name = typing.rec(c.type).name;
+      const wanted = `class '${name}' implements 'From<${typing.show(x)}>', so it needs 'static from(e: ${typing.show(x)}): ${name}'`;
       if (!from || from.params.length !== 1 || !from.params[0]!.type || !from.returnType) throw new CompileError(wanted, node.start, node.end);
       const [param, returns] = withScope(c.scope, () => [resolveType(from.params[0]!.type!), resolveType(from.returnType!)]);
-      if (!fits(x, param) || returns !== c.type) throw new CompileError(wanted, from.start, from.end);
+      if (!typing.fits(x, param) || returns !== c.type) throw new CompileError(wanted, from.start, from.end);
       if (from.throws) throw new CompileError(`'${name}.from' wraps an error, so it can't throw one itself`, from.throws.start, from.throws.end);
       if (from.params[0]!.comptime) throw new CompileError(`'${name}.from' wraps errors as they are raised at run time, so it can't take a comptime parameter`, from.params[0]!.start, from.params[0]!.end);
       c.wraps.push([x, from.bodyId, param]);
@@ -177,11 +176,11 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   // pointer wherever it appears inside the classes it contains, as an alias that holds itself
   // does.
   function holdItself(c: ClassType) {
-    const back = blockFor(c, rec(c).generic?.args ?? []);
+    const back = typing.blockFor(c, typing.rec(c).generic?.args ?? []);
     const holders = new TypeSet<ClassType | VariantType>();
     const reach = (t: Type) => {
       if (typeof t === "string") return;
-      const r = rec(t);
+      const r = typing.rec(t);
       if (r.kind === "class" || r.kind === "variant") {
         if (holders.has(t as ClassType | VariantType)) return;
         holders.add(t as ClassType | VariantType);
@@ -191,14 +190,14 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       else if (r.kind === "object") r.fields.forEach((f) => reach(f.type));
     };
     reach(c);
-    for (const h of holders) for (const f of rec(h).fields) f.type = swapped(typing, f.type, c, back);
+    for (const h of holders) for (const f of typing.rec(h).fields) f.type = swapped(typing, f.type, c, back);
   }
 
   function contains(t: Type, inner: ClassType, seen: TypeSet<Type>): boolean {
     if (typeof t === "string" || seen.has(t)) return false;
     seen.add(t);
-    const r = rec(t);
-    const parts = [...fieldsOf(t).map((f) => f.type), ...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "union" ? r.members : [])];
+    const r = typing.rec(t);
+    const parts = [...typing.fieldsOf(t).map((f) => f.type), ...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "union" ? r.members : [])];
     return parts.some((p) => p === inner || contains(p, inner, seen));
   }
 
@@ -211,11 +210,10 @@ export function registry({ tables, classes, templates, members, resolveType, wit
 
 // A type with a class it holds inline, in a union, an object or a tuple, swapped for another.
 function swapped(typing: Typing, t: Type, from: ClassType, to: Type): Type {
-  const { unionType, retuple, objectType, rec } = typing;
   if (t === from) return to;
   if (typeof t === "string") return t;
-  const r = rec(t);
-  if (r.kind === "union") return unionType(r.members.map((m) => swapped(typing, m, from, to)), r.name);
-  if (r.kind === "object" && !r.match) return r.tuple ? retuple(t as ObjectType, (e) => swapped(typing, e, from, to)) : objectType(r.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
+  const r = typing.rec(t);
+  if (r.kind === "union") return typing.unionType(r.members.map((m) => swapped(typing, m, from, to)), r.name);
+  if (r.kind === "object" && !r.match) return r.tuple ? typing.retuple(t as ObjectType, (e) => swapped(typing, e, from, to)) : typing.objectType(r.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
   return t;
 }

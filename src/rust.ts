@@ -33,8 +33,8 @@ export type RustTables = { names: WeakNodeMap<Func | ClassMember, RustName>; cla
 export const HANDLE = "#handle";
 
 // The Rust type a type is, when it is one.
-export function rustClassOf({ rec }: Typing, t: Type): RustClass | undefined {
-  const r = typeof t === "string" ? undefined : rec(t);
+export function rustClassOf(typing: Typing, t: Type): RustClass | undefined {
+  const r = typeof t === "string" ? undefined : typing.rec(t);
   return r?.kind === "class" ? r.rust : undefined;
 }
 

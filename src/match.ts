@@ -35,23 +35,22 @@ export type Shape = ObjectType | ClassType | ParamType;
 
 // A pattern's information with each type it holds as an instance sees it.
 export function lowerPattern(typing: Typing, info: PatternInfo): PatternInfo {
-  const { lower, rec } = typing;
-  const type = lower(info.type);
-  if (info.kind === "variant") return { ...info, type, variant: lower(info.variant) as VariantType };
-  if (info.kind === "some") return { ...info, type, inner: lower(info.inner) };
+  const type = typing.lower(info.type);
+  if (info.kind === "variant") return { ...info, type, variant: typing.lower(info.variant) as VariantType };
+  if (info.kind === "some") return { ...info, type, inner: typing.lower(info.inner) };
   if (info.kind === "object") {
-    const shapes = info.shapes.map(lower);
+    const shapes = info.shapes.map((t) => typing.lower(t));
     // An interface's field may be an accessor in the instance that meets it.
     for (const [key, p] of info.fields) {
       const getter = (s: Type) => {
-        const r = typeof s === "string" ? undefined : rec(s);
+        const r = typeof s === "string" ? undefined : typing.rec(s);
         return r?.kind === "class" && !objectFields(typing, s as ClassType).some((f) => f.name === key);
       };
       if (shapes.some(getter)) throw unsupported("object patterns reading a field a getter provides", p);
     }
-    return { ...info, type, shapes, fields: info.fields.map(([k, p, t]) => [k, p, lower(t)]) };
+    return { ...info, type, shapes, fields: info.fields.map(([k, p, t]) => [k, p, typing.lower(t)]) };
   }
-  if (info.kind === "array") return { ...info, type, element: lower(info.element) };
+  if (info.kind === "array") return { ...info, type, element: typing.lower(info.element) };
   return { ...info, type };
 }
 
@@ -101,19 +100,18 @@ type Case =
   | { kind: "open"; type: Type };
 
 function cases(typing: Typing, t: Type): Case[] {
-  const { literalType, rec, recOf, unionType } = typing;
-  if (t === "boolean") return [literalType(true), literalType(false)].map((type) => ({ kind: "literal", type }));
-  const r = typeof t === "string" ? undefined : rec(t);
+  if (t === "boolean") return [typing.literalType(true), typing.literalType(false)].map((type) => ({ kind: "literal", type }));
+  const r = typeof t === "string" ? undefined : typing.rec(t);
   const members = r?.kind === "union" ? r.members : [t];
-  if (members.includes("null") && members.length > 1) return [{ kind: "none" }, { kind: "some", inner: unionType(members.filter((m) => m !== "null")) }];
+  if (members.includes("null") && members.length > 1) return [{ kind: "none" }, { kind: "some", inner: typing.unionType(members.filter((m) => m !== "null")) }];
   return members.flatMap((m): Case[] => {
     if (m === "boolean") return cases(typing, m);
     if (m === "null") return [{ kind: "none" }];
     if (typeof m === "string") return [{ kind: "open", type: m }];
-    const r = rec(m);
+    const r = typing.rec(m);
     if (r.kind === "literal") return [{ kind: "literal", type: m as LiteralType }];
     if (r.kind === "variant") return [{ kind: "variant", variant: m as VariantType }];
-    if (r.kind === "object" || r.kind === "class" || (r.kind === "param" && (recOf(r.bound)?.kind === "object" || recOf(r.bound)?.kind === "interface"))) return [{ kind: "object", type: m as Shape }];
+    if (r.kind === "object" || r.kind === "class" || (r.kind === "param" && (typing.recOf(r.bound)?.kind === "object" || typing.recOf(r.bound)?.kind === "interface"))) return [{ kind: "object", type: m as Shape }];
     return [{ kind: "open", type: m }];
   });
 }
@@ -191,16 +189,15 @@ export function objectFields(typing: Typing, t: Shape): Field[] {
 }
 
 function render(typing: Typing, c: Case, fields: string[]): string {
-  const { show, rec } = typing;
   switch (c.kind) {
     case "literal":
-      return show(c.type);
+      return typing.show(c.type);
     case "none":
       return "null";
     case "some":
       return fields[0]!;
     case "variant":
-      return fields.length > 0 ? `${rec(c.variant).name}(${fields.join(", ")})` : rec(c.variant).name;
+      return fields.length > 0 ? `${typing.rec(c.variant).name}(${fields.join(", ")})` : typing.rec(c.variant).name;
     case "object": {
       // A field left out of an object pattern matches anything, so only the telling ones show.
       const shown = objectFields(typing, c.type).flatMap((f, i) => (fields[i] === "_" ? [] : [`${f.name}: ${fields[i]}`]));
@@ -212,7 +209,7 @@ function render(typing: Typing, c: Case, fields: string[]): string {
 }
 
 // The message for a value no arm covers: the case to add, or the catch-all.
-export function missing({ show }: Typing, example: string, type: Type): string {
-  if (example === "_") return `this match doesn't cover every '${show(type)}'; add 'case _ =>' for the rest`;
+export function missing(typing: Typing, example: string, type: Type): string {
+  if (example === "_") return `this match doesn't cover every '${typing.show(type)}'; add 'case _ =>' for the rest`;
   return `this match doesn't cover ${example}; add 'case ${example} =>', or 'case _ =>' for the rest`;
 }

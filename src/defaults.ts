@@ -85,8 +85,8 @@ export function writtenName(tables: Tables, p: Param): string {
 }
 
 // Whether a type is `null` or an Option, which a call may pass in place of a default.
-export function holdsNull({ rec }: Typing, t: Type): boolean {
+export function holdsNull(typing: Typing, t: Type): boolean {
   if (typeof t === "string") return t === "null";
-  const r = rec(t);
+  const r = typing.rec(t);
   return r.kind === "union" && r.members.includes("null");
 }

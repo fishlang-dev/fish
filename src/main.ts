@@ -155,11 +155,11 @@ function header(name: string, exports: Instance[]): string {
   const lines = exports.map((i) => {
     const params = bodyOf(i).params.map((p) => {
       const { type, name } = i.tables.arenas.localOf(i.locals.get(p)!);
-      const c = cType(i.tables.typing.rec, type);
+      const c = cType(i.tables.typing, type);
       const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
       return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;
     });
-    return `${cType(i.tables.typing.rec, i.returns)} ${bodyOf(i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
+    return `${cType(i.tables.typing, i.returns)} ${bodyOf(i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
   });
   return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "", ...lines, "", "#ifdef __cplusplus", "}", "#endif", "", `#endif`, ""].join("\n");
 }
@@ -167,12 +167,12 @@ function header(name: string, exports: Instance[]): string {
 // How C names a type that crosses to it. A raw pointer's target is `const` unless it is a
 // `MutPtr`, after the `*` when the target is itself a pointer; a target C has no name for is
 // `void`.
-function cType(rec: Typing["rec"], t: Type): string {
+function cType(typing: Typing, t: Type): string {
   if (typeof t !== "string") {
-    const r = rec(t);
+    const r = typing.rec(t);
     if (r.kind !== "pointer") return "void";
-    const to = cType(rec, r.to);
-    const pointer = typeof r.to !== "string" && rec(r.to).kind === "pointer";
+    const to = cType(typing, r.to);
+    const pointer = typeof r.to !== "string" && typing.rec(r.to).kind === "pointer";
     const target = r.mutable ? to : pointer ? `${to}const` : `const ${to}`;
     return `${target}${target.endsWith("*") ? "" : " "}*`;
   }
