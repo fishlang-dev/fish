@@ -9,7 +9,7 @@ import { parse, type Stmt, type TypeMember, type TypeNode } from "./parser.ts";
 const CATEGORIES: Record<string, string> = { Expr: "AstExpr", Stmt: "AstStmt", TypeNode: "AstType", Pattern: "AstPattern" };
 // The parser's types that aren't part of the tree. A node's id is the compiler's own, so macros
 // never see one.
-const SKIPPED = new Set(["Span", "Id", "Cursor"]);
+const SKIPPED = new Set(["Span", "Id", "Cursor", "Parse"]);
 
 type Field = { name: string; optional: boolean; type: string };
 type Shape = Field[];

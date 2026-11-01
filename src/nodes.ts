@@ -23,6 +23,17 @@ export function renumber<T>(tree: T, next: () => usize): T {
   return tree;
 }
 
+// Moves every span in a parsed tree by `by`, for a source placed past others in one program.
+export function shiftSpans(v: unknown, by: usize, seen: Set<unknown> = new Set<unknown>()) {
+  if (typeof v !== "object" || v === null || seen.has(v)) return;
+  seen.add(v);
+  if (Array.isArray(v)) return v.forEach((x) => shiftSpans(x, by, seen));
+  const node = v as Record<string, unknown>;
+  if (typeof node.start === "number") node.start += by;
+  if (typeof node.end === "number") node.end += by;
+  Object.values(node).forEach((x) => shiftSpans(x, by, seen));
+}
+
 // The node behind each id is kept, so a different object arriving with an id already in use, a
 // copy that kept its original's id, fails loudly instead of reading or replacing its entry.
 function idOf(node: Id, known: Id | undefined): usize {
