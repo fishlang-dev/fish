@@ -2,7 +2,7 @@ import { bodyOf } from "./arenas.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Instance } from "./check.ts";
+import { compiledOf, type Checked, type Instance } from "./check.ts";
 import { validCrate } from "./manifest.ts";
 import { cacheDir } from "./mathlib.ts";
 import type { RustCrate } from "./modules.ts";
@@ -65,7 +65,8 @@ export type Shim = { lib: string; links: string[] };
 const LIBRARY = "fsh_rust_shim";
 
 // The shim the instances' Rust functions need, built by cargo; none when the program has none.
-export function rustShim(crates: RustCrate[], instances: Instance[]): Shim | undefined {
+export function rustShim(crates: RustCrate[], checked: Checked): Shim | undefined {
+  const instances = compiledOf(checked);
   // One shim function per Rust function, however many declarations name it.
   // The first declaration of each, as code generation declares it; the checker makes the rest agree.
   const called = [...instances.filter((i) => bodyOf(i).rust).reduce((seen, i) => (seen.has(trusted(bodyOf(i).rust!).symbol) ? seen : seen.set(bodyOf(i).rust!.symbol, i)), new Map<string, Instance>()).values()];

@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { Checked } from "./check.ts";
+import { compiledOf, type Checked } from "./check.ts";
 import { type Session } from "./compilation.ts";
 import { cachedSession } from "./stdcache.ts";
 import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
@@ -91,7 +91,7 @@ function named({ compilation: { names, typing } }: Checked, t: Type): string {
 // A generic body's definition and its instances share nodes, so a place is hinted once.
 export function hints(checked: Checked, text: string, range: Range) {
   const found = new Map<usize, object>();
-  for (const instance of checked.instances) {
+  for (const instance of compiledOf(checked)) {
     for (const [at, raised] of instance.raises) {
       // Past the document's text is another file's.
       if (at.kind === "throw" || at.end > text.length || found.has(at.end)) continue;

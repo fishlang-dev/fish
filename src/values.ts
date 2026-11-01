@@ -21,7 +21,7 @@ import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
 import { holdsNull } from "./defaults.ts";
-import { bodyOf, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
+import { bodyOf, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
@@ -68,7 +68,7 @@ export type Context = {
   coercions: NodeMap<Expr, Type>;
   calls: NodeMap<Expr, InstanceId>;
   setters: NodeMap<Expr, InstanceId>;
-  byName: Map<string, Body>;
+  byName: Map<string, BodyId>;
   classes: Map<string, ClassId>;
   enums: Map<string, EnumInfo>;
   // A data-carrying enum made with these type arguments.
@@ -313,6 +313,7 @@ export function expressions(ctx: Context) {
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
   const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
+  const bodyNamed = (name: string) => arenas.bodyOf(byName.get(name));
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   const expecting = new NodeMap<Expr, FunctionType>();
   // The type each generic enum's member is expected to have, by the member expression.
@@ -1294,7 +1295,7 @@ export function expressions(ctx: Context) {
       joined(e.args[0]!, operand(e.args[0]!), "'String'");
       return { type: "string", what: "'String'" };
     }
-    const found = lifted ?? (callee.kind === "ident" ? byName.get(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined);
+    const found = lifted ?? (callee.kind === "ident" ? bodyNamed(callee.name) : callee.kind === "member" ? method(callee, receiver) : undefined);
     // A package's function declared with several signatures is checked against the first that
     // takes the arguments, as TypeScript picks one.
     const target = found?.js?.overloads ? jsOverload(e, found) : found?.overloads && !(e as Direct).implementation ? overload(e, found) : found;
@@ -1428,7 +1429,7 @@ export function expressions(ctx: Context) {
   // array of its values for the tag's rest parameter.
   function untag(e: Extract<Expr, { kind: "tagged" }>) {
     const { tag, template } = e;
-    const target = tag.kind === "ident" && !lookup(tag.name) ? byName.get(tag.name) : undefined;
+    const target = tag.kind === "ident" && !lookup(tag.name) ? bodyNamed(tag.name) : undefined;
     if (tag.kind === "ident" && !target && !lookup(tag.name)) throw new CompileError(`unknown function '${tag.name}'${didYouMean(tag.name, ctx.names(tag.start))}`, tag.start, tag.end);
     if (!target || tag.kind !== "ident") throw new CompileError("a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet", tag.start, tag.end);
     const shape = `'comptime strings: TemplateStringsArray, ...values: T[]'`;
@@ -1501,7 +1502,7 @@ export function expressions(ctx: Context) {
     if (held && (kind === "closure" || kind === "function" || isCallable(held) || boundFunction(held) !== undefined)) {
       throw new CompileError(`a local function passed by name isn't supported yet; write an arrow calling it, as in '(x) => ${callback.name}(x)'`, callback.start, callback.end);
     }
-    const declared = local ? undefined : byName.get(callback.name);
+    const declared = local ? undefined : bodyNamed(callback.name);
     if (declared && !declared.comptime) functionValue(callback, declared);
   }
 
@@ -1546,8 +1547,8 @@ export function expressions(ctx: Context) {
     const local = lookup(e.name);
     const held = local && lower(isRefType(local.type) ? rec(local.type).to : local.type);
     const r = recOf(held);
-    const name = (local?.generic as Body | undefined)?.name ?? (r?.kind === "closure" ? r.generic : undefined) ?? (!local && byName.get(e.name)?.typeParams?.some((p) => !isLifetime(p)) ? e.name : undefined);
-    const f = name === undefined ? undefined : byName.get(name);
+    const name = (local?.generic as Body | undefined)?.name ?? (r?.kind === "closure" ? r.generic : undefined) ?? (!local && bodyNamed(e.name)?.typeParams?.some((p) => !isLifetime(p)) ? e.name : undefined);
+    const f = name === undefined ? undefined : bodyNamed(name);
     if (!f) return;
     const at = { start: e.start, end: e.end };
     const odd = f.params.find((p) => defaulted.has(p) || p.comptime || p.rest);
@@ -1603,7 +1604,7 @@ export function expressions(ctx: Context) {
     if (held === undefined) return undefined;
     const t = lower(isRefType(held) ? rec(held).to : held);
     const r = recOf(t);
-    return r?.kind === "closure" && r.generic ? byName.get(r.generic) : undefined;
+    return r?.kind === "closure" && r.generic ? bodyNamed(r.generic) : undefined;
   }
 
   // A name or `this`, or fields read from one, which reading has no effect of its own unless a
@@ -2959,7 +2960,7 @@ export function expressions(ctx: Context) {
     const stored = expected === undefined ? undefined : promiseMet(expected);
     const gives = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : stored ?? awaitedAs.get(e);
     if (gives === undefined) throw new CompileError(`can't tell what this Promise gives; write it, ${example}, since Fish has no 'unknown'`, e.start, e.end);
-    const declared = executor.kind === "arrow" ? executor : executor.kind === "ident" && !lookup(executor.name) ? byName.get(executor.name) : undefined;
+    const declared = executor.kind === "arrow" ? executor : executor.kind === "ident" && !lookup(executor.name) ? bodyNamed(executor.name) : undefined;
     const raw = declared === undefined ? lower(value(executor)) : undefined;
     const held = (raw && boundFunction(raw)) ?? raw;
     const r = recOf(held);
@@ -3063,7 +3064,7 @@ export function expressions(ctx: Context) {
     if (callback.kind !== "ident") return false;
     const local = lookup(callback.name);
     if (!local) {
-      const f = byName.get(callback.name);
+      const f = bodyNamed(callback.name);
       return f?.async === true || (f?.returnType?.kind === "ref" && f.returnType.name === "Promise");
     }
     const held = lower(local.type);
@@ -4330,7 +4331,7 @@ export function expressions(ctx: Context) {
         }
         if (!local && e.name === "undefined") return "null";
         // A package's const, read from JS.
-        const jsConst = local ? undefined : byName.get(e.name);
+        const jsConst = local ? undefined : bodyNamed(e.name);
         if (jsConst?.js?.const) {
           const type = jsView(resolveType(jsConst.returnType!));
           if (jsConverts(type)) jsExports.set(e, jsConst.js);
@@ -4339,7 +4340,7 @@ export function expressions(ctx: Context) {
         }
         // A top-level const: its value, computed while compiling. An aggregate is read where it
         // lives, through a reference, as a const can't change.
-        const constant = local ? undefined : byName.get(`const ${e.name}`);
+        const constant = local ? undefined : bodyNamed(`const ${e.name}`);
         if (constant) {
           const instance = ctx.instanceOf(constant);
           calls.set(e, instance.id);
@@ -4347,7 +4348,7 @@ export function expressions(ctx: Context) {
           return isCopy(type) || type === "string" ? type : refType(type, false);
         }
         // A declared function named as a value is a closure calling it.
-        const declared = local ? undefined : byName.get(e.name);
+        const declared = local ? undefined : bodyNamed(e.name);
         if (declared?.overloads) throw new CompileError(`'${e.name}' is overloaded, so it can't be used as a value yet; pass an arrow that calls it, as in '(x) => ${e.name}(x)'`, e.start, e.end);
         if (declared && !declared.comptime && declared.typeParams?.some((p) => !isLifetime(p))) return genericValue(declared, e);
         if (declared && !declared.comptime) {

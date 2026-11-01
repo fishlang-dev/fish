@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { check } from "../src/check.ts";
+import { check, compiledOf } from "../src/check.ts";
 import { newCompilation } from "../src/compilation.ts";
 import { cachedSession } from "../src/stdcache.ts";
 import { CompileError } from "../src/diag.ts";
@@ -120,7 +120,7 @@ test("every type of the checked test programs is in its arena", () => {
     if (p.src.includes("// mode: parse")) continue;
     try {
       const { checked } = analyze(session, p.src, p.file);
-      const roots: Type[] = checked.instances.flatMap((i) => [...i.types.values(), ...i.coercions.values(), ...i.bindings.values(), i.returns, ...(i.throws ? [i.throws] : [])]);
+      const roots: Type[] = compiledOf(checked).flatMap((i) => [...i.types.values(), ...i.coercions.values(), ...i.bindings.values(), i.returns, ...(i.throws ? [i.throws] : [])]);
       types += roots.length;
       problems.push(...auditTypes(roots, checked.compilation.typing, p.name));
     } catch (e) {
@@ -255,7 +255,7 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by an instance, body, loca
 // The checker's records and its tables, by where each is declared. They name one another by id,
 // read back through the compilation's arenas, which alone hold the records themselves.
 const RECORDS: [string, string][] = [
-  ["compilation.ts", "Tables"], ["check.ts", "Instance"], ["check.ts", "Local"], ["classes.ts", "Body"], ["classes.ts", "ClassInfo"], ["values.ts", "DynTable"],
+  ["compilation.ts", "Tables"], ["check.ts", "Checked"], ["check.ts", "Instance"], ["check.ts", "Local"], ["classes.ts", "Body"], ["classes.ts", "ClassInfo"], ["values.ts", "DynTable"],
 ];
 
 test("no instance, body, local or class holds another, nor does a checker table, but through its id", () => {
@@ -277,6 +277,16 @@ test("no instance, body, local or class holds another, nor does a checker table,
 
 // The checker's files: the checker, codegen and what they share.
 const CHECKER = ["check", "values", "classes", "resolve", "typefns", "operators", "typing", "generics", "interfaces", "flow", "narrow", "match", "moves", "comptime", "unions", "enums", "registry", "unsupported", "compilation", "codegen", "layout", "arithmetic", "runtime", "locals", "warnings"];
+
+// The checker's working tables, its own and codegen's, hold ids too, keys and values alike.
+test("no Map or Set in the checker holds an instance, body, local or class", () => {
+  const offenders: string[] = [];
+  for (const f of CHECKER.map((name) => `${name}.ts`)) {
+    const text = readFileSync(join(src, f), "utf8");
+    for (const m of text.matchAll(/\b(?:Map|Set)<([^;=()]*)/g)) if (/\b(?:Instance|Body|Local|ClassInfo)\b/.test(m[1]!)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
 
 // Tables still keyed by objects, each until it is given a key of its own: a walk's set of the
 // values it has visited, the quote, call and scope tables keyed by tree nodes without ids, and

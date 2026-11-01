@@ -1,4 +1,4 @@
-import { bodyOf, type ClassId, type InstanceId } from "./arenas.ts";
+import { bodyOf, type BodyId, type ClassId, type InstanceId } from "./arenas.ts";
 import { holdsNode, type Instance } from "./check.ts";
 import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
@@ -301,14 +301,14 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   const { typing } = tables;
   const { holdsPart, unfold, widenLet, callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, promiseInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef, rec } = typing;
   const concrete = concreteness(typing);
-  const explicit = new WeakNodeMap<Body, Map<string, Type>>();
-  const instances = new NodeMap<Body, Map<string, InstanceId>>();
+  const explicit = new Map<BodyId, Map<string, Type>>();
+  const instances = new Map<BodyId, Map<string, InstanceId>>();
   // By the method's first type parameter, which only its own list holds.
   const sharedPlaceholders = new NodeMap<TypeParam, Map<string, Type>>();
-  const implicits = new NodeMap<Body, Map<usize, Bound>>();
+  const implicits = new Map<BodyId, Map<usize, Bound>>();
   // Which implicit parameters are references to their type, and how.
-  const lent = new NodeMap<Body, Map<usize, RefType>>();
-  const definitions = new NodeMap<Body, InstanceId>();
+  const lent = new Map<BodyId, Map<usize, RefType>>();
+  const definitions = new Map<BodyId, InstanceId>();
   // Instances still to check.
   const pending: InstanceId[] = [];
   const all = () => [...instances.values()].flatMap((m) => [...m.values()].map((i) => tables.arenas.instanceOf(i)));
@@ -400,13 +400,13 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     // Only the one parameter the result borrows from, by its lifetime or by elision.
     const implicit = implicitOf(f);
     const refs = f.params.flatMap((p, i) => {
-      const type = lent.get(f)?.get(i) ?? (p.type && withScope(scope, () => resolveType(p.type!)));
+      const type = lent.get(f.bodyId)?.get(i) ?? (p.type && withScope(scope, () => resolveType(p.type!)));
       const r = type && typeof type !== "string" ? rec(type) : undefined;
       return r?.kind === "ref" && (!t.life || r.life === t.life) ? [i] : [];
     });
     const [i] = refs;
     const bound = i !== undefined && refs.length === 1 && !(f.self && !f.self.constructor && !t.life) ? implicit.get(i) : undefined;
-    return bound && lent.get(f)?.has(i!) && lower(t.to) === lower(bound) ? refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life) : returned;
+    return bound && lent.get(f.bodyId)?.has(i!) && lower(t.to) === lower(bound) ? refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life) : returned;
   }
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
@@ -418,7 +418,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
 
   // An implicit parameter's type, borrowed when the parameter is a reference to it.
   function lentAs(f: Body, i: usize, t: Type | undefined): Type | undefined {
-    const ref = lent.get(f)?.get(i);
+    const ref = lent.get(f.bodyId)?.get(i);
     if (!t || !ref) return t;
     const { mutable, life } = rec(ref);
     return refType(t, mutable, life);
@@ -429,14 +429,14 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // It is made once per body: fresh placeholders would make a new instance each time.
   function definition(f: Body): Instance {
     if (!generic(f)) return instanceOf(f);
-    const known = definitions.get(f);
+    const known = definitions.get(f.bodyId);
     if (known) return tables.arenas.instanceOf(known);
     const scope = explicitPlaceholders(f);
     for (const [i, bound] of implicitOf(f)) scope.set(`#${i}`, typeParameter(show(bound), sameParams(f, i, bound, new Map([...(f.scope ?? []), ...scope]))));
     // A comptime parameter's value is known only at each call; the definition has a placeholder.
     for (const p of f.params) if (p.comptime) scope.set(comptimeName(p), typeParameter(comptimeName(p), undefined));
     const found = instanceOf(f, new Map([...(f.scope ?? []), ...scope]));
-    definitions.set(f, found.id);
+    definitions.set(f.bodyId, found.id);
     return found;
   }
 
@@ -453,8 +453,8 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // A member of a generic class's instance runs with the class's type arguments in scope.
   function instanceOf(f: Body, bindings: Map<string, Type> = f.scope ?? new Map<string, Type>()): Instance {
     const key = [...bindings.values()].map(keyOf).join(",");
-    let byKey = instances.get(f);
-    if (!byKey) instances.set(f, byKey = new Map());
+    let byKey = instances.get(f.bodyId);
+    if (!byKey) instances.set(f.bodyId, byKey = new Map());
     const known = byKey.get(key);
     if (known) return tables.arenas.instanceOf(known);
     // Every type parameter, implicit ones included, needs a concrete binding to compile.
@@ -543,11 +543,11 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     ]);
     for (const [i, bound] of implicitOf(f)) {
       const meant = rebound(bound, decided);
-      own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f)!.has(i)));
+      own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f.bodyId)!.has(i)));
       const given = argTypes[i]!;
       const r = typeof given === "string" ? undefined : rec(given);
       const held = r?.kind === "ref" ? r.to : given;
-      const ref = lent.get(f)!.get(i);
+      const ref = lent.get(f.bodyId)!.get(i);
       const unlocked = ref && rec(ref).mutable ? unlocks(held, bound) : undefined;
       if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
       if (r?.kind === "closure" && r.once && repeats(f, paramName(f.params[i]!))) {
@@ -657,7 +657,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // One set of placeholders per body, so a parameter's type and the body name the same `T`;
   // callers get a copy they may add to.
   function explicitPlaceholders(f: Body): Map<string, Type> {
-    let made = explicit.get(f);
+    let made = explicit.get(f.bodyId);
     if (!made) {
       // A generic method's own parameters are one placeholder for every instance of its class
       // when no bound names the class's parameters, so 'map<U>(): Box<U>' makes one 'Box<U>'.
@@ -668,7 +668,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       // A bound may name the class's own parameters, as this instance holds them.
       if (!made) made = placeholders(typing, own, (t, scope) => withScope(new Map([...(f.scope ?? []), ...scope]), () => resolveType(t)));
       if (shared) sharedPlaceholders.set(f.typeParams![0]!, made);
-      explicit.set(f, made);
+      explicit.set(f.bodyId, made);
     }
     return new Map(made);
   }
@@ -677,16 +677,16 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // each concrete argument type gets its own instance instead of being copied down. A
   // parameter property and a setter's parameter keep their type, since it is a field's.
   function implicitOf(f: Body): Map<usize, Bound> {
-    let found = implicits.get(f);
+    let found = implicits.get(f.bodyId);
     if (found) return found;
     found = new Map();
-    implicits.set(f, found);
+    implicits.set(f.bodyId, found);
     // A generic class's member decides this as its definition does: a parameter of the class's
     // type parameter is one in every instance, whatever that parameter stands for.
     const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
     const scope = new Map([...(f.scope ?? []), ...outer, ...explicitPlaceholders(f)]);
     const borrows = new Map<usize, RefType>();
-    lent.set(f, borrows);
+    lent.set(f.bodyId, borrows);
     withScope(scope, () => f.params.forEach((p, i) => {
       const written = p.type && resolveType(p.type);
       // A reference to an interface or object type is one over what it borrows.

@@ -46,7 +46,10 @@ export type Local = { name: string; type: Type; mutable: boolean; param: boolean
 // A checked program: the functions to compile, the tables its check filled in, and the
 // compilation it was checked in.
 // `warnings`: what the build reports without failing, in source order.
-export type Checked = { instances: Instance[]; tables: Tables; compilation: Compilation; warnings: CompileError[] };
+export type Checked = { instances: InstanceId[]; tables: Tables; compilation: Compilation; warnings: CompileError[] };
+
+// The instances a checked program compiles, read from its arena.
+export const compiledOf = ({ instances, tables }: Checked): Instance[] => instances.map((i) => tables.arenas.instanceOf(i));
 
 // One compiled function: a body checked with concrete types, and the tables codegen reads
 // to lower it. `symbol` names it in the IR.
@@ -556,7 +559,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // Overloads are lowered on the tree, where an implementation holds its signatures' functions;
   // as a body it names them by id.
   for (const f of funcs) if (f.overloads) f.overloads = (f.overloads as unknown as Func[]).map((w) => addBody(w).bodyId);
-  const byName = new Map<string, Func & Body>();
+  const byName = new Map<string, BodyId>();
+  const bodyNamed = (name: string) => arenas.bodyOf(byName.get(name));
   for (const f of funcs) {
     // A tag takes its strings, then its values as a rest parameter.
     const tag = f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest;
@@ -569,7 +573,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
     if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError(`'${named}' is already defined`, f.start, f.end);
-    byName.set(f.name, f);
+    byName.set(f.name, f.bodyId);
   }
   // The name the file holding `at` writes for a top-level name, or nothing when that file can't
   // reach it. Std's prelude is in no file's table and reaches every file, but for its internals.
@@ -581,7 +585,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     return STD_INTERNAL.has(name) || name.startsWith("__") ? undefined : name;
   };
   const reached = (names: Iterable<string>, at: usize) => [...names].flatMap((n) => reachedAs(n, at) ?? []);
-  const main = byName.get("main");
+  const main = bodyNamed("main");
   if (!main && !library && !macros && !module) throw new CompileError("no main() function; execution starts there", 0, 0);
 
   // A class's members, for interface satisfaction. Like the resolver and generic classes,
@@ -591,7 +595,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     returnOf: (b, at) => returnOf(definition(b), at),
     // A generic method's, with its own type parameters standing for themselves.
     paramTypesOf: (b) => ((b.typeParams ?? []).some((p) => !isLifetime(p)) ? paramTypes(definition(b), scopeOf(definition(b))) : declaredParams(b)),
-    bodyNamed: (name) => byName.get(name),
+    bodyNamed,
     typeParamsOf: (b) => {
       const scope = scopeOf(definition(b));
       return (b.typeParams ?? []).filter((p) => !isLifetime(p)).map((p) => scope.get(p.name)!);
@@ -626,21 +630,21 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   lowersClasses((c, args) => classNamed(rec(c).generic!.name, args, (checking && bodyOf(checking)) ?? { start: 0, end: 0 })!);
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
-  const done = new NodeSet<Instance>();
+  const done = new Set<InstanceId>();
   // Each Rust function's types, by its shim symbol, as first declared.
   const rustTypes = new Map<string, string>();
   // Comptime runs a function only once the checker has been through it.
   comptimeChecks(tables, (i) => {
-    if (inProgress.has(i)) return false;
+    if (inProgress.has(i.id)) return false;
     checkBody(i);
     return true;
   });
   // Each concrete instance's return type as its own body saw it, before lowering.
-  const views = new NodeMap<Instance, Type>();
+  const views = new Map<InstanceId, Type>();
   // Each unannotated `let` of integer literals a use needs as another integer type, as Rust
   // infers it, and the variables still open to that in the pass being checked.
   const demands = new NodeMap<Stmt, Integer>();
-  const candidates = new NodeMap<Local, Stmt>();
+  const candidates = new Map<LocalId, Stmt>();
   // How many new demands the body being checked made itself, not counting its callees'.
   let demanded = 0;
   const { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
@@ -654,8 +658,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   function valueTypeOf(name: string, at: Span, shadowed: boolean): Type {
     if (shadowed) throw new CompileError(`'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
     if (classes.has(name)) throw new CompileError(`'typeof' of the class '${name}' isn't supported yet, since classes aren't values in Fish; name the class itself as the type`, at.start, at.end);
-    const constant = byName.get(`const ${name}`);
-    const f = constant ?? byName.get(name);
+    const constant = bodyNamed(`const ${name}`);
+    const f = constant ?? bodyNamed(name);
     if (!f) throw new CompileError(`'typeof' in a type names a top-level function or const, and there is none named '${name}'`, at.start, at.end);
     if (querying.has(name)) throw new CompileError(`'typeof ${name}' is used in working out ${name}'s own type, so that type would depend on itself; write it out`, at.start, at.end);
     querying.add(name);
@@ -692,8 +696,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
   // A function's type for `typeof`: a parameter typed with an object type, an interface or a
   // function type makes it generic in Fish, but its declared type is what `typeof` names.
-  function functionTypeOf(f: Func & Body, at: Span): Type {
-    const explicit = f.typeParams.filter((p) => !(p.constraint?.kind === "ref" && p.constraint.name === "Lifetime"));
+  function functionTypeOf(f: Body, at: Span): Type {
+    const explicit = (f.typeParams ?? []).filter((p) => !(p.constraint?.kind === "ref" && p.constraint.name === "Lifetime"));
     if (explicit.length > 0 || f.params.some((p) => p.comptime)) {
       throw new CompileError(`'typeof' of the generic function '${f.name}' isn't supported yet: it has a type per instance, and none is chosen here`, at.start, at.end);
     }
@@ -733,7 +737,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       return open;
     }
     // The argument was checked in the innermost body being checked, a closure's perhaps.
-    const site = [...inProgress].reverse().find((i) => i.types.has(arg)) ?? checking;
+    const site = [...inProgress].reverse().map((i) => arenas.instanceOf(i)).find((i) => i.types.has(arg)) ?? checking;
     const given = site.types.get(arg);
     const member = recOf(given);
     if (member?.kind === "literal" && member.owner) return given!;
@@ -750,7 +754,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // The targets some `break` leaves, and the loops some `continue` repeats.
   const broken = new NodeSet<Stmt>();
   const continued = new NodeSet<Stmt>();
-  const inProgress = new NodeSet<Instance>();
+  const inProgress = new Set<InstanceId>();
   let nextLocal = 0;
   // Every closure's instance, and the instance each closure type calls.
   const closures: InstanceId[] = [];
@@ -807,7 +811,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // So is an instance made for an abstract class, which only a template's check makes.
   const checkedOnly = (i: Instance): boolean => bodyOf(i).template === true || [...i.bindings.values()].some((t) => abstractPart(typing, t)) || (bodyOf(i).closure !== undefined && checkedOnly(arenas.instanceOf(bodyOf(i).closure!.parent)));
   const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(bodyOf(i)) && !bodyOf(i).js && !checkedOnly(i)), ...closures.map((c) => arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
-  unreached(typing, equalities, compiledInstances, (i) => bodyOf(i).abstract === true || checkedOnly(i));
+  unreached(typing, equalities, arenas, compiledInstances.map((i) => i.id), (i) => bodyOf(i).abstract === true || checkedOnly(i));
   // A package's const whose value has no JS form yet stops the program where it is read.
   const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
   const used = earliest(jsUses);
@@ -837,7 +841,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     return base !== undefined && inherited(arenas, base, "methods", method(b)) !== undefined;
   };
   const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
-  return { instances: compiledInstances, tables, compilation, warnings: warnings(tables, compiledInstances, required) };
+  const compiledIds = compiledInstances.map((i) => i.id);
+  return { instances: compiledIds, tables, compilation, warnings: warnings(tables, compiledIds, required) };
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
   // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
@@ -951,7 +956,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
 
   // Codegen sees each type parameter as the concrete type it stands for.
   function lowerTables(instance: Instance) {
-    views.set(instance, instance.returns);
+    views.set(instance.id, instance.returns);
     // `JSON.stringify` and printing write a field by how it was spelled, which lowering forgets.
     for (const e of instance.types.keys()) {
       const stringified = e.kind === "call" && jsonCalls.get(e) === "stringify" ? e.args[0] : undefined;
@@ -1042,7 +1047,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const returns = resolveType(f.returnType);
     if (returns !== "void" && !crosses(returns)) throw new CompileError(`a C function can't return a '${show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
     instance.returns = returns;
-    done.add(instance);
+    done.add(instance.id);
   }
 
   // A Rust function's signature: numbers and booleans, with `void` for no result, so far.
@@ -1084,7 +1089,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const other = rustTypes.get(f.rust!.symbol);
     if (other !== undefined && other !== types) throw new CompileError(`'${f.rust!.crate}::${f.rust!.path}' is declared elsewhere as ${other}; declare it with the same types`, f.start, f.end);
     rustTypes.set(f.rust!.symbol, types);
-    done.add(instance);
+    done.add(instance.id);
   }
 
   // A package's function's signature, from its declaration: what it takes and gives must cross
@@ -1099,7 +1104,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       jsUncalled.set(bodyOf(instance), e);
       instance.signature = [];
       instance.returns = blockType("JsValue");
-      done.add(instance);
+      done.add(instance.id);
     }
   }
 
@@ -1114,7 +1119,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (!instance.concrete) {
       instance.signature = [];
       instance.returns = blockType("JsValue");
-      done.add(instance);
+      done.add(instance.id);
       return;
     }
     // What its type parameters stand for, as plain types, since JS sees no Fish placeholders.
@@ -1132,7 +1137,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const why = returns === "void" ? undefined : uncrossable(returns);
     if (why) throw refuse(`${named} gives a '${show(returns)}', which can't cross between Fish and JS yet: ${why}`, f.returnType!);
     instance.returns = returns;
-    done.add(instance);
+    done.add(instance.id);
   }
 
   // An overload signature's body only passes its parameters on, so what fails there is the
@@ -1154,7 +1159,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const declared = returnTypeOf(f, new Map([...instance.bindings, ...site]));
     if (declared && !describes(declared)) return declared;
     const own = scopeOf(instance);
-    return replaced(views.get(instance) ?? returns, new TypeMap([...site].map(([name, t]) => [own.get(name)!, t])));
+    return replaced(views.get(instance.id) ?? returns, new TypeMap([...site].map(([name, t]) => [own.get(name)!, t])));
   }
 
   // Each member a class writes that implements an abstract member takes what the declaration
@@ -1225,7 +1230,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     const declared = returnTypeOf(f, instance.bindings);
     if (declared && !describes(declared)) return declared;
-    if (inProgress.has(instance)) {
+    if (inProgress.has(instance.id)) {
       if (f.generator) throw new CompileError(`a generator can't make another of itself, since its state would have to hold itself; loop inside one generator instead`, at.start, at.end);
       if (f.async) throw new CompileError(`an async function can't await another of itself, since its state would have to hold itself; loop inside one instead`, at.start, at.end);
       throw new CompileError(`'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
@@ -1244,12 +1249,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     const template = generic ? definedClass(generic.name) : undefined;
     if (template) f = bodiesOf(template).find((b) => b.start === f.start && b.end === f.end) ?? f;
     const written = definition(f);
-    if (written !== instance && !inProgress.has(written)) checkBody(written);
+    if (written !== instance && !inProgress.has(written.id)) checkBody(written);
   }
 
   // Checks an instance with its type arguments in scope.
   function checkBody(instance: Instance) {
-    if (done.has(instance)) return;
+    if (done.has(instance.id)) return;
     const outer = checking;
     const outerDemanded = demanded;
     checking = instance;
@@ -1262,7 +1267,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // A body sees its own names, not those of a body whose check needed it.
           withSight(undefined, () => withScope(scopeOf(instance), () => checkInstance(instance)));
         } catch (e) {
-          inProgress.delete(instance);
+          inProgress.delete(instance.id);
           if (!(e instanceof CompileError) || demanded === 0) throw bodyOf(instance).signature ? incompatible(bodyOf(instance), e) : e;
         }
         if (demanded === 0) return;
@@ -1286,13 +1291,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     delete instance.predicates;
     const within = (c: Instance): boolean => c === instance || (bodyOf(c).closure !== undefined && within(arenas.instanceOf(bodyOf(c).closure!.parent)));
     // A closure checked within a discarded pass isn't in progress any more either.
-    for (const c of [...inProgress]) if (within(c)) inProgress.delete(c);
+    for (const c of [...inProgress]) if (within(arenas.instanceOf(c))) inProgress.delete(c);
     const kept = closures.filter((c) => !within(arenas.instanceOf(c)));
     closures.length = 0;
     closures.push(...kept);
-    views.delete(instance);
-    done.delete(instance);
-    inProgress.delete(instance);
+    views.delete(instance.id);
+    done.delete(instance.id);
+    inProgress.delete(instance.id);
   }
 
   function checkInstance(instance: Instance, outer?: Outer) {
@@ -1305,13 +1310,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (f.foreign) return foreignSignature(instance);
     if (f.abstract) {
       instance.returns = returnTypeOf(f, instance.bindings) ?? "void";
-      done.add(instance);
+      done.add(instance.id);
       return;
     }
     if (f.js) return jsSignature(instance);
     if (fixedParam && (f.async || f.generator)) throw unsupported("comptime parameters on async functions and generators", fixedParam);
     if (fixedParam && f.exported) throw new CompileError("an exported function can't take a comptime parameter, since C calls it with run-time values", fixedParam.start, fixedParam.end);
-    inProgress.add(instance);
+    inProgress.add(instance.id);
     const { types, locals, coercions, calls, setters, jumps } = instance;
     // A closure returns the number type the function type it meets returns, so its literals
     // take that type.
@@ -1366,7 +1371,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     let comptimeDepth = 0;
     const floors: usize[] = [];
     // Each narrowed `Mut` given a whole value of another member, in order.
-    const changed: Local[] = [];
+    const changed: LocalId[] = [];
     // The expression an expression statement being checked consists of.
     let whole: Expr | undefined;
     const assigned = assignedNames(f.body);
@@ -1374,9 +1379,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A capture narrows as a variable of the closure's would.
     const narrowable = (l: Local) => (captures?.has(l.localId) ? !assigned.has(l.name) : l.param || !l.mutable || !assigned.has(l.name)) || (isRef(l.type) && rec(l.type).mutable);
     // How many scopes enclose each binding's declaration.
-    const depths = new NodeMap<Local, usize>();
+    const depths = new Map<LocalId, usize>();
     // Bindings declared directly in a switch case body whose checking has finished.
-    const caseOnly = new NodeSet<Local>();
+    const caseOnly = new Set<LocalId>();
     // A call of a function whose result is `x is T` narrows its argument for x to T.
     const predicate = (call: Extract<Expr, { kind: "call" }>) => {
       const target = arenas.instanceOf(calls.get(call));
@@ -1471,9 +1476,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       awaitable,
       unsafe: f.closure?.unsafe === true,
       changesCapture,
-      reachable: (l) => !caseOnly.has(l),
+      reachable: (l) => !caseOnly.has(l.localId),
       rewritten,
-      depthOf: (l) => depths.get(l)!,
+      depthOf: (l) => depths.get(l.localId)!,
       closure,
       liftArrow,
       resolveWith: (t, scope) => withScope(scope, () => resolveType(t)),
@@ -1491,7 +1496,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const from = at.captures.get(local.localId)!;
           local = from === "this" ? undefined : localOf(from);
         }
-        const s = local && candidates.get(local);
+        const s = local && candidates.get(local.localId);
         if (!s || !isInteger(to) || to === "i64") return false;
         if (demands.has(s)) return demands.get(s) === to;
         demands.set(s, to);
@@ -1583,8 +1588,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (instance.concrete) lowerTables(instance);
     if (generator) frameOf(instance, generator);
     if (future) frameOf(instance, future);
-    done.add(instance);
-    inProgress.delete(instance);
+    done.add(instance.id);
+    inProgress.delete(instance.id);
 
     // Nested functions go right after the declarations of the variables they use, as early as
     // that allows, so a call before a function's own statement still finds it, as JavaScript's
@@ -2013,23 +2018,23 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (outside && outside !== "this" && outer!.narrowed(localOf(outside))) {
         throw new CompileError(`can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
       }
-      const from = facts.findIndex((f) => f.has(l));
+      const from = facts.findIndex((f) => f.has(l.localId));
       if (from < 0) return;
       // Inside a larger expression, a condition could still prove the member it had.
       if (at !== whole) {
         throw new CompileError(`can't give '${l.name}' another member inside a larger expression while a check narrows it; assign it as a statement of its own`, at.start, at.end);
       }
-      changed.push(l);
+      changed.push(l.localId);
       if (targets.some((t) => t.kind === "loop" && t.facts! > from)) {
         throw new CompileError(`can't give '${l.name}' another member inside a loop here: a check outside the loop narrowed it; assign its fields instead, or check it inside the loop`, at.start, at.end);
       }
-      for (let i = from; i < facts.length; i++) facts[i] = new NodeMap(facts[i]).set(l, l.type);
+      for (let i = from; i < facts.length; i++) facts[i] = new Map(facts[i]).set(l.localId, l.type);
     }
 
     // Facts proven before a statement that carry past it, less any it gave another member.
     function current(proven: Facts, mark: usize): Facts {
       const gone = changed.slice(mark);
-      return gone.length === 0 ? proven : new NodeMap([...proven].filter(([l]) => !gone.includes(l)));
+      return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => !gone.includes(l)));
     }
 
     function assume<T>(proven: Facts, check: () => T): T {
@@ -2251,7 +2256,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           // So does a regex given as a 'RegExp', which keeps its pattern's captures.
           const describes = annotated && (isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
           declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
-          if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(localOf(locals.get(s)!), s);
+          if (s.keyword === "let" && !annotated && type === "i64" && literalOnly(d.init, false)) candidates.set(locals.get(s)!, s);
           // A nested function's declaration, met as this `const` again when a body is checked anew.
           if (nestedFunctions.has(d.init)) nestedBindings.add(locals.get(s)!);
           return;
@@ -2433,11 +2438,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
               if (test && test !== type && !comparable(tables.typing, tables.typing.lower(type), test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
-              const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new NodeMap();
+              const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
               const reaching: Facts = falling ? either(tables.typing, falling, tested) : tested;
               const mark = changed.length;
               assume(reaching, () => statements(c.body));
-              for (const local of shared.values()) if (!before.has(local)) caseOnly.add(localOf(local));
+              for (const local of shared.values()) if (!before.has(local)) caseOnly.add(local);
               falling = leaves(c.body) ? null : current(reaching, mark);
             }
           });
@@ -2646,7 +2651,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
       if (scope.has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError(`cannot redeclare '${name}' in the same scope`, node.start, node.end);
       const local = arenas.addLocal({ name, type, mutable, param, id: nextLocal++ });
-      depths.set(local, scopes.length);
+      depths.set(local.localId, scopes.length);
       scope.set(name, local.localId);
       locals.set(node, local.localId);
       declarations.add(node);
@@ -2734,7 +2739,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           return false;
         });
         liftedFunctions.set(key, lifted);
-        byName.set(lifted.fn.name, addBody(lifted.fn));
+        byName.set(lifted.fn.name, addBody(lifted.fn).bodyId);
         funcs.push(addBody(lifted.fn));
       }
       return lifted.fn;
@@ -2843,7 +2848,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // was made.
     function narrowed(l: Local): Type | undefined {
       const outside = captures?.get(l.localId);
-      return facts.findLast((f) => f.has(l))?.get(l) ?? (outside && outside !== "this" ? outer!.narrowed(localOf(outside)) : undefined);
+      return facts.findLast((f) => f.has(l.localId))?.get(l.localId) ?? (outside && outside !== "this" ? outer!.narrowed(localOf(outside)) : undefined);
     }
 
     // A closure's body reads a variable it captures through a binding of its own, standing
@@ -2853,7 +2858,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       let alias = found === undefined ? undefined : localOf(found);
       if (!alias) {
         alias = arenas.addLocal({ name: from.name, type: from.type, mutable: false, param: false, id: nextLocal++ });
-        depths.set(alias, 0);
+        depths.set(alias.localId, 0);
         captures!.set(alias.localId, from.localId);
         if (nestedBindings.has(from.localId)) nestedBindings.add(alias.localId);
       }
@@ -2895,9 +2900,8 @@ function abstractPart({ holdsPart, rec }: Typing, t: Type): ClassType | undefine
 // A net under the rules that decide what is compiled: no compiled function calls, and no
 // compiled Dyn's table holds, an instance that isn't compiled. Only a value of an abstract
 // class's own type, which escaped where no rule saw it, could reach one.
-export function unreached(typing: Typing, equalities: Tables["equalities"], compiled: Instance[], dropped: (i: Instance) => boolean) {
-  for (const i of compiled) {
-    const { arenas } = i.tables;
+export function unreached(typing: Typing, equalities: Tables["equalities"], arenas: Arenas, compiled: InstanceId[], dropped: (i: Instance) => boolean) {
+  for (const i of compiled.map((id) => arenas.instanceOf(id))) {
     const reached: [Expr, InstanceId, string][] = [
       ...[...i.calls, ...i.setters].map(([at, target]): [Expr, InstanceId, string] => [at, target, ""]),
       ...[...(i.dyns ?? [])].flatMap(([at, table]) => [...table.methods, ...table.fields, table.clone].flatMap((target): [Expr, InstanceId, string][] => (target && target !== "copy" ? [[at, target, " through a 'Dyn'"]] : []))),

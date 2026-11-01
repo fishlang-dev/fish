@@ -1,4 +1,4 @@
-import { bodyOf, type LocalId } from "./arenas.ts";
+import { bodyOf, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Body, Instance } from "./check.ts";
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
@@ -22,7 +22,8 @@ export function markGenerated(generated: Tables["generated"], node: unknown, see
 // are a signature's to decide, as an export's, an override's or an interface method's are.
 // `declarations` are the `let` statements and parameters that declare a name, as the checker met
 // them; every other node an instance's `locals` holds is a use of one.
-export function warnings({ arenas, declarations, generated, prologues }: Tables, instances: Instance[], required: (b: Body) => boolean): CompileError[] {
+export function warnings({ arenas, declarations, generated, prologues }: Tables, compiled: InstanceId[], required: (b: Body) => boolean): CompileError[] {
+  const instances = compiled.map((i) => arenas.instanceOf(i));
   const used = new Set<LocalId>();
   for (const i of instances) {
     for (const [node, l] of i.locals) if (!declarations.has(node)) used.add(l);

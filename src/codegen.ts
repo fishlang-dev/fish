@@ -1,5 +1,5 @@
-import { bodyOf, type LocalId } from "./arenas.ts";
-import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
+import { bodyOf, type InstanceId, type LocalId } from "./arenas.ts";
+import { compiledOf, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
@@ -13,7 +13,7 @@ import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { type ArrayRecord, type FixedRecord, TypeMap, TypeSet, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
-import { NodeSet, NodeMap, walk } from "./nodes.ts";
+import { NodeMap, walk } from "./nodes.ts";
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
@@ -120,7 +120,9 @@ export type Options = { src: string; file: string; release: boolean; panic: "unw
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen({ instances, tables: noted }: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false }: Options): string {
+export function codegen(checked: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false }: Options): string {
+  const { tables: noted } = checked;
+  const instances = compiledOf(checked);
   const {
     asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers,
     jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds,
@@ -173,7 +175,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   let labels = 0;
   // Each variable's number in the function being emitted, which tells apart two of one name.
   // Counted per function, so a function's IR doesn't change with the program around it.
-  let numbered = new NodeMap<Local, usize>();
+  let numbered = new Map<LocalId, usize>();
   // The label of the block being emitted into, which a phi names as its predecessor.
   let block = "entry";
   // The instance being emitted, and the tables its checking produced.
@@ -185,7 +187,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // The class of the constructor or method being emitted, whose instance `%this` points to.
   let self: ClassType | undefined;
   // In a closure, where each variable it captures lives, loaded from its environment.
-  let captured = new NodeMap<Local, string>();
+  let captured = new Map<LocalId, string>();
   // The value of an Option an optional chain's link has already evaluated, to read through.
   const known = new NodeMap<Expr, string>();
   // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
@@ -232,15 +234,15 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   const inspectors = new TypeMap<Type, string>();
   // Each async instance's awaits, by the state it is paused in at each: the frame field the
   // awaited future is in, and its type, for cancelling it there.
-  const awaitsOf = new NodeMap<Instance, { state: usize; field: usize; type: Type }[]>();
+  const awaitsOf = new Map<InstanceId, { state: usize; field: usize; type: Type }[]>();
   // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
   // cancel function is wanted for.
   const combinePolls = new TypeMap<FutureType, string>();
-  const cancelled = new NodeSet<Instance>();
+  const cancelled = new Set<InstanceId>();
   // The functions writing String(x) of a value with parts, by its type.
   const stringers = new TypeMap<Type, string>();
   // The global each top-level const holding an aggregate lives in.
-  const constantGlobals = new NodeMap<Instance, string>();
+  const constantGlobals = new Map<InstanceId, string>();
   // The thunks copying a Dyn that can't be copied that are made, by the Rust type they name or
   // "" for the general one, and whether the one dropping a settled JS promise's output is.
   const uncopyable = new Set<string>();
@@ -312,7 +314,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     body = [];
     temps = 0;
     labels = 0;
-    numbered = new NodeMap();
+    numbered = new Map();
     block = "entry";
     pending = [];
     floor = 0;
@@ -370,7 +372,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (f.closure) params.unshift("ptr %env");
     // A method owning its object drops it, unless the object moves out first.
     if (f.self?.owned) own("%this", f.self.type, false);
-    captured = new NodeMap();
+    captured = new Map();
     // A capture the closure holds lives in its environment; a borrowed one, where it points.
     [...(instance.captures ?? [])].forEach(([alias, from], i) => {
       const at = temp();
@@ -378,12 +380,12 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const line = `${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`;
       if (resuming) allocas.push(`  ${line}`);
       else emit(line);
-      if (!isRef(rec(instance.closure!).fields[i]!.type)) return captured.set(localOf(alias), at);
+      if (!isRef(rec(instance.closure!).fields[i]!.type)) return captured.set(alias, at);
       const pointer = from === "this" ? "%this" : temp();
       const load = `${pointer} = load ptr, ptr ${at}`;
       if (resuming) allocas.push(`  ${load}`);
       else emit(load);
-      captured.set(localOf(alias), pointer);
+      captured.set(alias, pointer);
     });
     if (f.closure) self = selfOf(arenas, f)?.type;
     f.body.forEach(statement);
@@ -411,11 +413,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   framing = undefined;
   if (frames) globals.push("@fsh_rt_frames = external thread_local global ptr");
   // A cancel function wanted while making one may want another.
-  for (const done = new NodeSet<Instance>(); done.size < cancelled.size;) {
+  for (const done = new Set<InstanceId>(); done.size < cancelled.size;) {
     for (const i of [...cancelled]) {
       if (done.has(i)) continue;
       done.add(i);
-      cancelFunction(i);
+      cancelFunction(arenas.instanceOf(i));
     }
   }
   const main = instances.find((i) => i.symbol === "main")!;
@@ -495,10 +497,10 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A top-level const holding an aggregate lives in a global, filled once before main runs (or
   // as a library loads) and only ever read; its arrays and strings are never freed.
   function constantGlobal(c: Instance): string {
-    const made = constantGlobals.get(c);
+    const made = constantGlobals.get(c.id);
     if (made) return made;
     const name = `@"fsh.const.${bodyOf(c).name.slice("const ".length)}"`;
-    constantGlobals.set(c, name);
+    constantGlobals.set(c.id, name);
     globals.push(`${name} = internal global ${llvm(c.returns)} zeroinitializer`);
     return name;
   }
@@ -516,11 +518,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       return lines;
     };
     const filler = made('@"fsh.constants"', () => {
-      for (const [c, name] of constantGlobals) emit(`store ${llvm(c.returns)} ${bake(comptimeBody(c), c.returns)}, ptr ${name}`);
+      for (const [c, name] of [...constantGlobals].map(([i, name]) => [arenas.instanceOf(i), name] as const)) emit(`store ${llvm(c.returns)} ${bake(comptimeBody(c), c.returns)}, ptr ${name}`);
       emit('call void @fsh_rt_constants(ptr @"fsh.constants.drop")');
     });
     const dropper = made('@"fsh.constants.drop"', () => {
-      for (const [c, name] of constantGlobals) {
+      for (const [c, name] of [...constantGlobals].map(([i, name]) => [arenas.instanceOf(i), name] as const)) {
         const v = temp();
         emit(`${v} = load ${llvm(c.returns)}, ptr ${name}`);
         dispose(v, c.returns);
@@ -2246,7 +2248,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (promiseElement(rec(to).of) !== undefined) {
       if (leafOf.get(type as FutureType)?.method === "next") return nextSlots(type as FutureType, n);
       const instance = futureOf.get(type as FutureType)!;
-      cancelled.add(instance);
+      cancelled.add(instance.id);
       return [symbol(instance), cancelSymbol(instance)];
     }
     if (isDyn(type)) return [relayThunk(`@"fsh.dyn.${n}.call"`, type, rec(rec(to).of).methods[0]!)];
@@ -2272,7 +2274,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A boxed `next()` future's poll and cancel: the generator's own, through the pointer to it.
   function nextSlots(future: FutureType, n: string): string[] {
     const target = generatorOf.get(leafOf.get(future)!.of as GeneratorType)!;
-    cancelled.add(target);
+    cancelled.add(target.id);
     const generator = () => {
       const [slot, p] = [temp(), temp()];
       emit(`${slot} = getelementptr ${llvm(future)}, ptr %p, i32 0, i32 1`);
@@ -2866,10 +2868,10 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
 
   function slot(local: Local): string {
-    const at = captured.get(local);
+    const at = captured.get(local.localId);
     if (at) return at;
-    let n = numbered.get(local);
-    if (n === undefined) numbered.set(local, (n = numbered.size));
+    let n = numbered.get(local.localId);
+    if (n === undefined) numbered.set(local.localId, (n = numbered.size));
     // Its number follows a dot, as no other name in a function's IR puts one. Quoted unless
     // plain, so any name a variable may have, `café` or a pattern's `[a, b]`, is a valid one.
     const name = `${local.name === "%" ? "topic" : local.name}.${n}`;
@@ -7747,8 +7749,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const poll = label();
     g.resumes.push(poll);
     const resumed = g.resumes.length;
-    if (!awaitsOf.has(current)) awaitsOf.set(current, []);
-    awaitsOf.get(current)!.push({ state: resumed, field, type: inner });
+    if (!awaitsOf.has(current.id)) awaitsOf.set(current.id, []);
+    awaitsOf.get(current.id)!.push({ state: resumed, field, type: inner });
     emit(`br label %${poll}`);
     startBlock(poll);
     const step = pollStep(inner, at, e);
@@ -8145,7 +8147,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     else if (leaf && ["connect", "accept", "read", "write"].includes(leaf.method)) emit(`call void @fsh_rt_socket_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
     else if (leaf?.method === "next") {
       const instance = generatorOf.get(leaf.of as GeneratorType)!;
-      cancelled.add(instance);
+      cancelled.add(instance.id);
       emit(`call void ${cancelSymbol(instance)}(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
     }
     if (leaf?.signal) {
@@ -8169,7 +8171,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     }
     const instance = futureOf.get(t as FutureType);
     if (!instance) return;
-    cancelled.add(instance);
+    cancelled.add(instance.id);
     emit(`call void ${cancelSymbol(instance)}(ptr ${at}, ptr %cx)`);
   }
 
@@ -8219,7 +8221,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   function cancelFunction(i: Instance) {
     const saved = { allocas, body, temps, labels, block, pending, scopes };
     [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    const awaits = awaitsOf.get(i) ?? [];
+    const awaits = awaitsOf.get(i.id) ?? [];
     const [state, done] = [temp(), label()];
     const cases = awaits.map(() => label());
     emit(`${state} = load i32, ptr %frame`);
