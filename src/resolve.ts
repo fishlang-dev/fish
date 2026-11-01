@@ -9,7 +9,7 @@ import { placeholders } from "./generics.ts";
 import { type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
-import { openParam, standIn, typeFunctions } from "./typefns.ts";
+import { openParam, standIn, TypeFunctions, UTILITIES } from "./typefns.ts";
 import { mutates, owns, withoutUndefined } from "./classes.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -76,14 +76,18 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   // What was being resolved as each class layout under way began: an alias met again inside one
   // reads the fields of a class whose own field types need it.
   const layouts: Set<string>[] = [];
-  const { keyofType, indexedType, fieldsOf, keysOf, templateType, UTILITIES } = typeFunctions(typing, (c) => {
-    layouts.push(new Set(resolving));
-    try {
-      return withSight(undefined, () => layout(c));
-    } finally {
-      layouts.pop();
-    }
-  }, () => deferring > 0, conforms);
+  const typeFns = new TypeFunctions(typing, {
+    fieldsKnown(c) {
+      layouts.push(new Set(resolving));
+      try {
+        return withSight(undefined, () => layout(c));
+      } finally {
+        layouts.pop();
+      }
+    },
+    isDeferring: () => deferring > 0,
+    conforms: (from, to, at) => conforms(from, to, at),
+  });
   const resolved = new Map<string, Type>();
   const resolving = new Set<string>();
   // Where an alias instance leads back to itself, by its key, and the alias each is made from.
@@ -315,14 +319,14 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     }
     // `readonly T[]` is a shared borrow of an array.
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return refType(arrayType(resolveType(t.type.element)), false);
-    if (t.kind === "operator" && t.op === "keyof") return keyofType(resolveType(t.type), t);
+    if (t.kind === "operator" && t.op === "keyof") return typeFns.keyofType(resolveType(t.type), t);
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
-    if (t.kind === "indexed") return indexedType(resolveType(t.object), resolveType(t.index), t, t.index);
+    if (t.kind === "indexed") return typeFns.indexedType(resolveType(t.object), resolveType(t.index), t, t.index);
     if (t.kind === "conditional") return conditional(t);
     if (t.kind === "mapped") return mapped(t);
     if (t.kind === "template") {
       const holes = t.types.map(resolveType);
-      return standIn(typing, holes, "a template literal type", t, false, () => deferring > 0) ?? templateType(t.quasis, holes, t, t.types);
+      return standIn(typing, holes, "a template literal type", t, false, () => deferring > 0) ?? typeFns.templateType(t.quasis, holes, t, t.types);
     }
     if (t.kind === "infer") throw new CompileError(`'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
@@ -475,7 +479,8 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
     // TypeScript's utility types, unless the program declares its own of the name.
     const utility = UTILITIES.get(t.name);
     if (utility) {
-      const [count, apply, example] = utility;
+      const [count, example] = utility;
+      const apply = (given: Type[], at: Span, argAt: Span[]) => typeFns.utility(t.name, given, at, argAt);
       if (args.length !== count) throw new CompileError(`'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${example}'`, t.start, t.end);
       // Over a JS handle, a utility type remakes its shape's fields, and gives a handle again.
       const shapes = args.map(jsShape);
@@ -732,12 +737,12 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
       withScope(new Map([...scope, [t.name, held]]), () => (t.as && resolveType(t.as), resolveType(t.type!)));
       return held;
     }
-    const source = homomorphic ? fieldsOf(homomorphic, "a mapped type", t.constraint) : [];
+    const source = homomorphic ? typeFns.fieldsOf(homomorphic, "a mapped type", t.constraint) : [];
     const fields: Field[] = [];
-    for (const key of keys === "never" ? [] : keysOf(keys, "a mapped type", t.constraint)) {
+    for (const key of keys === "never" ? [] : typeFns.keysOf(keys, "a mapped type", t.constraint)) {
       const bound = new Map([...scope, [t.name, literalType(key)]]);
       const renamed = t.as ? withScope(bound, () => resolveType(t.as!)) : literalType(key);
-      const names = renamed === "never" ? [] : keysOf(renamed, "a mapped type's 'as' clause", t.as ?? t);
+      const names = renamed === "never" ? [] : typeFns.keysOf(renamed, "a mapped type's 'as' clause", t.as ?? t);
       const value = storable(typing, withScope(bound, () => resolveType(t.type!)), t.type);
       const from = source.find((f) => f.name === key);
       const readonly = t.readonly ? t.readonly === "+" : from?.readonly === true;
