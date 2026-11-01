@@ -36,6 +36,13 @@ import { watchProgram } from "./watch.ts";
 import { STD_BASE } from "./std.ts";
 
 export type Panic = "unwind" | "abort";
+
+// `formatError` for stderr, painted on a terminal unless NO_COLOR is set, or whenever FORCE_COLOR is.
+function painted(e: CompileError, path: string, program: string, kind = "error"): string {
+  const forced = process.env.FORCE_COLOR;
+  const colour = forced !== undefined && forced !== "0" ? true : process.stderr.isTTY === true && !process.env.NO_COLOR;
+  return formatError(e, path, program, kind, colour);
+}
 // A library C can call: an archive to link, or a shared library to load.
 export type Library = "static" | "shared";
 
@@ -290,7 +297,7 @@ async function testPackage(session: Session, dir: string, filter: string | undef
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     // The harness's own text is generated, and an error in it would be the compiler's.
-    console.error(formatError(e, relative(process.cwd(), join(dir, MANIFEST)), ""));
+    console.error(painted(e, relative(process.cwd(), join(dir, MANIFEST)), ""));
     return 1;
   } finally {
     rmSync(dirname(out), { recursive: true, force: true });
@@ -623,7 +630,7 @@ else if (import.meta.main) {
       }
     } catch (e) {
       if (e instanceof CompileError) {
-        console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+        console.error(painted(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
         process.exit(1);
       }
       fail(`fishc publish: ${e instanceof Error ? e.message : e}`);
@@ -661,7 +668,7 @@ else if (import.meta.main) {
       }
     } catch (e) {
       if (e instanceof CompileError) {
-        console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+        console.error(painted(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
         process.exit(1);
       }
       fail(`fishc ${command}: ${e instanceof Error ? e.message : e}`);
@@ -702,15 +709,15 @@ else if (import.meta.main) {
       if (!values["emit-llvm"] && command !== "check") mkdirSync(dirname(out), { recursive: true });
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
-      console.error(formatError(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+      console.error(painted(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
       process.exit(1);
     }
   }
   if (command === "check" && target && !values.out && !values.release && !values["emit-llvm"] && lib === undefined) {
     try {
-      for (const w of checkProgram(session, target)) console.error(formatError(w, target, readFileSync(target, "utf8"), "warning"));
+      for (const w of checkProgram(session, target)) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
     } catch (e) {
-      if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
+      if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
       else console.error(e instanceof Error ? e.message : e);
       process.exit(1);
     }
@@ -722,12 +729,12 @@ else if (import.meta.main) {
     const binary = out ?? join(scratch!, basename(target, ".fsh"));
     let code = 1;
     try {
-      for (const w of build(session, target, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug)) console.error(formatError(w, target, readFileSync(target, "utf8"), "warning"));
+      for (const w of build(session, target, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug)) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
       // A signal ends it with 128 plus the signal's number, as a shell reports it.
       code = ran.exitCode ?? 128 + (ran.signalCode ? constants.signals[ran.signalCode as NodeJS.Signals] : 0);
     } catch (e) {
-      if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
+      if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
       else console.error(e instanceof Error ? e.message : e);
     } finally {
       if (scratch) rmSync(scratch, { recursive: true, force: true });
@@ -745,10 +752,10 @@ else if (import.meta.main) {
       manifest: findManifest(dirname(resolve(entry))),
       build: (loaded) => {
         try {
-          for (const w of build(session, entry, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug, loaded)) console.error(formatError(w, entry, readFileSync(entry, "utf8"), "warning"));
+          for (const w of build(session, entry, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug, loaded)) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
           return true;
         } catch (e) {
-          if (e instanceof CompileError) console.error(formatError(e, entry, readFileSync(entry, "utf8")));
+          if (e instanceof CompileError) console.error(painted(e, entry, readFileSync(entry, "utf8")));
           else console.error(`fishc: ${e instanceof Error ? e.message : e}`);
           return false;
         }
@@ -779,7 +786,7 @@ else if (import.meta.main) {
       try {
         const warnings = lib ? buildLibrary(session, target, binary, lib, values.release, panic, values.link ?? [], platform, values.debug) : build(session, target, binary, values.release, panic, values.link ?? [], platform, values.leaks, values.debug);
         if (image) writeFileSync(image, dockerfile(binary));
-        for (const w of warnings) console.error(formatError(w, target, readFileSync(target, "utf8"), "warning"));
+        for (const w of warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       } catch (e) {
         // A missing header or library for another target is most often a missing or partial sysroot.
         if (e instanceof Error && platform.compile.includes("-target") && e.message.startsWith("clang failed")) e.message += `\nfishc build: building for ${platform.triple} needs its headers and libraries; check that --sysroot or FISH_SYSROOT names a complete sysroot for it`;
@@ -787,7 +794,7 @@ else if (import.meta.main) {
       }
     }
   } catch (e) {
-    if (e instanceof CompileError) console.error(formatError(e, target, readFileSync(target, "utf8")));
+    if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
     else console.error(e instanceof Error ? e.message : e);
     process.exit(1);
   }
