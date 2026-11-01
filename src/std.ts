@@ -777,8 +777,9 @@ type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64 };
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
 type __routerMiddleware = (req: Request, next: __routerNext) => Promise<Response>;
-// Each route's method, split path and handler, added together under one lock.
-type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[] };
+// Each route's method, split path, handler and whether it takes every path below its own, added
+// together under one lock.
+type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[]; prefixes: boolean[] };
 // A router's routes and middleware, shared so each middleware's next can hold them.
 type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
@@ -954,7 +955,7 @@ class Router {
   constructor() {
     // Named first: an empty array literal for a field of callables is typed 'never[]'.
     const handlers: ServeHandler[] = [];
-    const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers };
+    const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers, prefixes: [] };
     const middleware: __routerMiddleware[] = [];
     const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
     const held = table.clone();
@@ -984,6 +985,25 @@ class Router {
       t.methods.push(upper);
       t.paths.push(split);
       t.handlers.push(handler);
+      t.prefixes.push(false);
+    });
+  }
+
+  // Serves the files under root at the paths below prefix, for GET and HEAD. A path that isn't
+  // a readable regular file inside root, after symlinks are resolved, is answered 404.
+  static(this: Mut<this>, prefix: string, root: string) {
+    let split = (prefix.startsWith("/") ? prefix : "/" + prefix).split("/");
+    if (split.length > 1 && split[split.length - 1] === "") split.pop();
+    const skip = split.length;
+    const handler: ServeHandler = async (req: Request) => {
+      const res = await __staticResponse(req, skip, root.clone());
+      return res;
+    };
+    this.table.routes.update((t) => {
+      t.methods.push("GET");
+      t.paths.push(split);
+      t.handlers.push(handler);
+      t.prefixes.push(true);
     });
   }
 
@@ -1049,7 +1069,7 @@ class Router {
     for (let i = 0; i < t.paths.length; i++) {
       const want = t.methods[i];
       if (want !== "" && want !== method && !(head && want === "GET")) continue;
-      const found = Router.match(t.paths[i], have);
+      const found = Router.match(t.paths[i], have, t.prefixes[i]);
       if (found !== null) return { handler: t.handlers[i].clone(), params: found };
     }
     return null;
@@ -1076,9 +1096,10 @@ class Router {
     return out;
   }
 
-  // The :params a route's segments take from a path's, or null when they don't match.
-  static match(want: Ref<string[]>, have: Ref<string[]>): string[] | null {
-    if (want.length !== have.length) return null;
+  // The :params a route's segments take from a path's, or null when they don't match. A prefix
+  // route matches a path with more segments than its own.
+  static match(want: Ref<string[]>, have: Ref<string[]>, prefix: boolean): string[] | null {
+    if (prefix ? have.length < want.length : want.length !== have.length) return null;
     let params: string[] = [];
     for (let i = 0; i < want.length; i++) {
       if (want[i].startsWith(":")) {
@@ -1089,6 +1110,122 @@ class Router {
     }
     return params;
   }
+}
+
+// The response Router.static gives a request: the file below root its path names past the
+// route's skip segments, a directory's index.html, or a 404 for anything else. Each segment is
+// percent-decoded before it is checked, so an encoded slash, dot or NUL is refused like a plain one.
+async function __staticResponse(req: Request, skip: usize, root: string): Promise<Response> {
+  const segments = req.path.split("/");
+  let parts: string[] = [];
+  for (let i = skip; i < segments.length; i++) {
+    const part = __urlDecodeStrict(segments[i]);
+    if (part === null) return __staticMissing();
+    // A trailing slash names a directory; an empty segment anywhere else is refused.
+    if (part === "" && i + 1 === segments.length) continue;
+    // A leading dot refuses '.', '..' and hidden files such as '.env'.
+    if (part === "" || part.startsWith(".") || part.includes("/") || part.includes("\\\\") || part.includes("\\0")) return __staticMissing();
+    parts.push(part);
+  }
+  const found = await spawnBlocking(() => __staticFind(root, parts));
+  if (found === null) return __staticMissing();
+  const [path, size, mtime] = found;
+  const tag = "W/\\"" + __staticHex(size) + "-" + __staticHex(mtime) + "\\"";
+  let headers = new Headers();
+  headers.set("etag", tag);
+  headers.set("last-modified", __cookieDate(mtime));
+  const asked = req.headers.get("if-none-match");
+  if (asked !== null && __staticMatches(asked, tag)) return new Response(null, { status: 304, headers: headers });
+  headers.set("content-type", __staticType(path));
+  try {
+    const bytes = await fileRead(path);
+    return new Response(bytes, { headers: headers });
+  } catch (e) {
+    return __staticMissing();
+  }
+}
+
+function __staticMissing(): Response {
+  return new Response("Not Found\\n", { status: 404 });
+}
+
+function __staticHex(n: i64): string {
+  const digits = "0123456789abcdef";
+  let out = "";
+  let rest = n < 0 ? 0 : n;
+  while (true) {
+    out = digits[(rest % 16) as usize] + out;
+    rest = rest / 16;
+    if (rest === 0) return out;
+  }
+}
+
+// The real path, size and modification time in milliseconds of the regular file root and parts
+// name, or of the index.html of the directory they name, or null when there is none inside root.
+// ponytail: the file is checked, then opened by its real path; a symlink swapped in between could
+// still be followed, which opening each segment with O_NOFOLLOW would close.
+function __staticFind(root: string, parts: Ref<string[]>): [string, i64, i64] | null {
+  try {
+    const base = pathReal(root);
+    const inside = base.endsWith("/") ? base : base + "/";
+    let path = inside + parts.join("/");
+    let [size, mode, mtime, kind] = pathStat(path, true);
+    if (kind === 2) {
+      path = (path.endsWith("/") ? path : path + "/") + "index.html";
+      [size, mode, mtime, kind] = pathStat(path, true);
+    }
+    if (kind !== 1) return null;
+    const real = pathReal(path);
+    if (!real.startsWith(inside)) return null;
+    return [real, size, Math.floor(mtime) as i64];
+  } catch (e) {
+    return null;
+  }
+}
+
+// Whether an If-None-Match header names the ETag, compared weakly as RFC 9110 says for GET.
+function __staticMatches(asked: string, tag: string): boolean {
+  const strong = tag.slice(2);
+  for (const each of asked.split(",")) {
+    const t = each.trim();
+    if (t === "*" || t === tag || t === strong) return true;
+  }
+  return false;
+}
+
+// The Content-Type for a file's extension, text types in UTF-8.
+function __staticType(path: string): string {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  const ext = dot <= 0 ? "" : name.slice(dot + 1).toLowerCase();
+  const text = "; charset=utf-8";
+  if (ext === "html" || ext === "htm") return "text/html" + text;
+  if (ext === "css") return "text/css" + text;
+  if (ext === "js" || ext === "mjs") return "text/javascript" + text;
+  if (ext === "json" || ext === "map") return "application/json" + text;
+  if (ext === "txt") return "text/plain" + text;
+  if (ext === "md") return "text/markdown" + text;
+  if (ext === "csv") return "text/csv" + text;
+  if (ext === "xml") return "application/xml" + text;
+  if (ext === "svg") return "image/svg+xml" + text;
+  if (ext === "png") return "image/png";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  if (ext === "avif") return "image/avif";
+  if (ext === "ico") return "image/x-icon";
+  if (ext === "woff") return "font/woff";
+  if (ext === "woff2") return "font/woff2";
+  if (ext === "ttf") return "font/ttf";
+  if (ext === "otf") return "font/otf";
+  if (ext === "pdf") return "application/pdf";
+  if (ext === "wasm") return "application/wasm";
+  if (ext === "zip") return "application/zip";
+  if (ext === "mp4") return "video/mp4";
+  if (ext === "webm") return "video/webm";
+  if (ext === "mp3") return "audio/mpeg";
+  if (ext === "wav") return "audio/wav";
+  return "application/octet-stream";
 }
 
 // The wire format of HTTP/1.x.
