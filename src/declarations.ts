@@ -26,7 +26,7 @@ export function atDeclarationKeyword(c: Mut<Cursor>): Stmt | undefined {
   }
   // Inside `declare module "m" { }`, `global { }` augments the global scope without `declare`.
   if (c.at("global") && isToken(next, "{") && sameLine) return namespaceDeclaration(c);
-  if (c.at("declare") && sameLine && (DECLARABLE.has(next.text) && next.kind === "ident")) {
+  if (c.at("declare") && sameLine && (DECLARABLE.includes(next.text) && next.kind === "ident")) {
     c.next();
     const body = c.at("global") ? namespaceDeclaration(c) : statement(c);
     const bodyEnd: usize = body.end;
@@ -35,10 +35,10 @@ export function atDeclarationKeyword(c: Mut<Cursor>): Stmt | undefined {
   return undefined;
 }
 
-const DECLARABLE = new Set([
+const DECLARABLE = [
   "var", "let", "const", "function", "async", "class", "abstract", "enum", "namespace", "module", "global",
   "interface", "type",
-]);
+];
 
 /** @throws {CompileError} */
 function enumDeclaration(c: Mut<Cursor>): Stmt {

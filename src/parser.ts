@@ -296,13 +296,18 @@ export type AssignOp =
   | "&=" | "|=" | "^=" | "&&=" | "||=" | "??=";
 
 
-// Reserved in strict-mode JavaScript, so never usable as names.
-export const RESERVED = new Set([
-  "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
-  "do", "else", "enum", "export", "extends", "false", "finally", "for", "function", "if",
-  "import", "in", "instanceof", "let", "new", "null", "return", "static", "super", "switch",
-  "this", "throw", "true", "try", "typeof", "var", "void", "while", "with", "yield",
-]);
+// Whether `name` is reserved in strict-mode JavaScript, so never usable as a name. A switch, as a
+// `Set` built at the top level can't be in Fish.
+export function isReserved(name: string): boolean {
+  switch (name) {
+    case "break": case "case": case "catch": case "class": case "const": case "continue": case "debugger": case "default": case "delete":
+    case "do": case "else": case "enum": case "export": case "extends": case "false": case "finally": case "for": case "function": case "if":
+    case "import": case "in": case "instanceof": case "let": case "new": case "null": case "return": case "static": case "super": case "switch":
+    case "this": case "throw": case "true": case "try": case "typeof": case "var": case "void": case "while": case "with": case "yield":
+      return true;
+  }
+  return false;
+}
 
 // A grammar function, as the cursor's helpers take one.
 /** @throws {CompileError} */
@@ -401,7 +406,7 @@ export class Cursor {
   /** @throws {CompileError} */
   ident(this: Mut<this>): Token {
     if (this.peek().kind !== "ident") throw this.error("expected an identifier");
-    if (RESERVED.has(this.peek().text)) throw this.error("expected a name");
+    if (isReserved(this.peek().text)) throw this.error("expected a name");
     return this.next();
   }
 
@@ -430,14 +435,24 @@ export class Cursor {
     return this.tokens[this.pos - 1]!.end;
   }
 
-  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined.
+  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined. Any
+  // other error goes on, which only the Bun build can meet: in Fish `parse` throws nothing else.
+  /** @throws {CompileError} */
   attempt<T>(this: Mut<this>, parse: Parse<T>): T | undefined {
-    const [pos, conditionalAllowed, inAllowed, inPipe, topicUsed] = [this.pos, this.conditionalAllowed, this.inAllowed, this.inPipe, this.topicUsed];
+    const pos = this.pos;
+    const conditionalAllowed = this.conditionalAllowed;
+    const inAllowed = this.inAllowed;
+    const inPipe = this.inPipe;
+    const topicUsed = this.topicUsed;
     try {
       return parse(this);
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
-      [this.pos, this.conditionalAllowed, this.inAllowed, this.inPipe, this.topicUsed] = [pos, conditionalAllowed, inAllowed, inPipe, topicUsed];
+      this.pos = pos;
+      this.conditionalAllowed = conditionalAllowed;
+      this.inAllowed = inAllowed;
+      this.inPipe = inPipe;
+      this.topicUsed = topicUsed;
       return undefined;
     }
   }
@@ -446,7 +461,7 @@ export class Cursor {
   /** @throws {CompileError} */
   regex(this: Mut<this>): Token {
     const slash = this.token();
-    this.tokens.length = this.pos;
+    while (this.tokens.length > this.pos) this.tokens.pop();
     this.tokens.push(this.lex.regex(slash));
     return this.next();
   }
@@ -513,7 +528,7 @@ export function parseType(src: string, ids: Mut<Ids>): TypeNode {
 }
 
 // Words a declaration may start with before its keyword, all of which its JSDoc comes before.
-const LEADING = new Set(["export", "default", "declare", "macro"]);
+const LEADING = ["export", "default", "declare", "macro"];
 
 // Whether the token at `i` is a word starting the declaration after it, rather than a property
 // name as in `a.default`.
@@ -521,7 +536,7 @@ const LEADING = new Set(["export", "default", "declare", "macro"]);
 function leading(c: Mut<Cursor>, i: usize): boolean {
   const t: Ref<Token> = c.tokens[i]!;
   const member = i > 0 && (isToken(c.tokens[i - 1]!, ".") || isToken(c.tokens[i - 1]!, "?."));
-  return t.kind === "ident" && LEADING.has(t.text) && !member;
+  return t.kind === "ident" && LEADING.includes(t.text) && !member;
 }
 
 // Adds the members of a union, nested ones included, to `into`, as a written `A | B | C` has them.
@@ -723,6 +738,7 @@ function tokenShape(src: string, start: usize, end: usize): string {
 // The types of a JSDoc comment's `@throws` tags. As in TypeScript, only `@throws {E} why` names a
 // type: `@throws INVALID_PARAM` only describes, and so does a tag whose type doesn't parse, such
 // as `{@link E}` or `{?E}`, so any TypeScript file still parses. They're added to `types`.
+/** @throws {CompileError} */
 function thrownTypes(src: string, ids: Mut<Ids>, m: Ref<Comment>, types: Mut<TypeNode[]>): void {
   const close = m.end - 2;
   for (const tag of m.text.matchAll(/(?<![^\s*])@throws(?![\p{ID_Continue}$])[ \t]*/gu)) {
@@ -745,6 +761,7 @@ function thrownTypes(src: string, ids: Mut<Ids>, m: Ref<Comment>, types: Mut<Typ
 
 // The type written from `start` to `end` of `src`, its spans offsets into the whole text, or
 // undefined when that text isn't one type.
+/** @throws {CompileError} */
 function typeAt(src: string, ids: Mut<Ids>, start: usize, end: usize): TypeNode | undefined {
   let c = cursor(src.slice(0, end as i64), ids, start);
   const t = c.attempt((c) => {
@@ -860,7 +877,7 @@ export function statement(c: Mut<Cursor>): Stmt {
   if (c.at("for")) return forStatement(c);
   if (c.at("switch")) return switchStatement(c);
   if (c.at("try")) return tryStatement(c);
-  if (c.peek().kind === "ident" && !RESERVED.has(c.peek().text) && isToken(c.peek(1), ":")) {
+  if (c.peek().kind === "ident" && !isReserved(c.peek().text) && isToken(c.peek(1), ":")) {
     const label = c.next().text;
     c.next();
     const labeled = statement(c);
@@ -1016,7 +1033,7 @@ function simpleStatement(c: Mut<Cursor>): Stmt {
   if (c.at("break") || c.at("continue")) {
     const kind: "break" | "continue" = c.next().text === "break" ? "break" : "continue";
     // A label must be on the same line, as with `return`'s value.
-    const label = c.peek().kind === "ident" && !c.peek().newlineBefore && !RESERVED.has(c.peek().text) ? c.next().text : undefined;
+    const label = c.peek().kind === "ident" && !c.peek().newlineBefore && !isReserved(c.peek().text) ? c.next().text : undefined;
     return { id: nextId(c.ids), kind, label, start, end: c.end() };
   }
   if (c.at("throw")) {

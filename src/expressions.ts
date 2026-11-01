@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { isToken } from "./lexer.ts";
 import {
-  accessorOf, allowingIn, block, RESERVED, type AssignOp, type BinaryOp, type Cursor, type Parse, type Expr, type ObjectProp, type Stmt, type Param, type TypeNode,
+  accessorOf, allowingIn, block, isReserved, type AssignOp, type BinaryOp, type Cursor, type Parse, type Expr, type ObjectProp, type Stmt, type Param, type TypeNode,
   type MatchArm, type Pattern, type TypeParam, type UnaryOp,
 } from "./parser.ts";
 import { classNode, decoratorList } from "./declarations.ts";
@@ -500,7 +500,7 @@ export function primary(c: Mut<Cursor>): Expr {
       if (t.text === "null") return { id: nextId(c.ids), kind: "null", ...span };
       if (t.text === "this") return { id: nextId(c.ids), kind: "this", ...span };
       if (t.text === "super") return { id: nextId(c.ids), kind: "super", ...span };
-      if (RESERVED.has(t.text)) break;
+      if (isReserved(t.text)) break;
       return { id: nextId(c.ids), kind: "ident", name: t.text, ...span };
   }
   if (t.text === "(") {
@@ -631,7 +631,7 @@ function objectProp(c: Mut<Cursor>): ObjectProp {
     const valueEnd: usize = value.end;
     return { id: nextId(c.ids), kind: "property", key, value, start, end: valueEnd };
   }
-  if (keyToken.kind !== "ident" || RESERVED.has(keyToken.text)) throw c.error("expected ':'");
+  if (keyToken.kind !== "ident" || isReserved(keyToken.text)) throw c.error("expected ':'");
   const fallback = c.eat("=") ? expression(c) : undefined;
   return { id: nextId(c.ids), kind: "shorthand", name: keyToken.text, default: fallback, start, end: c.end() };
 }

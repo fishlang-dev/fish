@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import { expression, primary, unary } from "./expressions.ts";
 import { isToken } from "./lexer.ts";
-import { RESERVED, type Cursor, type Expr, type Pattern, type PatternProp } from "./parser.ts";
+import { isReserved, type Cursor, type Expr, type Pattern, type PatternProp } from "./parser.ts";
 import { propertyName } from "./types.ts";
 import { nextId } from "./ids.ts";
 
@@ -47,7 +47,7 @@ function objectPattern(c: Mut<Cursor>): Pattern {
       if (c.eat(":")) {
         value = nested(c);
       } else {
-        if (typeof key !== "string" || keyStart.kind !== "ident" || RESERVED.has(key)) throw c.error("expected ':'");
+        if (typeof key !== "string" || keyStart.kind !== "ident" || isReserved(key)) throw c.error("expected ':'");
         const name: Pattern = { id: nextId(c.ids), kind: "ident", name: key, start: keyStart.start, end: keyStart.end };
         if (c.eat("=")) {
           const fallback = expression(c);
@@ -210,7 +210,7 @@ function matchObject(c: Mut<Cursor>): Pattern {
       if (c.eat(":")) {
         value = matchPattern(c);
       } else {
-        if (typeof key !== "string" || keyStart.kind !== "ident" || RESERVED.has(key)) throw c.error("expected ':'");
+        if (typeof key !== "string" || keyStart.kind !== "ident" || isReserved(key)) throw c.error("expected ':'");
         value = { id: nextId(c.ids), kind: "ident", name: key, start: keyStart.start, end: keyStart.end };
       }
       props.push({ id: nextId(c.ids), key, value, start: keyStart.start, end: c.end() });
