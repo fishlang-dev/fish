@@ -15,6 +15,9 @@ export type Members = {
   typing: Typing;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
   assuming: Set<string>;
+  // Each class whose `implements` claim was refused and the interface, as shown, with why, which an
+  // error at a use of it as that interface repeats.
+  refused: { type: string; trait: string; reason: string }[];
 };
 
 // Why the generic function `f` can't be given where the generic function type `family` is, or

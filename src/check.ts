@@ -1,7 +1,7 @@
 import { declareClass, extend, inherited, isLifetime, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
 import { newTables, type Compilation, type Tables } from "./compilation.ts";
-import { CompileError, named } from "./diag.ts";
+import { CompileError, CompileErrors, named } from "./diag.ts";
 import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
 import { FILE_SPAN } from "./modules.ts";
@@ -415,6 +415,36 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && member.decorators && member.decorators.length > 0) throw new CompileError("E1103", "a macro on a member applies in a top-level class", member.decorators[0]!.start, member.decorators[0]!.end);
     return false;
   });
+  // Each declaration and body is checked on its own, so one mistake doesn't hide the next; the
+  // errors are reported together.
+  const errors: CompileError[] = [];
+  // A bad signature, or a failed body whose result another needs, is met again from every body
+  // that uses it, and is reported once.
+  // Instances that never stop growing would be queued without end once their error is recovered.
+  let unending = false;
+  const recover = (e: unknown) => {
+    if (!(e instanceof CompileError)) throw e;
+    if (e.code === "E0113") unending = true;
+    if (!errors.some((x) => x.start === e.start && x.end === e.end && x.message === e.message)) errors.push(e);
+  };
+  // Errors a recorded mistake makes elsewhere: a use repeating why a class's `implements` claim
+  // was refused, or a `try` that can't throw only because a function it calls failed before its
+  // throws were known.
+  const claimErrors = new Set<CompileError>();
+  const refused: Members["refused"] = [];
+  const tryCallees = new Map<CompileError, Body[]>();
+  // A callee only accounts for a `try` when its failure is reported itself: a recursive function's
+  // failure may be that very `try`'s.
+  const followsOn = (e: CompileError) =>
+    (!claimErrors.has(e) && refused.some(({ type, trait, reason }) => e.message.includes(`'${type}'`) && e.message.includes(`'${trait}'`) && e.message.includes(reason)))
+    || (tryCallees.get(e)?.some((b) => failed.has(b) && !b.throws && !tryCallees.has(failed.get(b)!)) ?? false);
+  const stopOnErrors = () => {
+    const held = errors.filter((e) => !followsOn(e));
+    // Errors are never all held back, or a program that failed would build.
+    const reported = held.length > 0 ? held : errors;
+    if (reported.length === 1) throw reported[0];
+    if (reported.length > 1) throw new CompileErrors(reported.sort((a, b) => a.start - b.start || a.end - b.end));
+  };
   written = lowerOverloads(ids, written);
   written = [...written, ...hoistLocals(compilation, written)];
   holdsNode(written, (n) => {
@@ -436,115 +466,125 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const slots = new Map<string, boolean[]>();
   separatePrivateNames(program.flatMap((s) => (s.kind === "class" && s.name !== undefined ? [{ ...s, name: s.name }] : [])));
   for (const s of program) {
-    // A `declare const enum` writes its values, so it is an enum like any other.
-    const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
-    if (e.kind === "enum") {
-      typeName(e.name, e, aliases, classes, templates, interfaces, enums);
-      enums.set(e.name, declareEnum(compilation, e, (owner, member, init) => enumMemberValue(owner, member, init)));
-      continue;
-    }
-    if (s.kind === "typeAlias") {
-      addAlias(aliases, s, classes, templates, interfaces, enums);
-      continue;
-    }
-    if (s.kind === "interface") {
-      typeName(s.name, s, aliases, classes, templates, interfaces, enums);
-      interfaces.set(s.name, s);
-      if (s.jsClass) jsClasses.set(s.name, s);
-      continue;
-    }
-    if (s.kind === "class" && s.name !== undefined) {
-      typeName(s.name, s, aliases, classes, templates, interfaces, enums);
-      // A class's lifetimes are checked and erased, never instanced, so they are set aside.
-      const node = { ...s, id: nextId(ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
-      if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
-      if (node.typeParams.length > 0) templates.set(s.name, node);
-      else classes.set(s.name, declareClass(tables, node));
-      const rust = rustClassNodes.get(s);
-      if (rust) classes.get(s.name)!.type.rust = rust;
-      // A Rust type declaring no constructor is never made with `new`, so its handle needs no
-      // assigning in the empty one it is given.
-      if (rust && !classes.get(s.name)!.constructor.rust) classes.get(s.name)!.required.clear();
-      // A `static readonly` field is a top-level const named `C.x`, which no source name can be.
-      const declared = classes.get(s.name);
-      for (const f of declared?.staticFields.values() ?? []) {
-        const giving: Stmt = { id: nextId(ids), kind: "return", value: f.init!, start: f.init!.start, end: f.init!.end };
-        funcs.push(Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end }, { comptime: "const" as const, owner: declared!.type }));
+    try {
+      // A `declare const enum` writes its values, so it is an enum like any other.
+      const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
+      if (e.kind === "enum") {
+        typeName(e.name, e, aliases, classes, templates, interfaces, enums);
+        enums.set(e.name, declareEnum(compilation, e, (owner, member, init) => enumMemberValue(owner, member, init)));
+        continue;
       }
-      continue;
-    }
-    // `declare function f(...): T;` names a C function, called inside `unsafe`.
-    if (s.kind === "declare" && s.body.kind === "function" && !hasBody(s.body)) {
-      const rest = s.body.params.find((p) => p.rest);
-      if (rest) throw unsupported("variadic C functions", rest);
-      funcs.push(Object.assign({ ...s.body, id: nextId(ids), body: [] }, { foreign: true }));
-      continue;
-    }
-    // `export function f() {}` is an ordinary function, and in a library a C function too; an
-    // exported macro is for other files.
-    if (s.kind === "export" && s.body.kind === "function" && hasBody(s.body)) {
-      if (s.body.macro) macroShape(s.body);
-      funcs.push(s.body.macro ? s.body : Object.assign({ ...s.body, id: nextId(ids) }, { exported: true }));
-      continue;
-    }
-    const declaration = unsupportedDeclaration(s);
-    if (declaration) throw declaration;
-    if (s.kind === "empty") continue;
-    // A top-level `const` is computed while compiling: comptime runs a function of no parameters
-    // giving its value. A `comptime { }` block is a function giving nothing, run the same way.
-    const made = { kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], start: s.start, end: s.end };
-    if (s.kind === "let" && s.keyword === "const") {
-      for (const d of s.declarations) {
-        if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
-        if (["undefined", "console", "print"].includes(d.target.name)) throw new CompileError("E0407", `'${d.target.name}' already names something every program has; call the const something else`, d.target.start, d.target.end);
-        if (!d.init) throw new CompileError("E0404", "a top-level 'const' needs its value", d.start, d.end);
-        // A generic arrow is a family of functions, so it is declared as a generic function is.
-        if (d.init.kind === "arrow" && d.init.typeParams.some((p) => !isLifetime(p))) {
-          funcs.push(arrowFunction(ids, d.target.name, d.init, d));
-          continue;
+      if (s.kind === "typeAlias") {
+        addAlias(aliases, s, classes, templates, interfaces, enums);
+        continue;
+      }
+      if (s.kind === "interface") {
+        typeName(s.name, s, aliases, classes, templates, interfaces, enums);
+        interfaces.set(s.name, s);
+        if (s.jsClass) jsClasses.set(s.name, s);
+        continue;
+      }
+      if (s.kind === "class" && s.name !== undefined) {
+        typeName(s.name, s, aliases, classes, templates, interfaces, enums);
+        // A class's lifetimes are checked and erased, never instanced, so they are set aside.
+        const node = { ...s, id: nextId(ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
+        if (s.typeParams.some(isLifetime)) slots.set(s.name, s.typeParams.map(isLifetime));
+        if (node.typeParams.length > 0) templates.set(s.name, node);
+        else classes.set(s.name, declareClass(tables, node));
+        const rust = rustClassNodes.get(s);
+        if (rust) classes.get(s.name)!.type.rust = rust;
+        // A Rust type declaring no constructor is never made with `new`, so its handle needs no
+        // assigning in the empty one it is given.
+        if (rust && !classes.get(s.name)!.constructor.rust) classes.get(s.name)!.required.clear();
+        // A `static readonly` field is a top-level const named `C.x`, which no source name can be.
+        const declared = classes.get(s.name);
+        for (const f of declared?.staticFields.values() ?? []) {
+          const giving: Stmt = { id: nextId(ids), kind: "return", value: f.init!, start: f.init!.start, end: f.init!.end };
+          funcs.push(Object.assign({ id: nextId(ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end }, { comptime: "const" as const, owner: declared!.type }));
         }
-        const giving: Stmt = { id: nextId(ids), kind: "return", value: d.init, start: d.init.start, end: d.init.end };
-        funcs.push(Object.assign({ ...made, id: nextId(ids), name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const }));
+        continue;
       }
-      continue;
+      // `declare function f(...): T;` names a C function, called inside `unsafe`.
+      if (s.kind === "declare" && s.body.kind === "function" && !hasBody(s.body)) {
+        const rest = s.body.params.find((p) => p.rest);
+        if (rest) throw unsupported("variadic C functions", rest);
+        funcs.push(Object.assign({ ...s.body, id: nextId(ids), body: [] }, { foreign: true }));
+        continue;
+      }
+      // `export function f() {}` is an ordinary function, and in a library a C function too; an
+      // exported macro is for other files.
+      if (s.kind === "export" && s.body.kind === "function" && hasBody(s.body)) {
+        if (s.body.macro) macroShape(s.body);
+        funcs.push(s.body.macro ? s.body : Object.assign({ ...s.body, id: nextId(ids) }, { exported: true }));
+        continue;
+      }
+      const declaration = unsupportedDeclaration(s);
+      if (declaration) throw declaration;
+      if (s.kind === "empty") continue;
+      // A top-level `const` is computed while compiling: comptime runs a function of no parameters
+      // giving its value. A `comptime { }` block is a function giving nothing, run the same way.
+      const made = { kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], start: s.start, end: s.end };
+      if (s.kind === "let" && s.keyword === "const") {
+        for (const d of s.declarations) {
+          if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
+          if (["undefined", "console", "print"].includes(d.target.name)) throw new CompileError("E0407", `'${d.target.name}' already names something every program has; call the const something else`, d.target.start, d.target.end);
+          if (!d.init) throw new CompileError("E0404", "a top-level 'const' needs its value", d.start, d.end);
+          // A generic arrow is a family of functions, so it is declared as a generic function is.
+          if (d.init.kind === "arrow" && d.init.typeParams.some((p) => !isLifetime(p))) {
+            funcs.push(arrowFunction(ids, d.target.name, d.init, d));
+            continue;
+          }
+          const giving: Stmt = { id: nextId(ids), kind: "return", value: d.init, start: d.init.start, end: d.init.end };
+          funcs.push(Object.assign({ ...made, id: nextId(ids), name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const }));
+        }
+        continue;
+      }
+      if (s.kind === "comptime") {
+        funcs.push(Object.assign({ ...made, id: nextId(ids), name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const }));
+        continue;
+      }
+      if (s.kind === "let") throw new CompileError("E0404", "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
+      // Top-level code with side effects belongs in main(); the migration lint moves it there.
+      if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
+      const rust = rustNames.get(s);
+      if (rust) {
+        funcs.push(Object.assign({ ...s, id: nextId(ids), body: [] }, { foreign: true, rust }));
+        continue;
+      }
+      if (s.js) {
+        const body = { ...s, id: nextId(ids), body: [] };
+        jsBodies.set(s, body);
+        funcs.push(body);
+        continue;
+      }
+      if (!hasBody(s)) throw new CompileError("E0410", `'${s.name}' has no implementation; follow its overload signatures with a 'function ${s.name}' that has a body`, s.start, s.end);
+      if (s.macro) macroShape(s);
+      funcs.push(s);
+    } catch (e) {
+      recover(e);
     }
-    if (s.kind === "comptime") {
-      funcs.push(Object.assign({ ...made, id: nextId(ids), name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const }));
-      continue;
-    }
-    if (s.kind === "let") throw new CompileError("E0404", "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
-    // Top-level code with side effects belongs in main(); the migration lint moves it there.
-    if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
-    const rust = rustNames.get(s);
-    if (rust) {
-      funcs.push(Object.assign({ ...s, id: nextId(ids), body: [] }, { foreign: true, rust }));
-      continue;
-    }
-    if (s.js) {
-      const body = { ...s, id: nextId(ids), body: [] };
-      jsBodies.set(s, body);
-      funcs.push(body);
-      continue;
-    }
-    if (!hasBody(s)) throw new CompileError("E0410", `'${s.name}' has no implementation; follow its overload signatures with a 'function ${s.name}' that has a body`, s.start, s.end);
-    if (s.macro) macroShape(s);
-    funcs.push(s);
   }
   const byName = new Map<string, Func>();
   for (const f of funcs) {
-    // A tag takes its strings, then its values as a rest parameter.
-    const tag = f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest;
-    if (!tag && f.params.length === 2 && f.params[1]!.rest && (f.params[0]!.comptime || (f.params[0]!.type?.kind === "ref" && f.params[0]!.type.name === "TemplateStringsArray"))) {
-      const strings = f.params[0]!;
-      throw new CompileError("E1107", `'${f.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, strings.start, strings.end);
-    } else if (!tag && f.params[0]?.comptime && f.params.at(-1)?.rest) {
-      const rest = f.params.at(-1)!;
-      throw new CompileError("E1102", "a function with comptime parameters can't take a rest parameter yet, unless it is a tag, whose values follow its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'", rest.start, rest.end);
+    try {
+      // A tag takes its strings, then its values as a rest parameter.
+      const tag = f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest;
+      if (!tag && f.params.length === 2 && f.params[1]!.rest && (f.params[0]!.comptime || (f.params[0]!.type?.kind === "ref" && f.params[0]!.type.name === "TemplateStringsArray"))) {
+        const strings = f.params[0]!;
+        throw new CompileError("E1107", `'${f.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, strings.start, strings.end);
+      } else if (!tag && f.params[0]?.comptime && f.params.at(-1)?.rest) {
+        const rest = f.params.at(-1)!;
+        throw new CompileError("E1102", "a function with comptime parameters can't take a rest parameter yet, unless it is a tag, whose values follow its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'", rest.start, rest.end);
+      }
+      const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
+      if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError("E0402", `'${named}' is already defined`, f.start, f.end);
+      byName.set(f.name, f);
+    } catch (e) {
+      recover(e);
     }
-    const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
-    if (byName.has(f.name) || byName.has(named) || byName.has(`const ${named}`) || classes.has(named) || templates.has(named) || enums.has(named)) throw new CompileError("E0402", `'${named}' is already defined`, f.start, f.end);
-    byName.set(f.name, f);
   }
+  // A body using a declaration that failed would only say it can't find it.
+  stopOnErrors();
   // The name the file holding `at` writes for a top-level name, or nothing when that file can't
   // reach it. Std's prelude is in no file's table and reaches every file, but for its internals.
   const reachedAs = (name: string, at: number): string | undefined => {
@@ -572,8 +612,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     },
     typing,
     assuming: new Set(),
+    refused,
   };
-  const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
+  const { register, settle, claims, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
     tables, classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
     classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
@@ -594,6 +635,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // The instance being checked, which new instantiations count their depth from.
   let checking: Instance | undefined;
   const done = new Set<Instance>();
+  // The error each failed body's check gave, which a call of it gives again rather than another.
+  const failed = new Map<Body, CompileError>();
   // Each Rust function's types, by its shim symbol, as first declared.
   const rustTypes = new Map<string, string>();
   // Comptime runs a function only once the checker has been through it.
@@ -615,6 +658,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     signing: (f, run) => withSight((n, at) => writtenIn(f, at) && f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n), run),
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
     comptimeArgument: (arg) => comptimeLiteral(arg),
+    failure: (f) => failed.get(f),
   });
   // What `typeof name` names in a type: a top-level const's type, or a non-generic function's,
   // whose result is checked from its body when it isn't written.
@@ -748,19 +792,57 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // An enum with computed members is settled when first read; one nothing reads still reports
   // a bad initializer.
   for (const e of enums.values()) void e.members;
+  // The classes as declared, and generic classes' definitions; any other is an instance a call made.
+  const declaredClasses = new Set(unsettled);
+  // A class's `implements` claims are checked before any body uses the class, so a refused one is
+  // reported at the class rather than at each use.
+  for (const c of declaredClasses) {
+    try {
+      claims(c);
+    } catch (e) {
+      if (e instanceof CompileError) claimErrors.add(e);
+      recover(e);
+    }
+  }
   funcs.forEach((f) => {
     try {
       checkBody(definition(f));
     } catch (e) {
       // A package's function Fish can't type is refused where a program calls it.
-      if (!f.js || !(e instanceof CompileError)) throw e;
+      if (!f.js || !(e instanceof CompileError)) {
+        // A bad signature fails before the body's check does, and fails each call of it as well.
+        if (e instanceof CompileError && !failed.has(f)) failed.set(f, e);
+        return recover(e);
+      }
       jsUncalled.set(f, e);
     }
   });
-  while (unsettled.length > 0 || pending.length > 0) {
-    if (unsettled.length > 0) settle(unsettled.shift()!);
-    else checkBody(pending.shift()!);
+  // Once a body has failed, a generic body's or class's instances aren't checked: their
+  // definitions were, and an instance's error then is most often one a refused call already
+  // reported.
+  while (!unending && (unsettled.length > 0 || pending.length > 0)) {
+    if (errors.length > 0) {
+      pending.length = 0;
+      const kept = unsettled.filter((c) => declaredClasses.has(c));
+      unsettled.length = 0;
+      unsettled.push(...kept);
+      if (unsettled.length === 0 && pending.length === 0) break;
+    }
+    try {
+      if (unsettled.length > 0) settle(unsettled.shift()!, (run) => {
+        try {
+          run();
+        } catch (e) {
+          recover(e);
+        }
+      });
+      else checkBody(pending.shift()!);
+    } catch (e) {
+      recover(e);
+    }
   }
+  // What follows reads every body's results.
+  stopOnErrors();
   if (main && main.params.length > 0) throw new CompileError("E0405", "main() takes no parameters", main.start, main.end);
   const started = main && instanceOf(main).returns;
   if (main && (typeof started !== "string" && started?.kind === "future" ? started.gives : started) !== "void") throw new CompileError("E0405", "main() can't return a value yet", main.start, main.end);
@@ -1208,7 +1290,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           withSight(undefined, () => withScope(scopeOf(instance), () => checkInstance(instance)));
         } catch (e) {
           inProgress.delete(instance);
-          if (!(e instanceof CompileError) || demanded === 0) throw instance.body.signature ? incompatible(instance.body, e) : e;
+          if (!(e instanceof CompileError) || demanded === 0) {
+            const thrown = instance.body.signature ? incompatible(instance.body, e) : e;
+            if (thrown instanceof CompileError) failed.set(instance.body, thrown);
+            throw thrown;
+          }
         }
         if (demanded === 0) return;
         forget(instance);
@@ -2427,7 +2513,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           handlers.push([]);
           scoped(s.block);
           const sites = handlers.pop()!;
-          if (sites.length === 0) throw new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
+          if (sites.length === 0) {
+            const never = new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
+            tryCallees.set(never, [...instance.calls].filter(([x]) => x.start >= s.start && x.end <= s.end).map(([, i]) => i.body));
+            throw never;
+          }
           const caught = unionType(sites.map(([, t]) => t));
           for (const [at, from] of sites) instance.raises.set(at, { from, to: caught });
           instance.caught.set(s, caught);

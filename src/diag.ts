@@ -45,8 +45,28 @@ export class CompileError extends Error {
   }
 }
 
+// Several errors from one build, in source order. It reads as its first wherever only one error
+// is looked at.
+export class CompileErrors extends CompileError {
+  errors: CompileError[];
+
+  constructor(errors: CompileError[]) {
+    const first = errors[0]!;
+    super(first.code, first.message, first.start, first.end, first.note);
+    this.errors = errors;
+  }
+}
+
+// The errors `e` stands for, each rendered against the group's sources when it has none of its own.
+export function errorsOf(e: CompileError): CompileError[] {
+  if (!(e instanceof CompileErrors)) return [e];
+  for (const x of e.errors) if (x.sources.length === 0) x.sources = e.sources;
+  return e.errors;
+}
+
 // Gives `e` the names its compilation made up, with the hoisted ones in its messages as written.
 export function named(e: CompileError, names: Names): CompileError {
+  if (e instanceof CompileErrors) e.errors.forEach((x) => named(x, names));
   e.message = written(e.message, names);
   if (e.note) e.note = { ...e.note, message: written(e.note.message, names) };
   e.names = names;
@@ -71,9 +91,16 @@ export function locate(src: string, offset: number) {
 
 // Renders `file:line:col: error[E0201]: msg`, or another `kind` than `error`, followed by the
 // source line with a caret underline, then the same for its note. Only errors and warnings show
-// the code: lint findings render through here under their rule's name.
-export function formatError(e: CompileError, path: string, program: string, kind = "error"): string {
-  const lines = (kind: string, note: Note) => {
+// the code: lint findings render through here under their rule's name. A group renders each
+// error, a blank line apart, then a line counting them, as Rust's does. With `colour`, the
+// label and caret line are painted for a terminal.
+export function formatError(e: CompileError, path: string, program: string, kind = "error", colour = false): string {
+  const all = errorsOf(e);
+  if (all.length > 1) {
+    const summary = `${paint("error", RED, colour)}${paint(`: could not compile due to ${all.length} previous errors`, BOLD, colour)}`;
+    return [...all.map((x) => formatError(x, path, program, kind, colour)), summary].join("\n\n");
+  }
+  const lines = (kind: string, note: Note, tone: string) => {
     const { src, file, offset } = sourceOf(program, path, note.start, e.sources);
     // A position past its text would pad the caret line without end.
     const start = Math.min(offset, src.length);
@@ -83,14 +110,20 @@ export function formatError(e: CompileError, path: string, program: string, kind
     const width = Math.max(1, Math.min(end, lineEnd) - start);
     const pad = " ".repeat(String(line).length);
     return [
-      `${file}:${line}:${col}: ${kind}: ${shown(message, e.names)}`,
+      `${paint(`${file}:${line}:${col}:`, BOLD, colour)} ${paint(kind, tone, colour)}: ${shown(message, e.names)}`,
       ` ${line} | ${src.slice(lineStart, lineEnd)}`,
-      ` ${pad} | ${" ".repeat(col - 1)}${"^".repeat(width)}`,
+      ` ${pad} | ${" ".repeat(col - 1)}${paint("^".repeat(width), tone, colour)}`,
     ];
   };
   const head = kind === "error" || kind === "warning" ? `${kind}[${e.code}]` : kind;
-  return [...lines(head, e), ...(e.note ? lines("note", e.note) : [])].join("\n");
+  const tone = kind === "error" ? RED : kind === "warning" ? YELLOW : BOLD;
+  return [...lines(head, e, tone), ...(e.note ? lines("note", e.note, BOLD) : [])].join("\n");
 }
+
+const RED = "1;31";
+const YELLOW = "1;33";
+const BOLD = "1";
+const paint = (text: string, tone: string, colour: boolean) => (colour ? `\x1b[${tone}m${text}\x1b[0m` : text);
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
 export function indexText(e: { kind: string; name?: string; value?: unknown }): string {

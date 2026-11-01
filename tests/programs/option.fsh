@@ -344,7 +344,9 @@ function main() {
   print(steal(o), steal2(o))
   print(o?.x)
 }
-// error: can't move a value out of a reference to it, which only borrows it
+// errors: 2
+// error: option_unwrap_out_of_borrow.fsh:5:15: error[E0202]: can't move a value out of a reference to it, which only borrows it
+// error: option_unwrap_out_of_borrow.fsh:8:13: error[E0202]: can't move a value out of a reference to it, which only borrows it
 // case: option_unwrap_temporary
 // A temporary unwrapped with '!' may be changed.
 class C { n: i64 = 0; next(this: Mut<this>): i64 { this.n += 1; return this.n } }

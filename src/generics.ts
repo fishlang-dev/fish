@@ -256,6 +256,8 @@ type Checker = {
   classParams(f: Body): TypeParam[];
   // A comptime parameter's argument, computed while compiling, as the literal type of its value.
   comptimeArgument(arg: Expr): Type;
+  // The error a body's check failed with, when it did.
+  failure(f: Body): CompileError | undefined;
 };
 
 // The instances of every body: one for a plain function, and for a generic one, its
@@ -265,7 +267,7 @@ export function comptimeName(p: Param): string {
   return `comptime ${paramName(p)}`;
 }
 
-export function instancing({ tables, resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
+export function instancing({ tables, resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument, failure }: Checker) {
   const { typing } = tables;
   const { callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
   const concrete = concreteness(typing);
@@ -431,6 +433,11 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   // The instance a call runs: a generic function's type arguments come from the call, or are
   // inferred from its arguments, and must satisfy their bounds.
   function instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span & Id): Instance {
+    // A call of a body whose signature failed, or whose result only its body could tell, would
+    // report the same mistake again in other words; one with a written signature is typed by it.
+    const failed = failure(f);
+    const signature = { start: f.start, end: f.body[0]?.start ?? f.end };
+    if (failed && (f.returnType === undefined || (failed.start >= signature.start && failed.end <= signature.end))) throw failed;
     const params = typeParamsOf(f);
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
       throw new CompileError("E0106", `expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
