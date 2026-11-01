@@ -329,7 +329,9 @@ async function bothWays(file: string, src: string) {
   const run = async (out: string) => {
     const done = Bun.spawn([out], { env: { ...process.env, FISH_LEAKS: "1" }, stdout: "pipe", stderr: "pipe", timeout: 10_000 });
     const [stdout, stderr] = await Promise.all([new Response(done.stdout).text(), new Response(done.stderr).text()]);
-    return { stdout, stderr, code: await done.exited };
+    // Tasks that panic together write their reports in whatever order they finish, so stderr is
+    // compared as a set of lines.
+    return { stdout, stderr: stderr.split("\n").sort().join("\n"), code: await done.exited };
   };
   return [await run(split), await run(whole)];
 }
