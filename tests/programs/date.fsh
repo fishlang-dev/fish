@@ -107,3 +107,18 @@ function main() {
   jar.set("a", "", { expires: 0 });
   console.log(Date.now(), jar.toSetCookieHeaders()[0]);
 }
+// case: date_from_text
+// error: 'new Date(text)' isn't supported yet, as reading dates from strings isn't; give 'new Date(ms)' milliseconds since the epoch
+function main() {
+  const d = new Date("2026-11-01T12:29:41Z");
+}
+// case: date_from_fields
+// error: 'new Date(year, month, ...)' isn't supported yet, as local time isn't
+function main() {
+  const d = new Date(2026, 10, 1);
+}
+// case: date_parse
+// error: 'Date.parse' isn't supported yet, as reading dates from strings isn't
+function main() {
+  const t = Date.parse("2026-11-01");
+}

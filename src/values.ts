@@ -2284,8 +2284,19 @@ export function expressions(ctx: Context) {
     const declared = classes.get(owner);
     const hidden = declared !== undefined && !(owner === "Date" && declared.constructor.start >= STD_BASE);
     if ((owner !== "Date" && owner !== "performance") || (!std && (lookup(owner) || hidden || byName.has(owner) || byName.has(`const ${owner}`) || enums.has(owner)))) return undefined;
+    if (owner === "Date" && callee.name === "parse") throw new CompileError("E0801", "'Date.parse' isn't supported yet, as reading dates from strings isn't; give 'new Date(ms)' milliseconds since the epoch", callee.start, callee.end);
     if (callee.name !== "now") throw new CompileError("E0801", `'${owner}.${callee.name}' isn't supported yet; '${owner}.now()' is`, callee.start, callee.end);
     return `${owner}.now` as "Date.now" | "performance.now";
+  }
+
+  // std's Date is made from milliseconds alone: reading a string and the year, month, day form,
+  // which counts in local time, aren't there yet.
+  function dateNew(e: Expr, list: Expr[], argTypes: Type[]) {
+    if (list.length > 1) throw new CompileError("E0801", "'new Date(year, month, ...)' isn't supported yet, as local time isn't; give 'new Date(ms)' milliseconds since the epoch", e.start, e.end);
+    const t = argTypes[0];
+    if (t !== undefined && (t === "string" || (typeof t !== "string" && t.kind === "literal" && typeof t.value === "string"))) {
+      throw new CompileError("E0801", "'new Date(text)' isn't supported yet, as reading dates from strings isn't; give 'new Date(ms)' milliseconds since the epoch", e.start, e.end);
+    }
   }
 
   // `JSON.stringify` and `JSON.parse`, unless a name of the program's hides `JSON`.
@@ -4644,6 +4655,7 @@ export function expressions(ctx: Context) {
             : "'new Array(a, b)' makes an array of its arguments; write 'Array.of(a, b)' or '[a, b]'", e.start, e.end);
         }
         const argTypes = list.map(value);
+        if (named?.type.name === "Date" && named.constructor.start >= STD_BASE) dateNew(e, list, argTypes);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError("E0503", `only a class can be constructed with 'new'${e.callee.kind === "ident" && !lookup(e.callee.name) ? didYouMean(e.callee.name, ctx.classNames(e.callee.start)) : ""}`, e.callee.start, e.callee.end);
         const rust = rustClassOf(c.type);
