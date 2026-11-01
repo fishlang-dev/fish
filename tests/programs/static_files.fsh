@@ -97,15 +97,16 @@ async function main(): Promise<void> throws IoError | AbortError {
 // expect: GET /assets/sub 404
 // expect: GET /assets/ 404
 // expect: GET /assets/fifo 404
+// expect: GET /assets/a.txt/ 404
 // expect: GET /ASSETS/a.txt 404
 // expect: GET /assetsx/a.txt 404
 // expect: GET /missing/a.txt 404
 // expect: POST /assets/a.txt 404
 // Nothing outside the root is served, however the path is spelled: dot segments, encoded and
 // Windows-style separators, NUL, empty segments, hidden files, symlinks leading out, a directory
-// with no index.html, which is never listed, or a file that isn't a regular one. Each is a 404,
-// so a refusal doesn't say whether the file exists. Requests are written raw, so no client
-// cleans the path first.
+// with no index.html, which is never listed, a file that isn't a regular one, or a file named with
+// a trailing slash. Each is a 404, so a refusal doesn't say whether the file exists. Requests are
+// written raw, so no client cleans the path first.
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -140,7 +141,7 @@ async function main(): Promise<void> throws IoError | AbortError {
   spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, app.handler()));
   while (found.port.load() === 0) await sleep(1);
   const port = found.port.load();
-  const targets = ["/assets/a.txt", "/assets/../secret", "/assets/%2e%2e/secret", "/assets/..%2fsecret", "/assets/%2E%2E%2Fsecret", "/assets/sub/..%2f..%2fsecret", "/assets/..%5csecret", "/assets/..\\secret", "/assets/a.txt%00.png", "/assets/%2fetc%2fpasswd", "/assets//etc/passwd", "/assets/%zz", "/assets/.env", "/assets/sub/.hidden", "/assets/out", "/assets/escape/secret", "/assets/sub", "/assets/", "/assets/fifo", "/ASSETS/a.txt", "/assetsx/a.txt", "/missing/a.txt"];
+  const targets = ["/assets/a.txt", "/assets/../secret", "/assets/%2e%2e/secret", "/assets/..%2fsecret", "/assets/%2E%2E%2Fsecret", "/assets/sub/..%2f..%2fsecret", "/assets/..%5csecret", "/assets/..\\secret", "/assets/a.txt%00.png", "/assets/%2fetc%2fpasswd", "/assets//etc/passwd", "/assets/%zz", "/assets/.env", "/assets/sub/.hidden", "/assets/out", "/assets/escape/secret", "/assets/sub", "/assets/", "/assets/fifo", "/assets/a.txt/", "/ASSETS/a.txt", "/assetsx/a.txt", "/missing/a.txt"];
   for (const target of targets) {
     const status = await ask(port, "GET", target);
     console.log("GET", target, status);
@@ -200,5 +201,43 @@ async function main(): Promise<void> throws IoError | AbortError {
   }
   console.log("etag", lines.some((l) => l.startsWith("etag: W/")));
   console.log("body", parts[1].length);
+  rmSync(dir, { recursive: true });
+}
+// case: static_files_fall_through
+// expect: /api 200 api
+// expect: /a.txt 200 file
+// expect: /.env 200 route .env
+// expect: /old 200 api
+// expect: /..%2fsecret 404 Not Found
+// expect: /missing 404 Not Found
+// expect: /a.txt/ 404 Not Found
+// expect: HEAD /api 200 api
+// A static route finding no file passes the request on to the routes after it, so one registered
+// first at '/' hides nothing. A refused path is passed on just as a missing file is, so neither
+// says which it was.
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+
+async function show(app: Ref<Router>, method: string, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method: method }));
+  const body = await res.text();
+  console.log(method === "GET" ? path : method + " " + path, res.status, body.trim());
+}
+
+async function main(): Promise<void> throws IoError {
+  const dir = mkdtempSync("/tmp/fish-static-");
+  writeFileSync(dir + "/a.txt", "file");
+  writeFileSync(dir + "/.env", "KEY=1");
+  let app = new Router();
+  app.use(async (req, next) => {
+    let moved = req;
+    if (moved.path === "/old") moved.path = "/api";
+    const res = await next(moved);
+    return res;
+  });
+  app.static("/", dir);
+  app.get("/api", async (req) => new Response("api"));
+  app.get("/.env", async (req) => new Response("route .env"));
+  for (const path of ["/api", "/a.txt", "/.env", "/old", "/..%2fsecret", "/missing", "/a.txt/"]) await show(app, "GET", path);
+  await show(app, "HEAD", "/api");
   rmSync(dir, { recursive: true });
 }

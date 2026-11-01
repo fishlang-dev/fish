@@ -961,7 +961,7 @@ class Router {
     const held = table.clone();
     this.table = table;
     this.inner = async (r: Request) => {
-      const res = await Router.dispatch(held.clone(), r);
+      const res = await Router.dispatch(held.clone(), r, 0);
       return res;
     };
   }
@@ -1015,15 +1015,20 @@ class Router {
     const path = req.path.clone();
     const method = req.method.clone();
     const have = path.split("/");
-    const found = this.table.routes.update((t) => Router.find(t, method, have));
+    const found = this.table.routes.update((t) => Router.find(t, method, have, 0));
     let handler: ServeHandler = async (r: Request) => new Response("Not Found\\n", { status: 404 });
     let params: string[] = [];
+    let prefix = false;
+    let after: usize = 0;
     if (found !== null) {
       const decoded = Router.decoded(found.params);
       if (decoded === null) return new Response("Bad Request\\n", { status: 400 });
       params = decoded;
       handler = found.handler;
+      prefix = found.prefix;
+      after = found.next;
     }
+    const table = this.table.clone();
     // A middleware that changed the path or method has its request routed again.
     const again = this.inner.clone();
     let next: __routerNext = async (r: Request) => {
@@ -1033,8 +1038,15 @@ class Router {
       }
       let routed = r;
       routed.params = params.clone();
-      const res = await handler(routed);
-      return res;
+      if (!prefix) {
+        const res = await handler(routed);
+        return res;
+      }
+      // A static route's 404 is a miss, passed on to the routes after it.
+      const res = await handler(routed.clone());
+      if (res.status !== 404) return res;
+      const rest = await Router.dispatch(table.clone(), routed, after);
+      return rest;
     };
     let chain = this.table.middleware.update((all) => all.map((m) => m.clone()));
     while (chain.length > 0) {
@@ -1049,28 +1061,41 @@ class Router {
     return res;
   }
 
-  // The first matching route's response; a HEAD request may run a GET route.
-  private static async dispatch(table: shared<__routerTable>, req: Request): Promise<Response> {
+  // The response of the first route from index start that matches; a HEAD request may run a GET
+  // route, and a static route's 404 is a miss, passed on to the routes after it.
+  private static async dispatch(table: shared<__routerTable>, req: Request, start: usize): Promise<Response> {
     const have = req.path.split("/");
-    const method = req.method;
-    const found = table.routes.update((t) => Router.find(t, method, have));
-    if (found === null) return new Response("Not Found\\n", { status: 404 });
-    const params = Router.decoded(found.params);
-    if (params === null) return new Response("Bad Request\\n", { status: 400 });
-    let routed = req;
-    routed.params = params;
-    const res = await found.handler(routed);
-    return res;
+    const method = req.method.clone();
+    let from = start;
+    while (true) {
+      const at = from;
+      const found = table.routes.update((t) => Router.find(t, method, have, at));
+      if (found === null) return new Response("Not Found\\n", { status: 404 });
+      const params = Router.decoded(found.params);
+      if (params === null) return new Response("Bad Request\\n", { status: 400 });
+      if (!found.prefix) {
+        let routed = req;
+        routed.params = params;
+        const res = await found.handler(routed);
+        return res;
+      }
+      let routed = req.clone();
+      routed.params = params;
+      const res = await found.handler(routed);
+      if (res.status !== 404) return res;
+      from = found.next;
+    }
   }
 
-  // The first route taking a method and path, its handler cloned, with the :params it reads.
-  private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>): { handler: ServeHandler; params: string[] } | null {
+  // The first route from index start taking a method and path, its handler cloned, with the
+  // :params it reads, whether it is a prefix route, and the index after it.
+  private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>, start: usize): { handler: ServeHandler; params: string[]; prefix: boolean; next: usize } | null {
     const head = method === "HEAD";
-    for (let i = 0; i < t.paths.length; i++) {
+    for (let i = start; i < t.paths.length; i++) {
       const want = t.methods[i];
       if (want !== "" && want !== method && !(head && want === "GET")) continue;
       const found = Router.match(t.paths[i], have, t.prefixes[i]);
-      if (found !== null) return { handler: t.handlers[i].clone(), params: found };
+      if (found !== null) return { handler: t.handlers[i].clone(), params: found, prefix: t.prefixes[i], next: i + 1 };
     }
     return null;
   }
@@ -1121,8 +1146,12 @@ async function __staticResponse(req: Request, skip: usize, root: string): Promis
   for (let i = skip; i < segments.length; i++) {
     const part = __urlDecodeStrict(segments[i]);
     if (part === null) return __staticMissing();
-    // A trailing slash names a directory; an empty segment anywhere else is refused.
-    if (part === "" && i + 1 === segments.length) continue;
+    // A trailing slash is kept, so it names only a directory; an empty segment anywhere else is
+    // refused.
+    if (part === "" && i + 1 === segments.length) {
+      parts.push(part);
+      continue;
+    }
     // A leading dot refuses '.', '..' and hidden files such as '.env'.
     if (part === "" || part.startsWith(".") || part.includes("/") || part.includes("\\\\") || part.includes("\\0")) return __staticMissing();
     parts.push(part);
@@ -1169,15 +1198,15 @@ function __staticFind(root: string, parts: Ref<string[]>): [string, i64, i64] | 
     const base = pathReal(root);
     const inside = base.endsWith("/") ? base : base + "/";
     let path = inside + parts.join("/");
-    let [size, mode, mtime, kind] = pathStat(path, true);
-    if (kind === 2) {
+    let stat = pathStat(path, true);
+    if (stat[3] === 2) {
       path = (path.endsWith("/") ? path : path + "/") + "index.html";
-      [size, mode, mtime, kind] = pathStat(path, true);
+      stat = pathStat(path, true);
     }
-    if (kind !== 1) return null;
+    if (stat[3] !== 1) return null;
     const real = pathReal(path);
     if (!real.startsWith(inside)) return null;
-    return [real, size, Math.floor(mtime) as i64];
+    return [real, stat[0], Math.floor(stat[2]) as i64];
   } catch (e) {
     return null;
   }
