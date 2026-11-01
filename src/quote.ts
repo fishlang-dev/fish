@@ -118,18 +118,28 @@ export function holesOf(typing: Typing, q: Quote, types: Record<Category, Type>,
 
 // The member of a union a node is: the object of its kind with all its fields, a string, an
 // array or a number.
-function memberFor({ unfold, field }: Typing, node: unknown, union: UnionType): Type | undefined {
-  const members = union.members.map(unfold);
+function memberFor({ unfold, field, rec }: Typing, node: unknown, union: UnionType): Type | undefined {
+  const all = rec(union).members;
+  const members = all.map(unfold);
   if (node === null || node === undefined) return members.includes("null") ? "null" : undefined;
-  if (Array.isArray(node)) return union.members.find((m) => typeof unfold(m) !== "string" && (unfold(m) as { kind: string }).kind === "array");
-  if (typeof node === "string") return union.members.find((m) => m === "string" || (typeof m !== "string" && m.kind === "literal" && m.value === node));
-  if (typeof node !== "object") return union.members.find((m) => typeof m === "string" && m !== "null");
+  if (Array.isArray(node)) return all.find((m) => {
+    const u = unfold(m);
+    return typeof u !== "string" && rec(u).kind === "array";
+  });
+  if (typeof node === "string") return all.find((m) => {
+    if (m === "string") return true;
+    const r = typeof m === "string" ? undefined : rec(m);
+    return r?.kind === "literal" && r.value === node;
+  });
+  if (typeof node !== "object") return all.find((m) => typeof m === "string" && m !== "null");
   const n = node as Record<string, unknown>;
-  return union.members.find((m) => {
+  return all.find((m) => {
     const o = unfold(m);
-    if (typeof o === "string" || o.kind !== "object") return false;
+    if (typeof o === "string") return false;
+    if (rec(o).kind !== "object") return false;
     const kind = field(o, "kind")?.type;
-    if (typeof n.kind === "string" && (typeof kind === "string" || kind?.kind !== "literal" || kind.value !== n.kind)) return false;
+    const kr = kind === undefined || typeof kind === "string" ? undefined : rec(kind);
+    if (typeof n.kind === "string" && (kr?.kind !== "literal" || kr.value !== n.kind)) return false;
     return Object.keys(n).every((k) => k === "id" || field(o, k) !== undefined);
   });
 }
@@ -143,18 +153,19 @@ function walk(typing: Typing, node: unknown, type: Type, types: Record<Category,
     return hole(name, "AstExpr");
   }
   if (node === null || node === undefined || typeof t === "string") return;
-  if (t.kind === "union") {
-    const splice = spliceIn(typing, node, t, types, q.asExpressions);
+  const r = typing.rec(t);
+  if (r.kind === "union") {
+    const splice = spliceIn(typing, node, r, types, q.asExpressions);
     if (splice) return hole(splice.i, splice.category);
-    const member = memberFor(typing, node, t);
+    const member = memberFor(typing, node, r);
     if (member) walk(typing, node, member, types, q, hole);
     return;
   }
-  if (t.kind === "array" && Array.isArray(node)) {
-    for (const x of node) walk(typing, x, t.element, types, q, hole);
+  if (r.kind === "array" && Array.isArray(node)) {
+    for (const x of node) walk(typing, x, r.element, types, q, hole);
     return;
   }
-  if (t.kind === "object") for (const f of t.fields) walk(typing, (node as Record<string, unknown>)[f.name], f.type, types, q, hole);
+  if (r.kind === "object") for (const f of r.fields) walk(typing, (node as Record<string, unknown>)[f.name], f.type, types, q, hole);
 }
 
 // The splice a node in a union's place stands for: a statement written as a splice alone, or a
@@ -163,7 +174,7 @@ function spliceIn(typing: Typing, node: unknown, t: UnionType, types: Record<Cat
   const n = node as { kind?: string; expr?: unknown };
   const member = memberFor(typing, node, t);
   const statements = typing.unfold(types.AstStmt) as UnionType;
-  if (n.kind === "expr" && spliceOf(n.expr) !== undefined && !asExpressions.has(spliceOf(n.expr)!) && member && statements.members.includes(member)) return { i: spliceOf(n.expr)!, category: "AstStmt" };
+  if (n.kind === "expr" && spliceOf(n.expr) !== undefined && !asExpressions.has(spliceOf(n.expr)!) && member && typing.rec(statements).members.includes(member)) return { i: spliceOf(n.expr)!, category: "AstStmt" };
   const i = spliceOf(node);
   if (i === undefined) return undefined;
   if ((node as { kind: string }).kind === "ident" && isUnionOf(typing, t, types.AstExpr)) return { i, category: "AstExpr" };
@@ -171,9 +182,11 @@ function spliceIn(typing: Typing, node: unknown, t: UnionType, types: Record<Cat
   return undefined;
 }
 
-function isUnionOf({ unfold }: Typing, t: Type, category: Type): boolean {
+function isUnionOf({ unfold, rec }: Typing, t: Type, category: Type): boolean {
   const c = unfold(category);
-  return typeof t !== "string" && t.kind === "union" && typeof c !== "string" && c.kind === "union" && c.members.every((m) => t.members.includes(m));
+  if (typeof t === "string" || typeof c === "string") return false;
+  const [tr, cr] = [rec(t), rec(c)];
+  return tr.kind === "union" && cr.kind === "union" && cr.members.every((m) => tr.members.includes(m));
 }
 
 // What a quote's tree is while compiling: records of the Ast types, every node given the
@@ -293,28 +306,29 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
   // `here` is the span of the node a part is in, where an error about the part is reported.
   const make = (node: unknown, type: Type, here: Span = at ?? { start: 0, end: 0 }): V => {
     const t = typing.unfolded(type);
-    if (typeof t !== "string" && t.kind === "union") {
+    const r = typeof t === "string" ? undefined : typing.rec(t);
+    if (r?.kind === "union") {
       if (node === null || node === undefined) return b.member(b.none, t, "null");
-      const splice = spliceIn(typing, node, t, types, q.asExpressions);
+      const splice = spliceIn(typing, node, r, types, q.asExpressions);
       if (splice) return b.splice(splice.i, type);
-      const member = memberFor(typing, node, t);
+      const member = memberFor(typing, node, r);
       if (!member) throw new Error("internal error: a quoted node fits no member of its Ast type");
       return b.member(make(node, member, here), t, member);
     }
     if (node === null || node === undefined || t === "null") return b.none;
     if (t === "string" && nameSplice(node) !== undefined) return b.name(nameSplice(node)!);
-    if (typeof t === "string") return t === "i64" ? b.int(inRange(BigInt(node as i64 | bigint), here)) : (node as V);
-    if (t.kind === "literal") return t.value as V;
-    if (t.kind === "array") return b.array((node as unknown[]).map((x) => make(x, t.element, here)));
-    if (t.kind !== "object") throw new Error(`internal error: an Ast field of type '${t.kind}'`);
+    if (r === undefined) return t === "i64" ? b.int(inRange(BigInt(node as i64 | bigint), here)) : (node as V);
+    if (r.kind === "literal") return r.value as V;
+    if (r.kind === "array") return b.array((node as unknown[]).map((x) => make(x, r.element, here)));
+    if (r.kind !== "object") throw new Error(`internal error: an Ast field of type '${r.kind}'`);
     const n = node as Record<string, unknown>;
     const own = !at && typeof n.start === "number" && typeof n.end === "number" ? { start: n.start, end: n.end } : here;
     const fields = new Map<string, V>();
-    for (const f of t.fields) {
+    for (const f of r.fields) {
       if (f.name === "start" || f.name === "end") fields.set(f.name, b.int(BigInt(at ? at[f.name] : (n[f.name] as usize))));
       else fields.set(f.name, make(n[f.name], f.type, own));
     }
-    return b.record(t, fields);
+    return b.record(t as ObjectType, fields);
   };
   return make(at && hygiene ? hygienic(ids, q.tree, OF[q.category], hygiene, Math.floor(at.start / FILE_SPAN), scope, free) : q.tree, types[q.category]);
 }

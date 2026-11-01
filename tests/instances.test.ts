@@ -41,7 +41,8 @@ test("abstract classes compile no call to what isn't compiled", () => {
 // to compare, so the net under them is tested directly: a comparison reaching an `equals`
 // that isn't compiled, through an object holding the class, is refused at its span.
 test("a comparison can't reach an equals that isn't compiled", () => {
-  const { classType, objectType } = newTyping();
+  const typing = newTyping();
+  const { classType, objectType } = typing;
   const shape = classType("Shape");
   shape.abstract = true;
   const equals = { body: { name: "Shape.equals", owner: shape }, bindings: new Map() } as unknown as Instance;
@@ -52,8 +53,8 @@ test("a comparison can't reach an equals that isn't compiled", () => {
   const held = objectType([{ name: "s", type: shape }]);
   const types = new NodeMap<Expr, Type>([[left!, held], [right!, held], [compare, "boolean"]]);
   const caller = { body: { name: "check" }, bindings: new Map(), calls: new NodeMap(), setters: new NodeMap(), types } as unknown as Instance;
-  expect(() => unreached(equalities, [caller], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));
-  expect(() => unreached(equalities, [caller], () => false)).not.toThrow();
+  expect(() => unreached(typing, equalities, [caller], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));
+  expect(() => unreached(typing, equalities, [caller], () => false)).not.toThrow();
 });
 
 // An instance's symbol is its name and the FNV-1a digest of its type arguments, so it is the same

@@ -34,7 +34,7 @@ export type LiteralValue = string | bigint | boolean | f64 | null;
 export type Shape = ObjectType | ClassType | ParamType;
 
 // A pattern's information with each type it holds as an instance sees it.
-export function lowerPattern({ lower }: Typing, info: PatternInfo): PatternInfo {
+export function lowerPattern({ lower, rec }: Typing, info: PatternInfo): PatternInfo {
   const type = lower(info.type);
   if (info.kind === "variant") return { ...info, type, variant: lower(info.variant) as VariantType };
   if (info.kind === "some") return { ...info, type, inner: lower(info.inner) };
@@ -42,7 +42,11 @@ export function lowerPattern({ lower }: Typing, info: PatternInfo): PatternInfo 
     const shapes = info.shapes.map(lower);
     // An interface's field may be an accessor in the instance that meets it.
     for (const [key, p] of info.fields) {
-      if (shapes.some((s) => typeof s !== "string" && s.kind === "class" && !objectFields(s).some((f) => f.name === key))) throw unsupported("object patterns reading a field a getter provides", p);
+      const getter = (s: Type) => {
+        const r = typeof s === "string" ? undefined : rec(s);
+        return r?.kind === "class" && !objectFields(r).some((f) => f.name === key);
+      };
+      if (shapes.some(getter)) throw unsupported("object patterns reading a field a getter provides", p);
     }
     return { ...info, type, shapes, fields: info.fields.map(([k, p, t]) => [k, p, lower(t)]) };
   }
@@ -96,16 +100,19 @@ type Case =
   | { kind: "open"; type: Type };
 
 function cases(typing: Typing, t: Type): Case[] {
-  const { literalType, unionType } = typing;
+  const { literalType, rec, unionType } = typing;
   if (t === "boolean") return [literalType(true), literalType(false)].map((type) => ({ kind: "literal", type }));
-  const members = typeof t !== "string" && t.kind === "union" ? t.members : [t];
+  const r = typeof t === "string" ? undefined : rec(t);
+  const members = r?.kind === "union" ? r.members : [t];
   if (members.includes("null") && members.length > 1) return [{ kind: "none" }, { kind: "some", inner: unionType(members.filter((m) => m !== "null")) }];
   return members.flatMap((m): Case[] => {
     if (m === "boolean") return cases(typing, m);
     if (m === "null") return [{ kind: "none" }];
-    if (typeof m !== "string" && m.kind === "literal") return [{ kind: "literal", type: m }];
-    if (typeof m !== "string" && m.kind === "variant") return [{ kind: "variant", variant: m }];
-    if (typeof m !== "string" && (m.kind === "object" || m.kind === "class" || (m.kind === "param" && (m.bound?.kind === "object" || m.bound?.kind === "interface")))) return [{ kind: "object", type: m }];
+    if (typeof m === "string") return [{ kind: "open", type: m }];
+    const r = rec(m);
+    if (r.kind === "literal") return [{ kind: "literal", type: r }];
+    if (r.kind === "variant") return [{ kind: "variant", variant: r }];
+    if (r.kind === "object" || r.kind === "class" || (r.kind === "param" && (r.bound?.kind === "object" || r.bound?.kind === "interface"))) return [{ kind: "object", type: r }];
     return [{ kind: "open", type: m }];
   });
 }

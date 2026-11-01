@@ -46,8 +46,6 @@ export function isPrint(callee: Expr): boolean {
 // Where a print writes: stdout, or stderr for `console.error` and `console.warn`.
 export const printStream = (callee: Expr): 1 | 2 => (callee.kind === "member" && callee.name !== "log" ? 2 : 1);
 
-const isRefType = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
-
 // Whether a value of the type can hold a float anywhere inside it.
 function holdsFloat(typing: Typing, t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): boolean {
   if (typeof t === "string") return isFloat(t);
@@ -60,8 +58,6 @@ function holdsFloat(typing: Typing, t: Type, seen: TypeSet<Type> = new TypeSet<T
   return parts.some((p) => holdsFloat(typing, p, seen));
 }
 
-const printable = (t: Type): boolean =>
-  typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || (t.kind === "union" && t.members.every(printable));
 
 // What expression checking needs from the program and the function it is in.
 export type Context = {
@@ -224,11 +220,11 @@ const REGEX_METHODS = new Set(["replace", "replaceAll", "split", "match", "match
 
 // What a string method given a regex gives, from the regex: one whose captures aren't known may
 // have one that takes no part. Each instance of a generic body works it out from its own regex.
-export function regexStringType({ unionType, arrayType, matchType }: Typing, name: string, rx: RegexType, unknown: boolean): Type {
+export function regexStringType({ rec, unionType, arrayType, matchType }: Typing, name: string, rx: RegexType, unknown: boolean): Type {
   if (name === "search") return "i64";
-  if (name === "match") return rx.flags.includes("g") ? unionType([arrayType("string"), "null"]) : unionType([matchType(rx), "null"]);
+  if (name === "match") return rec(rx).flags.includes("g") ? unionType([arrayType("string"), "null"]) : unionType([matchType(rx), "null"]);
   if (name === "matchAll") return arrayType(matchType(rx));
-  if (name === "split") return arrayType(rx.captures.some((c) => c.optional) || unknown ? unionType(["string", "null"]) : "string");
+  if (name === "split") return arrayType(rec(rx).captures.some((c) => c.optional) || unknown ? unionType(["string", "null"]) : "string");
   return "string";
 }
 // A regex's flag properties, by the flag each reads.
@@ -282,15 +278,37 @@ export function expressions(ctx: Context) {
     syncFileCalls, tagCalls, timerCalls, timerNames, timerSets, timerWrappers, tupleLiterals,
     unusedDefaults, restStarts, upcasts, typing, ids, regex, files
   } = ctx.tables;
-  const { allFields, baseOf, derives, elementsOf, field, holdsHandle, holdsInterior, holdsMut, holdsPart, interiorMutable, isCopy, isOption, isPlainJs, isTuple, jsShape, optionRef, unequal, unfold, uninspectable, widenEnum, widenLet,
+  const { rec, allFields, baseOf, derives, elementsOf, field, holdsHandle, holdsInterior, holdsMut, holdsPart, interiorMutable, isCopy, isOption, isPlainJs, isTuple, jsShape, optionRef, unequal, unfold, uninspectable, widenEnum, widenLet,
     show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, pointerType, handleType, leafFuture,
     arrayType, timerCallback, jsUncalled, fits, jsTakes, promiseElement, genericFunctionType, stored: storedType, matchType, functionType, tupleType, regexType,
     holdsPattern, unjson, sameLowered, heldArgument, jsUntyped, jsOptional, uncrossable, keptByJs, jsConverts, interiorType, lockCallbacks, sharedCallbacks,
     combinedFuture, nextResult, lentPromise, promiseInterface, generatorElement, membersFor, wrapped, jsRead, literalType, objectType, sameCallable, partOfItself, unlocks, keyOf, joinedType,
   } = typing;
-  const isCallable = (t: Type) => typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of);
+  const recOf = <T extends Type>(t: T | undefined) => (t === undefined || typeof t === "string" ? undefined : rec(t as Exclude<T, string>));
+  const isRefType = (t: Type): t is RefType => recOf(t)?.kind === "ref";
+  const isArray = (t: Type): t is ArrayType => recOf(t)?.kind === "array";
+  const isFixed = (t: Type): t is FixedType => recOf(t)?.kind === "fixed";
+  const printable = (t: Type): boolean => {
+    const r = recOf(t);
+    return r === undefined || r.kind === "literal" || r.kind === "pattern" || (r.kind === "union" && r.members.every(printable));
+  };
+  // The function type a type parameter is bounded by, if it is.
+  const boundFunction = (t: Type) => {
+    const r = recOf(t);
+    const bound = r?.kind === "param" ? r.bound : undefined;
+    return recOf(bound)?.kind === "function" ? (bound as FunctionType) : undefined;
+  };
+  // A type parameter no instance has given a type yet, as a generic body's definition holds.
+  const placeholder = (t: Type) => {
+    const r = recOf(t);
+    return r?.kind === "param" && r.concrete === undefined;
+  };
+  const isCallable = (t: Type) => {
+    const r = recOf(t);
+    return r?.kind === "dyn" && callableOf.has(r.of);
+  };
   // Whether a value holds a future, which an array element or a sort's order can't be.
-  const holdsFuture = (t: Type): boolean => typeof t !== "string" && (t.kind === "future" || promiseElement(t) !== undefined);
+  const holdsFuture = (t: Type): boolean => typeof t !== "string" && (rec(t).kind === "future" || promiseElement(t) !== undefined);
   const { types, locals, coercions, calls, setters, byName, classes, enums, construct, members, returnOf, resultOf, sourcesOf, borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup } = ctx;
   const { self, owner, superCall, thisReady, proves, assume, narrowed, reachable, captured, closing, changesCapture, noteThis, raise, errorOf, thrown, rewritten, depthOf, closure, closureBody, implicitOf, resolveType, constructs } = ctx;
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
@@ -416,13 +434,14 @@ export function expressions(ctx: Context) {
     // Callers pass what a parameter list has, which may run out.
     if (t !== undefined) t = unfolded(t);
     // A literal lent to a reference is a temporary of the type it refers to.
-    if ((e.kind === "object" || e.kind === "array") && isRefType(t)) t = unfolded(t.to);
+    if ((e.kind === "object" || e.kind === "array") && isRefType(t)) t = unfolded(rec(t).to);
     // A generic function value meeting a function type that isn't generic is the one instance
     // that type gives it: an arrow calling it, its parameters typed from there.
-    if (t !== undefined && typeof t !== "string" && ((t.kind === "function" && !t.generic) || (isCallable(t) && !callableOf.get((t as DynType).of)?.generic))) instanceArrow(e);
-    if (e.kind === "arrow" && typeof t !== "string" && t.kind === "function") expecting.set(e, t);
+    const r = recOf(t);
+    if ((r?.kind === "function" && !r.generic) || (r?.kind === "dyn" && isCallable(t) && !callableOf.get(r.of)?.generic)) instanceArrow(e);
+    if (e.kind === "arrow" && r?.kind === "function") expecting.set(e, r);
     // An object literal meeting a JS shape, or an Option of one, takes the types of its fields.
-    const shapes = t === undefined ? [] : (typeof t !== "string" && t.kind === "union" ? t.members : [t]).flatMap((m) => jsShape(m) ?? []);
+    const shapes = t === undefined ? [] : (r?.kind === "union" ? r.members : [t]).flatMap((m) => jsShape(m) ?? []);
     if (e.kind === "object" && shapes.length === 1) {
       for (const p of e.props) {
         const declared = p.kind === "property" ? shapes[0]!.fields.find((f) => f.name === p.key)?.type : undefined;
@@ -436,40 +455,44 @@ export function expressions(ctx: Context) {
     if (t !== undefined && e.kind === "unary" && e.op === "await" && makesPromise(e.operand)) awaitedAs.set(e.operand, t);
     // An arrow for a union holding one callable, like an optional callback, is stored as that
     // callable.
-    const callables = e.kind === "arrow" && typeof t !== "string" && t?.kind === "union" ? t.members.filter(isCallable) : [];
+    const callables = e.kind === "arrow" && r?.kind === "union" ? r.members.filter(isCallable) : [];
     if (callables.length === 1) t = callables[0]!;
     // A value written where a Dyn is wanted, as an object literal's field, is boxed into it there.
     const box = t === undefined ? undefined : boxedIn(t);
     if (e.kind !== "arrow" && box) wanted.set(e, box);
     // An arrow written where a callable is stored captures by move: the callable owns it all.
-    if (e.kind === "arrow" && typeof t !== "string" && t.kind === "dyn" && callableOf.has(t.of)) {
-      expecting.set(e, callableOf.get(t.of)!);
+    const stored = recOf(t);
+    if (e.kind === "arrow" && stored?.kind === "dyn" && callableOf.has(stored.of)) {
+      expecting.set(e, callableOf.get(stored.of)!);
       owning.add(e);
       wanted.set(e, t);
     }
     // An array literal where a union is expected is expected to be its one array, tuple or fixed
     // array member of a length the literal could have.
-    if (e.kind === "array" && typeof t !== "string" && t.kind === "union") {
-      const fitting = t.members.filter((m) => couldHold(m, e));
+    const union = recOf(t);
+    if (e.kind === "array" && union?.kind === "union") {
+      const fitting = union.members.filter((m) => couldHold(m, e));
       if (fitting.length === 1) t = fitting[0]!;
     }
     // An array literal's elements are expected to be its element type, and an object literal's
     // properties their fields'.
     if (e.kind === "array" && isArray(t)) {
-      wanted.set(e, t.element);
-      for (const x of e.elements) if (x) expect(x.kind === "spread" ? x.value : x, x.kind === "spread" ? t : t.element);
+      wanted.set(e, rec(t).element);
+      for (const x of e.elements) if (x) expect(x.kind === "spread" ? x.value : x, x.kind === "spread" ? t : rec(t).element);
     }
     // A literal where a fixed array is expected is that fixed array; an Option or union holding
     // one fixed array expects that one.
-    if ((e.kind === "array" || e.kind === "call") && typeof t !== "string" && t.kind === "union" && t.members.filter(isFixed).length === 1) t = t.members.find(isFixed)!;
+    const holdingFixed = recOf(t);
+    if ((e.kind === "array" || e.kind === "call") && holdingFixed?.kind === "union" && holdingFixed.members.filter(isFixed).length === 1) t = holdingFixed.members.find(isFixed)!;
     if (e.kind === "array" && isFixed(t)) {
       fixedLiterals.set(e, t);
-      for (const x of e.elements) if (x) expect(x, t.element);
+      for (const x of e.elements) if (x) expect(x, rec(t).element);
     }
     if (e.kind === "call" && isFixed(t)) wanted.set(e, t);
     // A literal where a tuple is expected is that tuple, each element expected to be its own; an
     // Option or union holding one tuple expects that tuple.
-    if ((e.kind === "array" || tupleLiterals.has(e)) && typeof t !== "string" && t.kind === "union" && t.members.filter(isTuple).length === 1) t = t.members.find(isTuple)!;
+    const holdingTuple = recOf(t);
+    if ((e.kind === "array" || tupleLiterals.has(e)) && holdingTuple?.kind === "union" && holdingTuple.members.filter(isTuple).length === 1) t = holdingTuple.members.find(isTuple)!;
     if ((e.kind === "array" || tupleLiterals.has(e)) && isTuple(t)) {
       tuples.set(e, t as ObjectType);
       const elements = elementsOf(t as ObjectType);
@@ -485,11 +508,11 @@ export function expressions(ctx: Context) {
     // An object literal where a union is expected is expected to be the member it names: the one
     // with all its names whose literal fields its literals match.
     if (e.kind === "object") t = memberNamed(e, t) ?? t;
-    if (e.kind === "object" && typeof t !== "string" && (t.kind === "object" || t.kind === "class")) {
+    if (e.kind === "object" && typeof t !== "string" && (rec(t).kind === "object" || rec(t).kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && field(t, p.key)) expect(p.value, field(t, p.key)!.type);
     }
-    if (e.kind === "new" && typeof t !== "string" && (t.kind === "interior" || t.kind === "block" || t.kind === "map")) wanted.set(e, t);
-    if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "shared" && typeof t !== "string" && t.kind === "shared") wanted.set(e, t);
+    if (e.kind === "new" && typeof t !== "string" && (rec(t).kind === "interior" || rec(t).kind === "block" || rec(t).kind === "map")) wanted.set(e, t);
+    if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "shared" && typeof t !== "string" && rec(t).kind === "shared") wanted.set(e, t);
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !lookup(built.object.name) && enums.get(built.object.name)?.data) wanted.set(built, t);
   }
@@ -497,17 +520,19 @@ export function expressions(ctx: Context) {
   // The member of a union an object literal names: the one with all its names whose literal
   // fields its literals match.
   function memberNamed(e: Extract<Expr, { kind: "object" }>, t: Type): ObjectType | undefined {
-    if (typeof t === "string" || t.kind !== "union") return undefined;
+    const union = recOf(t);
+    if (union?.kind !== "union") return undefined;
     const props = e.props.filter((p): p is Extract<typeof p, { kind: "property" }> => p.kind === "property" && typeof p.key === "string");
-    const named = t.members.map(unfold).filter((m): m is ObjectType => typeof m !== "string" && m.kind === "object" && props.every((p) => field(m, p.key as string)));
+    const named = union.members.map(unfold).filter((m): m is ObjectType => recOf(m)?.kind === "object" && props.every((p) => field(rec(m as ObjectType), p.key as string)));
     // A field of one literal, or of a union of literals as `kind: "as" | "satisfies"` is, names
     // the member only for a string among them.
     const matching = named.filter((m) => props.every((p) => {
       const f = field(m, p.key as string)!.type;
-      const isLiteral = (l: Type): l is LiteralType => typeof l !== "string" && l.kind === "literal";
-      const literals = isLiteral(f) ? [f] : typeof f !== "string" && f.kind === "union" && f.members.every(isLiteral) ? f.members as LiteralType[] : [];
+      const isLiteral = (l: Type): l is LiteralType => recOf(l)?.kind === "literal";
+      const r = recOf(f);
+      const literals = isLiteral(f) ? [f] : r?.kind === "union" && r.members.every(isLiteral) ? r.members as LiteralType[] : [];
       const value = p.value.kind === "string" ? p.value.value : undefined;
-      return literals.length === 0 || literals.some((l) => l.value === value);
+      return literals.length === 0 || literals.some((l) => rec(l).value === value);
     }));
     return matching.length === 1 ? matching[0] : undefined;
   }
@@ -517,11 +542,11 @@ export function expressions(ctx: Context) {
     if (isArray(t)) return true;
     const n = e.elements.length;
     const spread = e.elements.some((x) => x?.kind === "spread");
-    if (isFixed(t)) return spread || n === t.size;
+    if (isFixed(t)) return spread || n === rec(t).size;
     if (!isTuple(t)) return false;
     const tuple = t as ObjectType;
     const count = elementsOf(tuple).length;
-    return spread || (n >= (tuple.required ?? count) && (tuple.rest !== undefined || n <= count));
+    return spread || (n >= (rec(tuple).required ?? count) && (rec(tuple).rest !== undefined || n <= count));
   }
 
   // What a match arm gives: its expression, or each value its block's `return`s give, leaving
@@ -555,7 +580,8 @@ export function expressions(ctx: Context) {
       const { type } = call(e);
       // A parse read only to check the text still makes its value, which is then dropped.
       if (jsonCalls.get(e) === "parse") types.set(e, type);
-      if (typeof type !== "string" && type.kind === "future" && leafOf.has(type)) {
+      const r = recOf(type);
+      if (r?.kind === "future" && leafOf.has(r)) {
         throw new CompileError("this Promise does nothing until it's awaited, since Fish's promises are lazy; add 'await'", e.start, e.end);
       }
     } else if (e.kind === "match") match(e, false);
@@ -594,7 +620,7 @@ export function expressions(ctx: Context) {
     if (numeric) given.forEach(([v, t], i) => t !== numeric && adapt(v, numeric) && (types[i] = numeric));
     for (let i = 0; i < given.length; i++) given[i]![1] = types[i]!;
     const type = types.every((t) => t === types[0]) ? types[0]! : unionType(types);
-    if (type !== types[0] && types.some((t) => typeof t !== "string" && t.kind === "closure")) throw unsupported("unions holding functions", e);
+    if (type !== types[0] && types.some((t) => typeof t !== "string" && rec(t).kind === "closure")) throw unsupported("unions holding functions", e);
     if (holdsRef(type)) throw new CompileError(`a match can't give a reference it binds yet; ${holdsHandle(type, true) ? "match on a value just made to move its parts out" : "give a copy with '.clone()', or a field of it"}`, e.start, e.subject.end + 1);
     for (const [v, t] of given) if (t !== type) coerce(v, t, type, `this arm's '${show(t)}' doesn't fit the match's '${show(type)}'`);
     return type;
@@ -751,7 +777,8 @@ export function expressions(ctx: Context) {
   // reference to it.
   function pattern(p: Pattern, type: Type, borrowing: boolean) {
     const record = (test: PatternTest) => ctx.patterns.set(p, { type, ...test });
-    const members = typeof type !== "string" && type.kind === "union" ? type.members : [type];
+    const whole = recOf(type);
+    const members = whole?.kind === "union" ? whole.members : [type];
     const optional = members.includes("null");
     const never = () => new CompileError(`this pattern can never match a '${show(type)}'`, p.start, p.end);
     switch (p.kind) {
@@ -759,14 +786,17 @@ export function expressions(ctx: Context) {
         return record({ kind: "any" });
       case "ident": {
         const unit = variantNamed(members, p.name);
-        if (unit && unit.fields.length === 0) return record({ kind: "variant", variant: unit, args: [] });
+        if (unit && rec(unit).fields.length === 0) return record({ kind: "variant", variant: unit, args: [] });
         if (p.name === "None" && optional) return record({ kind: "none" });
         // A C-like enum's member may be named bare too, as a data enum's unit member may.
-        const named = members.filter((m): m is LiteralType => typeof m !== "string" && m.kind === "literal" && m.owner?.member === p.name);
+        const named = members.filter((m): m is LiteralType => {
+          const r = recOf(m);
+          return r?.kind === "literal" && r.owner?.member === p.name;
+        });
         if (named.length > 1) {
-          throw new CompileError(`'${p.name}' is a member of ${named.map((m) => `'${m.owner!.enum}'`).join(" and ")}; name which, as '${named[0]!.owner!.enum}.${p.name}'`, p.start, p.end);
+          throw new CompileError(`'${p.name}' is a member of ${named.map((m) => `'${rec(m).owner!.enum}'`).join(" and ")}; name which, as '${rec(named[0]!).owner!.enum}.${p.name}'`, p.start, p.end);
         }
-        if (named[0]) return record({ kind: "literal", value: named[0].value, member: named[0] });
+        if (named[0]) return record({ kind: "literal", value: rec(named[0]).value, member: named[0] });
         ctx.bind(p.name, borrowing && !isCopy(type) ? refType(type, false) : type, p as Expr);
         return record({ kind: "any" });
       }
@@ -798,15 +828,15 @@ export function expressions(ctx: Context) {
         const member = enumMember(p);
         if (member) {
           if (!comparable(typing, type, member)) throw never();
-          return record({ kind: "literal", value: member.value, member });
+          return record({ kind: "literal", value: rec(member).value, member });
         }
         const v = variantNamed(members, p.name);
         if (!v) throw never();
         const args = p.args ?? [];
-        if (args.length !== v.fields.length) {
-          throw new CompileError(`'${v.name}' holds ${v.fields.length} value${v.fields.length === 1 ? "" : "s"}, so its pattern takes ${v.fields.length}`, p.start, p.end);
+        if (args.length !== rec(v).fields.length) {
+          throw new CompileError(`'${rec(v).name}' holds ${rec(v).fields.length} value${rec(v).fields.length === 1 ? "" : "s"}, so its pattern takes ${rec(v).fields.length}`, p.start, p.end);
         }
-        args.forEach((a, i) => pattern(a, v.fields[i]!.type, borrowing));
+        args.forEach((a, i) => pattern(a, rec(v).fields[i]!.type, borrowing));
         return record({ kind: "variant", variant: v, args });
       }
       // An object pattern tests the members that hold every field it names; each field's pattern
@@ -820,10 +850,13 @@ export function expressions(ctx: Context) {
         // A member is ruled out by a field it lacks, or by a literal field the pattern's literal
         // contradicts, as a discriminant does.
         const shapes = members.filter((m): m is Shape => {
-          if (typeof m === "string" || !(m.kind === "object" || m.kind === "class" || (m.kind === "param" && (m.bound?.kind === "object" || m.bound?.kind === "interface")))) return false;
+          const r = recOf(m);
+          const bound = r?.kind === "param" ? recOf(r.bound) : undefined;
+          if (!(r?.kind === "object" || r?.kind === "class" || bound?.kind === "object" || bound?.kind === "interface")) return false;
           return p.props.every((prop, i) => {
-            const field = objectFields(m).find((f) => f.name === keys[i]);
-            const known = field && typeof field.type !== "string" && field.type.kind === "literal" ? field.type : undefined;
+            const field = objectFields(rec(m as Shape)).find((f) => f.name === keys[i]);
+            const r = field ? recOf(field.type) : undefined;
+            const known = r?.kind === "literal" ? r : undefined;
             return field && !(known && prop.value.kind === "literal" && literalOf(prop.value.value) !== known.value);
           });
         });
@@ -842,8 +875,9 @@ export function expressions(ctx: Context) {
         if (members.some(isTuple)) throw new CompileError("array patterns over tuples in 'match' are not supported yet; take the tuple apart first, as in 'const [a, b] = t'", p.start, p.end);
         if (!array || members.length > 1) throw never();
         const items = p.elements as Pattern[];
-        for (const item of items) pattern(item, array.element, borrowing);
-        return record({ kind: "array", element: array.element, items });
+        const { element } = rec(array);
+        for (const item of items) pattern(item, element, borrowing);
+        return record({ kind: "array", element, items });
       }
       case "or":
         for (const alt of p.patterns) pattern(alt, type, borrowing);
@@ -865,7 +899,10 @@ export function expressions(ctx: Context) {
     const parts = name.split(".");
     const member = parts.at(-1)!;
     const owner = parts.length > 1 ? parts.slice(0, -1).join(".") : undefined;
-    return members.find((m): m is VariantType => typeof m !== "string" && m.kind === "variant" && m.member === member && (owner === undefined || m.enum === owner));
+    return members.find((m): m is VariantType => {
+      const r = recOf(m);
+      return r?.kind === "variant" && r.member === member && (owner === undefined || r.enum === owner);
+    });
   }
 
   // Checks a call: what it returns, and how a message names what it calls. A method called in
@@ -890,7 +927,7 @@ export function expressions(ctx: Context) {
     if (e.optional) throw unsupported("optional calls", e);
     if (callee.kind === "super") {
       if (e !== superCall) throw new CompileError("'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
-      const base = classOf(self!.type.base!);
+      const base = classOf(rec(self!.type).base!);
       types.set(callee, base.type);
       if (base.constructor.params.at(-1)?.rest) packRest(e, e.args, base.constructor.params);
       else refuseSpread(e.args);
@@ -1004,7 +1041,7 @@ export function expressions(ctx: Context) {
         filling.delete(e);
       }
       const t = lower(types.get(x)!);
-      if (typeof t !== "string" && t.kind === "generator") throw new CompileError("'new Array(n).fill(x)' puts a clone of x in every slot, and a generator can't be cloned: it runs once", x.start, x.end);
+      if (typeof t !== "string" && rec(t).kind === "generator") throw new CompileError("'new Array(n).fill(x)' puts a clone of x in every slot, and a generator can't be cloned: it runs once", x.start, x.end);
       clonable(t, x);
       return result;
     }
@@ -1017,7 +1054,7 @@ export function expressions(ctx: Context) {
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? receiverType(callee) : undefined;
     if (callee.kind === "member" && callee.name === "clone" && receiver && copies(receiver)) return cloned(e, callee, receiver);
-    if (callee.kind === "member" && receiver !== undefined && stringLike(receiver)) return stringCall(e, callee, receiver);
+    if (callee.kind === "member" && receiver !== undefined && stringLike(typing, receiver)) return stringCall(e, callee, receiver);
     // A bigint's digits, in base 10 or the radix given.
     if (callee.kind === "member" && receiver === "bigint") {
       if (callee.name !== "toString") throw new CompileError(`'bigint' has no method '${callee.name}'`, callee.start, callee.end);
@@ -1026,15 +1063,16 @@ export function expressions(ctx: Context) {
       return { type: "string", what: "'toString'" };
     }
     if (callee.kind === "member" && receiver !== undefined && isArray(receiver)) return arrayCall(e, callee, receiver);
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "map" && callee.name !== "clone") return mapCall(e, callee, receiver);
+    const recv = recOf(receiver);
+    if (callee.kind === "member" && recv?.kind === "map" && callee.name !== "clone") return mapCall(e, callee, recv);
     if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver) !== undefined) return generatorCall(e, callee, receiver, yieldsOf(receiver)!);
-    if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver, true) !== undefined && (typeof receiver === "string" || receiver.kind !== "dyn")) return generatorCall(e, callee, receiver, yieldsOf(receiver, true)!, true);
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "pointer") return pointerCall(e, callee, receiver);
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "interior") return interiorCall(e, callee, receiver);
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "shared") return sharedCall(e, callee, receiver);
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "block") return blockCall(e, callee, receiver);
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "handle" && callee.name !== "clone") return handleCall(e, callee, receiver);
-    if (callee.kind === "member" && callee.name !== "clone" && typeof receiver !== "string" && receiver?.kind === "dyn") return dynCall(e, callee, receiver);
+    if (callee.kind === "member" && receiver !== undefined && yieldsOf(receiver, true) !== undefined && recv?.kind !== "dyn") return generatorCall(e, callee, receiver, yieldsOf(receiver, true)!, true);
+    if (callee.kind === "member" && recv?.kind === "pointer") return pointerCall(e, callee, recv);
+    if (callee.kind === "member" && recv?.kind === "interior") return interiorCall(e, callee, recv);
+    if (callee.kind === "member" && recv?.kind === "shared") return sharedCall(e, callee, recv);
+    if (callee.kind === "member" && recv?.kind === "block") return blockCall(e, callee, recv);
+    if (callee.kind === "member" && recv?.kind === "handle" && callee.name !== "clone") return handleCall(e, callee, recv);
+    if (callee.kind === "member" && callee.name !== "clone" && recv?.kind === "dyn") return dynCall(e, callee, recv);
     if (callee.kind === "ident" && callee.name === "shared" && !lookup(callee.name) && !byName.has("shared")) return sharedNew(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(lower(receiver))) {
       const n = lower(receiver);
@@ -1048,13 +1086,14 @@ export function expressions(ctx: Context) {
       throw new CompileError(`a FixedArray has no method '${callee.name}' yet; loop over it with 'for...of', or read 'length'`, callee.start, callee.end);
     }
     // A field holding a stored callable, through an object-typed parameter's bound too.
-    if (callee.kind === "member" && typeof receiver !== "string" && receiver?.kind === "param" && receiver.bound?.kind === "object") {
-      const stored = field(receiver.bound, callee.name);
-      const held = stored && lower(isRefType(stored.type) ? stored.type.to : stored.type);
+    const bound = recv?.kind === "param" ? recOf(recv.bound) : undefined;
+    if (callee.kind === "member" && bound?.kind === "object") {
+      const stored = field(bound, callee.name);
+      const held = stored && lower(isRefType(stored.type) ? rec(stored.type).to : stored.type);
       if (held && isCallable(held)) return callableCall(e, callee, held as DynType);
     }
-    if (callee.kind === "member" && typeof receiver !== "string" && (receiver?.kind === "param" || receiver?.kind === "interface")) {
-      return traitCall(e, callee, receiver);
+    if (callee.kind === "member" && (recv?.kind === "param" || recv?.kind === "interface")) {
+      return traitCall(e, callee, recv);
     }
     // A nested function's call of itself comes before any outer name it shares.
     const itself = callee.kind === "ident" ? ctx.selfCall(e) : undefined;
@@ -1066,34 +1105,34 @@ export function expressions(ctx: Context) {
     const lifted = (callee.kind === "ident" ? (lookup(callee.name)?.generic as Body | undefined) : undefined) ?? genericTarget(callee, receiver);
     if (callee.kind === "ident" && !lifted && lookup(callee.name)) return closureCall(e, callee);
     // A field holding a stored callable, `this.onClick(e)`, when no method has that name.
-    if (callee.kind === "member" && receiver !== undefined && typeof receiver !== "string" && (receiver.kind === "class" || receiver.kind === "object")) {
-      const stored = field(receiver, callee.name);
-      const method = receiver.kind === "class" && inherited(classOf(receiver), "methods", callee.name);
-      const held = stored && lower(isRefType(stored.type) ? stored.type.to : stored.type);
+    if (callee.kind === "member" && receiver !== undefined && (recv?.kind === "class" || recv?.kind === "object")) {
+      const stored = field(recv, callee.name);
+      const method = recv.kind === "class" && inherited(classOf(recv), "methods", callee.name);
+      const held = stored && lower(isRefType(stored.type) ? rec(stored.type).to : stored.type);
       if (held && !method && isCallable(held)) return callableCall(e, callee, held as DynType);
     }
     if (callee.kind !== "ident" && callee.kind !== "member") {
       const given = value(callee);
-      const held = lower(isRefType(given) ? given.to : given);
+      const held = lower(isRefType(given) ? rec(given).to : given);
       if (isCallable(held)) return callableCall(e, callee, held as DynType);
-      if (typeof held !== "string" && held.kind === "closure") return closureCall(e, callee, given);
+      if (typeof held !== "string" && rec(held).kind === "closure") return closureCall(e, callee, given);
     }
     // `Shape.Circle(1.5)` builds a variant from its payload.
     const named = callee.kind === "member" && callee.object.kind === "ident" && !lookup(callee.object.name) ? enums.get(callee.object.name) : undefined;
     if (named?.data && callee.kind === "member") {
       const ahead = expectedVariant(callee, named);
-      if (ahead) e.args.forEach((a, i) => ahead.fields[i] && expect(a, ahead.fields[i]!.type));
+      if (ahead) e.args.forEach((a, i) => rec(ahead).fields[i] && expect(a, rec(ahead).fields[i]!.type));
       const given = e.args.map(value);
       const v = variant(callee, named, false, given, e.typeArgs);
-      if (e.args.length !== v.fields.length) {
-        throw new CompileError(`'${v.name}' holds ${v.fields.length} value${v.fields.length === 1 ? "" : "s"}, but ${e.args.length} ${e.args.length === 1 ? "was" : "were"} given`, e.start, e.end);
+      if (e.args.length !== rec(v).fields.length) {
+        throw new CompileError(`'${rec(v).name}' holds ${rec(v).fields.length} value${rec(v).fields.length === 1 ? "" : "s"}, but ${e.args.length} ${e.args.length === 1 ? "was" : "were"} given`, e.start, e.end);
       }
       e.args.forEach((a, i) => {
         const t = given[i]!;
-        coerce(a, t, v.fields[i]!.type, `argument of type '${show(t)}' is not assignable to '${v.name}', which holds '${show(v.fields[i]!.type)}'`);
+        coerce(a, t, rec(v).fields[i]!.type, `argument of type '${show(t)}' is not assignable to '${rec(v).name}', which holds '${show(rec(v).fields[i]!.type)}'`);
       });
       types.set(callee, v);
-      return { type: v, what: `'${v.name}'` };
+      return { type: v, what: `'${rec(v).name}'` };
     }
     // `ptrOf(r)` and `mutPtrOf(m)`: a raw pointer to what a reference, or a place, holds. Making
     // one is safe; the borrow lasts only for the call.
@@ -1104,10 +1143,10 @@ export function expressions(ctx: Context) {
       const t = value(a);
       // A type parameter may stand for a reference in one instance and a value in another, and
       // the two point at different things.
-      if (typeof t !== "string" && t.kind === "param") throw unsupported(`'${callee.name}' calls on values whose type is a type parameter`, a);
+      if (typeof t !== "string" && rec(t).kind === "param") throw unsupported(`'${callee.name}' calls on values whose type is a type parameter`, a);
       if (isRefType(t)) {
-        if (mutable && !t.mutable) throw new CompileError("'mutPtrOf' needs a 'Mut' reference, or a place that may change", a.start, a.end);
-        return { type: pointerType(t.to, mutable), what: `'${callee.name}'` };
+        if (mutable && !rec(t).mutable) throw new CompileError("'mutPtrOf' needs a 'Mut' reference, or a place that may change", a.start, a.end);
+        return { type: pointerType(rec(t).to, mutable), what: `'${callee.name}'` };
       }
       if (!place(a)) throw new CompileError(`'${callee.name}' needs a variable or a field to point at; a temporary is gone once its statement ends`, a.start, a.end);
       if (mutable) changeable(a, "point mutably at");
@@ -1127,12 +1166,13 @@ export function expressions(ctx: Context) {
         e.args[0] = { id: nextId(ids), kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
       }
       const t = value(e.args[0]!);
-      if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP || leafOf.has(t)) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
+      const r = recOf(t);
+      if (r?.kind !== "future" || t === YIELD_NOW || t === SLEEP || leafOf.has(r)) throw new CompileError(`'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       const blocker = unsent(t);
       if (blocker) {
-        throw new CompileError(`'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
+        throw new CompileError(`'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && rec(blocker).kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
       }
-      return { type: handleType(t.gives, t.throws), what: "'spawn'" };
+      return { type: handleType(r.gives, r.throws), what: "'spawn'" };
     }
     // `sleep(ms)`: a future done once that many milliseconds have passed, holding no thread.
     if (callee.kind === "ident" && callee.name === "sleep" && (!byName.has("sleep") || inStd)) {
@@ -1227,7 +1267,7 @@ export function expressions(ctx: Context) {
     // The signal the first SIGINT or SIGTERM aborts, for node:process's 'shutdown' and the HTTP server.
     if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || fileAt(files, e.start).startsWith("node:")) && e.args.length === 0) return { type: blockType("AbortSignal"), what: "'shutdownSignal'" };
     // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
-    if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && owner?.name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
+    if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && owner !== undefined && rec(owner).name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
       value(e.args[0]!);
       return { type: callee.name === "utf8Encode" ? arrayType("u8") : "string", what: `'${callee.name}'` };
     }
@@ -1258,7 +1298,8 @@ export function expressions(ctx: Context) {
     // A package's const is a value; one holding a function would be a function crossing from JS.
     if (target?.js?.const) {
       const held = resolveType(target.returnType!);
-      const callable = typeof held !== "string" && (held.kind === "function" || held.kind === "closure" || (held.kind === "param" && held.bound?.kind === "function"));
+      const kind = recOf(held)?.kind;
+      const callable = kind === "function" || kind === "closure" || boundFunction(held) !== undefined;
       throw new CompileError(callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${show(jsView(held))}' has no call signatures`, e.start, e.end);
     }
     if (target?.name.replace(/-fsh\d+$/, "") === "ok" && fileAt(files, target.start) === "node:assert") return assertion(e);
@@ -1315,14 +1356,15 @@ export function expressions(ctx: Context) {
       if (a.kind !== "arrow") return;
       // A generic function type's parameter takes the arrow as the family it is.
       const bound = bounds.get(i);
-      const want = bound?.kind === "function" && bound.generic ? undefined : ctx.callbackType(target, e.typeArgs, argTypes, i, e);
+      const r = recOf(bound);
+      const want = r?.kind === "function" && r.generic ? undefined : ctx.callbackType(target, e.typeArgs, argTypes, i, e);
       if (want) expect(a, want);
       argTypes[i] = value(a);
     });
     // The array iterators clone elements: a generic body's instance checks the real element.
     if ((target.name === "array entries" || target.name === "array values") && argTypes[0] !== undefined) {
-      const array = lower(isRefType(argTypes[0]) ? argTypes[0].to : argTypes[0]);
-      if (isArray(array)) clonable(array.element, e, target.name.slice("array ".length));
+      const array = lower(isRefType(argTypes[0]) ? rec(argTypes[0]).to : argTypes[0]);
+      if (isArray(array)) clonable(rec(array).element, e, target.name.slice("array ".length));
     }
     if (target.js) jsCrossings.add(e);
     if (target.js && !jsCalledAt.has(target)) jsCalledAt.set(target, e);
@@ -1406,12 +1448,13 @@ export function expressions(ctx: Context) {
     const known = generic ? undefined : paramTypes(instanceOf(target));
     list.forEach((a, i) => {
       const t = bounds.get(i);
-      if (t?.kind === "function") expect(a, target.js ? jsTakes(t) : t);
+      const r = recOf(t);
+      if (r?.kind === "function") expect(a, target.js ? jsTakes(r) : r);
       // A `new Promise` given for a `Promise<T>` parameter takes its T from there.
-      if (t?.kind === "interface" && promiseElement(t) !== undefined) expect(a, t);
+      if (r?.kind === "interface" && promiseElement(r) !== undefined) expect(a, r);
       // An arrow in an object literal given for an object-typed parameter takes its field's type,
       // and a value for a Dyn field is boxed into it.
-      if (t?.kind === "object" && a.kind === "object") {
+      if (t && r?.kind === "object" && a.kind === "object") {
         for (const p of a.props) {
           const declared = p.kind === "property" ? field(t, p.key as string)?.type : undefined;
           const boxes = declared !== undefined && boxedIn(declared) !== undefined;
@@ -1451,7 +1494,8 @@ export function expressions(ctx: Context) {
     if (callback.kind !== "ident") return;
     const local = lookup(callback.name);
     const held = local && lower(local.type);
-    if (held && typeof held !== "string" && (held.kind === "closure" || held.kind === "function" || isCallable(held) || (held.kind === "param" && held.bound?.kind === "function"))) {
+    const kind = recOf(held)?.kind;
+    if (held && (kind === "closure" || kind === "function" || isCallable(held) || boundFunction(held) !== undefined)) {
       throw new CompileError(`a local function passed by name isn't supported yet; write an arrow calling it, as in '(x) => ${callback.name}(x)'`, callback.start, callback.end);
     }
     const declared = local ? undefined : byName.get(callback.name);
@@ -1477,7 +1521,7 @@ export function expressions(ctx: Context) {
       const constraint = written.typeParams[i]!.constraint;
       if (constraint) {
         const limit = ctx.resolveWith(constraint, new Map([...scope, ...bindings]));
-        const reason = typeof limit !== "string" && limit.kind === "interface" ? unsatisfied(bound, limit, members, e) : fits(bound, limit) ? undefined : `'${show(bound)}' is not a '${show(limit)}'`;
+        const reason = typeof limit !== "string" && rec(limit).kind === "interface" ? unsatisfied(bound, rec(limit) as InterfaceType, members, e) : fits(bound, limit) ? undefined : `'${show(bound)}' is not a '${show(limit)}'`;
         if (reason) throw new CompileError(`type '${show(bound)}' does not satisfy the constraint '${show(limit)}' of '${n}' in ${name}: ${reason}`, e.start, e.end);
       }
     }
@@ -1497,8 +1541,9 @@ export function expressions(ctx: Context) {
     if (e.kind === "arrow" && e.typeParams.some((p) => !isLifetime(p))) ctx.liftArrow(e);
     if (e.kind !== "ident") return;
     const local = lookup(e.name);
-    const held = local && lower(isRefType(local.type) ? local.type.to : local.type);
-    const name = (local?.generic as Body | undefined)?.name ?? (typeof held !== "string" && held?.kind === "closure" ? held.generic : undefined) ?? (!local && byName.get(e.name)?.typeParams?.some((p) => !isLifetime(p)) ? e.name : undefined);
+    const held = local && lower(isRefType(local.type) ? rec(local.type).to : local.type);
+    const r = recOf(held);
+    const name = (local?.generic as Body | undefined)?.name ?? (r?.kind === "closure" ? r.generic : undefined) ?? (!local && byName.get(e.name)?.typeParams?.some((p) => !isLifetime(p)) ? e.name : undefined);
     const f = name === undefined ? undefined : byName.get(name);
     if (!f) return;
     const at = { start: e.start, end: e.end };
@@ -1516,10 +1561,14 @@ export function expressions(ctx: Context) {
   // The Dyn of an interface a value meeting `t` is boxed into: `t` itself, or the one in an
   // Option, as an optional field's.
   function boxedIn(t: Type): DynType | undefined {
-    const dyn = (u: Type) => typeof u !== "string" && u.kind === "dyn" && !callableOf.has(u.of) && promiseElement(u.of) === undefined;
+    const dyn = (u: Type) => {
+      const r = recOf(u);
+      return r?.kind === "dyn" && !callableOf.has(r.of) && promiseElement(r.of) === undefined;
+    };
     if (dyn(t)) return t as DynType;
-    if (typeof t !== "string" && t.kind === "union" && t.members.length === 2 && t.members.includes("null")) {
-      const other = t.members.find((m) => m !== "null")!;
+    const r = recOf(t);
+    if (r?.kind === "union" && r.members.length === 2 && r.members.includes("null")) {
+      const other = r.members.find((m) => m !== "null")!;
       return dyn(other) ? (other as DynType) : undefined;
     }
     return undefined;
@@ -1540,16 +1589,18 @@ export function expressions(ctx: Context) {
       if (!local) return undefined;
       held = local.type;
       locals.set(callee, local);
-    } else if (callee.kind === "member" && pure(callee) && typeof receiver !== "string" && (receiver?.kind === "class" || receiver?.kind === "object")) {
-      if (receiver.kind === "class" && inherited(classOf(receiver), "methods", callee.name)) return undefined;
-      held = field(receiver, callee.name)?.type;
+    } else if (callee.kind === "member" && pure(callee) && receiver !== undefined && (recOf(receiver)?.kind === "class" || recOf(receiver)?.kind === "object")) {
+      if (rec(receiver as ClassType).kind === "class" && inherited(classOf(rec(receiver as ClassType)), "methods", callee.name)) return undefined;
+      held = field(rec(receiver as ObjectType | ClassType), callee.name)?.type;
       // A getter on the way runs code the direct call would skip.
-      const t = held && lower(isRefType(held) ? held.to : held);
-      if (typeof t !== "string" && t?.kind === "closure" && t.generic && throughGetter(callee)) throw unsupported("calls of a generic function value read through a getter", callee);
+      const t = held && lower(isRefType(held) ? rec(held).to : held);
+      const r = recOf(t);
+      if (r?.kind === "closure" && r.generic && throughGetter(callee)) throw unsupported("calls of a generic function value read through a getter", callee);
     }
     if (held === undefined) return undefined;
-    const t = lower(isRefType(held) ? held.to : held);
-    return typeof t !== "string" && t.kind === "closure" && t.generic ? byName.get(t.generic) : undefined;
+    const t = lower(isRefType(held) ? rec(held).to : held);
+    const r = recOf(t);
+    return r?.kind === "closure" && r.generic ? byName.get(r.generic) : undefined;
   }
 
   // A name or `this`, or fields read from one, which reading has no effect of its own unless a
@@ -1561,8 +1612,8 @@ export function expressions(ctx: Context) {
   function throughGetter(e: Expr): boolean {
     if (e.kind !== "member") return false;
     const object = types.get(e.object);
-    const held = object && lower(isRefType(object) ? object.to : object);
-    const getter = typeof held !== "string" && held?.kind === "class" && inherited(classOf(held), "getters", e.name) !== undefined;
+    const held = object && lower(isRefType(object) ? rec(object).to : object);
+    const getter = recOf(held)?.kind === "class" && inherited(classOf(held as ClassType), "getters", e.name) !== undefined;
     return getter || throughGetter(e.object);
   }
 
@@ -1586,10 +1637,11 @@ export function expressions(ctx: Context) {
     // Typed where it is declared, so a type name means what it means there.
     // A function it takes is a stored callable, as a function type's parameters are.
     const types = paramTypes(instanceOf(f)).map((t) => {
-      const fn = typeof t !== "string" && t.kind === "param" && t.bound?.kind === "function" ? t.bound : t;
-      return typeof fn !== "string" && fn.kind === "function" && !fn.generic ? storedType(fn) : t;
+      const fn = boundFunction(t) ?? t;
+      const r = recOf(fn);
+      return r?.kind === "function" && !r.generic ? storedType(r) : t;
     });
-    if (types.some((t) => typeof t !== "string" && (t.kind === "function" || t.kind === "closure" || (t.kind === "param" && t.bound?.kind === "function")))) throw unsupported("functions taking functions used as values", e);
+    if (types.some((t) => recOf(t)?.kind === "function" || recOf(t)?.kind === "closure" || boundFunction(t) !== undefined)) throw unsupported("functions taking functions used as values", e);
     const at = { start: e.start, end: e.end };
     // A parameter keeps its name unless it would hide the function, or has none of its own.
     const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== written && p.pattern.name !== f.name ? p.pattern.name : `${written}-arg${i}`));
@@ -1638,15 +1690,16 @@ export function expressions(ctx: Context) {
   function closureCall(e: Call, callee: Expr, known?: Type): { type: Type; what: string } {
     const held = known ?? value(callee);
     const name = callee.kind === "ident" ? `'${callee.name}'` : "this function";
-    const through = lower(isRefType(held) ? held.to : held);
+    const through = lower(isRefType(held) ? rec(held).to : held);
     // A generic function value reached here isn't a name or a field, which `callee` calls.
-    if (typeof through !== "string" && through.kind === "closure" && through.generic) throw unsupported("calls of a generic function value that isn't a name or a field", callee);
+    const r = recOf(through);
+    if (r?.kind === "closure" && r.generic) throw unsupported("calls of a generic function value that isn't a name or a field", callee);
     if (isCallable(through)) return callableCall(e, callee, through as DynType);
     // A parameter of a function type calls it through its signature; its instance, the
     // closure it was given.
-    const type = typeof held !== "string" && held.kind === "param" && held.bound?.kind === "function" ? held.bound : held;
-    if (typeof type === "string" || (type.kind !== "closure" && type.kind !== "function")) {
-      throw new CompileError(`this expression is not callable: type '${show(type)}' has no call signatures`, callee.start, callee.end);
+    const type = recOf(boundFunction(held) ?? held);
+    if (type === undefined || (type.kind !== "closure" && type.kind !== "function")) {
+      throw new CompileError(`this expression is not callable: type '${show(boundFunction(held) ?? held)}' has no call signatures`, callee.start, callee.end);
     }
     if (type.kind === "function" && type.generic) return familyCall(e, type, name);
     if (e.typeArgs.length > 0) throw new CompileError(`${name} takes no type arguments`, e.start, e.end);
@@ -1662,14 +1715,15 @@ export function expressions(ctx: Context) {
       coerce(a, t, type.params[i]!, `argument of type '${show(t)}' is not assignable to parameter of type '${show(shown)}'`);
     });
     const given = lower(held);
-    if (typeof given !== "string" && given.kind === "closure") calls.set(e, closureBody(given));
+    const run = recOf(given);
+    if (run?.kind === "closure") calls.set(e, closureBody(run));
     // The closure it runs throws what it throws, which its function type may only widen.
-    const error = typeof given !== "string" && given.kind === "closure" ? given.throws : type.throws;
+    const error = run?.kind === "closure" ? run.throws : type.throws;
     if (error) raise(e, error, name);
     // Where the signature says `Promise<T>`, the call gives the future of the closure it was given.
-    const returns = typeof given !== "string" && given.kind === "closure" && promiseElement(type.returns) !== undefined ? given.returns : type.returns;
+    const returns = run?.kind === "closure" && promiseElement(type.returns) !== undefined ? run.returns : type.returns;
     // An async arrow's future holds a copy of what it captured, references too.
-    if (typeof returns !== "string" && returns.kind === "future" && holdsRef(returns)) borrowsFrom.set(e, [callee]);
+    if (recOf(returns)?.kind === "future" && holdsRef(returns)) borrowsFrom.set(e, [callee]);
     return { type: returns, what: name };
   }
 
@@ -1704,7 +1758,7 @@ export function expressions(ctx: Context) {
       for (const a of e.args) {
         if (a.kind === "spread") throw new CompileError("a spread into 'concat' isn't supported yet; join the array instead, as in 's + parts.join(\"\")'", a.start, a.end);
         const t = value(a);
-        if (!stringLike(lower(t))) throw new CompileError(`'concat' takes strings, and this is '${show(t)}'; convert it with 'String(x)'`, a.start, a.end);
+        if (!stringLike(typing, lower(t))) throw new CompileError(`'concat' takes strings, and this is '${show(t)}'; convert it with 'String(x)'`, a.start, a.end);
         coerce(a, t, "string", "");
       }
       return { type: "string", what: "'concat'" };
@@ -1728,8 +1782,8 @@ export function expressions(ctx: Context) {
   function regexStringCall(e: Call, callee: Extract<Expr, { kind: "member" }>, rx: RegexType, generic: boolean): { type: Type; what: string } {
     const name = callee.name;
     const what = `'${name}'`;
-    const global = rx.flags.includes("g");
-    const typed = !rx.any || generic;
+    const global = rec(rx).flags.includes("g");
+    const typed = !rec(rx).any || generic;
     const unknown = () => new CompileError(`${what} types its matches from the regex's pattern, which isn't known for a 'RegExp' kept here; call it where the regex is written, or pass the regex as a parameter`, e.start, e.end);
     if (e.optional || callee.optional) throw new CompileError(`${what} with a regex is called without '?.'`, e.start, e.end);
     const most = name === "search" || name === "match" || name === "matchAll" ? 1 : 2;
@@ -1757,9 +1811,9 @@ export function expressions(ctx: Context) {
     const given = e.args[1]!;
     if (given.kind !== "arrow") {
       const t = read(given);
-      if (!stringLike(t)) throw new CompileError(`what replaces each match is a string or an arrow function, not '${show(t)}'`, given.start, given.end);
+      if (!stringLike(typing, t)) throw new CompileError(`what replaces each match is a string or an arrow function, not '${show(t)}'`, given.start, given.end);
       // With named groups, $<name> must name one, as JavaScript's early check would if it had one.
-      const names = new Set(rx.captures.flatMap((c) => (c.name === undefined ? [] : [c.name])));
+      const names = new Set(rec(rx).captures.flatMap((c) => (c.name === undefined ? [] : [c.name])));
       const missing = given.kind === "string" && names.size > 0 ? [...given.value.matchAll(/\$\$|\$<([^>]*)>/g)].find((m) => m[1] !== undefined && !names.has(m[1])) : undefined;
       if (missing) throw new CompileError(`the regex has no group named '${missing[1]}' for '${missing[0]}'`, given.start, given.end);
       if (t !== "string") coerce(given, t, "string", "");
@@ -1769,11 +1823,11 @@ export function expressions(ctx: Context) {
     const match = matchType(rx);
     const groups = field(match, "groups")?.type;
     const params: Type[] = ["string", ...elementsOf(match).slice(1), "i64", "string", ...(groups ? [refType(groups, false)] : [])];
-    const names = ["match", ...rx.captures.map((_, i) => `p${i + 1}`), "offset", "string", ...(groups ? ["groups"] : [])];
+    const names = ["match", ...rec(rx).captures.map((_, i) => `p${i + 1}`), "offset", "string", ...(groups ? ["groups"] : [])];
     if (given.params.length > params.length) throw new CompileError(`the replacing function is given ${names.join(", ")}`, given.params[params.length]!.start, given.params[params.length]!.end);
     expect(given, functionType(names, params, "string"));
-    const c = value(given);
-    if (typeof c === "string" || c.kind !== "closure") throw new CompileError("what replaces each match is a string or an arrow function", given.start, given.end);
+    const c = recOf(value(given));
+    if (c?.kind !== "closure") throw new CompileError("what replaces each match is a string or an arrow function", given.start, given.end);
     runsOften(c, "replace", "its function once per match", given);
     c.params.forEach((p, i) => passedExactly("replace", params[i]!, p, given.params[i], given.params[i] ?? given));
     if (!fits(c.returns, "string")) throw new CompileError(`the replacing function gives the string each match becomes, not '${show(c.returns)}'`, given.start, given.end);
@@ -1787,8 +1841,8 @@ export function expressions(ctx: Context) {
     if (linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError(`'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
-    if (["at", "find", "filter", "slice", "concat", "fill", "entries", "values"].includes(callee.name) || (callee.name === "reduce" && e.args.length === 1)) clonable(array.element, callee, callee.name);
-    if (callee.name === "flat" && isArray(lower(array.element))) clonable((lower(array.element) as ArrayType).element, callee, "flat");
+    if (["at", "find", "filter", "slice", "concat", "fill", "entries", "values"].includes(callee.name) || (callee.name === "reduce" && e.args.length === 1)) clonable(rec(array).element, callee, callee.name);
+    if (callee.name === "flat" && isArray(lower(rec(array).element))) clonable(rec(lower(rec(array).element) as ArrayType).element, callee, "flat");
     // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
     if (Object.hasOwn(ITERATORS, callee.name)) {
@@ -1798,7 +1852,7 @@ export function expressions(ctx: Context) {
     }
     // `toBase64(options?)` and `toHex()` on bytes call the prelude's encoders, which borrow them.
     if (Object.hasOwn(BYTE_METHODS, callee.name)) {
-      if (lower(array.element) !== "u8") throw new CompileError(`'${callee.name}' encodes bytes, a 'u8[]', not '${show(array)}'`, callee.start, callee.end);
+      if (lower(rec(array).element) !== "u8") throw new CompileError(`'${callee.name}' encodes bytes, a 'u8[]', not '${show(array)}'`, callee.start, callee.end);
       const most = callee.name === "toBase64" ? 1 : 0;
       if (e.args.length > most) throw new CompileError(most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
       Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: BYTE_METHODS[callee.name], start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] });
@@ -1819,17 +1873,17 @@ export function expressions(ctx: Context) {
       expect(i, "i64");
       const t = value(i);
       coerce(i, t, "i64", `argument of type '${show(t)}' is not assignable to parameter of type 'i64'`);
-      return { type: unionType([array.element, "null"]), what: "'at'" };
+      return { type: unionType([rec(array).element, "null"]), what: "'at'" };
     }
     if (CHANGING_METHODS.has(callee.name)) return changingCall(e, callee, array);
     const count = callee.name === "push" ? 1 : 0;
     if (e.args.length !== count) throw new CompileError(`'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     if (!place(callee.object)) throw new CompileError(`'${callee.name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
     changeable(callee.object, callee.name === "push" ? "push to" : "pop from");
-    if (callee.name === "pop") return { type: unionType([array.element, "null"]), what: "'pop'" };
-    expect(e.args[0]!, array.element);
+    if (callee.name === "pop") return { type: unionType([rec(array).element, "null"]), what: "'pop'" };
+    expect(e.args[0]!, rec(array).element);
     const t = value(e.args[0]!);
-    coerce(e.args[0]!, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
+    coerce(e.args[0]!, t, rec(array).element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(rec(array).element)}'`);
     return { type: "void", what: "'push'" };
   }
 
@@ -1846,16 +1900,16 @@ export function expressions(ctx: Context) {
     const [callback, init] = e.args as [Expr, Expr | undefined];
     namedFunction(callback);
     if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place, or a function by name`, callback.start, callback.end);
-    const element = isCopy(array.element) ? array.element : refType(array.element, false);
-    const acc = !reducing ? undefined : init ? widenLet(value(init)) : array.element;
+    const element = isCopy(rec(array).element) ? rec(array).element : refType(rec(array).element, false);
+    const acc = !reducing ? undefined : init ? widenLet(value(init)) : rec(array).element;
     const params = acc ? [acc, element, "i64" as const] : [element, "i64" as const];
     if (callback.params.length > params.length) {
       throw new CompileError(`'${name}' passes its callback ${acc ? "the accumulator, " : ""}the element and its index; JavaScript's last argument, the array, isn't passed, since the array is already borrowed`, callback.params[params.length]!.start, callback.params[params.length]!.end);
     }
     const signature = functionType(acc ? ["accumulator", "value", "index"] : ["value", "index"], params, "void");
     expect(callback, signature);
-    const c = value(callback);
-    if (typeof c === "string" || c.kind !== "closure") throw new CompileError(`'${name}' takes a callback like 'x => ...'`, callback.start, callback.end);
+    const c = recOf(value(callback));
+    if (c?.kind !== "closure") throw new CompileError(`'${name}' takes a callback like 'x => ...'`, callback.start, callback.end);
     if (c.params.length > params.length) {
       throw new CompileError(`'${name}' passes its callback ${acc ? "the accumulator, " : ""}the element and its index; JavaScript's last argument, the array, isn't passed, since the array is already borrowed`, callback.start, callback.end);
     }
@@ -1872,10 +1926,10 @@ export function expressions(ctx: Context) {
     if (acc && !fits(gives, acc)) throw new CompileError(`'reduce''s callback gives the next accumulator, a '${show(acc)}', but this one gives '${show(gives)}'`, callback.start, callback.end);
     if (name === "map" && (gives === "void" || holdsRef(gives))) throw new CompileError(`'map''s callback has to give a value to keep, not '${show(gives)}'`, callback.start, callback.end);
     const many = lower(gives);
-    if (name === "flatMap" && (typeof many === "string" || many.kind !== "array")) {
+    if (name === "flatMap" && (typeof many === "string" || rec(many).kind !== "array")) {
       throw new CompileError(`'flatMap''s callback gives an array for each element, whose elements make up the result; this one gives '${show(gives)}'`, callback.start, callback.end);
     }
-    const type = name === "map" ? arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" ? unionType([array.element, "null"])
+    const type = name === "map" ? arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" ? unionType([rec(array).element, "null"])
       : name === "findIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
     return { type, what: `'${name}'` };
   }
@@ -1890,19 +1944,20 @@ export function expressions(ctx: Context) {
     const what = "'sort', which sorts its array in place,";
     const compare = e.args[0];
     if (!compare) {
-      const element = lower(array.element);
+      const element = lower(rec(array).element);
       if (!isNumeric(element) && element !== "string") {
-        throw new CompileError(`'sort()' without a comparator orders numbers and strings, not '${show(array.element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
+        throw new CompileError(`'sort()' without a comparator orders numbers and strings, not '${show(rec(array).element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
       }
       return { type: "void", what };
     }
     namedFunction(compare);
     if (compare.kind !== "arrow") throw new CompileError("'sort' takes a comparator written in place, like '(a, b) => a - b', or a function by name", compare.start, compare.end);
     if (compare.params.length > 2) throw new CompileError("'sort' passes its comparator two elements", compare.params[2]!.start, compare.params[2]!.end);
-    const element = isCopy(array.element) ? array.element : refType(array.element, false);
+    const held = rec(array).element;
+    const element = isCopy(held) ? held : refType(held, false);
     expect(compare, functionType(["a", "b"], [element, element], "void"));
-    const c = value(compare);
-    if (typeof c === "string" || c.kind !== "closure") throw new CompileError("'sort' takes a comparator like '(a, b) => a - b'", compare.start, compare.end);
+    const c = recOf(value(compare));
+    if (c?.kind !== "closure") throw new CompileError("'sort' takes a comparator like '(a, b) => a - b'", compare.start, compare.end);
     runsOften(c, "sort", "its comparator many times", compare);
     c.params.forEach((p, i) => {
       passedExactly("sort", element, p, compare.params[i], compare);
@@ -1926,9 +1981,9 @@ export function expressions(ctx: Context) {
     if (!place(callee.object)) throw new CompileError(`'${name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
     changeable(callee.object, name);
     const element = (a: Expr) => {
-      expect(a, array.element);
+      expect(a, rec(array).element);
       const t = value(a);
-      coerce(a, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
+      coerce(a, t, rec(array).element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(rec(array).element)}'`);
     };
     const position = (a: Expr) => {
       expect(a, "i64");
@@ -1947,7 +2002,7 @@ export function expressions(ctx: Context) {
     if (name === "fill") e.args.forEach((a, i) => (i === 0 ? element(a) : position(a)));
     if (name === "reserve") position(e.args[0]!);
     const what = `'${name}', which changes its array in place,`;
-    if (name === "shift") return { type: unionType([array.element, "null"]), what: "'shift'" };
+    if (name === "shift") return { type: unionType([rec(array).element, "null"]), what: "'shift'" };
     if (name === "splice") return { type: array, what: "'splice'" };
     return { type: "void", what };
   }
@@ -1958,13 +2013,13 @@ export function expressions(ctx: Context) {
     const elements = elementsOf(tuple);
     // Once a literal became an object, its rest elements are its field `...`, checked again.
     const parts = tupleParts(e) as Expr[];
-    const given = tuple.rest !== undefined && e.kind === "object" ? parts.slice(0, -1) : [...parts];
-    const least = tuple.required ?? elements.length;
+    const given = rec(tuple).rest !== undefined && e.kind === "object" ? parts.slice(0, -1) : [...parts];
+    const least = rec(tuple).required ?? elements.length;
     const fixed = given.slice(0, elements.length);
     const spread = fixed.find((x) => x.kind === "spread");
     if (spread) throw unsupported("spread elements in tuple literals", spread);
-    if (given.length < least || (given.length > elements.length && tuple.rest === undefined)) {
-      const count = tuple.rest !== undefined ? `at least ${least}` : least === elements.length ? `${least}` : `${least} to ${elements.length}`;
+    if (given.length < least || (given.length > elements.length && rec(tuple).rest === undefined)) {
+      const count = rec(tuple).rest !== undefined ? `at least ${least}` : least === elements.length ? `${least}` : `${least} to ${elements.length}`;
       throw new CompileError(`type '${show(tuple)}' has ${count} element${elements.length === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
     }
     // Optional elements left out are empty.
@@ -1975,8 +2030,8 @@ export function expressions(ctx: Context) {
     });
     // A rest tuple's further elements are an array literal of its rest type, spreads allowed.
     const many: Expr[] = [];
-    if (tuple.rest !== undefined) {
-      const rest = arrayType(tuple.rest);
+    if (rec(tuple).rest !== undefined) {
+      const rest = arrayType(rec(tuple).rest!);
       const extra: Expr = e.kind === "object" ? parts.at(-1)! : { id: nextId(ids), kind: "array", elements: given.slice(elements.length), start: e.start, end: e.end };
       expect(extra, rest);
       const t = value(extra);
@@ -2006,7 +2061,7 @@ export function expressions(ctx: Context) {
     if (!node.elements.some((n) => n.rest)) return given.length > fixed.length ? tupleType(given) : tupleType(elements, required < 0 ? undefined : required);
     // No parts past the fixed ones say nothing about the rest, as an empty array literal doesn't.
     const extra = given.slice(fixed.length);
-    const rest = again ? (parts.at(-1) as ArrayType).element : extra.length === 0 ? "never" : unionType(extra);
+    const rest = again ? rec(parts.at(-1) as ArrayType).element : extra.length === 0 ? "never" : unionType(extra);
     return tupleType(elements, undefined, rest);
   }
 
@@ -2020,14 +2075,15 @@ export function expressions(ctx: Context) {
     // Whatever reads the object next, the index's check or the field's, takes this type, so a
     // chain of indexes is checked once, not once per level and again for each.
     once.add(e.object);
-    const held = isRefType(through) ? through.to : through;
-    const object = typeof held !== "string" && held.kind === "shared" ? lower(held.of) : held;
+    const held = isRefType(through) ? rec(through).to : through;
+    const r = recOf(held);
+    const object = r?.kind === "shared" ? lower(r.of) : held;
     if (!isTuple(object)) return false;
     const count = elementsOf(object as ObjectType).length;
     if (e.index.kind !== "int") throw new CompileError(`a tuple's element is named by a number written in place, like '[0]'; '${show(object)}' has no element for a computed index`, e.index.start, e.index.end);
     const n = e.index.value;
     // Past a rest tuple's fixed elements, an index reads its array, panicking past the end.
-    if (n >= BigInt(count) && (object as ObjectType).rest !== undefined) {
+    if (n >= BigInt(count) && rec(object as ObjectType).rest !== undefined) {
       const at = { start: e.index.start, end: e.index.end };
       const array: Expr = { id: nextId(ids), kind: "member", object: e.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
       restStarts.set(array, count);
@@ -2053,11 +2109,11 @@ export function expressions(ctx: Context) {
     const written = e.typeArgs.length > 0 ? resolveType({ id: nextId(ids), kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : wanted.get(e);
     if (!written || !isFixed(written)) throw new CompileError("say which fixed array to fill, as in 'FixedArray.filled<i64, 4>(0)'", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("'FixedArray.filled' takes the value to fill it with", e.start, e.end);
-    clonable(written.element, e, "FixedArray.filled");
+    clonable(rec(written).element, e, "FixedArray.filled");
     const v = e.args[0]!;
-    expect(v, written.element);
+    expect(v, rec(written).element);
     const t = value(v);
-    coerce(v, t, written.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(written.element)}'`);
+    coerce(v, t, rec(written).element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(rec(written).element)}'`);
     // Each instance's own type, as a generic body's differ, and a statement keeps it too.
     fixedFills.add(e);
     types.set(e, written);
@@ -2117,7 +2173,7 @@ export function expressions(ctx: Context) {
     if (e.typeArgs.length > 0) throw new CompileError(`${what} takes no type argument`, e.start, e.end);
     if (e.args.length < 1 || e.args.length > most) throw new CompileError(name === "parseInt" ? "'parseInt' takes a string and an optional radix" : `${what} takes one string`, e.start, e.end);
     const t = read(e.args[0]!);
-    if (!stringLike(t)) {
+    if (!stringLike(typing, t)) {
       const hint = name === "Number" && isNumeric(t) ? "; to convert a number, write 'x as f64'" : "";
       throw new CompileError(`${what} parses a string, not '${show(t)}'${hint}`, e.args[0]!.start, e.args[0]!.end);
     }
@@ -2138,7 +2194,7 @@ export function expressions(ctx: Context) {
     const message = e.args[1];
     if (message) {
       const t = read(message);
-      if (!stringLike(t)) throw new CompileError(`an assertion's message is a string, not '${show(t)}'`, message.start, message.end);
+      if (!stringLike(typing, t)) throw new CompileError(`an assertion's message is a string, not '${show(t)}'`, message.start, message.end);
       if (t !== "string") coerce(message, t, "string", "");
     }
     asserts.set(e, textAt(files, e.args[0]!));
@@ -2174,15 +2230,15 @@ export function expressions(ctx: Context) {
     const what = `'${callee.name}'`;
     if (callee.name !== "test" && callee.name !== "exec") throw new CompileError(`'RegExp' has no method '${callee.name}' in Fish; it has 'test' and 'exec', and strings take regexes in 'replace', 'split', 'match' and 'matchAll'`, callee.start, callee.end);
     if (callee.optional || e.optional) throw new CompileError(`a regex is always there, so ${what} is called without '?.'`, e.start, e.end);
-    if (/[gy]/.test(t.flags)) {
-      throw new CompileError(`a Fish regex keeps no 'lastIndex', so ${what} on a regex with the '${t.flags.includes("g") ? "g" : "y"}' flag would start at 0 every time; ${callee.name === "exec" ? "use 'matchAll' to go through every match, or" : ""} drop the flag`, e.start, e.end);
+    if (/[gy]/.test(rec(t).flags)) {
+      throw new CompileError(`a Fish regex keeps no 'lastIndex', so ${what} on a regex with the '${rec(t).flags.includes("g") ? "g" : "y"}' flag would start at 0 every time; ${callee.name === "exec" ? "use 'matchAll' to go through every match, or" : ""} drop the flag`, e.start, e.end);
     }
     if (e.args.length !== 1) throw new CompileError(`${what} takes the string to match`, e.start, e.end);
     const s = read(e.args[0]!);
-    if (!stringLike(s)) throw new CompileError(`${what} matches a string, not '${show(s)}'`, e.args[0]!.start, e.args[0]!.end);
+    if (!stringLike(typing, s)) throw new CompileError(`${what} matches a string, not '${show(s)}'`, e.args[0]!.start, e.args[0]!.end);
     if (s !== "string") coerce(e.args[0]!, s, "string", "");
     loaded(callee.object, types.get(callee.object)!);
-    if (callee.name === "exec" && t.any && !generic) {
+    if (callee.name === "exec" && rec(t).any && !generic) {
       throw new CompileError("'exec' types its match from the regex's pattern, which isn't known for a 'RegExp' kept here; call it where the regex is written, or pass the regex as a parameter", e.start, e.end);
     }
     regexCalls.set(e, callee.name);
@@ -2194,8 +2250,9 @@ export function expressions(ctx: Context) {
   function asRegex(t: Type): RegexType | undefined {
     const held = lower(t);
     if (typeof held === "string") return undefined;
-    if (held.kind === "regex") return held;
-    return held.kind === "param" && held.bound?.kind === "regex" ? held.bound : undefined;
+    const r = rec(held);
+    if (r.kind === "regex") return r;
+    return r.kind === "param" && recOf(r.bound)?.kind === "regex" ? r.bound as RegexType : undefined;
   }
 
   // How JavaScript shows a pattern given as a string: a '/' not already escaped, outside a class,
@@ -2218,7 +2275,7 @@ export function expressions(ctx: Context) {
 
   // `re.source`, `re.flags` and the flag properties, known from its type.
   function regexMember(e: Extract<Expr, { kind: "member" }>, t: RegexType, generic: boolean): Type {
-    if (t.any && !generic && (e.name === "source" || e.name === "flags" || e.name in REGEX_FLAGS)) {
+    if (rec(t).any && !generic && (e.name === "source" || e.name === "flags" || e.name in REGEX_FLAGS)) {
       throw new CompileError(`'${e.name}' is known from a regex's pattern, which isn't known for a 'RegExp' kept here; read it where the regex is written, or pass the regex as a parameter`, e.start, e.end);
     }
     if (e.name === "source" || e.name === "flags") return "string";
@@ -2267,11 +2324,11 @@ export function expressions(ctx: Context) {
     jsonable(t, written, "read from");
     if (holdsRef(t)) throw new CompileError(`'JSON.parse' makes owned values, so '${show(t)}' can't hold references`, written.start, written.end);
     if (holdsPattern(t)) throw unsupported("template literal pattern types in 'JSON.parse'", written);
-    if (holdsPart(t, (u) => typeof u !== "string" && u.kind === "fixed")) throw unsupported("fixed-size arrays in 'JSON.parse'", written);
-    const hidden = holdsPart(t, (u) => typeof u !== "string" && u.kind === "class" && u.fields.some((f) => f.name.startsWith("#")));
+    if (holdsPart(t, (u) => typeof u !== "string" && rec(u).kind === "fixed")) throw unsupported("fixed-size arrays in 'JSON.parse'", written);
+    const hidden = holdsPart(t, (u) => typeof u !== "string" && rec(u).kind === "class" && rec(u).fields.some((f) => f.name.startsWith("#")));
     if (hidden) throw new CompileError("a class with '#private' fields can't be read from JSON, since JSON doesn't hold them", written.start, written.end);
     const s = read(text);
-    if (!stringLike(s)) throw new CompileError(`'JSON.parse' reads a string, not '${show(s)}'`, text.start, text.end);
+    if (!stringLike(typing, s)) throw new CompileError(`'JSON.parse' reads a string, not '${show(s)}'`, text.start, text.end);
     if (s !== "string") coerce(text, s, "string", "");
     raise(e, classes.get("JsonError")!.type, "'JSON.parse'");
     jsonCalls.set(e, "parse");
@@ -2282,17 +2339,19 @@ export function expressions(ctx: Context) {
   function jsonable(t: Type, at: Span, verb: string) {
     const part = unjson(t, derivesJson);
     if (!part) return;
-    const why = typeof part === "string" ? "it has no JSON form"
-      : part.kind === "class" ? `a class is ${verb} JSON when it has '@derive(Json)', which '${part.name}' doesn't`
-      : part.kind === "variant" ? `an enum holding values is ${verb} JSON when it has '@derive(Json)', which '${part.enum}' doesn't`
-      : part.kind === "map" ? (part.set ? "a Set has no JSON form; use an array of its members" : "only a Map with string keys has a JSON form, an object")
+    const r = recOf(part);
+    const why = r === undefined ? "it has no JSON form"
+      : r.kind === "class" ? `a class is ${verb} JSON when it has '@derive(Json)', which '${r.name}' doesn't`
+      : r.kind === "variant" ? `an enum holding values is ${verb} JSON when it has '@derive(Json)', which '${r.enum}' doesn't`
+      : r.kind === "map" ? (r.set ? "a Set has no JSON form; use an array of its members" : "only a Map with string keys has a JSON form, an object")
       : "it has no JSON form";
     throw new CompileError(`values of type '${show(part)}' can't be ${verb} JSON: ${why}`, at.start, at.end);
   }
 
   function derivesJson(t: ClassType | VariantType): boolean {
-    if (t.kind === "variant") return [...enums.values()].some((e) => e.data?.name === t.enum && e.data.json);
-    return classOf(t).node.derives?.includes("Json") ?? false;
+    const r = rec(t);
+    if (r.kind === "variant") return [...enums.values()].some((e) => e.data?.name === r.enum && e.data.json);
+    return classOf(r).node.derives?.includes("Json") ?? false;
   }
 
   // The global `Math`, unless a name of the program's hides it.
@@ -2367,9 +2426,9 @@ export function expressions(ctx: Context) {
       made = prelude("array range", [length]);
     } else {
       const t = value(source);
-      const held = isRefType(t) ? t.to : t;
+      const held = isRefType(t) ? rec(t).to : t;
       if (isArray(held)) made = f ? source : { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
-      else if (stringLike(held)) made = prelude("array chars", [source]);
+      else if (stringLike(typing, held)) made = prelude("array chars", [source]);
       else if (yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
       else throw new CompileError(`'Array.from' makes an array from an array, a string, a generator or '{ length: n }', not '${show(t)}'`, source.start, source.end);
     }
@@ -2395,7 +2454,7 @@ export function expressions(ctx: Context) {
     if (p && (p.optional || defaulted.has(p))) throw new CompileError(`'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
     // A declared function given by name takes its own value, which a lent element isn't.
     const named = p && namedParams.get(p);
-    if (named && isRefType(given) && sameLowered(given.to, written)) {
+    if (named && isRefType(given) && sameLowered(rec(given).to, written)) {
       const { fn, names, clones } = named;
       const arrow = `(${names.join(", ")}) => ${fn}(${names.map((n, i) => (clones[i] ? `${n}.clone()` : n)).join(", ")})`;
       throw new CompileError(`'${name}' lends its callback ${article(show(given))}, and '${fn}' takes its own '${show(written)}'; write '${arrow}', or have '${fn}' take a '${show(given)}'`, at.start, at.end);
@@ -2409,25 +2468,25 @@ export function expressions(ctx: Context) {
   function spreadElements(x: Extract<Expr, { kind: "spread" }>): Type {
     const source = x.value;
     const t = value(source);
-    const held = lower(isRefType(t) ? t.to : t);
+    const held = lower(isRefType(t) ? rec(t).to : t);
     const at = { start: source.start, end: source.end };
     const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: nextId(ids), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
     let from: Expr | undefined;
-    if (stringLike(held)) from = made({ id: nextId(ids), kind: "ident", name: "array chars", ...at }, [source]);
+    if (stringLike(typing, held)) from = made({ id: nextId(ids), kind: "ident", name: "array chars", ...at }, [source]);
     else if (yieldsOf(held) !== undefined) from = made({ id: nextId(ids), kind: "ident", name: "array collect", ...at }, [source]);
-    else if (typeof held !== "string" && held.kind === "map") from = made({ id: nextId(ids), kind: "member", object: source, name: held.set ? "values" : "entries", optional: false, ...at });
+    else if (recOf(held)?.kind === "map") from = made({ id: nextId(ids), kind: "member", object: source, name: rec(held as MapType).set ? "values" : "entries", optional: false, ...at });
     else if (!isArray(held)) throw new CompileError(`'...' spreads an array, a string, a generator, a Map or a Set, not '${show(t)}'`, source.start, source.end);
     if (from) {
       once.add(source);
       x.value = from;
     }
     const array = from ? value(from) : t;
-    const lowered = lower(isRefType(array) ? array.to : array) as ArrayType;
+    const lowered = lower(isRefType(array) ? rec(array).to : array) as ArrayType;
     if (isRefType(array)) coercions.set(x.value, lowered);
-    clonable(lowered.element, x, "a spread");
+    clonable(rec(lowered).element, x, "a spread");
     // Codegen converts each element from this type.
-    types.set(x, lowered.element);
-    return lowered.element;
+    types.set(x, rec(lowered).element);
+    return rec(lowered).element;
   }
 
   // A call's arguments after the fixed parameters fill its rest parameter, as one array literal,
@@ -2453,7 +2512,7 @@ export function expressions(ctx: Context) {
   // A closure that moves a capture out of itself can run only once, which a method calling it
   // again and again can't allow.
   function runsOften(c: ClosureType, name: string, calls: string, at: Span) {
-    if (c.once) throw new CompileError(`'${name}' calls ${calls}, but this closure moves '${c.once}' out, so it can run only once; clone it inside instead`, at.start, at.end);
+    if (rec(c).once) throw new CompileError(`'${name}' calls ${calls}, but this closure moves '${rec(c).once}' out, so it can run only once; clone it inside instead`, at.start, at.end);
   }
 
   // `includes` and `indexOf` compare elements by value, as `===` does; `join` writes each as
@@ -2465,7 +2524,7 @@ export function expressions(ctx: Context) {
       for (const a of e.args) {
         expect(a, array);
         const t = value(a);
-        const given = isRefType(t) ? t.to : t;
+        const given = isRefType(t) ? rec(t).to : t;
         // A literal, `[]` and `[2]` among them, takes the element type as an annotated one does.
         if (!(a.kind === "array" && literalArray(a, t, array)) && !fits(given, array)) throw new CompileError(`'concat' joins arrays of the same element type, '${show(array)}', not '${show(t)}'; to add single values, push them`, a.start, a.end);
         coercions.set(a, refType(array, false));
@@ -2474,8 +2533,8 @@ export function expressions(ctx: Context) {
     }
     if (name === "flat") {
       if (e.args.length > 0) throw new CompileError("'flat' flattens one level so far, so it takes no depth", e.args[0]!.start, e.args[0]!.end);
-      const inner = lower(array.element);
-      if (typeof inner === "string" || inner.kind !== "array") throw new CompileError(`'flat' flattens an array of arrays, not '${show(array)}'`, callee.start, callee.end);
+      const inner = lower(rec(array).element);
+      if (typeof inner === "string" || rec(inner).kind !== "array") throw new CompileError(`'flat' flattens an array of arrays, not '${show(array)}'`, callee.start, callee.end);
       return { type: inner, what: "'flat'" };
     }
     const [most, takes] = name === "includes" || name === "indexOf" || name === "lastIndexOf" ? [2, "a value to look for and an optional position to start from"] : name === "join" ? [1, "an optional separator"] : [2, "an optional start and end"];
@@ -2488,9 +2547,12 @@ export function expressions(ctx: Context) {
     };
     if (name === "join") {
       // Literals, and unions of them, are written as their values.
-      const writable = (t: Type): boolean => isNumeric(t) || t === "boolean" || t === "string" || (typeof t !== "string" && (t.kind === "literal" || (t.kind === "union" && t.members.every(writable))));
-      if (!writable(lower(array.element))) {
-        throw new CompileError(`'join' writes each element as 'String(x)' does, which works for numbers, booleans and strings, not '${show(array.element)}'`, callee.start, callee.end);
+      const writable = (t: Type): boolean => {
+        const r = recOf(t);
+        return isNumeric(t) || t === "boolean" || t === "string" || r?.kind === "literal" || (r?.kind === "union" && r.members.every(writable));
+      };
+      if (!writable(lower(rec(array).element))) {
+        throw new CompileError(`'join' writes each element as 'String(x)' does, which works for numbers, booleans and strings, not '${show(rec(array).element)}'`, callee.start, callee.end);
       }
       if (e.args[0]) argument(e.args[0], "string");
       return { type: "string", what: "'join'" };
@@ -2500,17 +2562,17 @@ export function expressions(ctx: Context) {
       return { type: array, what: "'slice'" };
     }
     const [sought, from] = e.args as [Expr, Expr | undefined];
-    expect(sought, array.element);
+    expect(sought, rec(array).element);
     const t = value(sought);
-    if (objectsMeet(array.element, t)) throw new CompileError(`'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
+    if (objectsMeet(typing, rec(array).element, t)) throw new CompileError(`'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
     // A value that fits the element type, a literal of a sized number too, is one.
-    if (fits(t, array.element) || (isNumeric(widenLet(t)) && isNumeric(array.element) && isFloat(widenLet(t)) === isFloat(array.element))) {
+    if (fits(t, rec(array).element) || (isNumeric(widenLet(t)) && isNumeric(rec(array).element) && isFloat(widenLet(t)) === isFloat(rec(array).element))) {
       if (from) argument(from, "i64");
-      coerce(sought, t, array.element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(array.element)}'`);
+      coerce(sought, t, rec(array).element, `argument of type '${show(t)}' is not assignable to parameter of type '${show(rec(array).element)}'`);
       return { type: name === "includes" ? "boolean" : "i64", what: `'${name}'` };
     }
-    if (objectsMeet(array.element, t)) throw new CompileError(`'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
-    if (!comparable(typing, array.element, t)) throw new CompileError(`'${name}' can never find a '${show(widenLet(t))}' among elements of type '${show(array.element)}'`, sought.start, sought.end);
+    if (objectsMeet(typing, rec(array).element, t)) throw new CompileError(`'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
+    if (!comparable(typing, rec(array).element, t)) throw new CompileError(`'${name}' can never find a '${show(widenLet(t))}' among elements of type '${show(rec(array).element)}'`, sought.start, sought.end);
     if (from) argument(from, "i64");
     return { type: name === "includes" ? "boolean" : "i64", what: `'${name}'` };
   }
@@ -2526,13 +2588,14 @@ export function expressions(ctx: Context) {
     const held = types.get(callee.object)!;
     if (isRefType(held)) coercions.set(callee.object, p);
     if (e.args.length !== counts[callee.name]) throw new CompileError(`'${callee.name}' takes ${counts[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
-    const plain = isNumeric(p.to) || p.to === "boolean" || (typeof p.to !== "string" && p.to.kind === "pointer");
-    if ((callee.name === "read" || callee.name === "write") && !plain) throw unsupported(`raw reads and writes of '${show(p.to)}'`, callee);
-    if (callee.name === "read") return { type: p.to, what: "'read'" };
+    const { to } = rec(p);
+    const plain = isNumeric(to) || to === "boolean" || recOf(to)?.kind === "pointer";
+    if ((callee.name === "read" || callee.name === "write") && !plain) throw unsupported(`raw reads and writes of '${show(to)}'`, callee);
+    if (callee.name === "read") return { type: to, what: "'read'" };
     if (callee.name === "isNull") return { type: "boolean", what: "'isNull'" };
     const a = e.args[0]!;
-    const want = callee.name === "write" ? p.to : "i64";
-    if (callee.name === "write" && !p.mutable) throw new CompileError("'write' needs a 'MutPtr'; a 'Ptr' only reads what it points at", callee.start, callee.end);
+    const want = callee.name === "write" ? to : "i64";
+    if (callee.name === "write" && !rec(p).mutable) throw new CompileError("'write' needs a 'MutPtr'; a 'Ptr' only reads what it points at", callee.start, callee.end);
     expect(a, want);
     const t = value(a);
     coerce(a, t, want, `argument of type '${show(t)}' is not assignable to parameter of type '${show(want)}'`);
@@ -2544,7 +2607,8 @@ export function expressions(ctx: Context) {
   function interiorNew(e: Extract<Expr, { kind: "new" }>, which: InteriorType["which"], list: Expr[]): Type {
     if (list.length !== 1 || e.typeArgs.length > 1) throw new CompileError(`'${which}' takes the value it starts with, as in 'new ${which}(0)'`, e.start, e.end);
     const expected = wanted.get(e);
-    const given = e.typeArgs[0] ? heldArgument(resolveType(e.typeArgs[0])) : typeof expected !== "string" && expected?.kind === "interior" && expected.which === which ? expected.of : undefined;
+    const r = recOf(expected);
+    const given = e.typeArgs[0] ? heldArgument(resolveType(e.typeArgs[0])) : r?.kind === "interior" && r.which === which ? r.of : undefined;
     if (given) expect(list[0]!, given);
     const t = value(list[0]!);
     const of = given ?? heldArgument(widenLet(t));
@@ -2556,14 +2620,14 @@ export function expressions(ctx: Context) {
   // the same by every thread, and gives what it held before, except `store`.
   function interiorCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
     where(callee, t);
-    if (t.which === "Cell") return cellCall(e, callee, t);
-    if (t.which === "Lock") return lockCall(e, callee, t);
-    if (t.which !== "Atomic") throw new CompileError(`'${t.which}' has no method '${callee.name}'`, callee.start, callee.end);
+    if (rec(t).which === "Cell") return cellCall(e, callee, t);
+    if (rec(t).which === "Lock") return lockCall(e, callee, t);
+    if (rec(t).which !== "Atomic") throw new CompileError(`'${rec(t).which}' has no method '${callee.name}'`, callee.start, callee.end);
     const takes: Record<string, usize> = { load: 0, store: 1, add: 1, sub: 1, exchange: 1, compareExchange: 2 };
     if (!(callee.name in takes)) throw new CompileError(`'Atomic' has no method '${callee.name}'; it has 'load', 'store', 'add', 'sub', 'exchange' and 'compareExchange'`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling 'Atomic' methods", callee);
     if (e.args.length !== takes[callee.name]) throw new CompileError(`'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : `${takes[callee.name]} arguments`}`, e.start, e.end);
-    const of = lower(t.of);
+    const of = lower(rec(t).of);
     if ((callee.name === "add" || callee.name === "sub") && !isInteger(of)) throw new CompileError(`'${callee.name}' needs an integer 'Atomic', not '${show(t)}'`, callee.start, callee.end);
     for (const a of e.args) {
       expect(a, of);
@@ -2578,20 +2642,20 @@ export function expressions(ctx: Context) {
   function where(callee: Extract<Expr, { kind: "member" }>, t: InteriorType) {
     const inPlace = (e: Expr): boolean => {
       const type = types.get(e);
-      if (typeof type !== "string" && type?.kind === "ref") return true;
+      if (recOf(type)?.kind === "ref") return true;
       if (e.kind === "ident" || e.kind === "this" || e.kind === "call" || e.kind === "new") return true;
       if (e.kind === "member") {
         // A field shared by a union's members is read from a copy of the union.
-        const holder = types.get(e.object);
-        const held = typeof holder !== "string" && holder?.kind === "ref" ? holder.to : holder;
-        const inside = typeof held !== "string" && (held?.kind === "object" || held?.kind === "class" || held?.kind === "shared");
+        const holder = recOf(types.get(e.object));
+        const held = holder?.kind === "ref" ? recOf(holder.to) : holder;
+        const inside = held?.kind === "object" || held?.kind === "class" || held?.kind === "shared";
         return inside && !calls.has(e) && !ctx.copiesOut.has(e) && inPlace(e.object);
       }
       return element(e) && inPlace(e.object);
     };
     if (inPlace(callee.object)) return;
     const hint = bare(callee.object).kind === "nonNull" ? "; narrow the Option with a check like 'if (x !== null)' instead of '!'" : "; narrow a union to one member first";
-    throw new CompileError(`'${callee.name}' works on the '${t.which}' where it lives, so call it on a variable or a field${hint}`, callee.start, callee.end);
+    throw new CompileError(`'${callee.name}' works on the '${rec(t).which}' where it lives, so call it on a variable or a field${hint}`, callee.start, callee.end);
   }
 
   // A Cell's methods, Rust's: `get` copies out what it holds, `set` puts a value in, dropping
@@ -2601,7 +2665,7 @@ export function expressions(ctx: Context) {
     if (!(callee.name in takes)) throw new CompileError(`'Cell' has no method '${callee.name}'; it has 'get', 'set' and 'replace'`, callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling 'Cell' methods", callee);
     if (e.args.length !== takes[callee.name]) throw new CompileError(`'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
-    const of = lower(t.of);
+    const of = lower(rec(t).of);
     if (callee.name === "get" && !isCopy(of)) throw new CompileError(`'get' copies what a Cell holds, which a '${show(of)}' can't be; use 'replace' to take it out and put another in`, callee.start, callee.end);
     for (const a of e.args) {
       expect(a, of);
@@ -2621,7 +2685,8 @@ export function expressions(ctx: Context) {
     coerce(list[0]!, t, "i64", `argument of type '${show(t)}' is not assignable to parameter of type 'i64'`);
     if (which === "Semaphore") return blockType("Semaphore");
     const expected = wanted.get(e);
-    const of = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : typeof expected !== "string" && expected?.kind === "block" && expected.which === "Channel" ? expected.of : undefined;
+    const r = recOf(expected);
+    const of = e.typeArgs[0] ? resolveType(e.typeArgs[0]) : r?.kind === "block" && r.which === "Channel" ? r.of : undefined;
     if (!of) throw new CompileError("'Channel' needs the type it carries, as in 'new Channel<string>(8)'", e.start, e.end);
     return channel(typing, of, e);
   }
@@ -2641,8 +2706,8 @@ export function expressions(ctx: Context) {
   // `Mut` borrow of it, which `set` and `add` give for chaining. What they give out are clones.
   function mapCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: MapType): { type: Type; what: string } {
     const name = callee.name;
-    const kind = t.set ? "Set" : "Map";
-    if (!(t.set ? SET_METHODS : MAP_METHODS).has(name)) throw new CompileError(`'${kind}' has no method '${name}' yet${didYouMean(name, t.set ? SET_METHODS : MAP_METHODS)}`, callee.start, callee.end);
+    const kind = rec(t).set ? "Set" : "Map";
+    if (!(rec(t).set ? SET_METHODS : MAP_METHODS).has(name)) throw new CompileError(`'${kind}' has no method '${name}' yet${didYouMean(name, rec(t).set ? SET_METHODS : MAP_METHODS)}`, callee.start, callee.end);
     if (linked(callee)) throw unsupported(`optional chains calling '${kind}' methods`, callee);
     if (e.typeArgs.length > 0) throw new CompileError(`'${name}' takes no type arguments`, e.start, e.end);
     const count = MAP_ARGUMENTS[name]!;
@@ -2651,7 +2716,7 @@ export function expressions(ctx: Context) {
     if (isRefType(held)) coercions.set(callee.object, t);
     if (MAP_CHANGES.has(name)) {
       if (readCopy(callee.object)) throw new CompileError(`'${name}' changes its ${kind}, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
-      const lent = isRefType(held) && held.mutable;
+      const lent = isRefType(held) && rec(held).mutable;
       if (!place(callee.object) && !lent) throw new CompileError(`'${name}' changes its ${kind}, so call it on a variable or a field`, callee.start, callee.end);
       if (!lent) changeable(callee.object, name === "clear" ? "clear" : name === "delete" ? "delete from" : name === "update" ? "update" : "add to");
     }
@@ -2660,30 +2725,30 @@ export function expressions(ctx: Context) {
       const got = value(x);
       coerce(x, got, to, `argument of type '${show(got)}' is not assignable to parameter of type '${show(to)}'`);
     };
-    if (count > 0 && name !== "forEach") argument(e.args[0]!, t.key);
+    if (count > 0 && name !== "forEach") argument(e.args[0]!, rec(t).key);
     switch (name) {
       case "set":
       case "add":
-        if (name === "set") argument(e.args[1]!, t.value);
+        if (name === "set") argument(e.args[1]!, rec(t).value);
         borrowsFrom.set(e, [callee.object]);
         return { type: refType(t, true), what: `'${name}'` };
       case "get":
-        clonable(t.value, callee);
-        return { type: unionType([t.value, "null"]), what: "'get'" };
+        clonable(rec(t).value, callee);
+        return { type: unionType([rec(t).value, "null"]), what: "'get'" };
       case "has":
       case "delete":
         return { type: "boolean", what: `'${name}'` };
       case "clear":
         return { type: "void", what: "'clear'" };
       case "keys":
-        return { type: arrayType(t.key), what: "'keys'" };
+        return { type: arrayType(rec(t).key), what: "'keys'" };
       case "values":
-        if (t.set) return { type: arrayType(t.key), what: "'values'" };
-        clonable(t.value, callee);
-        return { type: arrayType(t.value), what: "'values'" };
+        if (rec(t).set) return { type: arrayType(rec(t).key), what: "'values'" };
+        clonable(rec(t).value, callee);
+        return { type: arrayType(rec(t).value), what: "'values'" };
       case "entries":
-        clonable(t.value, callee);
-        return { type: arrayType(tupleType(t.set ? [t.key, t.key] : [t.key, t.value])), what: "'entries'" };
+        clonable(rec(t).value, callee);
+        return { type: arrayType(tupleType(rec(t).set ? [rec(t).key, rec(t).key] : [rec(t).key, rec(t).value])), what: "'entries'" };
     }
     // `update(k, f)` and `forEach(f)` call an arrow written in place: `update`'s gets the value
     // to change, once, and `forEach`'s each value and its key in turn, borrowed or copied.
@@ -2692,11 +2757,12 @@ export function expressions(ctx: Context) {
     if (callback.kind !== "arrow") throw new CompileError(`'${name}' takes an arrow function written in place, or a function by name`, callback.start, callback.end);
     const lend = (u: Type) => (isCopy(u) ? u : refType(u, false));
     // A Set's forEach passes each member twice, as JavaScript's does.
-    const params = name === "update" ? [refType(t.value, true)] : t.set ? [lend(t.key), lend(t.key)] : [lend(t.value), lend(t.key)];
-    const passes = name === "update" ? "the value to change" : t.set ? "each member" : "each value and its key";
+    const { key, value: entry, set } = rec(t);
+    const params = name === "update" ? [refType(entry, true)] : set ? [lend(key), lend(key)] : [lend(entry), lend(key)];
+    const passes = name === "update" ? "the value to change" : set ? "each member" : "each value and its key";
     expect(callback, functionType(params.map((_, i) => (i === 0 ? "value" : "key")), params, "void"));
-    const c = value(callback);
-    if (typeof c === "string" || c.kind !== "closure" || c.params.length > params.length) {
+    const c = recOf(value(callback));
+    if (c?.kind !== "closure" || c.params.length > params.length) {
       throw new CompileError(`'${name}' passes its callback ${passes}${name === "forEach" ? "; JavaScript's last argument, the collection, isn't passed, since it is already borrowed" : ""}`, callback.start, callback.end);
     }
     if (name === "forEach") runsOften(c, name, "its callback once per entry", callback);
@@ -2716,26 +2782,29 @@ export function expressions(ctx: Context) {
     if (e.typeArgs.length > 0 && e.typeArgs.length !== (set ? 1 : 2)) throw new CompileError(set ? "'Set' takes the type of its members, like 'new Set<string>()'" : "'Map' takes its key and value types, like 'new Map<string, i64>()'", e.start, e.end);
     const expected = wanted.get(e);
     const made = e.typeArgs.length > 0 ? collection(typing, resolveType(e.typeArgs[0]!), set ? "void" : resolveType(e.typeArgs[1]!), set, e)
-      : typeof expected !== "string" && expected?.kind === "map" && expected.set === set ? expected : undefined;
+      : recOf(expected)?.kind === "map" && rec(expected as MapType).set === set ? expected as MapType : undefined;
     // The entries or members are moved in from an array, which gives the types when nothing else does.
     const from = list[0];
+    const entries = made && (set ? rec(made).key : tupleType([rec(made).key, rec(made).value]));
     if (from) {
-      if (made) expect(from, arrayType(set ? made.key : tupleType([made.key, made.value])));
+      if (entries) expect(from, arrayType(entries));
       else if (!set && from.kind === "array") for (const x of from.elements) if (x?.kind === "array" && x.elements.length === 2) pairs.add(x);
       const t = value(from);
-      if (made) {
-        const wants = arrayType(set ? made.key : tupleType([made.key, made.value]));
+      if (made && entries) {
+        const wants = arrayType(entries);
         coerce(from, t, wants, `'new ${name}' takes ${shape}, not '${show(t)}'`);
         return made;
       }
-      const element = isArray(t) ? lower(t.element) : undefined;
-      const pair = element !== undefined && isTuple(element) && (element as ObjectType).fields.length === 2 && (element as ObjectType).rest === undefined && (element as ObjectType).required === undefined ? elementsOf(element as ObjectType) : undefined;
+      const element = isArray(t) ? lower(rec(t).element) : undefined;
+      const tuple = element !== undefined && isTuple(element) ? rec(element as ObjectType) : undefined;
+      const pair = tuple && tuple.fields.length === 2 && tuple.rest === undefined && tuple.required === undefined ? elementsOf(element as ObjectType) : undefined;
       if (element === undefined || (!set && !pair)) throw new CompileError(`'new ${name}' takes ${shape}, not '${show(t)}'`, from.start, from.end);
       // Each closure is its own type, so which callable type the values share must be written.
       const v = set ? undefined : lower(pair![1]!);
-      if (typeof v !== "string" && v?.kind === "closure") throw new CompileError(`a 'Map' of functions needs its types written, as in 'new Map<${show(widenLet(pair![0]!))}, ${v.name}>(...)'`, e.start, e.end);
+      const fn = recOf(v);
+      if (fn?.kind === "closure") throw new CompileError(`a 'Map' of functions needs its types written, as in 'new Map<${show(widenLet(pair![0]!))}, ${fn.name}>(...)'`, e.start, e.end);
       const result = collection(typing, widenLet(set ? element : pair![0]!), set ? "void" : widenLet(pair![1]!), set, e);
-      const wants = arrayType(set ? result.key : tupleType([result.key, result.value]));
+      const wants = arrayType(set ? rec(result).key : tupleType([rec(result).key, rec(result).value]));
       coerce(from, t, wants, `argument of type '${show(t)}' is not assignable to parameter of type '${show(wants)}'`);
       return result;
     }
@@ -2745,8 +2814,8 @@ export function expressions(ctx: Context) {
 
   // `handle.join()`: the task's handle, awaited as giving its value or throwing a TaskPanic.
   function handleCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: HandleType): { type: Type; what: string } {
-    if (callee.name !== "join") throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${t.joined ? "await it" : "it has 'join', and awaiting it gives what the task gave"}`, callee.start, callee.end);
-    if (t.joined) throw new CompileError("this is already the task's 'join()'; await it", callee.start, callee.end);
+    if (callee.name !== "join") throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${rec(t).joined ? "await it" : "it has 'join', and awaiting it gives what the task gave"}`, callee.start, callee.end);
+    if (rec(t).joined) throw new CompileError("this is already the task's 'join()'; await it", callee.start, callee.end);
     if (linked(callee)) throw unsupported("optional chains calling 'join'", callee);
     if (e.args.length !== 0) throw new CompileError("'join' takes no arguments", e.start, e.end);
     if (isRefType(types.get(callee.object)!)) throw new CompileError("'join' takes the handle over, so it needs the handle itself, not a borrow of it", callee.object.start, callee.object.end);
@@ -2757,25 +2826,25 @@ export function expressions(ctx: Context) {
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   function blockCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
-    if (t.which === "JsValue") return jsMethodCall(e, callee, t);
+    if (rec(t).which === "JsValue") return jsMethodCall(e, callee, t);
     // A wait may also take an AbortSignal, as its last argument.
     const sockets = ["accept", "read", "write"].includes(callee.name);
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
-    const methods: Record<string, usize> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
-      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" ? { accept: 0 } : t.which === "TcpStream" ? { read: 1, write: 1 } : {};
+    const methods: Record<string, usize> = rec(t).which === "Semaphore" ? { acquire: 0, available: 0 } : rec(t).which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
+      : rec(t).which === "AbortController" ? { abort: 0 } : rec(t).which === "AbortSignal" ? { throwIfAborted: 0 } : rec(t).which === "TcpListener" ? { accept: 0 } : rec(t).which === "TcpStream" ? { read: 1, write: 1 } : {};
     if (!(callee.name in methods)) {
-      const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
-        : t.which === "AbortController" ? "it has 'abort' and 'signal'" : t.which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
-        : t.which === "TcpListener" ? "it has 'accept' and 'port'" : t.which === "TcpStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
+      const has = rec(t).which === "Semaphore" ? "it has 'acquire' and 'available'" : rec(t).which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
+        : rec(t).which === "AbortController" ? "it has 'abort' and 'signal'" : rec(t).which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
+        : rec(t).which === "TcpListener" ? "it has 'accept' and 'port'" : rec(t).which === "TcpStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
       throw new CompileError(`'${show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
-    if (linked(callee)) throw unsupported(`optional chains calling '${t.which}' methods`, callee);
+    if (linked(callee)) throw unsupported(`optional chains calling '${rec(t).which}' methods`, callee);
     const signalled = waits && e.args.length === methods[callee.name]! + 1;
     if (e.args.length !== methods[callee.name] && !signalled) throw new CompileError(`'${callee.name}' takes ${methods[callee.name] === 1 ? "1 argument" : "no arguments"}${waits ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
     if (signalled) signalArgument(e.args.at(-1)!, `'${callee.name}'`);
     // The std's own non-waiting send, which a promise's resolve and reject make.
     if (callee.name === "send" || callee.name === "settle") {
-      const of = lower(t.of);
+      const of = lower(rec(t).of);
       expect(e.args[0]!, of);
       const given = value(e.args[0]!);
       coerce(e.args[0]!, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
@@ -2796,7 +2865,7 @@ export function expressions(ctx: Context) {
       return { type: "void", what: "'throwIfAborted'" };
     }
     if (callee.name === "close" || callee.name === "settle") return { type: "void", what: `'${callee.name}'` };
-    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(t.of), signalled ? abortError() : undefined, signalled), what: `'${callee.name}'` };
+    return { type: leafFuture(callee.name as "acquire" | "send" | "receive", lower(rec(t).of), signalled ? abortError() : undefined, signalled), what: `'${callee.name}'` };
   }
 
   // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds. And
@@ -2884,10 +2953,12 @@ export function expressions(ctx: Context) {
     if (gives === undefined) throw new CompileError(`can't tell what this Promise gives; write it, ${example}, since Fish has no 'unknown'`, e.start, e.end);
     const declared = executor.kind === "arrow" ? executor : executor.kind === "ident" && !lookup(executor.name) ? byName.get(executor.name) : undefined;
     const raw = declared === undefined ? lower(value(executor)) : undefined;
-    const held = typeof raw !== "string" && raw?.kind === "param" && raw.bound?.kind === "function" ? raw.bound : raw;
-    const fn = typeof held !== "string" && (held?.kind === "closure" || held?.kind === "function") ? held : held !== undefined && isCallable(held) ? callableOf.get((held as DynType).of) : undefined;
+    const held = (raw && boundFunction(raw)) ?? raw;
+    const r = recOf(held);
+    const fn = r?.kind === "closure" || r?.kind === "function" ? r : held !== undefined && isCallable(held) ? recOf(callableOf.get(rec(held as DynType).of)) : undefined;
     if (declared === undefined && fn === undefined) throw new CompileError(`'new Promise' takes an executor, a function given 'resolve' and 'reject', ${example}; not '${show(held!)}'`, executor.start, executor.end);
-    const async = declared?.async === true || (fn !== undefined && typeof fn.returns !== "string" && (fn.returns.kind === "future" || promiseElement(fn.returns.kind === "dyn" ? fn.returns.of : fn.returns) !== undefined));
+    const returned = recOf(fn?.returns);
+    const async = declared?.async === true || (returned !== undefined && (returned.kind === "future" || promiseElement(returned.kind === "dyn" ? returned.of : fn!.returns) !== undefined));
     if (async) throw new CompileError("an executor runs at once, so it can't be async; call an async function that awaits and then calls 'resolve' instead", executor.start, executor.end);
     const takes = declared?.params.length ?? fn!.params.length;
     const rejects = takes >= 2;
@@ -2895,7 +2966,8 @@ export function expressions(ctx: Context) {
     // Reject's own type, written on the executor's parameter or in its signature.
     const annotated = declared?.params[1]?.type;
     const reason = annotated ? resolveType(annotated) : fn?.params[1];
-    const signature = reason === undefined || typeof reason === "string" ? undefined : reason.kind === "function" ? reason : isCallable(reason) ? callableOf.get((reason as DynType).of) : undefined;
+    const rejecting = recOf(reason);
+    const signature = rejecting?.kind === "function" ? rejecting : reason !== undefined && isCallable(reason) ? recOf(callableOf.get(rec(reason as DynType).of)) : undefined;
     if (reason !== undefined && signature?.params.length !== 1) throw new CompileError(`'reject' takes the error it fails with, as in 'reject: (reason: Error) => void', not '${show(reason)}'`, (annotated ?? executor).start, (annotated ?? executor).end);
     const error = signature?.params[0] ?? ctx.throwsDeclared() ?? classes.get("Error")!.type;
     const variant = `${rejects ? "" : " resolve"}${gives === "void" ? " void" : ""}`;
@@ -2912,9 +2984,9 @@ export function expressions(ctx: Context) {
 
   // The T of a `Promise<T>` a value meets, stored or taken by a parameter.
   function promiseMet(t: Type): Type | undefined {
-    const held = typeof t !== "string" && t.kind === "param" ? t.bound : t;
-    if (typeof held === "string" || held === undefined) return undefined;
-    return held.kind === "dyn" ? promiseElement(held.of) : held.kind === "interface" ? promiseElement(held) : undefined;
+    const r = recOf(t);
+    const held = recOf(r?.kind === "param" ? r.bound : t);
+    return held?.kind === "dyn" ? promiseElement(held.of) : held?.kind === "interface" ? promiseElement(held) : undefined;
   }
 
   // A type argument for a rewritten call, standing for a type already known.
@@ -2987,9 +3059,10 @@ export function expressions(ctx: Context) {
       return f?.async === true || (f?.returnType?.kind === "ref" && f.returnType.name === "Promise");
     }
     const held = lower(local.type);
-    const fn = typeof held !== "string" && (held.kind === "closure" || held.kind === "function") ? held : isCallable(held) ? callableOf.get((held as DynType).of) : undefined;
+    const r = recOf(held);
+    const fn = r?.kind === "closure" || r?.kind === "function" ? r : isCallable(held) ? recOf(callableOf.get(rec(held as DynType).of)) : undefined;
     const returns = fn?.returns;
-    return typeof returns !== "string" && returns !== undefined && (returns.kind === "future" || promiseMet(returns) !== undefined);
+    return returns !== undefined && (recOf(returns)?.kind === "future" || promiseMet(returns) !== undefined);
   }
 
   // `Promise.withResolvers<T>()`, rewritten as the prelude's cell with its promise and the
@@ -3020,7 +3093,8 @@ export function expressions(ctx: Context) {
       if (gives === "void" && e.args.length > 0) throw new CompileError("a 'Promise<void>' gives nothing, so 'Promise.resolve' takes no value for it", e.args[0]!.start, e.args[0]!.end);
       if (gives !== "void" && e.args.length === 0) throw new CompileError(`'Promise.resolve' takes the value it gives, of type '${show(gives!)}'`, e.start, e.end);
       const given = e.args.length > 0 ? value(e.args[0]!) : undefined;
-      if (typeof given !== "string" && (given?.kind === "future" || given?.kind === "handle" || (given?.kind === "dyn" && promiseElement(given.of) !== undefined))) {
+      const r = recOf(given);
+      if (r?.kind === "future" || r?.kind === "handle" || (r?.kind === "dyn" && promiseElement(r.of) !== undefined)) {
         throw new CompileError("'Promise.resolve' of a Promise would hold one Promise inside another, which Fish doesn't flatten; await it first, or use the Promise itself", e.args[0]!.start, e.args[0]!.end);
       }
       Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [presetNode(gives, e)] });
@@ -3047,7 +3121,7 @@ export function expressions(ctx: Context) {
   // Why a value doesn't pass where a JS shape is wanted, said of the first field that fails.
   function missingField(from: Type, shape: InterfaceType | ObjectType): string | undefined {
     // A borrowed handle is the handle, counted again where it goes.
-    if (isRefType(from) && jsShape(from.to)) from = from.to;
+    if (isRefType(from) && jsShape(rec(from).to)) from = rec(from).to;
     const own = jsShape(from);
     if (own === shape) return undefined;
     // A pair of types met again while it is compared: handles' shapes referring to themselves
@@ -3065,12 +3139,15 @@ export function expressions(ctx: Context) {
   }
 
   function shapeMisses(from: Type, own: InterfaceType | ObjectType | undefined, shape: InterfaceType | ObjectType): string | undefined {
-    const source = own ?? (typeof from !== "string" && (from.kind === "object" || from.kind === "class") && !isTuple(from) ? from : undefined);
+    const kind = recOf(from)?.kind;
+    const source = own ?? ((kind === "object" || kind === "class") && !isTuple(from) ? from : undefined);
     if (!source) return `a '${show(from)}' isn't an object`;
-    if (!own && shape.kind === "interface" && shape.methods.length > 0) return `its methods come only with a value JS made`;
+    const wanted = rec(shape);
+    const owned = own && rec(own);
+    if (!own && wanted.kind === "interface" && wanted.methods.length > 0) return `its methods come only with a value JS made`;
     // A handle of another shape has the methods this one declares, by name and types.
-    if (own && shape.kind === "interface") {
-      const methods = own.kind === "interface" ? own.methods : [];
+    if (own && wanted.kind === "interface") {
+      const methods = owned?.kind === "interface" ? owned.methods : [];
       // A method fits as TypeScript's do: it may take fewer parameters, an extra one of its own
       // is optional, the wanted one's arguments pass for those it has, and what it gives passes for
       // what is wanted; a generic one is matched by its parameters' count.
@@ -3079,17 +3156,18 @@ export function expressions(ctx: Context) {
         if (a.generic || b.generic) return a.params.length === b.params.length;
         return a.params.every((p, i) => i >= b.params.length || passesJs(b.params[i]!, p)) && (b.returns === "void" || passesJs(a.returns, b.returns));
       };
-      const lacking = shape.methods.find((m) => !methods.some((n) => n.name === m.name && same(n, m)));
+      const lacking = wanted.methods.find((m) => !methods.some((n) => n.name === m.name && same(n, m)));
       if (lacking) return methods.some((n) => n.name === lacking.name) ? `method '${lacking.name}' takes or gives other types` : `property '${lacking.name}' is missing`;
     }
     // A member Fish couldn't type that the shape declares is one only a handle of it has.
-    const held = shape.kind === "interface" ? jsUntyped.get(shape) : undefined;
+    const held = wanted.kind === "interface" ? jsUntyped.get(wanted) : undefined;
     const aside = [...(held ?? [])].filter(([, why]) => !jsOptional.has(why)).map(([n]) => n);
-    const unseen = aside.find((n) => own?.kind !== "interface" || !(jsUntyped.get(own)?.has(n) ?? false));
+    const unseen = aside.find((n) => owned?.kind !== "interface" || !(jsUntyped.get(owned)?.has(n) ?? false));
     if (unseen !== undefined) return unseen.startsWith("[") ? `its ${unseen === "[index]" ? "index" : "call"} signature comes only with a value JS made` : `property '${unseen}' is missing`;
     // A Fish class's private fields stay its own.
-    const fields = source.kind === "class" ? source.fields.filter((g) => (g.access ?? "public") === "public") : source.fields;
-    for (const f of shape.fields) {
+    const r = rec(source as Exclude<Type, string>);
+    const fields = r.kind === "class" ? r.fields.filter((g) => (g.access ?? "public") === "public") : r.fields;
+    for (const f of rec(shape).fields) {
       const found = fields.find((g) => g.name === f.name);
       if (!found) {
         if (isOption(f.type)) continue;
@@ -3105,30 +3183,36 @@ export function expressions(ctx: Context) {
   // Whether a value passes where a package declares a type: as it fits it, or as a value JS takes
   // for it, inside unions and arrays too.
   function passesJs(from: Type, to: Type): boolean {
-    if (isRefType(from) && typeof from.to !== "string" && from.to.kind === "block" && from.to.which === "JsValue") from = from.to;
+    const referred = isRefType(from) ? recOf(rec(from).to) : undefined;
+    if (isRefType(from) && referred?.kind === "block" && referred.which === "JsValue") from = rec(from).to;
     if (fits(from, to)) return true;
     // An integer is a number in JS, as a literal in an object for one is written.
     // ponytail: past 2^53 an integer loses precision, as it would in JS; refuse if that matters
     if (isInteger(from) && to === "f64") return true;
-    if (typeof from !== "string" && from.kind === "union") return from.members.every((m) => passesJs(m, to));
+    const source = recOf(from);
+    if (source?.kind === "union") return source.members.every((m) => passesJs(m, to));
     if (typeof to === "string") return false;
-    if (to.kind === "union") return to.members.some((m) => passesJs(from, m));
-    if (to.kind === "array") return typeof from !== "string" && from.kind === "array" && passesJs(from.element, to.element);
+    const r = rec(to);
+    if (r.kind === "union") return r.members.some((m) => passesJs(from, m));
+    if (r.kind === "array") return source?.kind === "array" && passesJs(source.element, r.element);
     // A nested object becomes a new JS object as the one holding it does, so it takes a Fish value
     // of its shape the same way.
-    const shape = jsShape(to) ?? (to.kind === "object" && !to.tuple ? to : undefined);
+    const shape = jsShape(to) ?? (r.kind === "object" && !r.tuple ? r : undefined);
     if (shape) return takesShape(from, shape);
-    return to.kind === "block" && to.which === "JsValue" && uncrossable(from) === undefined;
+    return r.kind === "block" && r.which === "JsValue" && uncrossable(from) === undefined;
   }
 
   // Whether a type holds a JS handle or an any, where Fish values of other types pass.
   function holdsJs(t: Type): boolean {
-    return holdsPart(t, (u) => typeof u !== "string" && u.kind === "block" && u.which === "JsValue");
+    return holdsPart(t, (u) => {
+      const r = recOf(u);
+      return r?.kind === "block" && r.which === "JsValue";
+    });
   }
 
   // A shape's member Fish couldn't type, as the refusal of its declaration, noting this use.
   function untyped(shape: InterfaceType | ObjectType | undefined, name: string, at: Span): CompileError | undefined {
-    const why = shape?.kind === "interface" ? jsUntyped.get(shape)?.get(name) : undefined;
+    const why = shape && rec(shape).kind === "interface" ? jsUntyped.get(rec(shape) as InterfaceType)?.get(name) : undefined;
     if (why && !why.note) why.note = { message: `'${name}' is used here`, start: at.start, end: at.end };
     return why;
   }
@@ -3136,7 +3220,7 @@ export function expressions(ctx: Context) {
   // A type a handle's member gives or takes, refused when it can't cross between Fish and JS.
   function crossing(t: Type, what: string, at: Span): Type {
     // A generic body's definition holds placeholders, which each instance checks as what they are.
-    if (holdsPart(t, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined)) return t;
+    if (holdsPart(t, placeholder)) return t;
     const why = t === "void" ? undefined : uncrossable(t);
     if (why) throw new CompileError(`${what} '${show(t)}', which can't cross between Fish and JS yet: ${why}`, at.start, at.end);
     return t;
@@ -3144,24 +3228,25 @@ export function expressions(ctx: Context) {
 
   // A JS handle's property, as its shape declares it, read from JS.
   function jsProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
-    if (t.of === "void") {
+    if (rec(t).of === "void") {
       if (writing === e) throw new CompileError("writing a JS value's properties isn't supported yet; a 'JsValue' is read with 'get'", e.start, e.end);
       if (["get", "at", "has"].includes(e.name)) throw new CompileError(`'${e.name}' is a method of a 'JsValue'; call it, as in '${placeText(e)}(...)'`, e.start, e.end);
       throw new CompileError(`a 'JsValue' could be anything, as an 'unknown' could, so it has no property '${e.name}' to use; read one with '${placeText(e.object)}.get("${e.name}")'`, e.start, e.end);
     }
     const shape = jsShape(t);
-    const found = shape?.fields.find((f) => f.name === e.name);
+    const found = shape && rec(shape).fields.find((f) => f.name === e.name);
     if (found) {
       jsMembers.add(e);
       // A callback or a Promise goes to JS when written, but Fish has no reading of one back.
-      const kept = (u: Type) => typeof u !== "string" && u.kind === "dyn" && keptByJs(u);
+      const kept = (u: Type) => typeof u !== "string" && rec(u).kind === "dyn" && keptByJs(u);
       if (writing !== e && holdsPart(found.type, kept)) {
-        const promise = holdsPart(found.type, (u) => kept(u) && promiseElement((u as DynType).of) !== undefined);
+        const promise = holdsPart(found.type, (u) => kept(u) && promiseElement(rec(u as DynType).of) !== undefined);
         throw new CompileError(`reading property '${e.name}' of '${show(t)}' isn't supported yet: it holds a ${promise ? "Promise" : "function"}, which Fish can give JS but not read back`, e.start, e.end);
       }
       return crossing(jsView(found.type), `property '${e.name}' of '${show(t)}' is a`, e);
     }
-    const method = shape?.kind === "interface" && shape.methods.some((m) => m.name === e.name);
+    const r = recOf(shape);
+    const method = r?.kind === "interface" && r.methods.some((m) => m.name === e.name);
     if (method) throw new CompileError(`'${e.name}' is a method of '${show(t)}'; call it, as in '${placeText(e)}(...)'`, e.start, e.end);
     throw untyped(shape, e.name, e) ?? new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
@@ -3183,11 +3268,12 @@ export function expressions(ctx: Context) {
 
   // A JS handle's method, called with its declared parameters.
   function jsMethodCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
-    if (t.of === "void") return jsAccessor(e, callee);
+    if (rec(t).of === "void") return jsAccessor(e, callee);
     const shape = jsShape(t);
-    const method = shape?.kind === "interface" ? shape.methods.find((m) => m.name === callee.name) : undefined;
+    const r = recOf(shape);
+    const method = r?.kind === "interface" ? r.methods.find((m) => m.name === callee.name) : undefined;
     if (!method) {
-      const field = shape?.fields.some((f) => f.name === callee.name);
+      const field = r?.fields.some((f) => f.name === callee.name);
       throw untyped(shape, callee.name, callee) ?? new CompileError(field ? `'${callee.name}' is a property of '${show(t)}', not a method` : `property '${shownName(callee.name)}' does not exist on type '${show(t)}'`, callee.start, callee.end);
     }
     jsMethods.add(e);
@@ -3215,7 +3301,7 @@ export function expressions(ctx: Context) {
     if (e.args.some((a) => a.kind === "arrow" || a.kind === "spread")) return first;
     const given = e.args.map((a) => value(a));
     // In a generic body's definition an argument may be a placeholder: each instance picks again.
-    const open = given.some((t) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined));
+    const open = given.some((t) => holdsPart(t, placeholder));
     const fitting = signatures.find((f) => {
       const required = f.params.filter((p) => !p.optional && !p.rest).length;
       if (given.length < required || (given.length > f.params.length && !f.params.at(-1)?.rest)) return false;
@@ -3264,7 +3350,8 @@ export function expressions(ctx: Context) {
     const from = value(call);
     const to = resolveType(node);
     if (fits(from, to)) return from;
-    const kept = typeof from !== "string" && from.kind === "union" ? from.members.filter((m) => fits(m, to)) : [];
+    const r = recOf(from);
+    const kept = r?.kind === "union" ? r.members.filter((m) => fits(m, to)) : [];
     if (kept.length === 0 && fits(to, from)) throw new CompileError(`it returns '${show(to)}', narrower than the implementation's '${show(from)}', which isn't a union whose members it could be narrowed to; give the implementation a union return type, as in '${show(to)} | ...'`, node.start, node.end);
     if (kept.length === 0) throw new CompileError(`this overload signature is not compatible with its implementation, which returns '${show(from)}', never a '${show(to)}'`, node.start, node.end);
     return kept.length === 1 ? kept[0]! : unionType(kept);
@@ -3287,7 +3374,7 @@ export function expressions(ctx: Context) {
     const known = bounds.size > 0 ? undefined : paramTypes(instanceOf(f));
     return f.params.map((p, i) => {
       const t = bounds.get(i) ?? known![i]!;
-      return p.optional ? unionType([t, "null"]) : p.rest && isArray(lower(t)) ? (lower(t) as ArrayType).element : t;
+      return p.optional ? unionType([t, "null"]) : p.rest && isArray(lower(t)) ? rec(lower(t) as ArrayType).element : t;
     });
   }
 
@@ -3297,30 +3384,32 @@ export function expressions(ctx: Context) {
     if (a.kind === "arrow") return arrowPasses(a, to);
     if (given === undefined) return true;
     if (fits(given, to)) return true;
-    if (isRefType(to)) return passes(a, isRefType(given) ? given.to : given, to.to, p);
-    if (isRefType(given)) return passes(a, given.to, to, p);
+    if (isRefType(to)) return passes(a, isRefType(given) ? rec(given).to : given, rec(to).to, p);
+    if (isRefType(given)) return passes(a, rec(given).to, to, p);
     const n = numberLiteral(a);
     if (typeof to === "string") {
       if (n === undefined || !isNumeric(to)) return false;
       if (isFloat(to)) return true;
       return typeof n === "bigint" && isInteger(to) && n >= range(to)[0] && n <= range(to)[1];
     }
-    if (to.kind === "union") return to.members.some((m) => passes(a, given, m, p));
-    if (to.kind === "interface") return unsatisfied(given, to, members, a) === undefined;
-    if (to.kind === "literal") return (a.kind === "string" || a.kind === "bool") ? a.value === to.value : n !== undefined && n === to.value;
+    const r = rec(to);
+    if (r.kind === "union") return r.members.some((m) => passes(a, given, m, p));
+    if (r.kind === "interface") return unsatisfied(given, r, members, a) === undefined;
+    if (r.kind === "literal") return (a.kind === "string" || a.kind === "bool") ? a.value === r.value : n !== undefined && n === r.value;
     return false;
   }
 
   // Whether an arrow passes for a function type: no more parameters than it takes, each one
   // written with a type taking what it is given. Without a function type, the call decides.
   function arrowPasses(a: Extract<Expr, { kind: "arrow" }>, to: Type): boolean {
-    if (typeof to !== "string" && to.kind === "union") return to.members.some((m) => arrowPasses(a, m));
-    if (typeof to === "string" || to.kind !== "function" || to.generic) return true;
-    if (a.params.length > to.params.length) return false;
+    const r = recOf(to);
+    if (r?.kind === "union") return r.members.some((m) => arrowPasses(a, m));
+    if (r?.kind !== "function" || r.generic) return true;
+    if (a.params.length > r.params.length) return false;
     return a.params.every((q, i) => {
       if (!q.type) return true;
       const written = tryType(q.type);
-      return written === undefined || fits(to.params[i]!, written);
+      return written === undefined || fits(r.params[i]!, written);
     });
   }
 
@@ -3369,26 +3458,26 @@ export function expressions(ctx: Context) {
   function givenToJs(a: Expr, given: Type) {
     jsGiven.add(a);
     // A type parameter is what it stands for in this instance.
-    while (typeof given !== "string" && given.kind === "param" && given.concrete !== undefined) given = given.concrete;
+    for (let r = recOf(given); r?.kind === "param" && r.concrete !== undefined; r = recOf(given)) given = r.concrete;
     // A callback given to JS is kept by JS, which may call it later from whichever task calls
     // into JS next, so what it holds goes with it to any thread.
     // A future given to JS is a promise, running as a task from when it is given.
-    if (typeof given !== "string" && (given.kind === "future" || given.kind === "handle")) {
+    if (typeof given !== "string" && (rec(given).kind === "future" || rec(given).kind === "handle")) {
       if (!ctx.async) throw new CompileError("a Promise given to JS starts running as a task when it is given, so it is given only inside an 'async' function", a.start, a.end);
       const blocker = unsent(given);
       if (blocker) throw new CompileError(`a Promise given to JS runs as a task of its own, so it must own everything it uses; it holds a '${show(blocker)}'`, a.start, a.end);
       return;
     }
-    if (typeof given !== "string" && (given.kind === "closure" || given.kind === "function" || given.kind === "dyn")) {
+    if (typeof given !== "string" && (rec(given).kind === "closure" || rec(given).kind === "function" || rec(given).kind === "dyn")) {
       const blocker = unsent(given);
       if (blocker) throw new CompileError(`a callback given to JS must own everything it uses, as JS may keep it and call it from another task; it holds a '${show(blocker)}'`, a.start, a.end);
       return;
     }
     // JS keeps a callback or a future, so one only borrowed here can't be given; one inside
     // another value would be dropped by Fish as well as kept by JS.
-    if (isRefType(given) && keptByJs(given.to)) throw new CompileError("JS keeps a callback or a Promise given to it, so it is given owned, not borrowed; give it a clone, or take it owned", a.start, a.end);
+    if (isRefType(given) && keptByJs(rec(given).to)) throw new CompileError("JS keeps a callback or a Promise given to it, so it is given owned, not borrowed; give it a clone, or take it owned", a.start, a.end);
     if (holdsPart(given, (u) => u !== given && keptByJs(u))) throw new CompileError("a callback or a Promise inside another value isn't supported yet; give it to JS on its own", a.start, a.end);
-    const open = holdsPart(given, (u) => typeof u !== "string" && u.kind === "param" && u.concrete === undefined);
+    const open = holdsPart(given, placeholder);
     if (!open && !jsConverts(given)) throw new CompileError(`a '${show(given)}' has no JS form yet, so it can't be given to JS`, a.start, a.end);
   }
 
@@ -3434,12 +3523,12 @@ export function expressions(ctx: Context) {
   // `c.signal` on a controller, another handle to its signal, and `signal.aborted`, whether
   // its controller has aborted: values computed by the runtime, not fields.
   function blockProperty(e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
-    if (linked(e)) throw unsupported(`optional chains through '${t.which}' values`, e);
+    if (linked(e)) throw unsupported(`optional chains through '${rec(t).which}' values`, e);
     computed.add(e);
-    if (t.which === "JsValue") return jsProperty(e, t);
-    if (t.which === "AbortController" && e.name === "signal") return blockType("AbortSignal");
-    if (t.which === "AbortSignal" && e.name === "aborted") return "boolean";
-    if (t.which === "TcpListener" && e.name === "port") return "i64";
+    if (rec(t).which === "JsValue") return jsProperty(e, t);
+    if (rec(t).which === "AbortController" && e.name === "signal") return blockType("AbortSignal");
+    if (rec(t).which === "AbortSignal" && e.name === "aborted") return "boolean";
+    if (rec(t).which === "TcpListener" && e.name === "port") return "i64";
     throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'`, e.start, e.end);
   }
 
@@ -3448,7 +3537,7 @@ export function expressions(ctx: Context) {
   function sharedNew(e: Call): { type: Type; what: string } {
     if (e.args.length !== 1 || e.typeArgs.length > 1) throw new CompileError("'shared' takes the value it starts with, as in 'shared({ hits: 0 })'", e.start, e.end);
     const expected = wanted.get(e);
-    const given = e.typeArgs[0] ? heldArgument(resolveType(e.typeArgs[0])) : typeof expected !== "string" && expected?.kind === "shared" ? expected.of : undefined;
+    const given = e.typeArgs[0] ? heldArgument(resolveType(e.typeArgs[0])) : typeof expected !== "string" && expected?.kind === "shared" ? rec(expected).of : undefined;
     const a = e.args[0]!;
     if (given) expect(a, given);
     const t = value(a);
@@ -3459,25 +3548,26 @@ export function expressions(ctx: Context) {
 
   // A shared value's `update`, a Lock's: the callback changes the value under the block's lock.
   function sharedCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
-    const inner = lower(t.of);
-    const stored = typeof inner !== "string" && (inner.kind === "object" || inner.kind === "class") ? field(inner, callee.name) : undefined;
+    const inner = lower(rec(t).of);
+    const stored = typeof inner !== "string" && (rec(inner).kind === "object" || rec(inner).kind === "class") ? field(inner, callee.name) : undefined;
     if (stored && isCallable(lower(stored.type))) return callableCall(e, callee, lower(stored.type) as DynType);
     if (callee.name !== "update") throw new CompileError(`'shared' has no method '${callee.name}'; read its fields, change it with 'update', or share it again with 'clone'`, callee.start, callee.end);
-    return lockCall(e, callee, interiorType("Lock", t.of), true);
+    return lockCall(e, callee, interiorType("Lock", rec(t).of), true);
   }
 
   // `s.f` on a shared value: an interior-mutable field is borrowed where it lives, unlocked,
   // since it changes only through its own methods; any other is copied out under the lock.
   function sharedField(e: Extract<Expr, { kind: "member" }>, t: SharedType): Type {
     if (linked(e)) throw unsupported("optional chains through shared values", e);
-    const inner = lower(t.of);
-    if (typeof inner !== "string" && inner.kind === "class") classOf(inner);
-    const found = typeof inner === "string" || inner.kind === "closure" ? undefined : field(inner, e.name);
+    const inner = lower(rec(t).of);
+    const ir = recOf(inner);
+    if (ir?.kind === "class") classOf(ir);
+    const found = ir === undefined || ir.kind === "closure" ? undefined : field(ir, e.name);
     if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'${didYouMean(e.name, memberNames(inner))}`, e.start, e.end);
-    if (typeof inner !== "string" && inner.kind === "class") visible(found.access, declaring(inner, e.name), e.name, e);
+    if (ir?.kind === "class") visible(found.access, declaring(ir, e.name), e.name, e);
     // A Rust value is reached only under the lock, and a read here would copy its handle out.
     let rust: RustClass | undefined;
-    if (holdsPart(found.type, (u) => (rust ??= rustClassOf(u)) !== undefined)) {
+    if (holdsPart(found.type, (u) => (rust ??= rustClassOf(typing, u)) !== undefined)) {
       throw new CompileError(`'${e.name}' holds a Rust '${rust!.name}', which a shared value gives only inside 'update', as in 's.update((v) => v.${e.name}...)'`, e.start, e.end);
     }
     if (!interiorMutable(found.type)) ctx.copiesOut.add(e);
@@ -3493,13 +3583,13 @@ export function expressions(ctx: Context) {
     if (e.args.length !== 1) throw new CompileError("'update' takes 1 argument, a callback like 'v => ...'", e.start, e.end);
     const callback = e.args[0]!;
     if (callback.kind !== "arrow") throw unsupported("callbacks passed to 'update' by name; write the arrow function in place", callback);
-    const held = refType(lower(t.of), true);
+    const held = refType(lower(rec(t).of), true);
     const signature = functionType(["value"], [held], "void");
     lockCallbacks.add(signature);
     if (sharing) sharedCallbacks.add(signature);
     expect(callback, signature);
-    const c = value(callback);
-    if (typeof c === "string" || c.kind !== "closure" || c.params.length > 1) throw new CompileError(`'update' passes its callback a '${show(held)}'`, callback.start, callback.end);
+    const c = recOf(value(callback));
+    if (c?.kind !== "closure" || c.params.length > 1) throw new CompileError(`'update' passes its callback a '${show(held)}'`, callback.start, callback.end);
     if (c.params[0] !== undefined) passedExactly("update", held, c.params[0], callback.kind === "arrow" ? callback.params[0] : undefined, callback);
     return { type: c.returns, what: "'update'" };
   }
@@ -3514,15 +3604,17 @@ export function expressions(ctx: Context) {
     let t = value(e.operand);
     // Through a bound: in an instance, the concrete method's own future; in the definition, what
     // the bound's `Promise<T>` gives.
-    if (typeof t !== "string" && t.kind === "param" && t.concrete) t = t.concrete;
-    const promise = typeof t !== "string" && t.kind === "param" ? t.bound : t;
-    const described = typeof promise !== "string" && promise?.kind === "interface" ? promiseElement(promise) : undefined;
-    if (described !== undefined && typeof t !== "string" && (t.kind === "interface" || t.kind === "param")) return described;
-    if (typeof t !== "string" && (t.kind === "param" || t.kind === "interface")) throw unsupported("awaits of 'Promise<T>' parameters", e.operand);
-    if (typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined) return promiseElement(t.of)!;
-    if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
-    if (t.throws) raise(e, t.throws, "this Promise");
-    return t.gives;
+    const p = recOf(t);
+    if (p?.kind === "param" && p.concrete) t = p.concrete;
+    const r = recOf(t);
+    const promise = r?.kind === "param" ? r.bound : t;
+    const described = recOf(promise)?.kind === "interface" ? promiseElement(promise!) : undefined;
+    if (described !== undefined && (r?.kind === "interface" || r?.kind === "param")) return described;
+    if (r?.kind === "param" || r?.kind === "interface") throw unsupported("awaits of 'Promise<T>' parameters", e.operand);
+    if (r?.kind === "dyn" && promiseElement(r.of) !== undefined) return promiseElement(r.of)!;
+    if (r === undefined || (r.kind !== "future" && r.kind !== "handle")) throw new CompileError(`'await' needs a Promise, like an async function's call, not '${show(t)}'`, e.operand.start, e.operand.end);
+    if (r.throws) raise(e, r.throws, "this Promise");
+    return r.gives;
   }
 
   // `Promise.all`, `race`, `allSettled` and `any`: one future awaiting those in the list at once,
@@ -3536,8 +3628,9 @@ export function expressions(ctx: Context) {
     // An array of `Promise<T>` values gives a `T[]`, or for `race` a `T`.
     if (list.kind !== "array") {
       const t = value(list);
-      const element = typeof t !== "string" && t.kind === "array" ? t.element : undefined;
-      if (typeof element === "string" || element?.kind !== "dyn" || promiseElement(element.of) === undefined) throw new CompileError(`${name} takes an array of Promises, as in 'Promise.${kind}([a(), b()])' or a 'Promise<T>[]', not '${show(t)}'`, list.start, list.end);
+      const lr = recOf(t);
+      const er = recOf(lr?.kind === "array" ? lr.element : undefined);
+      if (er?.kind !== "dyn" || promiseElement(er.of) === undefined) throw new CompileError(`${name} takes an array of Promises, as in 'Promise.${kind}([a(), b()])' or a 'Promise<T>[]', not '${show(t)}'`, list.start, list.end);
       combinedCalls.add(e);
       // Boxed futures throw nothing, so an `any` over them fails only when the array is empty,
       // with no errors, typed as null.
@@ -3550,10 +3643,12 @@ export function expressions(ctx: Context) {
         throw new CompileError(`'Promise.${(x.callee as { name: string }).name}' can't be in another Promise's list; give it an async function of its own, as in 'async function both() { return await Promise.all([...]); }', and put its call in the list`, x.start, x.end);
       }
       let t = value(x);
-      if (typeof t !== "string" && t.kind === "param" && t.concrete) t = t.concrete;
-      if (typeof t !== "string" && t.kind === "dyn" && promiseElement(t.of) !== undefined) return t;
-      if (typeof t === "string" || (t.kind !== "future" && t.kind !== "handle")) throw new CompileError(`${name} takes Promises, like an async function's call, not '${show(t)}'`, x.start, x.end);
-      return t;
+      const p = recOf(t);
+      if (p?.kind === "param" && p.concrete) t = p.concrete;
+      const r = recOf(t);
+      if (r?.kind === "dyn" && promiseElement(r.of) !== undefined) return r;
+      if (r === undefined || (r.kind !== "future" && r.kind !== "handle")) throw new CompileError(`${name} takes Promises, like an async function's call, not '${show(t)}'`, x.start, x.end);
+      return r;
     });
     // An `any` fails only when every future can, with all their errors.
     const thrown = futures.map((f) => (f.kind === "dyn" ? undefined : f.throws));
@@ -3574,11 +3669,12 @@ export function expressions(ctx: Context) {
     // A type holding itself is looked into once.
     if (typeof t === "string" || seen.has(t)) return undefined;
     seen.add(t);
-    if (t.kind === "ref" || t.kind === "pointer" || (t.kind === "interior" && t.which === "Cell") || (t.kind === "dyn" && borrowing.has(t.of))) return t;
+    const r = rec(t);
+    if (r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "dyn" && borrowing.has(r.of))) return t;
     // A Rust type is Send, which the shim asserts.
-    if (rustClassOf(t)) return undefined;
-    const parts = t.kind === "interior" ? [t.of] : t.kind === "future" || t.kind === "generator" ? t.params.map((f) => f.type)
-      : t.kind === "union" ? t.members : t.kind === "array" || t.kind === "fixed" ? [t.element] : t.kind === "map" ? [t.key, t.value] : t.kind === "class" && t.base ? [t.base, ...t.fields.map((f) => f.type)] : t.fields.map((f) => f.type);
+    if (rustClassOf(typing, t)) return undefined;
+    const parts = r.kind === "interior" ? [r.of] : r.kind === "future" || r.kind === "generator" ? r.params.map((f) => f.type)
+      : r.kind === "union" ? r.members : r.kind === "array" || r.kind === "fixed" ? [r.element] : r.kind === "map" ? [r.key, r.value] : r.kind === "class" && r.base ? [r.base, ...r.fields.map((f) => f.type)] : (r as ObjectType).fields.map((f) => f.type);
     for (const part of parts) {
       const found = unsent(part, seen);
       if (found) return found;
@@ -3599,8 +3695,9 @@ export function expressions(ctx: Context) {
     if (!place(callee.object)) throw new CompileError("'next' changes its generator, so call it on a variable or a field", callee.start, callee.end);
     changeable(callee.object, "advance");
     if (!async) return { type: nextResult(yields), what: "'next'" };
-    const made = typeof generator !== "string" && generator.kind === "param" && generator.concrete ? generator.concrete : generator;
-    return { type: typeof made !== "string" && made.kind === "generator" ? leafFuture("next", made) : promiseInterface(nextResult(yields)), what: "'next'" };
+    const g = recOf(generator);
+    const made = recOf(g?.kind === "param" && g.concrete ? g.concrete : generator);
+    return { type: made?.kind === "generator" ? leafFuture("next", made) : promiseInterface(nextResult(yields)), what: "'next'" };
   }
 
   // The iterator helpers call std's generators and functions over the generator, which they take
@@ -3655,9 +3752,9 @@ export function expressions(ctx: Context) {
     // std lends a predicate even a value that copies; a function taking the copy reads it there.
     if (callback.kind === "arrow" && lent && isCopy(yields) && presetParams.get(callback.params[0]!) === yields) presetParams.delete(callback.params[0]!);
     expect(callback, functionType(names, params, "void"));
-    const c = value(callback);
+    const c = recOf(value(callback));
     once.add(callback);
-    if (typeof c === "string" || c.kind !== "closure") throw new CompileError(`'${name}' takes a callback like 'x => ...'`, callback.start, callback.end);
+    if (c?.kind !== "closure") throw new CompileError(`'${name}' takes a callback like 'x => ...'`, callback.start, callback.end);
     c.params.forEach((p, i) => passedExactly(name, params[i]!, p, callback.kind === "arrow" ? callback.params[i] : undefined, callback, i !== params.length - 1));
     runsOften(c, name, "its callback once per value", callback);
     const gives = c.returns;
@@ -3670,7 +3767,7 @@ export function expressions(ctx: Context) {
     if (name === "flatMap") {
       if (yieldsOf(lower(gives)) !== undefined) target = "iter flat map generator";
       else if (!isArray(lower(gives))) throw new CompileError(`'flatMap''s callback gives a generator or an array for each value, whose values make up the result; this one gives '${show(gives)}'`, callback.start, callback.end);
-      else clonable((lower(gives) as ArrayType).element, callback, "flatMap");
+      else clonable(rec(lower(gives) as ArrayType).element, callback, "flatMap");
     }
     if (reducing && !init) {
       // std gives the fold in a one-element tuple, or nothing when the generator was empty.
@@ -3687,7 +3784,7 @@ export function expressions(ctx: Context) {
   function element(e: Expr): e is Extract<Expr, { kind: "index" }> {
     if (e.kind !== "index") return false;
     const object = types.get(e.object);
-    const held = object !== undefined && (isRefType(object) ? object.to : object);
+    const held = object !== undefined && (isRefType(object) ? rec(object).to : object);
     return held !== false && (isArray(held) || isFixed(held));
   }
 
@@ -3714,7 +3811,7 @@ export function expressions(ctx: Context) {
     const bindings = new Map<string, Type>();
     const expected = typeArgs.length > 0 ? undefined : expectedVariant(e, named, given);
     if (typeArgs.length > 0) data.params.forEach((p, i) => bindings.set(p, ctx.resolveType(typeArgs[i]!)));
-    else if (expected) data.params.forEach((p, i) => bindings.set(p, expected.args[i]!));
+    else if (expected) data.params.forEach((p, i) => bindings.set(p, rec(expected).args[i]!));
     else {
       const names = new Set(data.params);
       (member.payload ?? []).forEach((node, i) => given[i] && infer(ctx.tables, node, widenLet(given[i]!), names, bindings, e));
@@ -3724,8 +3821,8 @@ export function expressions(ctx: Context) {
       throw new CompileError(`can't tell what '${missing}' is for '${data.name}.${e.name}'; give it a declared type, like 'const x: ${data.name}<${data.params.join(", ")}> = ...' with real types`, e.start, e.end);
     }
     const found = ctx.enumInstance(named, data.params.map((p) => bindings.get(p)!), e).variants.get(e.name)!;
-    if (alone && found.fields.length > 0) throw new CompileError(`'${found.name}' holds ${found.fields.length === 1 ? "a value" : "values"}; build it with '${found.name}(...)'`, e.start, e.end);
-    if (!alone && found.fields.length === 0) throw new CompileError(`'${found.name}' holds nothing, so it isn't called; write '${found.name}'`, e.start, e.end);
+    if (alone && rec(found).fields.length > 0) throw new CompileError(`'${rec(found).name}' holds ${rec(found).fields.length === 1 ? "a value" : "values"}; build it with '${rec(found).name}(...)'`, e.start, e.end);
+    if (!alone && rec(found).fields.length === 0) throw new CompileError(`'${rec(found).name}' holds nothing, so it isn't called; write '${rec(found).name}'`, e.start, e.end);
     return found;
   }
 
@@ -3733,15 +3830,17 @@ export function expressions(ctx: Context) {
   // fields the payload fits, if it is given, or else the first.
   function expectedVariant(e: Extract<Expr, { kind: "member" }>, named: EnumInfo, given?: Type[]): VariantType | undefined {
     const want = wanted.get(e);
-    const members = want === undefined ? [] : typeof want !== "string" && want.kind === "union" ? want.members : [want];
-    const candidates = members.flatMap((m) => {
-      if (typeof m === "string" || m.kind !== "variant" || m.enum !== named.data!.name) return [];
+    const wr = recOf(want);
+    const members = want === undefined ? [] : wr?.kind === "union" ? wr.members : [want];
+    const candidates = members.flatMap((t) => {
+      const m = recOf(t);
+      if (m?.kind !== "variant" || m.enum !== named.data!.name) return [];
       const v = ctx.enumInstance(named, m.args, e).variants.get(e.name);
       return v ? [v] : [];
     });
     // A payload that fits exactly decides first; then a number takes a number type of its own
     // kind, an integer an integer type and a float a float type.
-    const suits = (exact: boolean) => (v: VariantType) => v.fields.every((f, i) => {
+    const suits = (exact: boolean) => (v: VariantType) => rec(v).fields.every((f, i) => {
       const g = given?.[i];
       if (g === undefined || fits(g, f.type)) return true;
       return !exact && isNumeric(g) && isNumeric(f.type) && isFloat(g) === isFloat(f.type);
@@ -3752,11 +3851,13 @@ export function expressions(ctx: Context) {
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
   // `clone` method of its own. A base's `clone` makes a base, so it doesn't count.
   function copies(t: Type): boolean {
-    if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern") return true;
+    if (typeof t === "string") return true;
+    const r = rec(t);
+    if (r.kind === "literal" || r.kind === "pattern") return true;
     // A generator's frame may hold a view into what it iterates, which a copy would share.
-    if (t.kind === "generator") return false;
-    if (t.kind === "class") return !classOf(t).methods.has("clone");
-    const bound = t.kind === "param" ? t.bound : t.kind === "interface" ? t : undefined;
+    if (r.kind === "generator") return false;
+    if (r.kind === "class") return !classOf(r).methods.has("clone");
+    const bound = recOf(r.kind === "param" ? r.bound : r.kind === "interface" ? t : undefined);
     return !bound || bound.kind !== "interface" || !bound.methods.some((m) => m.name === "clone");
   }
 
@@ -3765,11 +3866,12 @@ export function expressions(ctx: Context) {
     if (e.args.length > 0 || e.typeArgs.length > 0) throw new CompileError("'clone' takes no arguments", e.start, e.end);
     const stored = lower(receiver);
     // A generator runs once, through its frame, so there is no second one to make.
-    if (typeof stored !== "string" && stored.kind === "generator") throw new CompileError("a generator can't be cloned: it runs once, and a copy would share its place in the run", e.start, e.end);
+    const sr = recOf(stored);
+    if (sr?.kind === "generator") throw new CompileError("a generator can't be cloned: it runs once, and a copy would share its place in the run", e.start, e.end);
     // A copy of a value holding references borrows what it does.
     if (holdsRef(receiver)) borrowsFrom.set(e, [callee.object]);
-    if (stored !== receiver && typeof stored !== "string" && stored.kind === "class" && classOf(stored).methods.has("clone")) {
-      return { type: concreteMethod(e, callee, stored, receiver), what: "'clone'" };
+    if (stored !== receiver && sr?.kind === "class" && classOf(sr).methods.has("clone")) {
+      return { type: concreteMethod(e, callee, sr, receiver), what: "'clone'" };
     }
     clonable(receiver, e);
     // A clone of what a recursive type's block holds is a value of its own.
@@ -3781,23 +3883,30 @@ export function expressions(ctx: Context) {
   function clonable(type: Type, at: Span, by?: string, dyns: boolean = by !== undefined) {
     const stored = lower(type);
     const say = (why: string) => new CompileError(by ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
-    const permit = holdsPart(stored, (u) => typeof u !== "string" && u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit"));
+    const permit = holdsPart(stored, (u) => {
+      const r = recOf(u);
+      return r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit");
+    });
     if (permit) throw say("can't clone a 'Semaphore' or a 'Permit', or a value holding one: a semaphore's slots are counted, so share it inside a shared value or a class instead");
     let rust: ClassType | undefined;
-    holdsPart(isRefType(stored) ? stored.to : stored, (u) => (rustClassOf(u) ? ((rust = u as ClassType), true) : false));
+    const behind = isRefType(stored) ? rec(stored as RefType).to : stored;
+    holdsPart(behind, (u) => (rustClassOf(typing, u) ? ((rust = rec(u as ClassType)), true) : false));
     if (rust) {
-      const name = rustClassOf(rust)!.name;
+      const name = rustClassOf(typing, rust)!.name;
       if (classOf(rust).methods.has("clone")) throw say(`can't clone a value holding a Rust '${name}' as a whole; clone each '${name}' with its 'clone()'`);
-      throw say(`can't clone a Rust '${name}'${rustClassOf(isRefType(stored) ? stored.to : stored) ? "" : ", or a value holding one,"} unless its class declares 'clone(): ${name}', which calls its Clone`);
+      throw say(`can't clone a Rust '${name}'${rustClassOf(typing, behind) ? "" : ", or a value holding one,"} unless its class declares 'clone(): ${name}', which calls its Clone`);
     }
     // An array method's copy of a Dyn may panic, which unwinds as a Dyn's own copy does; only
     // `clone()` written on a value holding one asks for its Dyns to be cloned one by one.
-    if (!dyns && (typeof stored === "string" || stored.kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && u.kind === "dyn")) throw say("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one");
+    if (!dyns && (typeof stored === "string" || rec(stored).kind !== "dyn") && holdsPart(stored, (u) => typeof u !== "string" && rec(u).kind === "dyn")) throw say("can't clone a value holding a Dyn, whose clone may fail at run time; clone its Dyns one by one");
     const inner = holdsInterior(stored);
-    if (inner) throw say(`can't clone ${inner === stored ? "" : "a value holding "}${article(inner.which)}, which is changed in place wherever it is shared; make a new one from what it holds`);
+    if (inner) throw say(`can't clone ${inner === stored ? "" : "a value holding "}${article(rec(inner as InteriorType).which)}, which is changed in place wherever it is shared; make a new one from what it holds`);
     if (holdsHandle(stored)) throw say("can't clone a JoinHandle, or a value holding one: only one place can await a task's result, so pass the handle itself");
     // Its value is given once, so a copy awaited after the first would find nothing to give.
-    if (holdsPart(stored, (u) => typeof u !== "string" && u.kind === "future" && u.name.startsWith("promise await"))) throw say("can't clone a Promise made with 'new Promise', or a value holding one: its value is given once, to one await; await it once and share the value");
+    if (holdsPart(stored, (u) => {
+      const r = recOf(u);
+      return r?.kind === "future" && r.name.startsWith("promise await");
+    })) throw say("can't clone a Promise made with 'new Promise', or a value holding one: its value is given once, to one await; await it once and share the value");
     // Two mutable references to one thing can't be.
     if (holdsMut(type)) throw say("can't clone a value holding a mutable reference ('Mut'), since the copy would change the same thing");
   }
@@ -3809,7 +3918,8 @@ export function expressions(ctx: Context) {
     if (object.kind === "ident") objects.add(object);
     const type = linked(callee) ? unwrapped(object, callee.optional) : value(object);
     // A method called through a reference gets the pointer itself.
-    return unfold(typeof type !== "string" && type.kind === "ref" ? type.to : type);
+    const r = recOf(type);
+    return unfold(r?.kind === "ref" ? r.to : type);
   }
 
   // Whether a field read or method call is a link of an optional chain: written `?.`, or after
@@ -3882,8 +3992,9 @@ export function expressions(ctx: Context) {
     else if (target.self!.mutable) mutates(callee.object, callee.name);
     const instance = instantiate(target, e.typeArgs, e.args, e.args.map((a) => coercions.get(a) ?? types.get(a)!), e);
     calls.set(e, instance);
-    if (typeof returns === "string" || returns.kind !== "interface") return returns;
-    return wrapped(returns.name, returns, lower(returnOf(instance, e)));
+    const r = recOf(returns);
+    if (r?.kind !== "interface") return returns;
+    return wrapped(r.name, r, lower(returnOf(instance, e)));
   }
 
   // An owning method takes its object over, which can't happen through a borrow.
@@ -3900,7 +4011,7 @@ export function expressions(ctx: Context) {
   // A mutating method's receiver must be a place that could change, or a temporary.
   function mutates(object: Expr, name: string) {
     const type = types.get(object);
-    if (typeof type !== "string" && type?.kind === "ref" && !type.mutable) {
+    if (typeof type !== "string" && type?.kind === "ref" && !rec(type).mutable) {
       throw new CompileError(`cannot call '${name}' on '${placeText(object)}' because it is a shared reference ('Ref'), which only reads`, object.start, object.end);
     }
     if (object.kind === "conditional") {
@@ -3970,11 +4081,11 @@ export function expressions(ctx: Context) {
     const at = { start: e.start, end: e.end };
     if (found.field) {
       visible(found.field.access, found.declaring!.type, e.name, e);
-      return { id: nextId(ids), kind: "ident", name: `${found.declaring!.type.name}.${e.name}`, ...at };
+      return { id: nextId(ids), kind: "ident", name: `${rec(found.declaring!.type).name}.${e.name}`, ...at };
     }
     if (!found.getter) {
       const hidden = found.declaring.base && staticOf(found.declaring.base, e.name)?.getter;
-      throw new CompileError(hidden ? `'${found.declaring.type.name}' declares only a setter for '${e.name}', which hides the getter of its base; declare a getter in '${found.declaring.type.name}' too` : `property '${e.name}' has a setter but no getter`, e.start, e.end);
+      throw new CompileError(hidden ? `'${rec(found.declaring.type).name}' declares only a setter for '${e.name}', which hides the getter of its base; declare a getter in '${rec(found.declaring.type).name}' too` : `property '${e.name}' has a setter but no getter`, e.start, e.end);
     }
     visible(found.getter.access, found.declaring.type, e.name, e);
     return staticCall(e, "get", []);
@@ -4011,14 +4122,15 @@ export function expressions(ctx: Context) {
     if (named) {
       const found = inherited(named, "statics", name);
       const property = found ? undefined : staticOf(named, name);
-      if (property) throw new CompileError(`'${name}' is a static ${property.field ? "field" : "accessor"} of '${property.declaring.type.name}', not a method; read it as '${named.type.name}.${name}'`, callee.start, callee.end);
-      if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${named.type.name}'${didYouMean(name, staticNames(named))}`, callee.start, callee.end);
+      if (property) throw new CompileError(`'${name}' is a static ${property.field ? "field" : "accessor"} of '${rec(property.declaring.type).name}', not a method; read it as '${rec(named.type).name}.${name}'`, callee.start, callee.end);
+      if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${rec(named.type).name}'${didYouMean(name, staticNames(named))}`, callee.start, callee.end);
       visible(found.access, found.declared ?? found.owner!, name, callee);
       return found;
     }
     if (object.kind === "super") return superMethod(callee);
     const type = receiver!;
-    const found = typeof type !== "string" && type.kind === "class" ? inherited(classOf(type), "methods", name) : undefined;
+    const tr = recOf(type);
+    const found = tr?.kind === "class" ? inherited(classOf(tr), "methods", name) : undefined;
     if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'${didYouMean(name, memberNames(type))}`, callee.start, callee.end);
     visible(found.access, found.declared ?? found.owner!, name, callee);
     if (found.self!.owned) takesOver(object, name);
@@ -4034,11 +4146,11 @@ export function expressions(ctx: Context) {
     if (!thisReady(callee.object)) throw new CompileError("'super' can't be used until every field is assigned", callee.object.start, callee.object.end);
     let found = inherited(classOf(base), "methods", callee.name);
     if (!found) throw new CompileError(`'${base.name}' has no method '${callee.name}'${didYouMean(callee.name, memberNames(base))}`, callee.start, callee.end);
-    if (found.abstract) throw new CompileError(`'${callee.name}' is abstract in '${found.owner!.name}', so 'super.${callee.name}()' has nothing to run`, callee.start, callee.end);
+    if (found.abstract) throw new CompileError(`'${callee.name}' is abstract in '${rec(found.owner!).name}', so 'super.${callee.name}()' has nothing to run`, callee.start, callee.end);
     // A template runs as this class's own copy of it, on this class's `this`.
     const original = found.copyOf ?? found;
-    const copied = original.template === true && !self!.type.abstract;
-    if (copied) found = copyFor(ids, classOf(self!.type), original);
+    const copied = original.template === true && !rec(self!.type).abstract;
+    if (copied) found = copyFor(ctx.tables, classOf(self!.type), original);
     visible(found.access, found.declared ?? found.owner!, callee.name, callee);
     if (found.self!.mutable && !self!.mutable) {
       throw new CompileError(`cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);
@@ -4061,19 +4173,20 @@ export function expressions(ctx: Context) {
   function visible(access: Access | undefined, declaring: ClassType, name: string, at: Span) {
     if (accessible(access, declaring, name)) return;
     const message = name.startsWith("#")
-      ? `property '${shownName(name)}' is not accessible outside class '${declaring.name}' because it has a private identifier`
-      : `property '${name}' is ${access} and only accessible within class '${declaring.name}'${access === "protected" ? " and its subclasses" : ""}`;
+      ? `property '${shownName(name)}' is not accessible outside class '${rec(declaring).name}' because it has a private identifier`
+      : `property '${name}' is ${access} and only accessible within class '${rec(declaring).name}'${access === "protected" ? " and its subclasses" : ""}`;
     throw new CompileError(message, at.start, at.end);
   }
 
   // Access is by declaration, as in TypeScript, so any two instances of one generic class share it.
   function sameClass(a: ClassType, b: ClassType): boolean {
-    return a === b || (a.generic !== undefined && a.generic.name === b.generic?.name);
+    const g = rec(a).generic;
+    return a === b || (g !== undefined && g.name === rec(b).generic?.name);
   }
 
   function accessible(access: Access | undefined, declaring: ClassType, name: string): boolean {
     if (!access || access === "public" || (owner && sameClass(owner, declaring))) return true;
-    if (access === "protected" && owner) for (let b: ClassType | undefined = owner.base; b; b = b.base) if (sameClass(b, declaring)) return true;
+    if (access === "protected" && owner) for (let b: ClassType | undefined = rec(owner).base; b; b = rec(b).base) if (sameClass(b, declaring)) return true;
     // A base reaches a subclass's implementation of its abstract member.
     return access === "protected" && owner !== undefined && derives(declaring, owner) && abstractIn(classOf(owner), name);
   }
@@ -4083,14 +4196,15 @@ export function expressions(ctx: Context) {
   // accessible; an interface's or a Dyn's fields and methods.
   function memberNames(t: Type | undefined): string[] {
     if (t === undefined || typeof t === "string") return [];
-    if (t.kind === "ref") return memberNames(t.to);
-    if (t.kind === "param") return memberNames(t.bound);
-    if (t.kind === "dyn") return memberNames(t.of);
-    if (t.kind === "interface") return [...t.fields, ...t.methods].map((m) => m.name);
-    if (t.kind === "object") return t.fields.map((f) => f.name);
-    if (t.kind !== "class") return [];
+    const r = rec(t);
+    if (r.kind === "ref") return memberNames(r.to);
+    if (r.kind === "param") return memberNames(r.bound);
+    if (r.kind === "dyn") return memberNames(r.of);
+    if (r.kind === "interface") return [...r.fields, ...r.methods].map((m) => m.name);
+    if (r.kind === "object") return r.fields.map((f) => f.name);
+    if (r.kind !== "class") return [];
     const names: string[] = [];
-    for (let c: ClassInfo | undefined = classOf(t); c; c = c.base) {
+    for (let c: ClassInfo | undefined = classOf(r); c; c = c.base) {
       const declaring = c.type;
       names.push(...declaring.fields.filter((f) => accessible(f.access, declaring, f.name)).map((f) => shownName(f.name)));
       for (const table of [c.methods, c.getters, c.setters]) for (const [name, body] of table) if (accessible(body.access, declaring, name)) names.push(shownName(name));
@@ -4110,7 +4224,8 @@ export function expressions(ctx: Context) {
 
   // The class whose own fields include `name`: `t` itself or a base it embeds.
   function declaring(t: ClassType, name: string): ClassType {
-    return t.fields.some((f) => f.name === name) || !t.base ? t : declaring(t.base, name);
+    const { fields, base } = rec(t);
+    return fields.some((f) => f.name === name) || !base ? t : declaring(base, name);
   }
 
   function args(list: Expr[], argTypes: Type[], target: Instance, at: Span) {
@@ -4131,8 +4246,8 @@ export function expressions(ctx: Context) {
   // argument out gives the default, so a null or an Option where none is declared is refused.
   function defaultedArg(a: Expr, type: Type, p: Param): Type | undefined {
     const declared = declaredTypes.get(p);
-    if (!declared || holdsNull(declared)) return declared;
-    if (holdsNull(type)) throw new CompileError("this parameter has a default, so it takes a value, not null or an Option; leave the argument out to use the default", a.start, a.end);
+    if (!declared || holdsNull(typing, declared)) return declared;
+    if (holdsNull(typing, type)) throw new CompileError("this parameter has a default, so it takes a value, not null or an Option; leave the argument out to use the default", a.start, a.end);
     return declared;
   }
 
@@ -4142,7 +4257,7 @@ export function expressions(ctx: Context) {
     // An abstract class's code sees `this` as the abstract class, which exists only embedded in
     // a subclass, so a value of that type, such as `this.clone()`, can't be made there.
     if (owner?.abstract && type === owner && e.kind !== "this" && e.kind !== "super") {
-      throw new CompileError(`this would make a value of the abstract class '${owner.name}', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there`, e.start, e.end);
+      throw new CompileError(`this would make a value of the abstract class '${rec(owner).name}', which only exists embedded in its subclasses; give this method to each subclass, or clone the subclass's value there`, e.start, e.end);
     }
     types.set(e, type);
     return type;
@@ -4238,7 +4353,8 @@ export function expressions(ctx: Context) {
           throw new CompileError(`'${e.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, e.start, e.end);
         }
         locals.set(e, local);
-        const held = typeof local.type !== "string" && local.type.kind === "ref" ? local.type.to : local.type;
+        const lr = recOf(local.type);
+        const held = lr?.kind === "ref" ? lr.to : local.type;
         if (ctx.sharing && local.param && !objects.has(e) && interiorMutable(held)) {
           throw new CompileError(`inside a shared value's 'update', use '${e.name}' only through its fields: other tasks borrow its interior-mutable parts without the lock, and another name for it could replace them`, e.start, e.end);
         }
@@ -4260,23 +4376,23 @@ export function expressions(ctx: Context) {
         if (e.object.kind === "ident" && !lookup(e.object.name) && enums.has(e.object.name)) throw unsupported(EXPRESSION_FORMS.index, e);
         if (untuple(e)) return typeOf(e);
         const through = value(e.object);
-        const object = isRefType(through) ? through.to : through;
+        const object = isRefType(through) ? rec(through).to : through;
         // A fixed array's element, checked against its known length when the program runs.
         if (isFixed(object)) {
           if (e.optional) throw unsupported("optional index expressions", e);
           const index = value(e.index);
           coerce(e.index, index, "usize", `a fixed array's index is a 'usize', not '${show(index)}'`);
-          return unfolded(object.element);
+          return unfolded(rec(object).element);
         }
         const array = isArray(object);
         if (isPlainJs(object)) throw new CompileError(`a 'JsValue' could be anything, as an 'unknown' could, so its elements are read with 'at': '${placeText(e.object)}.at(i)'`, e.start, e.end);
-        if (!stringLike(object) && !array) throw unsupported(EXPRESSION_FORMS.index, e);
+        if (!stringLike(typing, object) && !array) throw unsupported(EXPRESSION_FORMS.index, e);
         if (e.optional) throw unsupported("optional index expressions", e);
         if (array && object !== through) coercions.set(e.object, object);
         if (!array) text(e.object, object, false);
         const index = value(e.index);
         coerce(e.index, index, "usize", `${array ? "an array" : "a string"}'s index is a 'usize', not '${show(index)}'`);
-        return array ? unfolded(object.element) : "string";
+        return array ? unfolded(rec(object).element) : "string";
       }
       // Text alone is a literal; with substitutions, a new string.
       case "template":
@@ -4312,27 +4428,29 @@ export function expressions(ctx: Context) {
         }
         if (e.object.kind === "ident") objects.add(e.object);
         const through = linked(e) ? unwrapped(e.object, e.optional) : value(e.object);
-        const object = unfold(typeof through !== "string" && through.kind === "ref" ? through.to : through);
+        const tr = recOf(through);
+        const object = unfold(tr?.kind === "ref" ? tr.to : through);
+        const or = recOf(object);
         // A field read through a reference loads what it points to; a getter gets the pointer.
-        if (typeof object !== "string" && object.kind === "shared") return sharedField(e, object);
-        if (typeof object !== "string" && object.kind === "block") return blockProperty(e, object);
-        if (typeof object !== "string" && object.kind === "dyn") return dynField(e, object);
+        if (or?.kind === "shared") return sharedField(e, or);
+        if (or?.kind === "block") return blockProperty(e, or);
+        if (or?.kind === "dyn") return dynField(e, or);
         const rx = asRegex(object);
         if (rx) {
           if (object !== through) coercions.set(e.object, object);
           return regexMember(e, rx, lower(object) !== rx);
         }
         const load = () => object !== through && coercions.set(e.object, object);
-        const shared = typeof object !== "string" && object.kind === "union" ? unionField(typing, object, e.name, e) : undefined;
+        const shared = or?.kind === "union" ? unionField(typing, or, e.name, e) : undefined;
         if (shared) {
           load();
           return linked(e) ? optional(shared, e) : shared;
         }
-        if (typeof object !== "string" && object.kind === "class") classOf(object);
+        if (or?.kind === "class") classOf(or);
         // A Map's or a Set's one property is its size, the number of entries it holds.
-        if (typeof object !== "string" && object.kind === "map") {
-          if ((object.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError(`'${object.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "size") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'${didYouMean(e.name, ["size", ...(object.set ? SET_METHODS : MAP_METHODS)])}`, e.start, e.end);
+        if (or?.kind === "map") {
+          if ((or.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError(`'${or.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
+          if (e.name !== "size") throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'${didYouMean(e.name, ["size", ...(or.set ? SET_METHODS : MAP_METHODS)])}`, e.start, e.end);
           load();
           return linked(e) ? optional("usize", e) : "usize";
         }
@@ -4359,14 +4477,14 @@ export function expressions(ctx: Context) {
           return linked(e) ? optional("usize", e) : "usize";
         }
         // A string's one property is its length in UTF-16 code units.
-        if (stringLike(object)) {
+        if (stringLike(typing, object)) {
           if (stringMethods(typing)[e.name]) throw new CompileError(`string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
           if (e.name !== "length") throw new CompileError(`property '${shownName(e.name)}' does not exist on type 'string'${didYouMean(e.name, ["length", ...Object.keys(stringMethods(typing))])}`, e.start, e.end);
           text(e.object, object, linked(e));
           return linked(e) ? optional("usize", e) : "usize";
         }
-        const found = typeof object === "string" || object.kind === "closure" ? undefined : field(object, e.name);
-        const c = typeof object !== "string" && object.kind === "class" ? classOf(object) : undefined;
+        const found = or === undefined || or.kind === "closure" ? undefined : field(or, e.name);
+        const c = or?.kind === "class" ? classOf(or) : undefined;
         const getter = !found && c ? inherited(c, "getters", e.name) : undefined;
         if (getter) {
           visible(getter.access, getter.declared ?? getter.owner!, e.name, e);
@@ -4379,12 +4497,13 @@ export function expressions(ctx: Context) {
         if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
         if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
         if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'${didYouMean(e.name, memberNames(object))}`, e.start, e.end);
-        if (typeof object !== "string" && object.kind === "class") visible(found.access, declaring(object, e.name), e.name, e);
+        if (or?.kind === "class") visible(found.access, declaring(or, e.name), e.name, e);
         // Through a type parameter the field has its bound's type, and in an instance the
         // concrete class may give it with a getter.
         const stored = lower(object);
-        if (stored !== object && typeof stored !== "string" && stored.kind === "class" && !field(stored, e.name)) {
-          const instance = instanceOf(inherited(classOf(stored), "getters", e.name)!);
+        const sr = recOf(stored);
+        if (stored !== object && sr?.kind === "class" && !field(sr, e.name)) {
+          const instance = instanceOf(inherited(classOf(sr), "getters", e.name)!);
           returnOf(instance, e);
           calls.set(e, instance);
         }
@@ -4417,7 +4536,7 @@ export function expressions(ctx: Context) {
         const written = ofElements.get(e);
         if (written) {
           // Resolved as an array's element is, so references and functions get the same rules.
-          const element = (resolveType({ id: nextId(ids), kind: "array", element: written, start: written.start, end: written.end } as TypeNode) as ArrayType).element;
+          const element = rec(resolveType({ id: nextId(ids), kind: "array", element: written, start: written.start, end: written.end } as TypeNode) as ArrayType).element;
           for (const x of e.elements as Expr[]) {
             expect(x, element);
             const t = value(x);
@@ -4428,12 +4547,12 @@ export function expressions(ctx: Context) {
         const inline = fixedLiterals.get(e);
         if (inline) {
           const given = e.elements as Expr[];
-          if (given.length !== inline.size) throw new CompileError(`type '${show(inline)}' holds ${inline.size} element${inline.size === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
+          if (given.length !== rec(inline).size) throw new CompileError(`type '${show(inline)}' holds ${rec(inline).size} element${rec(inline).size === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
           const spread = given.find((x) => x.kind === "spread");
           if (spread) throw unsupported("spread elements in fixed array literals", spread);
           for (const x of given) {
             const t = value(x);
-            coerce(x, t, inline.element, `type '${show(t)}' is not assignable to type '${show(inline.element)}'`);
+            coerce(x, t, rec(inline).element, `type '${show(t)}' is not assignable to type '${show(rec(inline).element)}'`);
           }
           return inline;
         }
@@ -4450,19 +4569,19 @@ export function expressions(ctx: Context) {
         if (first !== undefined && !wanted.has(e)) for (const x of elements) if (x.kind !== "spread") expect(x, first);
         // Closures meeting the callable an annotation expects of each element are boxed into it.
         const want = wanted.get(e);
-        const callable = typeof want !== "string" && want?.kind === "dyn" && callableOf.has(want.of) ? want : undefined;
-        const promise = typeof want !== "string" && want?.kind === "dyn" && promiseElement(want.of) !== undefined ? want : undefined;
+        const callable = typeof want !== "string" && want?.kind === "dyn" && callableOf.has(rec(want).of) ? want : undefined;
+        const promise = typeof want !== "string" && want?.kind === "dyn" && promiseElement(rec(want).of) !== undefined ? want : undefined;
         const given = elements.map((x) => {
           const spread = spreads.get(x);
           if (spread !== undefined) return spread;
           const t = value(x);
-          const boxed = typeof t !== "string" && ((t.kind === "closure" && callable) || (t.kind === "future" && promise));
+          const boxed = typeof t !== "string" && ((rec(t).kind === "closure" && callable) || (rec(t).kind === "future" && promise));
           if (boxed) {
             const into = (callable ?? promise)!;
             coerce(x, t, into, `type '${show(t)}' is not assignable to type '${show(into)}'`);
             return into;
           }
-          if (typeof t !== "string" && t.kind === "closure") throw unsupported("arrays of functions", x);
+          if (typeof t !== "string" && rec(t).kind === "closure") throw unsupported("arrays of functions", x);
           if (holdsRef(t)) throw unsupported("arrays of references", x);
           const widened = widenLet(t);
           if (widened !== t) coerce(x, t, widened, "");
@@ -4498,7 +4617,7 @@ export function expressions(ctx: Context) {
         if (to !== written) expect(e.expr, to);
         const from = operand(e.expr);
         // A raw pointer converts to another, or to and from an address, only inside `unsafe`.
-        const pointer = (t: Type) => typeof t !== "string" && t.kind === "pointer";
+        const pointer = (t: Type) => typeof t !== "string" && rec(t).kind === "pointer";
         if (pointer(to) || pointer(from)) {
           needsUnsafe("'as' with a raw pointer", e);
           if (!((pointer(to) && (pointer(from) || isInteger(from))) || (to === "usize" && pointer(from)))) {
@@ -4550,7 +4669,7 @@ export function expressions(ctx: Context) {
           return blockType("AbortController");
         }
         const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
-        if (named?.node.abstract) throw new CompileError(`cannot create an instance of the abstract class '${named.type.name}'`, e.start, e.end);
+        if (named?.node.abstract) throw new CompileError(`cannot create an instance of the abstract class '${rec(named.type).name}'`, e.start, e.end);
         const written = named?.constructor.params ?? (e.callee.kind === "ident" && !lookup(e.callee.name) ? ctx.templateParams(e.callee.name) : undefined);
         if (written?.at(-1)?.rest && e.args) packRest(e, e.args, written);
         else refuseSpread(list);
@@ -4573,14 +4692,14 @@ export function expressions(ctx: Context) {
         const argTypes = list.map(value);
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError(`only a class can be constructed with 'new'${e.callee.kind === "ident" && !lookup(e.callee.name) ? didYouMean(e.callee.name, ctx.classNames(e.callee.start)) : ""}`, e.callee.start, e.callee.end);
-        const rust = rustClassOf(c.type);
+        const rust = rustClassOf(typing, c.type);
         if (rust && !c.constructor.rust) throw new CompileError(`the Rust type '${rust.name}' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function`, e.start, e.end);
         constructs(c.constructor, list, argTypes);
         const constructor = instantiate(c.constructor, [], list, argTypes, e);
         args(list, argTypes, constructor, e);
         calls.set(e, constructor);
         const error = errorOf(constructor);
-        if (error) raise(e, error, `'new ${c.type.name}'`);
+        if (error) raise(e, error, `'new ${rec(c.type).name}'`);
         // An instance holding references borrows from what it was built from.
         if (holdsRef(c.type)) borrowsFrom.set(e, list.filter(lends));
         return c.type;
@@ -4646,9 +4765,9 @@ export function expressions(ctx: Context) {
           if (keptByJs(target) && statementAssign !== e) throw new CompileError(`a callback or a Promise written to property '${(place as { name: string }).name}' goes to JS, so the assignment has no value to use; write it as a statement of its own`, e.start, e.end);
         }
         const local = place.kind === "ident" ? locals.get(place) : undefined;
-        if (local && typeof local.type !== "string" && local.type.kind === "ref" && !coercions.has(place)) rebind(local, e.value);
+        if (local && typeof local.type !== "string" && rec(local.type).kind === "ref" && !coercions.has(place)) rebind(local, e.value);
         const narrow = local && narrowed(local);
-        if (local && op === "=" && coercions.has(place) && narrow && isRefType(narrow) && !fits(type, narrow.to)) rewritten(local, e);
+        if (local && op === "=" && coercions.has(place) && narrow && isRefType(narrow) && !fits(type, rec(narrow).to)) rewritten(local, e);
         return target;
       }
       case "update": {
@@ -4665,11 +4784,14 @@ export function expressions(ctx: Context) {
         if (then === otherwise) return then;
         // Two references lend shared what both point to, or a type both fit; otherwise a side
         // that borrows gives its value.
-        const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
+        const isRef = (t: Type) => typeof t !== "string" && rec(t).kind === "ref";
         if (isRef(then) && isRef(otherwise)) {
-          const [a, b] = [(then as RefType).to, (otherwise as RefType).to];
-          if ((then as RefType).mutable && (otherwise as RefType).mutable && lower(a) === lower(b)) return then;
-          const bound = (t: Type) => (typeof t !== "string" && t.kind === "param" ? t.bound : undefined);
+          const [a, b] = [rec(then as RefType).to, rec(otherwise as RefType).to];
+          if (rec(then as RefType).mutable && rec(otherwise as RefType).mutable && lower(a) === lower(b)) return then;
+          const bound = (t: Type) => {
+            const r = recOf(t);
+            return r?.kind === "param" ? r.bound : undefined;
+          };
           const common = [a, b, bound(a), bound(b)].find((t) => t && fits(a, t) && fits(b, t));
           if (common) {
             const shared = refType(common, false);
@@ -4719,7 +4841,7 @@ export function expressions(ctx: Context) {
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError(`operator '${e.op}' is not supported yet`, e.start, e.end);
         if (e.op === "+") {
           const [left, right] = [operand(e.left), operand(e.right)];
-          if (stringLike(left) || stringLike(right) || enumText(left) || enumText(right)) return join(e.left, left, e.right, right);
+          if (stringLike(typing, left) || stringLike(typing, right) || enumText(typing, left) || enumText(typing, right)) return join(e.left, left, e.right, right);
         }
         return binaryType(typing, e.op, ...sameNumbers(e.left, operand(e.left), e.right, operand(e.right), e.op === "===" || e.op === "!=="), e);
       // A spread anywhere but in an array literal or a call filling a rest parameter.
@@ -4740,9 +4862,11 @@ export function expressions(ctx: Context) {
       if (q.kind === "shorthand") return q.name === name;
       if (q.kind !== "spread") return false;
       const t = types.get(q.value)!;
-      const low = lower(isRefType(t) ? t.to : t);
-      const source = typeof low !== "string" && low.kind === "param" && low.bound?.kind === "object" ? low.bound : low;
-      return typeof source === "string" || source.kind === "param" || field(source, name) !== undefined;
+      const low = lower(isRefType(t) ? rec(t).to : t);
+      const lr = recOf(low);
+      const br = lr?.kind === "param" ? recOf(lr.bound) : undefined;
+      const source = br?.kind === "object" ? br : lr;
+      return source === undefined || source.kind === "param" || field(source, name) !== undefined;
     });
   }
 
@@ -4750,7 +4874,7 @@ export function expressions(ctx: Context) {
     to = unfolded(to);
     // An object literal meeting a union adapts to the member it names, then joins the union.
     if (e.kind === "object") to = memberNamed(e, to) ?? to;
-    if (e.kind !== "object" || typeof to === "string" || (to.kind !== "object" && to.kind !== "class")) return type;
+    if (e.kind !== "object" || typeof to === "string" || (rec(to).kind !== "object" && rec(to).kind !== "class")) return type;
     // Only a property no later part replaces gives its field, so only that one adapts.
     const winners = e.props.filter((p): p is Extract<ObjectProp, { kind: "property" }> =>
       p.kind === "property" && typeof p.key === "string" && winner(e, p.key) === p);
@@ -4774,14 +4898,14 @@ export function expressions(ctx: Context) {
       }
     }
     if (!changed) return type;
-    const fields = (type as ObjectType).fields.map((f) => {
+    const fields = rec(type as ObjectType).fields.map((f) => {
       const p = winners.find((q) => q.key === f.name);
       return p ? { ...f, type: coercions.get(p.value) ?? types.get(p.value)! } : f;
     });
     // A tuple stays one, its rest taken from its adapted array.
     const tuple = type as ObjectType;
     const many = fields.find((f) => f.name === "...")?.type as ArrayType | undefined;
-    const remade = isTuple(tuple) && !tuple.match ? tupleType(elementsOf({ ...tuple, fields }), tuple.required, many?.element) : objectType(fields);
+    const remade = isTuple(tuple) && !rec(tuple).match ? tupleType(elementsOf({ ...tuple, fields }), rec(tuple).required, many?.element) : objectType(fields);
     types.set(e, remade);
     return remade;
   }
@@ -4816,7 +4940,7 @@ export function expressions(ctx: Context) {
 
   // What an Option holds when it isn't empty.
   function held(option: UnionType): Type {
-    return unionType(option.members.filter((m) => m !== "null"));
+    return unionType(rec(option).members.filter((m) => m !== "null"));
   }
 
   // `a ?? b` is what `a` holds, or `b` when `a` is empty, which only then runs. With an Option
@@ -4835,7 +4959,7 @@ export function expressions(ctx: Context) {
     // A parameter's default is checked as an argument for it would be; a nullable one's is null.
     const declared = fallbacks.get(e);
     if (declared) {
-      const to = holdsNull(resolveType(declared)) ? option : inner;
+      const to = holdsNull(typing, resolveType(declared)) ? option : inner;
       expect(e.right, to);
       const fallback = value(e.right);
       coerce(e.right, fallback, to, `a default of type '${show(fallback)}' is not assignable to parameter of type '${show(to)}'`);
@@ -4843,7 +4967,7 @@ export function expressions(ctx: Context) {
     }
     const fallback = value(e.right);
     // An Option of a reference takes a place to lend as its fallback.
-    const to = fits(fallback, inner) || adaptable(e.right, inner) || (isRefType(inner) && fits(fallback, inner.to)) ? inner : option;
+    const to = fits(fallback, inner) || adaptable(e.right, inner) || (isRefType(inner) && fits(fallback, rec(inner).to)) ? inner : option;
     coerce(e.right, fallback, to, `type '${show(fallback)}' is not assignable to type '${show(to)}', what '${show(option)}' holds`);
     return to;
   }
@@ -4856,7 +4980,8 @@ export function expressions(ctx: Context) {
   // An array literal takes a declared element type, each element meeting it.
   function literalArray(e: Expr, type: Type, to: Type): boolean {
     // Meeting a union, it takes the union's one array member, and then joins the union.
-    const members = typeof to !== "string" && to.kind === "union" ? to.members.filter(isArray) : [];
+    const tr = recOf(to);
+    const members = tr?.kind === "union" ? tr.members.filter(isArray) : [];
     if (e.kind === "array" && isArray(type) && members.length === 1 && literalArray(e, type, members[0]!)) {
       coerce(e, members[0]!, to, "");
       return true;
@@ -4865,7 +4990,7 @@ export function expressions(ctx: Context) {
     // Each element meets the declared type afresh, replacing how it met the literal's own.
     for (const x of e.elements as Expr[]) {
       coercions.delete(x);
-      coerce(x, types.get(x)!, to.element, `type '${show(types.get(x)!)}' is not assignable to type '${show(to.element)}'`);
+      coerce(x, types.get(x)!, rec(to).element, `type '${show(types.get(x)!)}' is not assignable to type '${show(rec(to).element)}'`);
     }
     types.set(e, to);
     return true;
@@ -4878,7 +5003,7 @@ export function expressions(ctx: Context) {
       if (!isEmpty(other, locals as NodeMap<Expr, Local>)) continue;
       const t = value(subject);
       once.add(subject);
-      if (!isPlainJs(isRefType(t) ? t.to : t)) return undefined;
+      if (!isPlainJs(isRefType(t) ? rec(t).to : t)) return undefined;
       once.delete(subject);
       value(other);
       jsEmptyTests.set(e, [subject, other.kind === "null" ? "null" : "undefined"]);
@@ -4894,9 +5019,9 @@ export function expressions(ctx: Context) {
     const [left, right] = [value(e.left), value(e.right)];
     once.add(e.left);
     once.add(e.right);
-    const deref = (t: Type) => unfold(isRefType(t) ? t.to : t);
+    const deref = (t: Type) => unfold(isRefType(t) ? rec(t).to : t);
     const [l, r] = [deref(left), deref(right)];
-    if (!objectsMeet(l, r)) return undefined;
+    if (!objectsMeet(typing, l, r)) return undefined;
     once.delete(e.left);
     once.delete(e.right);
     for (const t of [l, r]) {
@@ -4908,13 +5033,17 @@ export function expressions(ctx: Context) {
     // A type parameter is compared as the type it stands for in this instance, and a union
     // holding one as the union that flattens into.
     const concrete = (t: Type): Type => {
-      if (typeof t !== "string" && t.kind === "param" && t.concrete) return concrete(t.concrete);
-      return typeof t !== "string" && t.kind === "union" && holdsArgument(t) ? lower(t) : t;
+      const r = recOf(t);
+      if (r?.kind === "param" && r.concrete) return concrete(r.concrete);
+      return r?.kind === "union" && holdsArgument(typing, r) ? lower(t) : t;
     };
     const [cl, cr] = [concrete(l), concrete(r)];
     const common = fits(cl, cr) ? cr : fits(cr, cl) ? cl : undefined;
     // Two unions that share a member compare as unions do, member by member.
-    const members = (t: Type) => (typeof t !== "string" && t.kind === "union" ? t.members : [t]);
+    const members = (t: Type) => {
+      const r = recOf(t);
+      return r?.kind === "union" ? r.members : [t];
+    };
     const overlap = members(cl).some((x) => members(cr).some((y) => fits(x, y) || fits(y, x)));
     if (!common && !overlap) throw new CompileError(`this comparison appears to be unintentional because the types '${show(l)}' and '${show(r)}' have no overlap`, e.start, e.end);
     // A reference is compared through, reading the value it borrows.
@@ -4926,28 +5055,32 @@ export function expressions(ctx: Context) {
 
   // Why values of a type can't be compared.
   function uncomparable(t: Type): string {
-    const rust = rustClassOf(t);
+    const rust = rustClassOf(typing, t);
     if (rust) return `a Rust '${rust.name}' isn't compared from Fish; compare what its methods give`;
-    if (typeof t !== "string" && t.kind === "class") return `a class compares through 'equals(other: Ref<this>): boolean', which '${t.name}' doesn't have; add one, or '@derive(Eq)'`;
-    if (typeof t !== "string" && t.kind === "variant") return "an enum holding values compares when it has '@derive(Eq)'";
-    if (typeof t !== "string" && t.kind === "map") return `a ${t.set ? "Set" : "Map"} isn't compared by value; compare its entries`;
+    const r = recOf(t);
+    if (r?.kind === "class") return `a class compares through 'equals(other: Ref<this>): boolean', which '${r.name}' doesn't have; add one, or '@derive(Eq)'`;
+    if (r?.kind === "variant") return "an enum holding values compares when it has '@derive(Eq)'";
+    if (r?.kind === "map") return `a ${r.set ? "Set" : "Map"} isn't compared by value; compare its entries`;
     return "it has no value equality";
   }
 
   // Whether a class or a data enum's values compare: a class through its `equals`, an enum
   // when it derives Eq.
   function comparesAsValue(t: ClassType | VariantType): boolean {
-    if (rustClassOf(t)) return false;
-    if (t.kind === "variant") return [...enums.values()].some((e) => e.data?.name === t.enum && e.data.eq);
-    const known = equalities.get(t);
+    if (rustClassOf(typing, t)) return false;
+    const r = rec(t);
+    if (r.kind === "variant") return [...enums.values()].some((e) => e.data?.name === r.enum && e.data.eq);
+    const known = equalities.get(r);
     if (known) return true;
-    const method = inherited(classOf(t), "methods", "equals");
+    const method = inherited(classOf(r), "methods", "equals");
     if (!method) return false;
     const instance = instanceOf(method);
     const [arg, ...more] = paramTypes(instance);
-    const shaped = !method.self?.mutable && !method.self?.owned && more.length === 0 && arg !== undefined && isRefType(arg) && !arg.mutable && (lower(arg.to) === lower(t) || (typeof arg.to !== "string" && arg.to.kind === "class" && derives(t, arg.to))) && returnOf(instance, method) === "boolean";
-    if (!shaped) throw new CompileError(`'${t.name}.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean`, method.start, method.end);
-    equalities.set(t, instance);
+    const ar = recOf(arg);
+    const to = ar?.kind === "ref" ? recOf(ar.to) : undefined;
+    const shaped = !method.self?.mutable && !method.self?.owned && more.length === 0 && ar?.kind === "ref" && !ar.mutable && (lower(ar.to) === lower(t) || (to?.kind === "class" && derives(r, to))) && returnOf(instance, method) === "boolean";
+    if (!shaped) throw new CompileError(`'${r.name}.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean`, method.start, method.end);
+    equalities.set(r, instance);
     return true;
   }
 
@@ -4963,12 +5096,12 @@ export function expressions(ctx: Context) {
   function shown(args: Expr[]) {
     for (const a of args) {
       const type = a.kind === "string" ? "void" : read(a);
-      if (holdsPart(type, (u) => rustClassOf(u) !== undefined, true)) throw new CompileError(`printing a '${show(type)}' isn't supported, since it holds a Rust value; print what its methods give`, a.start, a.end);
+      if (holdsPart(type, (u) => rustClassOf(typing, u) !== undefined, true)) throw new CompileError(`printing a '${show(type)}' isn't supported, since it holds a Rust value; print what its methods give`, a.start, a.end);
       if (printable(type)) continue;
       printed.add(a);
       const part = uninspectable(type);
       if (!part) continue;
-      throw new CompileError(typeof part !== "string" && (part.kind === "function" || part.kind === "closure" || part.kind === "dyn") ? "printing a function isn't supported yet" : `printing a '${show(part)}' isn't supported yet`, a.start, a.end);
+      throw new CompileError(typeof part !== "string" && (rec(part).kind === "function" || rec(part).kind === "closure" || rec(part).kind === "dyn") ? "printing a function isn't supported yet" : `printing a '${show(part)}' isn't supported yet`, a.start, a.end);
     }
   }
 
@@ -4981,7 +5114,7 @@ export function expressions(ctx: Context) {
 
   // A value written into a string: text, or a number or boolean written as JavaScript would.
   function joined(e: Expr, type: Type, into: string) {
-    if (stringLike(type) || enumText(type)) {
+    if (stringLike(typing, type) || enumText(typing, type)) {
       if (type !== "string") coerce(e, type, "string", "");
       return;
     }
@@ -4992,7 +5125,7 @@ export function expressions(ctx: Context) {
   // Two operands of different number types meet as one when either is only literals. String
   // literals meet as strings, unless two different ones are compared for equality.
   function sameNumbers(a: Expr, left: Type, b: Expr, right: Type, equality = false): [Type, Type] {
-    if (isText(left) && isText(right) && (!equality || (left !== right && (left === "string" || right === "string")))) {
+    if (isText(typing, left) && isText(typing, right) && (!equality || (left !== right && (left === "string" || right === "string")))) {
       if (left !== "string") coerce(a, left, "string", "");
       if (right !== "string") coerce(b, right, "string", "");
       return ["string", "string"];
@@ -5006,9 +5139,10 @@ export function expressions(ctx: Context) {
   // A value meeting a declared type must fit it. A wider one is copied down to it, except
   // that a fresh object literal may not name extra properties, as in TypeScript.
   function coerce(e: Expr, type: Type, to: Type, message: string) {
+    const tr = recOf(to);
     // A reference that changes its value's form points at a copy in a slot of the function,
     // which an async function loses each time it stops.
-    if (ctx.async && isRefType(to) && !isRefType(type) && lower(type) !== lower(to.to) && fits(type, to.to)) {
+    if (ctx.async && tr?.kind === "ref" && !isRefType(type) && lower(type) !== lower(tr.to) && fits(type, tr.to)) {
       throw unsupported("references that convert their value inside async functions", e);
     }
     // `unsafe { expr }` is `expr`, which meets the type itself.
@@ -5019,35 +5153,38 @@ export function expressions(ctx: Context) {
     }
     // A recursive type's value meeting another type is the type it stands for, read out of
     // its block.
-    if (typeof type !== "string" && type.kind === "recursive" && type !== to && !(typeof to !== "string" && to.kind === "union" && to.members.includes(type))) {
+    const held = recOf(type);
+    if (held?.kind === "recursive" && type !== to && !(tr?.kind === "union" && tr.members.includes(type))) {
       coercions.delete(e);
-      coerce(e, type.of, to, message);
-      if (!coercions.has(e)) coercions.set(e, type.of);
+      coerce(e, held.of, to, message);
+      if (!coercions.has(e)) coercions.set(e, held.of);
       return;
     }
     // A value meeting a recursive type meets the type it stands for, then moves into a block.
-    if (typeof to !== "string" && to.kind === "recursive" && type !== to) {
-      coerce(e, type, to.of, message);
+    if (tr?.kind === "recursive" && type !== to) {
+      coerce(e, type, tr.of, message);
       coercions.set(e, to);
       return;
     }
     // A derived `equals` lends its argument to the base's, which reads the embedded base.
-    if (upcasts.has(`${e.start}:${e.end}`) && isRefType(type) && isRefType(to) && !to.mutable && typeof type.to !== "string" && type.to.kind === "class" && typeof to.to !== "string" && to.to.kind === "class" && derives(type.to, to.to)) return;
+    const from = held?.kind === "ref" ? recOf(held.to) : undefined;
+    const into = tr?.kind === "ref" ? recOf(tr.to) : undefined;
+    if (upcasts.has(`${e.start}:${e.end}`) && tr?.kind === "ref" && !tr.mutable && from?.kind === "class" && into?.kind === "class" && derives(from, into)) return;
     // A mutable reference lent on must be reachable only through mutable references.
-    if (isRefType(to) && to.mutable && isRefType(type) && type.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
+    if (tr?.kind === "ref" && tr.mutable && held?.kind === "ref" && held.mutable && rooted(e) && place(e)) changeable(e, "mutably borrow");
     if (type === to || sameLowered(type, to) || sameCallable(type, to)) return;
     // An array literal takes the array of JS values it meets element by element, as any does.
-    if (e.kind === "array" && typeof to !== "string" && to.kind === "array" && holdsJs(to) && literalArray(e, type, to)) return;
+    if (e.kind === "array" && tr?.kind === "array" && holdsJs(to) && literalArray(e, type, to)) return;
     // An Option or array of JS values takes what each of its members would.
-    if (typeof to !== "string" && to.kind !== "block" && holdsJs(to) && !fits(type, to) && passesJs(type, to)) {
+    if (tr?.kind !== "block" && holdsJs(to) && !fits(type, to) && passesJs(type, to)) {
       coercions.set(e, to);
       return;
     }
     // Any value that crosses to JS is a JsValue there, as TypeScript's 'any' takes anything, and
     // a Fish value of a shape's fields becomes a new JS object of that shape.
-    if (typeof to !== "string" && to.kind === "block" && to.which === "JsValue") {
+    if (tr?.kind === "block" && tr.which === "JsValue") {
       // A borrowed handle passes as the handle, counted again.
-      if (isRefType(type) && typeof type.to !== "string" && type.to.kind === "block" && type.to.which === "JsValue") type = type.to;
+      if (from?.kind === "block" && from.which === "JsValue") type = from;
       const shape = jsShape(to);
       if (shape ? takesShape(type, shape) : uncrossable(type) === undefined) {
         coercions.set(e, to);
@@ -5071,8 +5208,8 @@ export function expressions(ctx: Context) {
       return;
     }
     if (isNumeric(type) && isNumeric(to)) throw new CompileError(`${message}; convert it with 'as ${show(to)}'`, e.start, e.end);
-    if (typeof to !== "string" && to.kind === "ref" && (typeof type === "string" || type.kind !== "ref")) {
-      borrow(e, type, to, message);
+    if (tr?.kind === "ref" && (typeof type === "string" || rec(type).kind !== "ref")) {
+      borrow(e, type, tr, message);
       return;
     }
     // A place meeting a reference or nothing is lent, as one meeting the reference is.
@@ -5086,75 +5223,81 @@ export function expressions(ctx: Context) {
       types.set(e, to);
       return;
     }
-    if (lent && type !== "null" && !optionRef(type) && (typeof type === "string" || type.kind !== "ref")) {
+    if (lent && type !== "null" && !optionRef(type) && (typeof type === "string" || rec(type).kind !== "ref")) {
       borrow(e, type, lent, message);
       coercions.set(e, to);
       return;
     }
     // A reference gives its value where one is wanted only by copying it: nothing moves out of
     // a borrow.
-    if (typeof type !== "string" && type.kind === "ref" && (typeof to === "string" || to.kind !== "ref") && !lent) {
-      if (!isCopy(type.to) && fits(type.to, to)) {
+    const ref = recOf(type);
+    if (ref?.kind === "ref" && (tr === undefined || tr.kind !== "ref") && !lent) {
+      if (!isCopy(ref.to) && fits(ref.to, to)) {
         throw new CompileError(`can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy`, e.start, e.end);
       }
-      coercions.set(e, type.to);
-      coerce(e, type.to, to, message);
+      coercions.set(e, ref.to);
+      coerce(e, ref.to, to, message);
       return;
     }
     // In an instance, a member of the union a type parameter stands for goes into that union, as
     // a value awaited from a promise of `T | null` does once narrowed.
-    const argument = typeof to !== "string" && to.kind === "param" && to.concrete && !fits(type, to) ? lower(to) : undefined;
-    if (typeof argument !== "string" && argument?.kind === "union") {
+    const argument = recOf(tr?.kind === "param" && tr.concrete && !fits(type, to) ? lower(to) : undefined);
+    if (argument?.kind === "union") {
       intoUnion(e, type, argument, message, unions);
       return;
     }
-    if (typeof to !== "string" && to.kind === "union") {
+    if (tr?.kind === "union") {
       // A value no member takes as it is goes into the union's one Dyn, boxed.
-      const dyns = to.members.filter((m): m is DynType => typeof m !== "string" && m.kind === "dyn");
-      const boxable = typeof type !== "string" && (type.kind === "class" || type.kind === "generator");
-      if (boxable && dyns.length === 1 && membersFor(type, to).length === 0 && !callableOf.has(dyns[0]!.of)) {
+      const dyns = tr.members.flatMap((m) => {
+        const r = recOf(m);
+        return r?.kind === "dyn" ? [r] : [];
+      });
+      const kind = recOf(type)?.kind;
+      const boxable = kind === "class" || kind === "generator";
+      if (boxable && dyns.length === 1 && membersFor(type, tr).length === 0 && !callableOf.has(dyns[0]!.of)) {
         boxing(e, type, dyns[0]!, message);
         boxedMembers.set(e, dyns[0]!);
         coercions.set(e, to);
         return;
       }
-      intoUnion(e, type, to, message, unions);
+      intoUnion(e, type, tr, message, unions);
       return;
     }
     // A literal type takes exactly its value, so only a literal expression of that value fits.
-    if (typeof to !== "string" && to.kind === "literal") {
-      if (literalValue(e) !== to.value) throw new CompileError(message, e.start, e.end);
+    if (tr?.kind === "literal") {
+      if (literalValue(e) !== tr.value) throw new CompileError(message, e.start, e.end);
       coercions.set(e, to);
       return;
     }
-    if (e.kind === "object" && typeof to !== "string" && to.kind === "object" && holdsRef(to)) type = lendFields(e, to, message);
+    if (e.kind === "object" && tr?.kind === "object" && holdsRef(to)) type = lendFields(e, tr, message);
     const shape = !fits(type, to) ? literalShape(typing, e, to, types) : undefined;
     if (shape) {
       shape.apply(coercions);
       type = shape.type;
     }
-    if (typeof to !== "string" && to.kind === "function") {
+    if (tr?.kind === "function") {
       if (!fits(type, to)) throw new CompileError(message, e.start, e.end);
       return;
     }
-    if (typeof to !== "string" && to.kind === "dyn") return boxing(e, type, to, message);
-    if (typeof to !== "string" && to.kind === "interface") {
-      const reason = unsatisfied(type, to, members, e);
+    if (tr?.kind === "dyn") return boxing(e, type, tr, message);
+    if (tr?.kind === "interface") {
+      const reason = unsatisfied(type, tr, members, e);
       if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
       excess(e, to);
       return;
     }
-    if (typeof type !== "string" && type.kind === "class" && typeof to !== "string" && to.kind === "class" && derives(type, to)) {
-      throw new CompileError(`'${type.name}' extends '${to.name}' by embedding one, so it can't be used as '${to.name}'; extract an interface both classes implement`, e.start, e.end);
+    const sub = recOf(type);
+    if (sub?.kind === "class" && tr?.kind === "class" && derives(sub, tr)) {
+      throw new CompileError(`'${sub.name}' extends '${tr.name}' by embedding one, so it can't be used as '${tr.name}'; extract an interface both classes implement`, e.start, e.end);
     }
-    if (typeof type !== "string" && type.kind === "ref" && typeof to !== "string" && to.kind === "ref" && !fits(type, to)) {
+    if (sub?.kind === "ref" && tr?.kind === "ref" && !fits(type, to)) {
       // A shared reference to something narrower lends a copy of what this one points to.
-      if (!to.mutable && fits(type.to, to.to)) {
+      if (!tr.mutable && fits(sub.to, tr.to)) {
         coercions.set(e, to);
         return;
       }
-      if (!to.mutable) throw new CompileError(message, e.start, e.end);
-      const reason = !type.mutable ? "a shared reference can't lend itself as mutable" : `only a reference to exactly '${show(to.to)}' can be lent mutably`;
+      if (!tr.mutable) throw new CompileError(message, e.start, e.end);
+      const reason = !sub.mutable ? "a shared reference can't lend itself as mutable" : `only a reference to exactly '${show(tr.to)}' can be lent mutably`;
       throw new CompileError(`${message}: ${reason}`, e.start, e.end);
     }
     if (!fits(type, to) && !builds(e, type, to)) throw new CompileError(message, e.start, e.end);
@@ -5180,25 +5323,25 @@ export function expressions(ctx: Context) {
       return;
     }
     // A literal lent is a temporary: it meets the type referred to, as its own literals do.
-    if ((e.kind === "object" || e.kind === "array") && !fits(type, to.to)) {
-      coerce(e, type, to.to, message);
+    if ((e.kind === "object" || e.kind === "array") && !fits(type, rec(to).to)) {
+      coerce(e, type, rec(to).to, message);
       type = coercions.get(e) ?? types.get(e)!;
     }
-    const exact = sameLowered(type, to.to);
+    const exact = sameLowered(type, rec(to).to);
     // A type that holds itself may lend a part of a parameter's value as the parameter's type,
     // which each instance checks against the type it is made for.
-    const part = partOfItself(type, to.to);
-    if (!exact && !part && !fits(type, to.to)) throw new CompileError(message, e.start, e.end);
-    const unlocked = to.mutable ? unlocks(type, to.to) : undefined;
-    if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, so it can't be lent mutably as '${show(to.to)}', which could change it`, e.start, e.end);
-    const through = to.mutable ? copied(e) : undefined;
+    const part = partOfItself(type, rec(to).to);
+    if (!exact && !part && !fits(type, rec(to).to)) throw new CompileError(message, e.start, e.end);
+    const unlocked = rec(to).mutable ? unlocks(type, rec(to).to) : undefined;
+    if (unlocked) throw new CompileError(`'${unlocked}' is read-only here, so it can't be lent mutably as '${show(rec(to).to)}', which could change it`, e.start, e.end);
+    const through = rec(to).mutable ? copied(e) : undefined;
     if (through) throw new CompileError(`can't lend this mutably through '${through}', which would lend a copy; check '!== null' first and lend the variable`, e.start, e.end);
-    if (to.mutable && readCopy(e)) throw new CompileError("this is part of a value read through a Dyn, which gives a copy, so lending it mutably would change only the copy; change it through a method", e.start, e.end);
+    if (rec(to).mutable && readCopy(e)) throw new CompileError("this is part of a value read through a Dyn, which gives a copy, so lending it mutably would change only the copy; change it through a method", e.start, e.end);
     // A shared borrow of anything but such a place lends a copy, but a mutable one of anything
     // that isn't a temporary must reach the place.
-    if (to.mutable && rooted(e)) {
+    if (rec(to).mutable && rooted(e)) {
       if (!place(e) || !inPlace(e, to)) {
-        throw new CompileError(`${message}: only a place holding exactly '${show(to.to)}' can be lent mutably`, e.start, e.end);
+        throw new CompileError(`${message}: only a place holding exactly '${show(rec(to).to)}' can be lent mutably`, e.start, e.end);
       }
       changeable(e, "mutably borrow");
     }
@@ -5222,12 +5365,13 @@ export function expressions(ctx: Context) {
   function inPlace(e: Expr, to: RefType): boolean {
     const type = types.get(e)!;
     const local = e.kind === "ident" ? locals.get(e) : undefined;
-    const held = typeof type !== "string" && type.kind === "ref" ? type.to : type;
-    if (local && local.type !== type && typeof held !== "string" && held.kind === "union") return false;
+    const ref = recOf(type);
+    const held = ref?.kind === "ref" ? ref.to : type;
+    if (local && local.type !== type && recOf(held)?.kind === "union") return false;
     // A field read through a type parameter may be stored as a different type by the concrete
     // type; at a definition, where nothing is concrete, each instance decides.
     if (e.kind === "member" && lower(stored(e)) !== lower(type)) return false;
-    return typeof type !== "string" && type.kind === "ref" ? fits(type, to) : (sameLowered(type, to.to) && sameLowered(to.to, type)) || partOfItself(type, to.to);
+    return typeof type !== "string" && rec(type).kind === "ref" ? fits(type, to) : (sameLowered(type, rec(to).to) && sameLowered(rec(to).to, type)) || partOfItself(type, rec(to).to);
   }
 
   // Without lifetimes, a reference variable can only be pointed at something that lives as long
@@ -5259,7 +5403,7 @@ export function expressions(ctx: Context) {
   // its field, so the literal holds what it borrows.
   function lendFields(e: Extract<Expr, { kind: "object" }>, to: ObjectType, message: string): Type {
     const own = types.get(e) as ObjectType;
-    const lent = own.fields.map((f) => {
+    const lent = rec(own).fields.map((f) => {
       const want = field(to, f.name)?.type;
       const p = winner(e, f.name);
       if (!want || !p || p.kind === "spread" || !holdsRef(want) || fits(f.type, want)) return f;
@@ -5267,7 +5411,8 @@ export function expressions(ctx: Context) {
       else if (p.kind === "shorthand") {
         // A shorthand lends its variable where it lives, so only as exactly what it holds.
         const local = locals.get(p)!;
-        if (typeof want === "string" || want.kind !== "ref" || want.mutable || lower(local.type) !== lower(want.to)) {
+        const wr = recOf(want);
+        if (wr?.kind !== "ref" || wr.mutable || lower(local.type) !== lower(wr.to)) {
           throw new CompileError(`${message}: write '${p.name}: ${p.name}' to lend '${p.name}' here`, p.start, p.end);
         }
       }
@@ -5282,15 +5427,16 @@ export function expressions(ctx: Context) {
   // gives every field and the class has no field hidden from it. Nested literals may build
   // the classes of nested fields.
   function builds(e: Expr, type: Type, to: Type): boolean {
-    if (e.kind !== "object" || typeof type === "string" || typeof to === "string" || to.kind !== "class") return false;
-    classOf(to);
-    for (const f of allFields(to)) {
+    const c = recOf(to);
+    if (e.kind !== "object" || typeof type === "string" || c?.kind !== "class") return false;
+    classOf(c);
+    for (const f of allFields(c)) {
       if ((f.access ?? "public") !== "public") {
-        throw new CompileError(`an object literal can't build '${to.name}' because '${f.name}' is ${f.access}; use 'new'`, e.start, e.end);
+        throw new CompileError(`an object literal can't build '${c.name}' because '${f.name}' is ${f.access}; use 'new'`, e.start, e.end);
       }
       const given = field(type, f.name);
       if (!given) {
-        throw new CompileError(`property '${f.name}' is missing in type '${show(type)}' but required in type '${to.name}'`, e.start, e.end);
+        throw new CompileError(`property '${f.name}' is missing in type '${show(type)}' but required in type '${c.name}'`, e.start, e.end);
       }
       const prop = e.props.find((p) => p.kind === "property" && p.key === f.name);
       if (!fits(given.type, f.type) && !(prop?.kind === "property" && builds(prop.value, given.type, f.type))) {
@@ -5305,9 +5451,13 @@ export function expressions(ctx: Context) {
     if (e.kind !== "object" || typeof to === "string") return;
     // Against a union, a name no member has is excess, and the literal is checked as the one
     // member that has all its names, when one does.
-    if (to.kind === "union") {
+    const u = rec(to);
+    if (u.kind === "union") {
       const names = e.props.flatMap((p) => (p.kind === "spread" ? [] : [p.kind === "shorthand" ? p.name : (p as { key: string }).key]));
-      const objects = to.members.map(unfold).filter((m): m is ObjectType | ClassType => typeof m !== "string" && (m.kind === "object" || m.kind === "class"));
+      const objects = u.members.map(unfold).flatMap((t) => {
+        const m = recOf(t);
+        return m?.kind === "object" || m?.kind === "class" ? [m] : [];
+      });
       if (objects.length === 0) return;
       const missing = names.find((n) => !objects.some((m) => field(m, n)));
       if (missing !== undefined) {
@@ -5350,14 +5500,16 @@ export function expressions(ctx: Context) {
         continue;
       }
       const t = value(p.value);
-      const low = lower(isRefType(t) ? t.to : t);
+      const low = lower(isRefType(t) ? rec(t).to : t);
       // An object-typed parameter stands for any type with its fields, which its bound names.
-      const held = typeof low !== "string" && low.kind === "param" && low.bound?.kind === "object" ? low.bound : low;
-      if (typeof held === "string" || (held.kind !== "object" && held.kind !== "class") || isTuple(held)) {
+      const lr = recOf(low);
+      const br = lr?.kind === "param" ? recOf(lr.bound) : undefined;
+      const held = br?.kind === "object" ? br : lr;
+      if (held === undefined || (held.kind !== "object" && held.kind !== "class") || isTuple(held)) {
         throw new CompileError(`'...' in an object literal spreads an object or an instance, not '${show(t)}'`, p.start, p.end);
       }
       if (holdsRef(held)) throw unsupported("spreads of values holding references", p);
-      if (rustClassOf(held)) throw new CompileError(`a Rust '${rustClassOf(held)!.name}' has no fields Fish can read, so it can't be spread; call its methods for what it holds`, p.start, p.end);
+      if (rustClassOf(typing, held)) throw new CompileError(`a Rust '${rustClassOf(typing, held)!.name}' has no fields Fish can read, so it can't be spread; call its methods for what it holds`, p.start, p.end);
       const parts = held.kind === "class" ? allFields(held).filter((f) => (f.access ?? "public") === "public") : held.fields;
       const place = copiesPlace(p.value);
       for (const f of parts) {
@@ -5405,30 +5557,32 @@ export function expressions(ctx: Context) {
   function property(p: ObjectProp): Field {
     const field = propertyField(p);
     // A generic function value is held as it is, captures nothing, and is called by name.
-    if (typeof field.type !== "string" && field.type.kind === "closure" && field.type.generic) return field;
+    const fr = recOf(field.type);
+    if (fr?.kind === "closure" && fr.generic) return field;
     // A value for a field the object's type holds a Dyn in is boxed into it.
     const boxed = p.kind === "property" ? wanted.get(p.value) : undefined;
     // `null`, or an Option, already is what an optional Dyn field holds.
     const plain = lower(field.type);
-    const already = plain === "null" || (typeof plain !== "string" && plain.kind === "union") || (boxed !== undefined && plain === lower(boxed));
+    const already = plain === "null" || (typeof plain !== "string" && rec(plain).kind === "union") || (boxed !== undefined && plain === lower(boxed));
     if (p.kind === "property" && typeof boxed !== "string" && boxed?.kind === "dyn" && !already) {
       coerce(p.value, field.type, boxed, `type '${show(field.type)}' is not assignable to type '${show(boxed)}'`);
       return { ...field, type: boxed };
     }
     // An arrow written for a field the object's type stores a callable in is boxed into it.
     const want = p.kind === "property" ? wanted.get(p.value) : undefined;
-    if (typeof field.type !== "string" && field.type.kind === "closure" && want && isCallable(want)) {
+    if (typeof field.type !== "string" && rec(field.type).kind === "closure" && want && isCallable(want)) {
       coerce((p as Extract<ObjectProp, { kind: "property" }>).value, field.type, want, `type '${show(field.type)}' is not assignable to type '${show(want)}'`);
       return { ...field, type: want };
     }
     // With no type to say which, a sync arrow is stored as a callable of its own signature.
-    if (typeof field.type !== "string" && field.type.kind === "closure" && p.kind === "property" && !(typeof field.type.returns !== "string" && field.type.returns.kind === "future")) {
+    const fn = recOf(field.type);
+    if (fn?.kind === "closure" && p.kind === "property" && recOf(fn.returns)?.kind !== "future") {
       // A signature read once to make the callable, never kept, so it isn't in the arena.
-      const own = storedType({ kind: "function", typeId: 0, name: field.type.name, names: field.type.params.map((_, i) => `p${i}`), params: field.type.params, returns: field.type.returns, ...(field.type.throws && { throws: field.type.throws }), fields: [] });
+      const own = storedType({ kind: "function", typeId: 0, name: fn.name, names: fn.params.map((_, i) => `p${i}`), params: fn.params, returns: fn.returns, ...(fn.throws && { throws: fn.throws }), fields: [] });
       coerce(p.value, field.type, own, `type '${show(field.type)}' is not assignable to type '${show(own)}'`);
       return { ...field, type: own };
     }
-    if (typeof field.type !== "string" && field.type.kind === "closure") throw unsupported("functions stored in objects", p);
+    if (typeof field.type !== "string" && rec(field.type).kind === "closure") throw unsupported("functions stored in objects", p);
     if (optionRef(field.type)) throw unsupported("unions holding references", p);
     return field;
   }
@@ -5464,8 +5618,9 @@ export function expressions(ctx: Context) {
   // What a variable holding a JsValue reads as where `typeof` left several kinds of JS value:
   // the JsValue, taken out of a union holding it, through a reference too.
   function stillJs(t: Type): Type {
-    if (isRefType(t)) return refType(stillJs(t.to), t.mutable);
-    return typeof t !== "string" && t.kind === "union" ? t.members.find(isPlainJs)! : t;
+    if (isRefType(t)) return refType(stillJs(rec(t).to), rec(t).mutable);
+    const u = recOf(t);
+    return u?.kind === "union" ? u.members.find(isPlainJs)! : t;
   }
 
   // The type of what an assignment replaces: a `let` variable, or a field inside one.
@@ -5490,7 +5645,7 @@ export function expressions(ctx: Context) {
     const bang = e as Bang;
     if (bang.redundant === undefined) ctx.asWritten();
     if (bang.redundant !== undefined) return bang.redundant;
-    const held = isRefType(given) ? given.to : given;
+    const held = isRefType(given) ? rec(given).to : given;
     if (held === "null") throw new CompileError("'!' takes the value out of an Option, and this is a 'null', which is always empty", e.start, e.end);
     return (bang.redundant = !isOption(held));
   }
@@ -5508,20 +5663,20 @@ export function expressions(ctx: Context) {
     const setter = target.kind === "member" ? accessor(target) : undefined;
     intoMember(typing, target, types);
     const indexed = target.kind === "index" ? read(target.object) : undefined;
-    if (indexed !== undefined && stringLike(indexed)) {
+    if (indexed !== undefined && stringLike(typing, indexed)) {
       throw new CompileError("strings can't be changed; build a new one instead, joining parts with '+'", target.start, target.end);
     }
     if (indexed !== undefined && isPlainJs(indexed)) throw new CompileError("writing a JS value's elements isn't supported yet; a 'JsValue' is read with 'at'", target.start, target.end);
     const holder = target.kind === "member" ? types.get(target.object) : undefined;
-    if (holder && isArray(isRefType(holder) ? holder.to : holder)) {
+    if (holder && isArray(isRefType(holder) ? rec(holder).to : holder)) {
       const capacity = (target as { name: string }).name === "capacity";
       throw new CompileError(capacity ? "an array's 'capacity' can't be set; use 'reserve(n)' to make room, or 'shrinkToFit()' to give it back" : "an array's 'length' can't be set; use 'pop()' to remove elements, or 'push' to add them", target.start, target.end);
     }
-    const table = holder && (isRefType(holder) ? holder.to : holder);
-    if (table && typeof table !== "string" && table.kind === "map") {
+    const table = holder && (isRefType(holder) ? rec(holder).to : holder);
+    if (table && typeof table !== "string" && rec(table).kind === "map") {
       throw new CompileError("a Map's or a Set's 'size' can't be set; use 'delete' or 'clear' to remove entries", target.start, target.end);
     }
-    if (holder && stringLike(isRefType(holder) ? holder.to : holder)) {
+    if (holder && stringLike(typing, isRefType(holder) ? rec(holder).to : holder)) {
       throw new CompileError(`a string's '${(target as { name: string }).name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
     }
     // A top-level const, or a part of one, was computed while compiling and never changes.
@@ -5538,13 +5693,14 @@ export function expressions(ctx: Context) {
       if (computed.has(target)) {
         const holder = types.get((target as Extract<Expr, { kind: "member" }>).object);
         // A JS handle's property is written in JS, whatever holds the handle.
-        const handle = holder === undefined ? undefined : jsShape(isRefType(holder) ? holder.to : holder);
+        const handle = holder === undefined ? undefined : jsShape(isRefType(holder) ? rec(holder).to : holder);
         const field = handle?.fields.find((f) => f.name === (target as { name: string }).name);
         if (field) {
           if (field.readonly) throw new CompileError(`'${field.name}' is read-only in its declaration`, target.start, target.end);
           return crossing(field.type, `property '${field.name}' is a`, target);
         }
-        const through = typeof holder !== "string" && (holder?.kind === "dyn" || (holder?.kind === "ref" && typeof holder.to !== "string" && holder.to.kind === "dyn"));
+        const hr = recOf(holder);
+        const through = hr?.kind === "dyn" || (hr?.kind === "ref" && recOf(hr.to)?.kind === "dyn");
         throw new CompileError(through ? "writing a field through a Dyn isn't supported yet; change it through a method" : `'${(target as { name: string }).name}' is read-only: the runtime keeps it`, target.start, target.end);
       }
       // A whole value assigned to a mutable reference is written through it, to what it was
@@ -5552,17 +5708,17 @@ export function expressions(ctx: Context) {
       // member, so it goes through the narrowed reference.
       const declared = target.kind === "ident" && !reads ? locals.get(target)!.type : read;
       // A constructor's assignment to a field of `this` sets the field rather than writing through it.
-      const initialises = target.kind === "member" && target.object.kind === "this" && self?.constructor && self.type.fields.some((f) => f.name === target.name);
-      if ((target.kind === "ident" || target.kind === "member") && !initialises && isRefType(declared) && declared.mutable) {
+      const initialises = target.kind === "member" && target.object.kind === "this" && self?.constructor && rec(self.type).fields.some((f) => f.name === target.name);
+      if ((target.kind === "ident" || target.kind === "member") && !initialises && isRefType(declared) && rec(declared).mutable) {
         // What a type parameter stands for may be wider than any value written here.
-        if (typeof declared.to !== "string" && declared.to.kind === "param") {
+        if (recOf(rec(declared).to)?.kind === "param") {
           throw new CompileError(`can't assign a whole value through '${placeText(target)}', which may point to a wider value; assign its fields instead`, target.start, target.end);
         }
         if (target.kind === "member") changeable(target, "assign to");
         else if (captured(locals.get(target)!)) changesCapture(locals.get(target)!, "", "assign to", target, true);
         types.set(target, declared);
-        coercions.set(target, declared.to);
-        return declared.to;
+        coercions.set(target, rec(declared).to);
+        return rec(declared).to;
       }
       intoMember(typing, target, types);
       changeable(target, "assign to");
@@ -5586,9 +5742,10 @@ export function expressions(ctx: Context) {
     if (target.kind !== "member") return types.get(target)!;
     // Through a reference, what it points to stores the field.
     const holder = lower(stored(target.object));
-    const object = typeof holder !== "string" && holder.kind === "ref" ? lower(holder.to) : holder;
-    if (stringLike(object)) throw new CompileError(`a string's '${target.name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
-    if (typeof object !== "string" && object.kind === "union") {
+    const hr = recOf(holder);
+    const object = hr?.kind === "ref" ? lower(hr.to) : holder;
+    if (stringLike(typing, object)) throw new CompileError(`a string's '${target.name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
+    if (typeof object !== "string" && rec(object).kind === "union") {
       throw new CompileError(`can't assign to '${target.name}' through '${show(object)}'; narrow it to one member first`, target.start, target.end);
     }
     const found = typeof object !== "string" && field(object, target.name)?.type;
@@ -5602,8 +5759,9 @@ export function expressions(ctx: Context) {
   // makes the property read-only.
   function accessor(target: Extract<Expr, { kind: "member" }>): Body | undefined {
     const object = lower(value(target.object));
-    if (typeof object === "string" || object.kind !== "class" || field(object, target.name)) return undefined;
-    const c = classOf(object);
+    const or = recOf(object);
+    if (or?.kind !== "class" || field(or, target.name)) return undefined;
+    const c = classOf(or);
     const setter = inherited(c, "setters", target.name);
     if (!setter && inherited(c, "getters", target.name)) {
       throw new CompileError(`cannot assign to '${target.name}' because it is a read-only property`, target.start, target.end);
@@ -5619,7 +5777,7 @@ export function expressions(ctx: Context) {
     for (e = bare(e); (e.kind === "member" && !e.optional && !calls.has(e)) || element(e); e = bare(e.object)) {
       // An enum's member, and a field every member of a union shares, are values, not places.
       const object = types.get(e.object);
-      const held = typeof object !== "string" && object?.kind === "ref" ? object.to : object;
+      const held = typeof object !== "string" && object?.kind === "ref" ? rec(object).to : object;
       if (!held || (typeof held !== "string" && held.kind === "union")) return false;
     }
     return e.kind === "this" || (e.kind === "ident" && lookup(e.name) !== undefined);
@@ -5639,14 +5797,14 @@ export function expressions(ctx: Context) {
     while (root.kind === "member" || element(root)) {
       if (root.kind === "member") readonly(root, target, action);
       const holder = types.get(root.object);
-      const referred = typeof holder !== "string" && holder?.kind === "ref" ? holder.to : holder;
+      const referred = typeof holder !== "string" && holder?.kind === "ref" ? rec(holder).to : holder;
       if (typeof referred !== "string" && referred?.kind === "shared") {
         throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(bare(root.object))}' is shared between threads; change it inside '${placeText(bare(root.object))}.update(...)'`, target.start, target.end);
       }
       if (ctx.sharing && interiorMutable(types.get(root)!) && isParamPath(root)) {
         throw new CompileError(`cannot ${action} '${placeText(target)}' inside 'update': other tasks borrow '${placeText(root)}' without the lock, so it changes only through its own methods`, target.start, target.end);
       }
-      if (typeof holder !== "string" && holder?.kind === "ref" && holder.mutable) throughMut = true;
+      if (typeof holder !== "string" && holder?.kind === "ref" && rec(holder).mutable) throughMut = true;
       else if (typeof holder !== "string" && holder?.kind === "ref") {
         throw new CompileError(`cannot ${action} '${placeText(target)}' because '${placeText(bare(root.object))}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
       }
@@ -5657,7 +5815,8 @@ export function expressions(ctx: Context) {
     }
     if (ctx.sharing && path === "" && isParamPath(root)) {
       const whole = types.get(root)!;
-      if (interiorMutable(typeof whole !== "string" && whole.kind === "ref" ? whole.to : whole)) {
+      const wr = recOf(whole);
+      if (interiorMutable(wr?.kind === "ref" ? wr.to : whole)) {
         throw new CompileError(`cannot ${action} '${placeText(target)}' as a whole inside 'update': other tasks borrow its interior-mutable fields without the lock; change its other fields one by one`, target.start, target.end);
       }
     }
@@ -5669,27 +5828,27 @@ export function expressions(ctx: Context) {
   // changes only under locks, since a Dyn hides what it holds from every later check and may
   // cross to another thread.
   function boxing(e: Expr, type: Type, to: DynType, message: string) {
-    if (promiseElement(to.of) !== undefined) return boxingFuture(e, lower(type), to, message);
+    if (promiseElement(rec(to).of) !== undefined) return boxingFuture(e, lower(type), to, message);
     if (relaying(lower(type), to)) {
       if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
       dynMembers.set(`${keyOf(lower(type))} ${keyOf(lower(to))}`, { methods: [], fields: [], clone: "copy" });
       return void coercions.set(e, to);
     }
-    if (callableOf.has(to.of)) storing(e, lower(type), to, message);
+    if (callableOf.has(rec(to).of)) storing(e, lower(type), to, message);
     else if (isRefType(types.get(e)!)) throw new CompileError("can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
     const held = lower(type);
-    if (typeof held !== "string" && held.kind === "dyn") throw new CompileError(`a '${show(held)}' can't become a '${show(to)}' yet; box the value it was made from`, e.start, e.end);
+    if (typeof held !== "string" && rec(held).kind === "dyn") throw new CompileError(`a '${show(held)}' can't become a '${show(to)}' yet; box the value it was made from`, e.start, e.end);
     let rust: RustClass | undefined;
-    if (holdsPart(held, (u) => (rust ??= rustClassOf(u)) !== undefined)) throw new CompileError(`a Rust '${rust!.name}' can't become a '${show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
-    const reason = callableOf.has(to.of) ? undefined : unsatisfied(type, to.of, members, e);
+    if (holdsPart(held, (u) => (rust ??= rustClassOf(typing, u)) !== undefined)) throw new CompileError(`a Rust '${rust!.name}' can't become a '${show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
+    const reason = callableOf.has(rec(to).of) ? undefined : unsatisfied(type, rec(to).of, members, e);
     if (reason) throw new CompileError(`${message}: ${reason}`, e.start, e.end);
     const blocker = unsent(held);
     if (blocker) {
-      const why = typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made";
+      const why = typeof blocker !== "string" && rec(blocker).kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made";
       throw new CompileError(`a '${show(to)}' may cross to another thread, so it can't hold a '${show(blocker)}', which ${why}`, e.start, e.end);
     }
     // A Dyn of a generic interface made in a generic body is keyed as codegen finds it, lowered.
-    if (typeof held === "string" || held.kind !== "param") {
+    if (typeof held === "string" || rec(held).kind !== "param") {
       const table = dynTable(e, held, lower(to) as DynType);
       dynMembers.set(`${keyOf(held)} ${keyOf(lower(to))}`, table);
       ctx.dynOf(e, table);
@@ -5700,7 +5859,8 @@ export function expressions(ctx: Context) {
   // A stored callable held in one taking and giving the same, that throws what it throws or
   // more: its calls are passed on through a slot of their own.
   function relaying(from: Type, to: DynType): boolean {
-    const [f, g] = [typeof from !== "string" && from.kind === "dyn" ? callableOf.get(from.of) : undefined, callableOf.get(to.of)];
+    const d = recOf(from);
+    const [f, g] = [recOf(d?.kind === "dyn" ? callableOf.get(d.of) : undefined), recOf(callableOf.get(rec(to).of))];
     if (!f || !g || !g.throws || f.params.length !== g.params.length || lower(f.returns) !== lower(g.returns)) return false;
     return f.params.every((p, i) => lower(p) === lower(g.params[i]!)) && (!f.throws || fits(f.throws, g.throws));
   }
@@ -5708,13 +5868,14 @@ export function expressions(ctx: Context) {
   // A future stored as a `Promise<T>`: one an async function's call made, giving T, throwing
   // nothing, and owning what it holds, since it may be awaited on any thread.
   function boxingFuture(e: Expr, type: Type, to: DynType, message: string) {
-    if (typeof type !== "string" && type.kind === "param") return coercions.set(e, to), undefined;
-    if (typeof type === "string" || type.kind !== "future" || type === YIELD_NOW || type === SLEEP || leafOf.has(type)) {
-      const what = typeof type !== "string" && type.kind === "future" ? "; store the async function's call instead" : "";
+    const r = recOf(type);
+    if (r?.kind === "param") return coercions.set(e, to), undefined;
+    if (r?.kind !== "future" || type === YIELD_NOW || type === SLEEP || leafOf.has(r)) {
+      const what = r?.kind === "future" ? "; store the async function's call instead" : "";
       throw new CompileError(`${message}${what}`, e.start, e.end);
     }
-    if (lower(type.gives) !== lower(promiseElement(to.of)!)) throw new CompileError(message, e.start, e.end);
-    if (type.throws) throw new CompileError(`a stored '${show(to)}' can't throw yet, and this one can throw '${show(type.throws)}'; await it where it is made, or catch inside the async function`, e.start, e.end);
+    if (lower(r.gives) !== lower(promiseElement(rec(to).of)!)) throw new CompileError(message, e.start, e.end);
+    if (r.throws) throw new CompileError(`a stored '${show(to)}' can't throw yet, and this one can throw '${show(r.throws)}'; await it where it is made, or catch inside the async function`, e.start, e.end);
     const blocker = unsent(type);
     if (blocker) throw new CompileError(`a stored '${show(to)}' may be awaited on any thread, so its future can't hold a '${show(blocker)}'`, e.start, e.end);
     dynMembers.set(`${keyOf(type)} ${keyOf(to)}`, { methods: [], fields: [], clone: undefined });
@@ -5724,26 +5885,30 @@ export function expressions(ctx: Context) {
   // A closure stored as a callable: it fits the function type, owns what it captures, changes
   // none of it, and can run any number of times.
   function storing(e: Expr, type: Type, to: DynType, message: string) {
-    const fn = callableOf.get(to.of)!;
-    if (typeof type === "string" || type.kind !== "closure") {
+    const fn = callableOf.get(rec(to).of)!;
+    const c = recOf(type);
+    if (c?.kind !== "closure") {
       // A function-typed parameter is checked when its instance knows the closure.
-      if (typeof type !== "string" && (type.kind === "function" || type.kind === "param")) return;
+      if (c?.kind === "function" || c?.kind === "param") return;
       throw new CompileError(message, e.start, e.end);
     }
     if (!fits(type, fn)) throw new CompileError(message, e.start, e.end);
-    const body = closureBody(type);
+    const body = closureBody(c);
     // A call through a stored callable passes every argument, with no default to fall back on.
     if (body.body.params.some((p) => defaulted.has(p))) throw new CompileError("a closure with default parameter values can't be stored as a value yet, since calls through it pass every argument; give the parameters no defaults", e.start, e.end);
     const capture = (name: string) => `'${name}'`;
-    const borrowed = type.fields.find((f) => isRefType(f.type));
+    const borrowed = c.fields.find((f) => isRefType(f.type));
     if (borrowed) throw new CompileError(`this closure borrows ${capture(borrowed.name)}, but a stored callable owns what it captures; write the closure where it is stored, so it captures by move, or as 'move (...) => ...'`, e.start, e.end);
-    if (type.once) throw new CompileError(`this closure moves ${capture(type.once)} out of what it captures, so it can run only once, but a stored callable may run any number of times; clone ${capture(type.once)} inside it instead`, e.start, e.end);
+    if (c.once) throw new CompileError(`this closure moves ${capture(c.once)} out of what it captures, so it can run only once, but a stored callable may run any number of times; clone ${capture(c.once)} inside it instead`, e.start, e.end);
     const changed = [...(body.changed ?? [])][0];
     if (changed) throw new CompileError(`this closure changes ${capture(changed.name)}, which it captures, but a stored callable can't change what it captures; keep that state in an 'Atomic' or a 'Lock'`, e.start, e.end);
     // Each call of an async callable runs on its own copy of what it captures, which would split
     // an Atomic's or a Lock's state in two.
-    const pinned = (u: Type) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle");
-    const held = body.body.async ? type.fields.find((f) => holdsPart(f.type, pinned)) : undefined;
+    const pinned = (u: Type) => {
+      const r = recOf(u);
+      return (r?.kind === "interior" && r.which !== "Cell") || (r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit")) || r?.kind === "handle";
+    };
+    const held = body.body.async ? c.fields.find((f) => holdsPart(f.type, pinned)) : undefined;
     if (held) throw new CompileError(`this async function captures ${capture(held.name)}, which holds an Atomic, a Lock, a Semaphore or a JoinHandle; each call works on its own copy of what it captures, which would split that state, so capture a shared value holding it instead, like 'shared({ count: new Atomic(0) })'`, e.start, e.end);
   }
 
@@ -5751,36 +5916,40 @@ export function expressions(ctx: Context) {
   // object than the interface declares, since a call through a Dyn only knows the interface,
   // and one taking an interface or function has a version per argument type, so no one slot.
   function dynTable(e: Expr, type: Type, to: DynType): DynTable {
-    const c = typeof type !== "string" && type.kind === "class" ? classOf(type) : undefined;
-    const fixed = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "handle" || u.kind === "dyn"));
+    const r = recOf(type);
+    const c = r?.kind === "class" ? classOf(r) : undefined;
+    const fixed = holdsPart(type, (u) => {
+      const p = recOf(u);
+      return (p?.kind === "interior" && p.which !== "Cell") || (p?.kind === "block" && (p.which === "Semaphore" || p.which === "Permit")) || p?.kind === "handle" || p?.kind === "dyn";
+    });
     // A boxed async generator's one slot is its `next()`, whose future borrows the generator in
     // the Dyn's block and is boxed in turn. A generator runs once, so it is never copied.
-    if (typeof type !== "string" && type.kind === "generator") {
-      dynMembers.set(`${keyOf(leafFuture("next", type))} ${keyOf(lentPromise(nextResult(type.yields)))}`, { methods: [], fields: [], clone: undefined });
+    if (r?.kind === "generator") {
+      dynMembers.set(`${keyOf(leafFuture("next", r))} ${keyOf(lentPromise(nextResult(r.yields)))}`, { methods: [], fields: [], clone: undefined });
       return { methods: [undefined], fields: [], clone: undefined };
     }
-    if (typeof type !== "string" && type.kind === "closure") {
-      const body = closureBody(type);
-      futureTable(body, to.of.methods[0]!.returns, false, e);
+    if (r?.kind === "closure") {
+      const body = closureBody(r);
+      futureTable(body, rec(rec(to).of).methods[0]!.returns, false, e);
       return { methods: [body], fields: [], clone: fixed ? undefined : "copy" };
     }
-    const methods = to.of.methods.map((m) => {
+    const methods = rec(rec(to).of).methods.map((m) => {
       const body = inherited(c!, "methods", m.name)!;
       // A generic method has no one function for the table; calls of it through a Dyn are refused.
       if (m.generic) return undefined;
       if (body.params.some((p) => p.comptime)) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes a comptime parameter, so it has a version per value and no one method a Dyn could call`, e.start, e.end);
-      const refuse = (does: string, declare: string) => new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' ${does}, which '${to.of.name}' doesn't declare; declare '${declare}' on it in the interface`, e.start, e.end);
+      const refuse = (does: string, declare: string) => new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' ${does}, which '${rec(rec(to).of).name}' doesn't declare; declare '${declare}' on it in the interface`, e.start, e.end);
       if (body.self?.owned && !m.owned) throw refuse("takes its object over", "this: Own<this>");
       if (body.self?.mutable && !body.self.owned && !m.mutable && !m.owned) throw refuse("changes its object", "this: Mut<this>");
       // An object-typed parameter takes exactly its own type through a Dyn; an interface or a
       // function has a version per argument type, and no one to call.
       const implicit = implicitOf(body);
-      if ([...implicit.values()].some((b) => b.kind !== "object")) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes an interface or a function, so it has a version per argument type and no one to call through a Dyn`, e.start, e.end);
+      if ([...implicit.values()].some((b) => rec(b).kind !== "object")) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes an interface or a function, so it has a version per argument type and no one to call through a Dyn`, e.start, e.end);
       const instance = instanceOf(body, new Map([...(body.scope ?? []), ...[...implicit].map(([i, b]): [string, Type] => [`#${i}`, b])]));
       futureTable(instance, m.returns, true, e);
       return instance;
     });
-    const fields = to.of.fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(c, "getters", f.name)!)));
+    const fields = rec(rec(to).of).fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(c, "getters", f.name)!)));
     const own = c?.methods.get("clone");
     return { methods, fields, clone: own ? instanceOf(own) : fixed ? undefined : "copy" };
   }
@@ -5791,27 +5960,29 @@ export function expressions(ctx: Context) {
     const gives = promiseElement(returns);
     if (gives === undefined) return;
     const made = lower(target.future ?? returnOf(target, at));
-    if (typeof made === "string" || made.kind !== "future") throw unsupported("Dyn methods giving a Promise that isn't an async function's future", at);
-    if (made.throws) throw new CompileError(`'${target.body.name}' can throw '${show(made.throws)}', and a Promise given through a Dyn or a stored function can't throw yet`, at.start, at.end);
+    const fr = recOf(made);
+    if (fr?.kind !== "future") throw unsupported("Dyn methods giving a Promise that isn't an async function's future", at);
+    if (fr.throws) throw new CompileError(`'${target.body.name}' can throw '${show(fr.throws)}', and a Promise given through a Dyn or a stored function can't throw yet`, at.start, at.end);
     const boxed = lent ? lentPromise(gives) : storedType(returns);
     dynMembers.set(`${keyOf(made)} ${keyOf(boxed)}`, { methods: [], fields: [], clone: undefined });
   }
 
   // A method call through a Dyn: the interface's method, run through its slot.
   function dynCall(e: Call, callee: Extract<Expr, { kind: "member" }>, t: DynType): { type: Type; what: string } {
-    if (callableOf.has(t.of)) throw new CompileError(`a stored function is called directly, as '${placeText(callee.object)}(...)'`, callee.start, callee.end);
-    const index = t.of.methods.findIndex((m) => m.name === callee.name);
-    const m = t.of.methods[index];
+    if (callableOf.has(rec(t).of)) throw new CompileError(`a stored function is called directly, as '${placeText(callee.object)}(...)'`, callee.start, callee.end);
+    const index = rec(rec(t).of).methods.findIndex((m) => m.name === callee.name);
+    const m = rec(rec(t).of).methods[index];
     if (!m) {
-      const hint = t.of.fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : didYouMean(callee.name, memberNames(t));
+      const hint = rec(rec(t).of).fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : didYouMean(callee.name, memberNames(t));
       throw new CompileError(`property '${shownName(callee.name)}' does not exist on type '${show(t)}'${hint}`, callee.start, callee.end);
     }
     if (linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
-    if (m.generic) throw new CompileError(`'${m.name}' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn; take a type parameter bounded by '${t.of.name}' instead`, callee.start, callee.end);
+    if (m.generic) throw new CompileError(`'${m.name}' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn; take a type parameter bounded by '${rec(rec(t).of).name}' instead`, callee.start, callee.end);
     const async = promiseElement(m.returns);
     if (async !== undefined && m.owned) throw unsupported("async methods taking their object over through a Dyn", callee);
-    if (typeof m.returns !== "string" && m.returns.kind === "interface" && async === undefined) {
-      throw new CompileError(`'${m.name}' returns the interface type '${m.returns.name}', which each type implementing '${t.of.name}' gives its own way, so a Dyn can't call it; have it return 'Dyn<${m.returns.name}>'`, callee.start, callee.end);
+    const mr = recOf(m.returns);
+    if (mr?.kind === "interface" && async === undefined) {
+      throw new CompileError(`'${m.name}' returns the interface type '${mr.name}', which each type implementing '${rec(rec(t).of).name}' gives its own way, so a Dyn can't call it; have it return 'Dyn<${mr.name}>'`, callee.start, callee.end);
     }
     if (e.typeArgs.length > 0) throw new CompileError(`'${m.name}' takes no type arguments`, e.start, e.end);
     if (e.args.length !== m.params.length) throw new CompileError(`expected ${m.params.length} argument${m.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
@@ -5821,7 +5992,7 @@ export function expressions(ctx: Context) {
       borrowsFrom.set(e, [callee.object]);
     }
     // A boxed async generator's `next()` runs it on, changing it.
-    const mutable = m.mutable === true || generatorElement(t.of, true) !== undefined;
+    const mutable = m.mutable === true || generatorElement(rec(t).of, true) !== undefined;
     if (m.owned) takesOver(callee.object, m.name);
     else if (mutable) mutates(callee.object, m.name);
     e.args.forEach((a, i) => {
@@ -5841,30 +6012,31 @@ export function expressions(ctx: Context) {
 
   // A call of a stored callable: whatever expression gives it, run through its one slot.
   function callableCall(e: Call, callee: Expr, t: DynType): { type: Type; what: string } {
-    const fn = callableOf.get(t.of)!;
+    const fn = callableOf.get(rec(t).of)!;
     // A field holding it is read as any field is.
     if (!types.has(callee)) value(callee);
     if (e.typeArgs.length > 0) throw new CompileError("a stored function takes no type arguments", e.start, e.end);
-    if (e.args.length !== fn.params.length) throw new CompileError(`expected ${fn.params.length} argument${fn.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+    if (e.args.length !== rec(fn).params.length) throw new CompileError(`expected ${rec(fn).params.length} argument${rec(fn).params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     e.args.forEach((a, i) => {
-      const want = fn.params[i]!;
+      const want = rec(fn).params[i]!;
       expect(a, want);
       const given = value(a);
       coerce(a, given, want, `argument of type '${show(given)}' is not assignable to parameter of type '${show(want)}'`);
     });
-    if (holdsRef(fn.returns)) borrowsFrom.set(e, [callee]);
+    if (holdsRef(rec(fn).returns)) borrowsFrom.set(e, [callee]);
     dynCalls.set(e, { index: 0, mutable: false, owned: false, callable: callee });
-    if (fn.throws) raise(e, fn.throws, callee.kind === "ident" || callee.kind === "member" ? `'${callee.name}'` : "this function");
+    const thrown = rec(fn).throws;
+    if (thrown) raise(e, thrown, callee.kind === "ident" || callee.kind === "member" ? `'${callee.name}'` : "this function");
     // One returning a Promise gives its future boxed, owning what it holds.
-    return { type: storedType(fn.returns), what: "this function" };
+    return { type: storedType(rec(fn).returns), what: "this function" };
   }
 
   // A field read through a Dyn, through its slot: a copy of the value.
   function dynField(e: Extract<Expr, { kind: "member" }>, t: DynType): Type {
     if (linked(e)) throw unsupported("optional chains through a Dyn", e);
-    const f = t.of.fields.find((x) => x.name === e.name);
+    const f = rec(rec(t).of).fields.find((x) => x.name === e.name);
     if (!f) {
-      const hint = t.of.methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : didYouMean(e.name, memberNames(t));
+      const hint = rec(rec(t).of).methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : didYouMean(e.name, memberNames(t));
       throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(t)}'${hint}`, e.start, e.end);
     }
     // A copy of an Atomic, a Lock or a Dyn would change apart from the original.
@@ -5893,8 +6065,9 @@ export function expressions(ctx: Context) {
     if (throughMut) return;
     // A shared reference never changes what it points to; a mutable one may, whatever holds
     // it, and a method may change through it.
-    if ((path || action !== "assign to") && typeof local.type !== "string" && local.type.kind === "ref") {
-      if (local.type.mutable) return;
+    const lr = recOf(local.type);
+    if ((path || action !== "assign to") && lr?.kind === "ref") {
+      if (lr.mutable) return;
       throw new CompileError(`cannot ${action} '${local.name}${path}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
     }
     if (local.param) {
@@ -5911,13 +6084,13 @@ export function expressions(ctx: Context) {
   // class's constructor may assign it, through `this`.
   function readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
     const found = types.get(e.object);
-    const object = typeof found !== "string" && found?.kind === "ref" ? found.to : found;
-    if (object && stringLike(object)) throw new CompileError(`a string's '${e.name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
+    const object = typeof found !== "string" && found?.kind === "ref" ? rec(found).to : found;
+    if (object && stringLike(typing, object)) throw new CompileError(`a string's '${e.name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
     // Through a mutable reference, the value written is someone else's: in an instance, its
     // field is as read-only as the field of the type it really is. A copy is the body's own.
     const locked = field(object as Exclude<Type, string>, e.name)?.readonly || (throughMutable(e.object) && concreteField(e)?.readonly);
     if (typeof object === "string" || !object || !locked) return;
-    if (e === target && e.object.kind === "this" && self?.constructor && self.type.fields.some((f) => f.name === e.name)) return;
+    if (e === target && e.object.kind === "this" && self?.constructor && rec(self.type).fields.some((f) => f.name === e.name)) return;
     const what = e === target ? `'${e.name}' because it is` : `'${placeText(target)}' because '${e.name}' is`;
     throw new CompileError(`cannot ${action} ${what} a read-only property`, target.start, target.end);
   }
@@ -5927,7 +6100,7 @@ export function expressions(ctx: Context) {
   function throughMutable(e: Expr): boolean {
     for (let x = e; ; x = x.object) {
       const t = types.get(x);
-      if (typeof t !== "string" && t?.kind === "ref" && t.mutable) return true;
+      if (typeof t !== "string" && t?.kind === "ref" && rec(t).mutable) return true;
       if (x.kind !== "member") return x.kind === "this" || x.kind === "super";
     }
   }
@@ -5942,7 +6115,7 @@ export function expressions(ctx: Context) {
   function concreteType(e: Expr): Type | undefined {
     const deref = (t: Type | undefined) => {
       const low = t && lower(t);
-      return typeof low !== "string" && low?.kind === "ref" ? lower(low.to) : low;
+      return typeof low !== "string" && low?.kind === "ref" ? lower(rec(low).to) : low;
     };
     if (e.kind !== "member") return deref(types.get(e));
     const holder = concreteType(e.object);
@@ -5971,9 +6144,10 @@ export function expressions(ctx: Context) {
 
   // A checked value of `type`, loaded from where it points when it is a reference.
   function loaded(e: Expr, type: Type): Type {
-    if (typeof type === "string" || type.kind !== "ref") return type;
-    coercions.set(e, type.to);
-    return type.to;
+    const r = recOf(type);
+    if (r?.kind !== "ref") return type;
+    coercions.set(e, r.to);
+    return r.to;
   }
 
   // An operand of an enum, a union of integer literals, works as an i64 too.
@@ -5983,8 +6157,12 @@ export function expressions(ctx: Context) {
       coercions.set(e, "string");
       return "string";
     }
-    const literals = typeof type !== "string" && type.kind === "union" ? type.members : [type];
-    const bases = new Set(literals.map((t) => (typeof t !== "string" && t.kind === "literal" ? baseOf(t) : undefined)));
+    const u = recOf(type);
+    const literals = u?.kind === "union" ? u.members : [type];
+    const bases = new Set(literals.map((t) => {
+      const l = recOf(t);
+      return l?.kind === "literal" ? baseOf(l) : undefined;
+    }));
     const base = bases.size === 1 ? [...bases][0] : undefined;
     // A string literal keeps its type, so comparing two different ones is caught.
     if (!base || base === "string") return type;
@@ -6003,13 +6181,25 @@ export function expressions(ctx: Context) {
 }
 
 // A string, or a string literal that isn't an enum's member.
-const isText = (t: Type) => t === "string" || (typeof t !== "string" && (t.kind === "pattern" || (t.kind === "literal" && typeof t.value === "string" && !t.owner)));
+const isText = ({ rec }: Typing, t: Type) => {
+  if (typeof t === "string") return t === "string";
+  const r = rec(t);
+  return r.kind === "pattern" || (r.kind === "literal" && typeof r.value === "string" && !r.owner);
+};
 
 // A string enum's member, or a union of them, which joins into a string as its value.
-const enumText = (t: Type): boolean => typeof t !== "string" && (t.kind === "union" ? t.members.every(enumText) : t.kind === "literal" && typeof t.value === "string" && t.owner !== undefined);
+const enumText = (typing: Typing, t: Type): boolean => {
+  if (typeof t === "string") return false;
+  const r = typing.rec(t);
+  return r.kind === "union" ? r.members.every((m) => enumText(typing, m)) : r.kind === "literal" && typeof r.value === "string" && r.owner !== undefined;
+};
 
 // What a string's length, index and methods work on: text, or a union of string literals.
-export const stringLike = (t: Type) => isText(t) || (typeof t !== "string" && t.kind === "union" && t.members.every(isText));
+export const stringLike = (typing: Typing, t: Type) => {
+  if (isText(typing, t)) return true;
+  const r = typeof t === "string" ? undefined : typing.rec(t);
+  return r?.kind === "union" && r.members.every((m) => isText(typing, m));
+};
 
 // The blocking file calls std's node:fs is written over: their parameters, what each gives, and
 // whether it throws an IoError.
@@ -6054,8 +6244,6 @@ const stringMethods = ({ unionType, arrayType }: Typing): Record<string, [Type[]
   substring: [["i64", "i64"], "string", 1],
 });
 
-const isArray = (t: Type): t is ArrayType => typeof t !== "string" && t.kind === "array";
-const isFixed = (t: Type): t is FixedType => typeof t !== "string" && t.kind === "fixed";
 
 // The methods an array has.
 // A type's name with its article, as `an 'i64'` or `a 'string'`.

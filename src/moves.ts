@@ -40,10 +40,6 @@ type Access = "read" | "change" | "move" | "lend" | "lend mutably";
 
 // The array methods that change their array.
 const ARRAY_CHANGES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
-const isRef = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
-
-const isUnion = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union";
-
 // The place a temporary or a copy stands for: a reference into one can't be returned.
 const TEMPORARY = "temporary";
 
@@ -56,7 +52,13 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
   const { kindTests, asserts, computed, jsCrossings, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts, typing, ids } = instance.tables;
-  const { field, holdsHandle, holdsMut, holdsPart, isCopy, optionRef, holdsRef, yieldsOf, lower, callableOf, keptByJs, partOfItself } = typing;
+  const { field, holdsHandle, holdsMut, holdsPart, isCopy, optionRef, holdsRef, yieldsOf, lower, callableOf, keptByJs, partOfItself, rec } = typing;
+  const isRef = (t: Type): t is RefType => typeof t !== "string" && rec(t).kind === "ref";
+  const isUnion = (t: Type): t is UnionType => typeof t !== "string" && rec(t).kind === "union";
+  // What a reference refers to, or the type itself.
+  const deref = (t: Type): Type => (isRef(t) ? rec(t).to : t);
+  // The record of a type that isn't a primitive.
+  const record = (t: Type | undefined) => (t === undefined || typeof t === "string" ? undefined : rec(t));
   // A place put into a `Ref<T> | null` is lent to the reference the Option holds.
   const coercions = new NodeMap(instance.coercions);
   for (const [e, to] of coercions) {
@@ -89,7 +91,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A reference parameter holds a borrow its caller made, of something outside this function.
   f.params.forEach((p, i) => {
     const local = locals.get(p);
-    if (local && holdsRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: isRef(local.type) && local.type.mutable, start: p.start, end: p.end, holders: new NodeSet([local]) });
+    if (local && holdsRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: isRef(local.type) && rec(local.type).mutable, start: p.start, end: p.end, holders: new NodeSet([local]) });
   });
   statements(body);
 
@@ -454,7 +456,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         if (key(e) !== undefined) {
           // A tuple's length looks at its optional elements and its rest, so none may have moved.
           const held = types.get(e.object)!;
-          const tuple = lower(typeof held !== "string" && held.kind === "ref" ? held.to : held) as ObjectType;
+          const tuple = rec(lower(deref(held)) as ObjectType);
           if (e.name === "length" && tuple.tuple && (tuple.required !== undefined || tuple.rest !== undefined)) usable(e.object as Named, key(e.object)!);
           return use(e, consume);
         }
@@ -524,7 +526,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // A closure is read to call it, or taken over when it can run only once.
           const run = e.callee.kind === "ident" ? lower(types.get(e.callee) ?? "void") : undefined;
           if (e.callee.kind === "ident" && locals.has(e.callee)) {
-            const once = typeof run !== "string" && run?.kind === "closure" && run.once;
+            const r = record(run);
+            const once = r?.kind === "closure" && r.once;
             expr(e.callee, once ? (p) => `'${p}' moved here: calling it runs it once, since it moves out what it captured` : undefined);
           }
           // A method's receiver is lent to it for the call, mutably when the method changes it.
@@ -537,7 +540,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const dyn = dynCalls.get(e);
           // A function held in a field is what its call lends, not the object holding it.
           const held = e.callee.kind === "member" ? lower(types.get(e.callee) ?? "void") : undefined;
-          const fieldCall = typeof held !== "string" && (held?.kind === "closure" || (held?.kind === "dyn" && callableOf.has(held.of)));
+          const h = record(held);
+          const fieldCall = h?.kind === "closure" || (h?.kind === "dyn" && callableOf.has(h.of));
           const object = e.callee.kind === "member" ? (fieldCall ? e.callee : e.callee.object) : dyn?.callable;
           const place = object && key(object);
           const self: { mutable: boolean; owned?: boolean } | undefined = calls.get(e)?.body.self ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
@@ -576,7 +580,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // when the object has somewhere to keep a reference.
           const keeper = object ?? (e.callee.kind === "super" ? e.callee : undefined);
           const keeperType = keeper && types.get(keeper);
-          const holder = keeperType === undefined || holdsRef(isRef(keeperType) ? keeperType.to : keeperType);
+          const holder = keeperType === undefined || holdsRef(deref(keeperType));
           if (keeper && holder && (self?.mutable || e.callee.kind === "super")) keeps = () => keep(keeper, e.args.filter((a) => holdsRef(coercions.get(a) ?? types.get(a)!)));
         });
         keeps?.();
@@ -716,7 +720,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       }
       case "binary": {
         // `a ?? b` hands over whichever it gives; a Rust value, which is never copied, always.
-        const given = e.op === "??" ? (consume ?? (holdsPart(types.get(e)!, (u) => rustClassOf(u) !== undefined) ? (place: string) => `'${place}' moved here: '??' hands over the Rust value it holds` : undefined)) : undefined;
+        const given = e.op === "??" ? (consume ?? (holdsPart(types.get(e)!, (u) => rustClassOf(typing, u) !== undefined) ? (place: string) => `'${place}' moved here: '??' hands over the Rust value it holds` : undefined)) : undefined;
         if (e.op === "??") outOfBorrow(e.left, e, consume);
         expr(e.left, given);
         // The right side of `&&`, `||` and `??` may not run.
@@ -840,7 +844,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const from = borrowsFrom.get(e);
     if (from) {
       const result = coercions.get(e) ?? types.get(e)!;
-      return from.flatMap((s) => source(s, isRef(result) ? result : ({ mutable: holdsMut(result) } as RefType)));
+      return from.flatMap((s) => source(s, isRef(result) ? rec(result).mutable : holdsMut(result)));
     }
     const type = types.get(e)!;
     const to = coercions.get(e) ?? type;
@@ -848,19 +852,23 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A shared reference passed on is just another pointer, which needs nothing lent; a
     // mutable one lends itself, shared or mutably as it is passed on.
     // A mutable reference or nothing passed on lends itself as a mutable reference does.
-    const ref = to && (isRef(to) ? to : optionRef(to));
-    const held = type && (isRef(type) ? type : optionRef(type));
+    const asRef = (t: Type) => {
+      const r = isRef(t) ? t : optionRef(t);
+      return r && rec(r);
+    };
+    const ref = to && asRef(to);
+    const held = type && asRef(type);
     if (place === undefined || !ref || (held && !held.mutable)) return [];
     return [[place, e, ref.mutable]];
   }
 
   // What a call's result borrows from one of its sources: what the source lends, or, for a
   // receiver that is a place, the place itself.
-  function source(s: Expr, result: RefType): [string, Expr, boolean][] {
+  function source(s: Expr, mutable: boolean): [string, Expr, boolean][] {
     const parts = lent(s);
     const place = key(s);
     if (parts.length > 0 || place === undefined || isRef(types.get(s)!)) return parts;
-    return [[place, s, result.mutable]];
+    return [[place, s, mutable]];
   }
 
   // Runs a call's arguments, then ends the loans made for it.
@@ -885,8 +893,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
     // Nor out of a reference a field holds, or a shared value every clone of it uses.
     for (let p: Named = e; p.kind === "member"; p = p.object) {
-      const holder = types.get(p.object);
-      if (typeof holder !== "string" && (holder?.kind === "shared" || (holder?.kind === "ref" && typeof holder.to !== "string" && holder.to.kind === "shared"))) {
+      const holder = record(types.get(p.object));
+      if (holder?.kind === "shared" || (holder?.kind === "ref" && record(holder.to)?.kind === "shared")) {
         throw new CompileError(`'${text(e)}' can't be moved out of '${text(p.object)}', which every clone of it shares; use it where it is`, e.start, e.end);
       }
       if (p !== e && isRef(types.get(p)!)) {
@@ -905,7 +913,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A message without its advice to clone, for a value holding a JoinHandle, which can't be.
   function hinted(type: Type, message: string): string {
     // A Promise isn't cloned either: its future runs once.
-    const counted = holdsPart(type, (u) => typeof u !== "string" && ((u.kind === "block" && (u.which === "Semaphore" || u.which === "Permit")) || u.kind === "future"), true);
+    const counted = holdsPart(type, (u) => {
+      const r = record(u);
+      return (r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit")) || r?.kind === "future";
+    }, true);
     return holdsHandle(type, true) || counted ? message.replace(/;[^;]*\.clone\(\)'[^;]*$/, "") : message;
   }
 
@@ -991,7 +1002,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       const result = coercions.get(e) ?? types.get(e)!;
       // A future holding a mutable reference, or a Dyn's async method declaring `Mut<this>`,
       // lends what it borrows mutably until it is done.
-      const mutable = isRef(result) ? result.mutable : holdsMut(result) || dynCalls.get(e)?.mutable === true;
+      const mutable = isRef(result) ? rec(result).mutable : holdsMut(result) || dynCalls.get(e)?.mutable === true;
       for (const s of from) {
         if (lentTemporary(s)) throw outlived(s, `'${holder.name}'`);
         if (holdsRef(coercions.get(s) ?? types.get(s)!) && (isRef(coercions.get(s) ?? types.get(s)!) || key(s) === undefined)) hold(holder, s);
@@ -1026,7 +1037,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             // lends itself mutably, as `{ m: m }` does, so only one of them is used at a time.
             if (isRef(field(to as Exclude<Type, string>, p.name)!.type) && !isRef(local.type)) lend(String(local.id), false, p, holder);
             else if (holdsRef(local.type)) {
-              if (isRef(local.type) && local.type.mutable) lend(String(local.id), true, p, holder);
+              if (isRef(local.type) && rec(local.type).mutable) lend(String(local.id), true, p, holder);
               inheritFrom(holder, local);
             }
           }
@@ -1089,13 +1100,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const type = types.get(e)!;
     const local = e.kind === "ident" ? locals.get(e) : undefined;
     const narrowed = (t: Type) => local !== undefined && local.type !== type && isUnion(t);
+    const target = rec(to).to;
     if (isRef(type)) {
-      if (narrowed(type.to)) return false;
-      const [from, want] = [lower(type.to), lower(to.to)];
-      return from === want || (isUnion(from) && from.members.includes(want));
+      const held = rec(type).to;
+      if (narrowed(held)) return false;
+      const [from, want] = [lower(held), lower(target)];
+      return from === want || (isUnion(from) && rec(from).members.includes(want));
     }
     if (key(e) === undefined || throughUnion(e) || narrowed(type)) return false;
-    return lower(type) === lower(to.to) || partOfItself(type, to.to);
+    return lower(type) === lower(target) || partOfItself(type, target);
   }
 
   // Whether a field path passes through a union, or ends where a type parameter's concrete type
@@ -1104,8 +1117,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function throughUnion(e: Expr): boolean {
     for (let p: Expr = e; p.kind === "member"; p = p.object) {
       const holder = types.get(p.object);
-      const held = holder && isRef(holder) ? holder.to : holder;
-      if (typeof held !== "string" && held?.kind === "union") return true;
+      if (holder && record(deref(holder))?.kind === "union") return true;
     }
     const stored = storedType(e);
     return stored !== undefined && lower(stored) !== lower(types.get(e)!);
@@ -1116,9 +1128,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function storedType(e: Expr): Type | undefined {
     if (e.kind !== "member") return types.get(e);
     const holder = storedType(e.object);
-    const held = holder && isRef(holder) ? holder.to : holder;
+    const held = holder && deref(holder);
     const concrete = held && typeof held !== "string" ? lower(held) : held;
-    if (typeof concrete === "string" || !concrete || concrete.kind === "union" || concrete.kind === "param") return types.get(e);
+    if (typeof concrete === "string" || !concrete) return types.get(e);
+    const kind = rec(concrete).kind;
+    if (kind === "union" || kind === "param") return types.get(e);
     return field(concrete, e.name)?.type ?? types.get(e);
   }
 
@@ -1385,7 +1399,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return [...[...inner.captures!].flatMap(([alias, from], i): [string, Named, Local | undefined, boolean, boolean][] => {
       const use = inner.captureUses!.get(alias) as Named | undefined;
       const mutable = inner.changed!.has(alias);
-      const held = !isRef(inner.closure!.fields[i]!.type);
+      const held = !isRef(rec(inner.closure!).fields[i]!.type);
       if (!use) return [];
       return [from === "this" ? ["this", use, undefined, mutable, false] : [String(from.id), use, from, mutable, held]];
     }), ...through];
@@ -1442,27 +1456,26 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   function generator(e: Expr): boolean {
     const t = types.get(e);
-    const held = t !== undefined && isRef(t) ? t.to : t;
+    const held = t && deref(t);
     return held !== undefined && (yieldsOf(held) !== undefined || yieldsOf(held, true) !== undefined);
   }
 
   function mapped(e: Expr): boolean {
     const t = types.get(e);
-    const held = t !== undefined && isRef(t) ? t.to : t;
-    return held !== undefined && typeof held !== "string" && held.kind === "map";
+    return t !== undefined && record(deref(t))?.kind === "map";
   }
 
   function array(e: Expr): boolean {
     const t = types.get(e);
-    const held = t !== undefined && isRef(t) ? t.to : t;
-    return held !== undefined && typeof held !== "string" && (held.kind === "array" || held.kind === "fixed");
+    const kind = t && record(deref(t))?.kind;
+    return kind === "array" || kind === "fixed";
   }
 
   // Moving a value out of an array by index would leave a hole in it, as in Rust.
   function elementMove(e: Named, type: Type): CompileError {
     const advice = holdsHandle(type, true) ? "" : `'${text(e)}.clone()' to take a copy, or `;
     const t = types.get((e as Extract<Expr, { kind: "index" }>).object);
-    const inline = t !== undefined && typeof t !== "string" && (t.kind === "fixed" || (t.kind === "ref" && typeof t.to !== "string" && t.to.kind === "fixed"));
+    const inline = t !== undefined && record(deref(t))?.kind === "fixed";
     if (inline) return new CompileError(`'${text(e)}' can't be moved out of its fixed array, which keeps every element${advice ? `; use ${advice.slice(0, -5)}` : ""}`, e.start, e.end);
     return new CompileError(`'${text(e)}' can't be moved out of its array; use ${advice}'pop()' to take the last element out`, e.start, e.end);
   }
@@ -1484,8 +1497,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const [id, ...fields] = place.replaceAll("....", ".\0").split(".").map((f) => (f === "\0" ? "..." : f));
     const local = [...locals.values()].find((l) => String(l.id) === id);
     // A rest tuple's array is its elements from where its fixed ones end, as `t[1...]`.
-    const held = local && lower(local.type);
-    const start = held && typeof held !== "string" && held.kind === "object" && held.rest !== undefined ? held.fields.length - 1 : undefined;
+    const held = record(local && lower(local.type));
+    const start = held?.kind === "object" && held.rest !== undefined ? held.fields.length - 1 : undefined;
     const named = fields.map((f, i) => (f === "..." ? (i === 0 && start !== undefined ? `[${start}...]` : "[...]") : f === "[]" ? "[...]" : f));
     return [local?.name ?? id, ...named].join(".").replaceAll(".[", "[").replace(/\.(\d+)(?=\.|\[|$)/g, "[$1]");
   }

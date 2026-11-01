@@ -32,7 +32,10 @@ export type RustTables = { names: WeakNodeMap<Func | ClassMember, RustName>; cla
 export const HANDLE = "#handle";
 
 // The Rust type a type is, when it is one.
-export const rustClassOf = (t: Type): RustClass | undefined => (typeof t !== "string" && t.kind === "class" ? t.rust : undefined);
+export function rustClassOf({ rec }: Typing, t: Type): RustClass | undefined {
+  const r = typeof t === "string" ? undefined : rec(t);
+  return r?.kind === "class" ? r.rust : undefined;
+}
 
 export const RUST_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -167,12 +170,12 @@ export function crossingOf(typing: Typing, t: Type, giving: boolean): Crossing |
   if (t === "boolean" || (typeof t === "string" && t !== "void" && t !== "string" && t !== "null" && t !== "never")) return { kind: "plain", type: t };
   if (t === "string") return { kind: "string" };
   if (typeof t === "string") return `a '${t}' can't cross the Rust boundary`;
-  const rust = rustClassOf(t);
+  const rust = rustClassOf(typing, t);
   if (rust) return { kind: "handle", of: rust };
   const r = typing.rec(t);
   if (r.kind === "ref") {
     if (giving) return "a borrow's lifetime can't cross from Rust yet; give the value itself";
-    const lent = rustClassOf(r.to);
+    const lent = rustClassOf(typing, r.to);
     if (lent) return { kind: "lent", of: lent, mutable: r.mutable };
     const to = typeof r.to !== "string" ? typing.rec(r.to) : undefined;
     if (to?.kind === "array") {
@@ -334,7 +337,7 @@ function source(called: Instance[]): string {
   const note = (c: RustClass) => types.set(typePath(c), c);
   const wrappers = called.map((i) => {
     const { crate, path, symbol } = trusted(i.body.rust!);
-    const owner = i.body.owner && rustClassOf(i.body.owner);
+    const owner = i.body.owner && rustClassOf(i.tables.typing, i.body.owner);
     const self = owner && i.body.self && !i.body.self.constructor ? i.body.self : undefined;
     const constructor = owner && i.body.self?.constructor;
     if (owner) note(owner);
@@ -343,7 +346,7 @@ function source(called: Instance[]): string {
     [...crossings, ...(gives ? [gives] : [])].flatMap(classesIn).forEach(note);
     const { returns, out } = rustGives(gives);
     // A `Result`'s `Err` goes to its own slot, as Fish's text for an `Error`, or as the Rust value.
-    const error = i.throws && rustClassOf(i.throws);
+    const error = i.throws && rustClassOf(i.tables.typing, i.throws);
     if (error) note(error);
     const err = i.throws ? `err: *mut *mut u8` : undefined;
     const params = [...(self ? [`this: *mut ${typePath(owner!)}`] : []), ...crossings.flatMap((c, k) => rustParams(c, `a${k}`)), ...(out ? [out] : []), ...(err ? [err] : []), "panicked: *mut *mut c_char"];

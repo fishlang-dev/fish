@@ -27,7 +27,7 @@ import { hideMains, harnessImports, harnessMain, liftTests, runTests, stopTests,
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
 import type { Checked, Instance } from "./check.ts";
-import { INTEGERS, type Type } from "./typing.ts";
+import { INTEGERS, type Type, type Typing } from "./typing.ts";
 import { rustShim, type Shim } from "./rust.ts";
 import { split } from "./split.ts";
 import { STD_BASE } from "./std.ts";
@@ -153,11 +153,11 @@ function header(name: string, exports: Instance[]): string {
   const lines = exports.map((i) => {
     const params = i.body.params.map((p) => {
       const { type, name } = i.locals.get(p)!;
-      const c = cType(type);
+      const c = cType(i.tables.typing.rec, type);
       const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
       return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;
     });
-    return `${cType(i.returns)} ${i.body.name}(${params.length > 0 ? params.join(", ") : "void"});`;
+    return `${cType(i.tables.typing.rec, i.returns)} ${i.body.name}(${params.length > 0 ? params.join(", ") : "void"});`;
   });
   return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "", ...lines, "", "#ifdef __cplusplus", "}", "#endif", "", `#endif`, ""].join("\n");
 }
@@ -165,12 +165,13 @@ function header(name: string, exports: Instance[]): string {
 // How C names a type that crosses to it. A raw pointer's target is `const` unless it is a
 // `MutPtr`, after the `*` when the target is itself a pointer; a target C has no name for is
 // `void`.
-function cType(t: Type): string {
+function cType(rec: Typing["rec"], t: Type): string {
   if (typeof t !== "string") {
-    if (t.kind !== "pointer") return "void";
-    const to = cType(t.to);
-    const pointer = typeof t.to !== "string" && t.to.kind === "pointer";
-    const target = t.mutable ? to : pointer ? `${to}const` : `const ${to}`;
+    const r = rec(t);
+    if (r.kind !== "pointer") return "void";
+    const to = cType(rec, r.to);
+    const pointer = typeof r.to !== "string" && rec(r.to).kind === "pointer";
+    const target = r.mutable ? to : pointer ? `${to}const` : `const ${to}`;
     return `${target}${target.endsWith("*") ? "" : " "}*`;
   }
   const names: Record<string, string> = { boolean: "bool", f32: "float", f64: "double", usize: "size_t", isize: "ptrdiff_t" };

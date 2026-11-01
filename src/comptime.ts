@@ -158,11 +158,12 @@ export function stringsType({ typing, stringArrays }: Tables, items: string[]): 
 // The value an instance's comptime parameter was given, from the literal type it is keyed by.
 export function comptimeParameter(instance: Instance, p: Param): Value {
   const t = instance.bindings.get(`comptime ${(p.pattern as { name: string }).name}`);
-  if (typeof t === "string" || t?.kind !== "literal") return undefined;
-  const strings = instance.tables.stringArrays.get(t);
+  const r = t === undefined || typeof t === "string" ? undefined : instance.tables.typing.rec(t);
+  if (r?.kind !== "literal") return undefined;
+  const strings = instance.tables.stringArrays.get(t as LiteralType);
   if (strings) return { kind: "array", items: [...strings] };
   // An enum's member keeps which enum it is, as members of two enums may share a value.
-  return t.owner ? { kind: "member", type: t, value: t.value } : t.value;
+  return r.owner ? { kind: "member", type: t!, value: r.value } : r.value;
 }
 
 // A frame for comptime code in an instance, which knows the instance's comptime parameters.
@@ -203,7 +204,7 @@ function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): V
     return go(interpreter(tables));
   } catch (e) {
     let stop = e;
-    if (e instanceof Thrown) stop = new Stop(`this comptime code threw an error it didn't catch: ${described(e.value)}`, e.at, false);
+    if (e instanceof Thrown) stop = new Stop(`this comptime code threw an error it didn't catch: ${described(tables.typing, e.value)}`, e.at, false);
     // A string or array past what the compiler can hold.
     if (e instanceof RangeError) stop = new Stop("this comptime code made a value too large to hold while compiling", site, false);
     if (!(stop instanceof Stop)) throw e;
@@ -218,7 +219,7 @@ const constName = (c: Instance) => c.body.name.slice("const ".length);
 
 function interpreter(tables: Tables) {
   const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files, asserts, clocks, integerCalls } = tables;
-  const { elementsOf, isSubclass, isTuple, show, lower } = typing;
+  const { elementsOf, isSubclass, isTuple, show, lower, rec } = typing;
   let steps = 0;
   let depth = 0;
   return { expr, block, constant, call };
@@ -282,7 +283,7 @@ function interpreter(tables: Tables) {
   // Instances of a class with an `equals` compare through it, as they do at run time.
   function byEquals(at: Span): Equals {
     return (a, b) => {
-      const method = a.type.kind === "class" ? equalities.get(a.type) : undefined;
+      const method = rec(a.type).kind === "class" ? equalities.get(a.type as ClassType) : undefined;
       return method && call(method, [b], a, at) === true;
     };
   }
@@ -447,9 +448,9 @@ function interpreter(tables: Tables) {
     // A place lent to a `Mut`: the place itself, which reads and writes go through.
     const [own, target] = [f.instance.types.get(e), f.instance.coercions.get(e) ?? f.instance.types.get(e)];
     // A fixed array copies where an array shares, which comptime values don't follow yet.
-    const held = typeof own === "string" ? own : own?.kind === "ref" ? own.to : own;
-    if (typeof held !== "string" && held?.kind === "fixed") unsupported("a FixedArray", e);
-    if (mutable(target) && !mutable(own) && (e.kind === "ident" || e.kind === "member" || e.kind === "index" || e.kind === "this")) return place(f, e);
+    const held = deref(typing, own);
+    if (held !== undefined && typeof held !== "string" && rec(held).kind === "fixed") unsupported("a FixedArray", e);
+    if (mutable(typing, target) && !mutable(typing, own) && (e.kind === "ident" || e.kind === "member" || e.kind === "index" || e.kind === "this")) return place(f, e);
     const v = raw(f, e);
     return isShort(v) ? v : typed(f, e, v);
   }
@@ -460,11 +461,11 @@ function interpreter(tables: Tables) {
   function typed(f: Frame, e: Expr, value: Value): Value {
     const own = f.instance.types.get(e);
     const target = f.instance.coercions.get(e) ?? own;
-    if (isPlace(value) && mutable(target)) return value;
+    if (isPlace(value) && mutable(typing, target)) return value;
     const v = isPlace(value) ? value.get() : value;
-    const to = deref(target);
+    const to = deref(typing, target);
     if (typeof v === "bigint" && to !== undefined && isFloat(to)) return fit(Number(v), to);
-    return retag(typing, v, deref(own), to);
+    return retag(typing, v, deref(typing, own), to);
   }
 
   function raw(f: Frame, e: Expr): Value | typeof SHORT {
@@ -524,7 +525,7 @@ function interpreter(tables: Tables) {
         return text;
       }
       case "ident": {
-        const literal = literalValue(type);
+        const literal = literalValue(typing, type);
         if (literal !== undefined && !f.instance.locals.has(e)) return literal;
         const read = f.instance.calls.get(e);
         if (read?.body.comptime === "const") return constant(read, e);
@@ -563,7 +564,8 @@ function interpreter(tables: Tables) {
           const [from, to] = [f.instance.types.get(e.expr), type];
           const held = expr(f, e.expr);
           if (from === to) return held;
-          const kept = typeof to !== "string" && to.kind === "union" ? to.members : [to];
+          const r = typeof to === "string" ? undefined : rec(to);
+          const kept = r?.kind === "union" ? r.members : [to];
           if (!kept.includes(memberType(typing, held, from)!)) panic("the implementation returned a value this overload signature doesn't declare", e);
           return retag(typing, held, from, to);
         }
@@ -610,19 +612,21 @@ function interpreter(tables: Tables) {
   }
 
   function construct(f: Frame, e: Extract<Expr, { kind: "new" }>, type: Type): Value {
-    if (typeof type !== "string" && type.kind === "interior" && type.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: expr(f, e.args[0]!) };
-    if (typeof type === "string" || type.kind !== "class") return refuse(`'new ${show(type)}'`, e);
+    const r = typeof type === "string" ? undefined : rec(type);
+    if (r?.kind === "interior" && r.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: expr(f, e.args[0]!) };
+    if (r?.kind !== "class") return refuse(`'new ${show(type)}'`, e);
     const ctor = f.instance.calls.get(e)!;
-    const made: Record = { kind: "record", type, fields: new Map() };
+    const made: Record = { kind: "record", type: type as ClassType, fields: new Map() };
     call(ctor, args(f, ctor, e.args ?? []), made, e);
     return made;
   }
 
   function member(f: Frame, e: Extract<Expr, { kind: "member" }>, type: Type): Value | typeof SHORT {
     // An enum's member, as `Color.Red`, is known from its type alone.
-    const literal = literalValue(type);
+    const literal = literalValue(typing, type);
     if (literal !== undefined) return literal;
-    if (typeof type !== "string" && type.kind === "variant" && type.fields.length === 0 && enumName(e.object)) return { kind: "variant", type, args: [] };
+    const r = typeof type === "string" ? undefined : rec(type);
+    if (r?.kind === "variant" && r.fields.length === 0 && enumName(e.object)) return { kind: "variant", type: type as VariantType, args: [] };
     const linked = link(f, e.object);
     if (isShort(linked)) return SHORT;
     const object = unwrap(linked);
@@ -641,7 +645,7 @@ function interpreter(tables: Tables) {
   function tupleLength(t: Record): bigint {
     const type = t.type as ObjectType;
     const count = elementsOf(type).length;
-    let length = type.required ?? count;
+    let length = rec(type).required ?? count;
     for (let i = length; i < count; i++) if (unwrap(t.fields.get(String(i))!) !== null) length = i + 1;
     const rest = t.fields.get("...");
     return BigInt(length + (rest && typeof rest === "object" && rest.kind === "array" ? rest.items.length : 0));
@@ -652,8 +656,9 @@ function interpreter(tables: Tables) {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") refuse("printing", e);
     if (clocks.get(e) === "Math.random") random("'Math.random'", e);
     // A data-carrying enum's member, as `Shape.Circle(2)`.
-    if (type !== undefined && typeof type !== "string" && type.kind === "variant" && callee.kind === "member" && enumName(callee.object)) {
-      return { kind: "variant", type, args: e.args.map((a) => expr(f, a)) };
+    const r = type === undefined || typeof type === "string" ? undefined : rec(type);
+    if (r?.kind === "variant" && callee.kind === "member" && enumName(callee.object)) {
+      return { kind: "variant", type: type as VariantType, args: e.args.map((a) => expr(f, a)) };
     }
     if (asserts.has(e)) {
       if (expr(f, e.args[0]!) === true) return undefined;
@@ -779,7 +784,8 @@ function interpreter(tables: Tables) {
     if (e.op === "!") return !v;
     if (e.op === "typeof") {
       const from = typeOf(f, e.operand);
-      const member = typeof from !== "string" && from.kind === "union" ? memberOf(typing, held, from) : from;
+      const r = typeof from === "string" ? undefined : rec(from);
+      const member = r?.kind === "union" ? memberOf(typing, held, r) : from;
       return member === "bigint" ? "bigint" : typeofValue(v);
     }
     if (type === "bigint") return e.op === "-" ? -(v as bigint) : e.op === "~" ? ~(v as bigint) : unsupported(`'${e.op}'`, e);
@@ -908,12 +914,13 @@ function interpreter(tables: Tables) {
     const info = f.instance.patterns.get(p)!;
     const tag = value && typeof value === "object" && value.kind === "member" ? value.type : undefined;
     const v = unwrap(value);
-    const union = typeof info.type !== "string" && info.type.kind === "union" ? info.type : undefined;
+    const r = typeof info.type === "string" ? undefined : rec(info.type);
+    const union = r?.kind === "union" ? r : undefined;
     switch (info.kind) {
       case "any":
         return true;
       case "literal":
-        return info.member ? same(typing, v, literalValue(info.member) ?? info.member.value) : same(typing, v, expr(f, (p as Extract<Pattern, { kind: "literal" }>).value));
+        return info.member ? same(typing, v, literalValue(typing, info.member) ?? rec(info.member).value) : same(typing, v, expr(f, (p as Extract<Pattern, { kind: "literal" }>).value));
       case "none":
         return v === null;
       case "some":
@@ -1118,8 +1125,10 @@ function isPlace(v: Value | Place): v is Place {
 }
 
 // The type a reference refers to, or the type itself.
-function deref(t: Type | undefined): Type | undefined {
-  return typeof t !== "string" && t?.kind === "ref" ? t.to : t;
+function deref({ rec }: Typing, t: Type | undefined): Type | undefined {
+  if (t === undefined || typeof t === "string") return t;
+  const r = rec(t);
+  return r.kind === "ref" ? r.to : t;
 }
 
 // A value without a union's tag, read through a `Mut`'s place.
@@ -1128,8 +1137,10 @@ function unwrap(v: Value): Value {
   return v && typeof v === "object" && v.kind === "member" ? unwrap(v.value) : v;
 }
 
-function mutable(t: Type | undefined): boolean {
-  return typeof t !== "string" && t?.kind === "ref" && t.mutable;
+function mutable({ rec }: Typing, t: Type | undefined): boolean {
+  if (t === undefined || typeof t === "string") return false;
+  const r = rec(t);
+  return r.kind === "ref" && r.mutable;
 }
 
 // A value of type `from` as one of type `to`: entering a union it is tagged with the member its
@@ -1138,23 +1149,28 @@ function mutable(t: Type | undefined): boolean {
 function retag(typing: Typing, value: Value, from: Type | undefined, to: Type | undefined): Value {
   // A `Mut` held in a field stays the place it points at.
   if (isPlace(value)) return value;
-  if (to === undefined || from === to) return typeof to !== "string" && to?.kind === "union" ? value : unwrap(value);
-  if (typeof to !== "string" && to.kind === "union") {
+  const { rec } = typing;
+  const record = (t: Type | undefined) => (t === undefined || typeof t === "string" ? undefined : rec(t));
+  const tr = record(to);
+  if (to === undefined || from === to) return tr?.kind === "union" ? value : unwrap(value);
+  if (tr?.kind === "union") {
     const tag = value && typeof value === "object" && value.kind === "member" ? value.type : undefined;
-    if (tag !== undefined && to.members.includes(tag)) return value;
+    if (tag !== undefined && tr.members.includes(tag)) return value;
     const v = unwrap(value);
     const own = tag ?? from;
-    const member = own !== undefined && to.members.includes(own) ? own : own !== undefined && typeof own !== "string" && own.kind === "union" ? memberOf(typing, v, own) : own !== undefined ? (typing.membersFor(own, to)[0] ?? memberOf(typing, v, to)) : memberOf(typing, v, to);
+    const or = record(own);
+    const member = own !== undefined && tr.members.includes(own) ? own : or?.kind === "union" ? memberOf(typing, v, or) : own !== undefined ? (typing.membersFor(own, tr)[0] ?? memberOf(typing, v, tr)) : memberOf(typing, v, tr);
     return { kind: "member", type: member, value: retag(typing, v, own, member) };
   }
   const v = unwrap(value);
-  if (v && typeof v === "object" && v.kind === "record" && typeof to !== "string" && (to.kind === "object" || to.kind === "class")) {
+  if (v && typeof v === "object" && v.kind === "record" && (tr?.kind === "object" || tr?.kind === "class")) {
     // A field the value leaves out is an optional one, which is empty.
-    for (const f of to.fields) v.fields.set(f.name, v.fields.has(f.name) ? retag(typing, v.fields.get(f.name), typing.field(v.type, f.name)?.type, f.type) : retag(typing, null, "null", f.type));
+    for (const f of tr.fields) v.fields.set(f.name, v.fields.has(f.name) ? retag(typing, v.fields.get(f.name), typing.field(v.type, f.name)?.type, f.type) : retag(typing, null, "null", f.type));
   }
-  if (v && typeof v === "object" && v.kind === "array" && typeof to !== "string" && to.kind === "array") {
-    const element = typeof from !== "string" && from?.kind === "array" ? from.element : undefined;
-    v.items = v.items.map((x) => retag(typing, x, element, to.element));
+  if (v && typeof v === "object" && v.kind === "array" && tr?.kind === "array") {
+    const fr = record(from);
+    const element = fr?.kind === "array" ? fr.element : undefined;
+    v.items = v.items.map((x) => retag(typing, x, element, tr.element));
   }
   return v;
 }
@@ -1163,9 +1179,10 @@ function retag(typing: Typing, value: Value, from: Type | undefined, to: Type | 
 // standing for its base type.
 function memberType(typing: Typing, v: Value, t: Type | undefined): Type | undefined {
   if (v && typeof v === "object" && v.kind === "member") return memberType(typing, v.value, v.type);
-  const own = deref(t);
-  if (typeof own !== "string" && own?.kind === "union") return memberOf(typing, v, own);
-  if (typeof own !== "string" && own?.kind === "literal") return typing.baseOf(own) ?? own;
+  const own = deref(typing, t);
+  const r = own === undefined || typeof own === "string" ? undefined : typing.rec(own);
+  if (r?.kind === "union") return memberOf(typing, v, r);
+  if (r?.kind === "literal") return typing.baseOf(r) ?? own;
   return own;
 }
 
@@ -1178,14 +1195,18 @@ function equal(typing: Typing, a: Value, ta: Type | undefined, b: Value, tb: Typ
   const [ma, mb] = [memberType(typing, a, ta), memberType(typing, b, tb)];
   // A literal stands for its base type: members of two enums that share a value are equal, as
   // they are at run time.
-  const plain = (t: Type | undefined) => (typeof t !== "string" && t?.kind === "literal" ? (typing.baseOf(t) ?? t) : t);
+  const plain = (t: Type | undefined) => {
+    const r = t === undefined || typeof t === "string" ? undefined : typing.rec(t);
+    return r?.kind === "literal" ? (typing.baseOf(r) ?? t) : t;
+  };
   if (ma !== undefined && mb !== undefined && plain(ma) !== plain(mb)) return false;
   return same(typing, a, b, eq);
 }
 
 // The value an enum member's literal type stands for, or undefined for any other type.
-function literalValue(type: Type | undefined): Value {
-  return type !== undefined && typeof type !== "string" && type.kind === "literal" && type.owner ? type.value : undefined;
+function literalValue({ rec }: Typing, type: Type | undefined): Value {
+  const r = type === undefined || typeof type === "string" ? undefined : rec(type);
+  return r?.kind === "literal" && r.owner ? r.value : undefined;
 }
 
 // Whether an expression names an enum rather than a value.
@@ -1197,7 +1218,10 @@ function enumName(e: Expr): boolean {
 function same(typing: Typing, x: Value, y: Value, eq?: Equals): boolean {
   // Two members of a union are equal when they are the same member holding equal values.
   if (x && y && typeof x === "object" && typeof y === "object" && x.kind === "member" && y.kind === "member") {
-    const plain = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (typing.baseOf(t) ?? t) : t);
+    const plain = (t: Type) => {
+      const r = typeof t === "string" ? undefined : typing.rec(t);
+      return r?.kind === "literal" ? (typing.baseOf(r) ?? t) : t;
+    };
     if (plain(x.type) !== plain(y.type)) return false;
   }
   const [a, b] = [unwrap(x), unwrap(y)];
@@ -1244,11 +1268,12 @@ function cloned(tables: Tables, v: Value): Value {
 }
 
 // What a thrown value is, for the compile error reporting it.
-function described(value: Value): string {
+function described({ rec }: Typing, value: Value): string {
   const v = unwrap(value);
   if (v && typeof v === "object" && v.kind === "record") {
     const message = unwrap(v.fields.get("message"));
-    const name = v.type.kind === "class" ? v.type.name : "an object";
+    const r = rec(v.type);
+    const name = r.kind === "class" ? r.name : "an object";
     return typeof message === "string" ? `${name}: ${message}` : name;
   }
   return display(v, undefined);
@@ -1299,17 +1324,22 @@ function shortestF32(v: f64): string {
 // The member of a union a value is when nothing says: its own type for an aggregate, the
 // literal member with its value, or the member of its kind.
 export function memberOf(typing: Typing, value: Value, union: UnionType): Type {
-  const m = union.members;
+  const { rec } = typing;
+  const m = rec(union).members;
+  const kindOf = (t: Type) => (typeof t === "string" ? undefined : rec(t).kind);
   if (value && typeof value === "object" && value.kind === "member" && m.includes(value.type)) return value.type;
   const v = unwrap(value);
   if (v === null) return "null";
   if (v && typeof v === "object") {
-    if (v.kind === "array") return m.find((t) => typeof t !== "string" && t.kind === "array")!;
-    if (v.kind === "interior") return m.find((t) => typeof t !== "string" && t.kind === "interior")!;
+    if (v.kind === "array") return m.find((t) => kindOf(t) === "array")!;
+    if (v.kind === "interior") return m.find((t) => kindOf(t) === "interior")!;
     if (v.kind === "member" || v.kind === "place") return memberOf(typing, unwrap(v), union);
     return m.find((t) => t === v.type) ?? m.find((t) => typing.fits(v.type, t))!;
   }
-  const literal = m.find((t) => typeof t !== "string" && t.kind === "literal" && t.value === v);
+  const literal = m.find((t) => {
+    const r = typeof t === "string" ? undefined : rec(t);
+    return r?.kind === "literal" && r.value === v;
+  });
   if (literal) return literal;
   if (typeof v === "bigint") return m.find(isInteger) ?? "bigint";
   if (typeof v === "number") return m.find(isFloat)!;

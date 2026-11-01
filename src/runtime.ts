@@ -308,7 +308,7 @@ export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf
 // A value of a type with no printed form, like an object, prints as its type's name.
 export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slots, convert: Convert) {
   const { emit, temp, label, startBlock, cString, typing } = b;
-  const { show } = typing;
+  const { show, rec } = typing;
   const llvm = layoutOf(typing);
   let format = "";
   let values: string[] = [];
@@ -324,14 +324,19 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
 
   function piece(v: string, type: Type) {
     // Objects, arrays, Maps, Sets and unions holding them print as Node's util.inspect would.
-    const plain = (t: Type): boolean => typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || (t.kind === "union" && t.members.every(plain));
+    const plain = (t: Type): boolean => {
+      if (typeof t === "string") return true;
+      const r = rec(t);
+      return r.kind === "literal" || r.kind === "pattern" || (r.kind === "union" && r.members.every(plain));
+    };
+    const r = typeof type === "string" ? undefined : rec(type);
     if (!plain(type) && b.inspect) {
       flush();
       const text = b.inspect(v, type);
       emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${text})`);
       emit(`call void @fsh_rt_str_release(ptr ${text})`);
-    } else if (typeof type !== "string" && type.kind === "literal") {
-      literal(String(type.value));
+    } else if (r?.kind === "literal") {
+      literal(String(r.value));
     } else if (type === "string") {
       // Written by the runtime, since its bytes may hold anything printf would read as format.
       flush();
@@ -348,21 +353,21 @@ export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slot
       // Printing never happens: the value's throw has left already.
     } else if (type === "null") {
       format += "null";
-    } else if (typeof type !== "string" && type.kind !== "union") {
+    } else if (r !== undefined && r.kind !== "union") {
       format += escape(show(type));
     } else if (type === "boolean") {
       const text = temp();
       emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);
       format += "%s";
       values.push(`, ptr ${text}`);
-    } else if (typeof type !== "string" && type.kind === "union") {
+    } else if (r?.kind === "union") {
       flush();
       const tag = temp();
       emit(`${tag} = extractvalue ${llvm(type)} ${v}, 0`);
-      const cases = type.members.map(() => label());
+      const cases = r.members.map(() => label());
       const end = label();
       emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-      type.members.forEach((member, i) => {
+      r.members.forEach((member, i) => {
         startBlock(cases[i]!);
         piece(convert(v, type, member), member);
         flush();
