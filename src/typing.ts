@@ -1145,12 +1145,12 @@ export function newTyping() {
     return t;
   }
 
-  // What `next()` gives: the next value, or that the generator has finished.
   // What `receiveFrom()` gives: a datagram's bytes and its sender, named as `sendTo` takes them.
   function datagram(): ObjectType {
     return objectType([{ name: "bytes", type: arrayType("u8") }, { name: "host", type: "string" }, { name: "port", type: "i64" }]);
   }
 
+  // What `next()` gives: the next value, or that the generator has finished.
   function nextResult(t: Type): Type {
     return unionType([objectType([{ name: "done", type: literalType(false) }, { name: "value", type: t }]), objectType([{ name: "done", type: literalType(true) }])]);
   }

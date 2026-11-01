@@ -50,13 +50,13 @@ const UNWINDS = "uwtable personality ptr @__gcc_personality_v0";
 const FARG = "{ i32, i64, double, ptr, ptr }";
 const FARG_KINDS = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, parts: 6, digits: 7, bigint: 8 };
 
-// A float constant as LLVM writes one exactly: the bits of the double holding it, which for
-// an f32 must be a float's value.
 // Whether a socket future's address is a path, as a Unix socket's is, rather than a host and port.
 function onPath(of: Type): boolean {
   return typeof of !== "string" && of.kind === "block" && (of.which === "UnixListener" || of.which === "UnixStream");
 }
 
+// A float constant as LLVM writes one exactly: the bits of the double holding it, which for
+// an f32 must be a float's value.
 function floatConstant(value: number, type: "f32" | "f64"): string {
   const view = new DataView(new ArrayBuffer(8));
   view.setFloat64(0, type === "f32" ? Math.fround(value) : value);
