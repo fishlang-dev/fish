@@ -468,6 +468,17 @@ class CookieMap {
   }
 }
 
+// A request's cookies, which can be read but not changed: a change goes on the response, through
+// res.cookies.
+class RequestCookies {
+  #cookies: CookieMap;
+  constructor(header: string) { this.#cookies = new CookieMap(header); }
+  get(name: string): string | null { return this.#cookies.get(name); }
+  has(name: string): boolean { return this.#cookies.has(name); }
+  get size(): i64 { return this.#cookies.size; }
+  forEach(callback: (value: string, name: string) => void) { this.#cookies.forEach(callback); }
+}
+
 // A Set-Cookie header's value: the cookie, then its attributes in the order Bun writes them.
 function __cookieLine(name: string, value: string, options: CookieInit | null): string {
   assert(Http1.isToken(name), "a cookie's name must be an HTTP token, of letters, digits and !#$%&'*+-.^_|~, so '" + name + "' can't be one");
@@ -590,12 +601,12 @@ class Request {
   }
 
   // The cookies of every Cookie header the request has.
-  get cookies(): CookieMap {
+  get cookies(): RequestCookies {
     let all: string[] = [];
     for (let i = 0; i < this.headers.names.length; i++) {
       if (this.headers.names[i] === "cookie") all.push(this.headers.values[i]);
     }
-    return new CookieMap(all.join("; "));
+    return new RequestCookies(all.join("; "));
   }
 
   // The path segment a Router's ':name' matched, the last when the name repeats, or "" when its
@@ -2820,7 +2831,7 @@ const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "CookieMap", "CookieInit", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;

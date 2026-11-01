@@ -209,3 +209,27 @@ function main() {
   let jar = new CookieMap();
   jar.set("sid", "x", { path: "/; SameSite=None" });
 }
+// case: cookies_request_delete
+// error: a request's cookies can't be changed, so 'RequestCookies' has no method 'delete'; delete the cookie on the response instead, as 'res.cookies.delete(...)'
+// Each read of req.cookies parses the request again, so a change to it would be lost; Bun's write
+// back to the response doesn't exist here, so the change is refused where it is written.
+async function handle(req: Request): Promise<Response> {
+  req.cookies.delete("session");
+  return new Response("logged out");
+}
+function main() {}
+// case: cookies_request_set
+// error: a request's cookies can't be changed, so 'RequestCookies' has no method 'set'; set the cookie on the response instead, as 'res.cookies.set(...)'
+function main() {
+  const req = new Request("http://h/", { headers: new Headers() });
+  let cookies = req.cookies;
+  cookies.set("a", "b");
+}
+// case: cookies_request_own_class
+// error: 'RequestCookies' has no method 'set'
+// A program's own class of that name gets the plain error.
+class RequestCookies { n: i64 = 0; }
+function main() {
+  const c = new RequestCookies();
+  c.set("a", "b");
+}
