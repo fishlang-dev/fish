@@ -1100,7 +1100,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     try {
       jsSigned(instance);
     } catch (e) {
-      if (!(e instanceof CompileError) || jsCalledAt.has(instance.body)) throw e;
+      if (!(e instanceof CompileError) || jsCalledAt.has(bodyOf(instance))) throw e;
       jsUncalled.set(bodyOf(instance), e);
       instance.signature = [];
       instance.returns = blockType("JsValue");
