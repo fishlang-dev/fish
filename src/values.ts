@@ -273,7 +273,7 @@ export type DynTable = { methods: (InstanceId | undefined)[]; fields: (InstanceI
 // place into a read of that const or a call of those methods, forms the rest of the compiler knows.
 type Static = { field?: FieldDecl; declaring: ClassInfo; getter?: Body; setter?: Body };
 
-export class Expressions {
+export class Expressions implements Union {
   ctx: Context;
 
   constructor(ctx: Context) {
@@ -369,11 +369,6 @@ export class Expressions {
     this.superCall = this.ctx.superCall;
     this.closing = this.ctx.closing;
     this.unsafeDepth = this.ctx.unsafe ? 1 : 0;
-    this.unions = {
-      kindTests: this.kindTests, typing: this.typing, types: this.types, coercions: this.coercions, value: (e) => this.read(e), excess: (e, to) => this.excess(e, to),
-      classNamed: (name) => (this.ctx.lookup(name) ? undefined : this.arenas.classOf(this.classes.get(name))?.type),
-      adapt: (e, to) => this.adapt(e, to),
-    };
   }
   private asserts: Tables["asserts"];
   private awaitedNow: Tables["awaitedNow"];
@@ -415,7 +410,7 @@ export class Expressions {
   private jsStatics: Tables["jsStatics"];
   private jsUses: Tables["jsUses"];
   private jsonCalls: Tables["jsonCalls"];
-  private kindTests: Tables["kindTests"];
+  kindTests: Tables["kindTests"];
   private lengthChecks: Tables["lengthChecks"];
   private maths: Tables["maths"];
   private namedParams: Tables["namedParams"];
@@ -445,7 +440,7 @@ export class Expressions {
   private unusedDefaults: Tables["unusedDefaults"];
   private restStarts: Tables["restStarts"];
   private upcasts: Tables["upcasts"];
-  private typing: Tables["typing"];
+  typing: Tables["typing"];
   private ids: Tables["ids"];
   private regex: Tables["regex"];
   private files: Tables["files"];
@@ -486,9 +481,9 @@ export class Expressions {
   private holdsFuture(t: Type): boolean {
     return typeof t !== "string" && (this.typing.rec(t).kind === "future" || this.typing.promiseElement(t) !== undefined);
   }
-  private types: Context["types"];
+  types: Context["types"];
   private locals: Context["locals"];
-  private coercions: Context["coercions"];
+  coercions: Context["coercions"];
   private calls: Context["calls"];
   private setters: Context["setters"];
   private byName: Context["byName"];
@@ -544,7 +539,6 @@ export class Expressions {
   private fitted = new NodeSet<Expr>();
   // Powers of literals whose exponent no u32 holds, unless they became floats.
   private powers: [Expr, Expr][] = [];
-  private unions: Union;
 
   // Runs a check inside \`unsafe\`, where raw pointers can be used.
   unsafely<T>(this: Mut<this>, check: () => T): T {
@@ -5034,10 +5028,10 @@ export class Expressions {
           return binaryType(this.typing, e.op, left, this.ctx.assume(e.op === "&&" ? proven.yes : proven.no, () => this.operand(e.right)), e);
         }
         if (e.op === "===" || e.op === "!==") {
-          const special = this.jsEmpty(e) ?? typeofComparison(e, this.unions) ?? this.equality(e) ?? unionComparison(e, this.unions, (v, to) => this.adapt(v, to));
+          const special = this.jsEmpty(e) ?? typeofComparison(e, this) ?? this.equality(e) ?? unionComparison(e, this, (v, to) => this.adapt(v, to));
           if (special) return special;
         }
-        if (e.op === "instanceof") return instanceofCheck(e, this.unions);
+        if (e.op === "instanceof") return instanceofCheck(e, this);
         if (e.op === "**") return this.power(e.left, this.operand(e.left), e.right, this.operand(e.right), e);
         if (e.op === "??") return this.orElse(e);
         if (e.op === "in" && e.left.kind === "privateName") {
@@ -5451,7 +5445,7 @@ export class Expressions {
     // a value awaited from a promise of `T | null` does once narrowed.
     const argument = this.recOf(tr?.kind === "param" && tr.concrete && !this.typing.fits(type, to) ? this.typing.lower(to) : undefined);
     if (argument?.kind === "union") {
-      intoUnion(e, type, this.typing.lower(to) as UnionType, message, this.unions);
+      intoUnion(e, type, this.typing.lower(to) as UnionType, message, this);
       return;
     }
     if (tr?.kind === "union") {
@@ -5468,7 +5462,7 @@ export class Expressions {
         this.coercions.set(e, to);
         return;
       }
-      intoUnion(e, type, to as UnionType, message, this.unions);
+      intoUnion(e, type, to as UnionType, message, this);
       return;
     }
     // A literal type takes exactly its value, so only a literal expression of that value fits.
@@ -5657,7 +5651,7 @@ export class Expressions {
     return true;
   }
 
-  private excess(e: Expr, to: Type) {
+  excess(e: Expr, to: Type) {
     e = this.rewrites.current(e);
     to = this.typing.unfold(to);
     if (e.kind !== "object" || typeof to === "string") return;
@@ -6354,6 +6348,11 @@ export class Expressions {
   // An operator works on a literal's base type, so `1` adds like any i64.
   private operand(this: Mut<this>, e: Expr): Type {
     return this.widen(e, this.read(e));
+  }
+
+  // The class a name declares, unless a variable shadows it.
+  classNamed(this: Mut<this>, name: string): ClassType | undefined {
+    return this.ctx.lookup(name) ? undefined : this.arenas.classOf(this.classes.get(name))?.type;
   }
 
   // A value that is only read, seen through a reference to it.

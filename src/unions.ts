@@ -15,7 +15,7 @@ export type Union = {
   typing: Typing;
   types: NodeMap<Expr, Type>;
   coercions: NodeMap<Expr, Type>;
-  value(e: Expr): Type;
+  read(e: Expr): Type;
   excess(e: Expr, to: Type): void;
   // The class a name declares, unless a variable shadows it.
   classNamed(name: string): ClassType | undefined;
@@ -118,21 +118,21 @@ export function unionField(typing: Typing, union: UnionType, name: string, at: S
 
 // `x instanceof C` checks whether x holds an instance of C or of a class extending it; each
 // keeps its own type when narrowed, its base's fields reached through the base it embeds.
-export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTests, typing, types, value, classNamed }: Union): Type {
-  const left = value(e.left);
-  const l = typeof left === "string" ? undefined : typing.rec(left);
+export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, host: Union): Type {
+  const left = host.read(e.left);
+  const l = typeof left === "string" ? undefined : host.typing.rec(left);
   const held = l?.kind === "ref" ? l.to : left;
-  const h = typeof held === "string" ? undefined : typing.rec(held);
+  const h = typeof held === "string" ? undefined : host.typing.rec(held);
   if (h?.kind === "dyn") {
-    throw new CompileError(`a '${typing.show(held)}' keeps no record of its value's class, so 'instanceof' can't test it; add a method to the interface that says`, e.start, e.end);
+    throw new CompileError(`a '${host.typing.show(held)}' keeps no record of its value's class, so 'instanceof' can't test it; add a method to the interface that says`, e.start, e.end);
   }
-  const c = e.right.kind === "ident" ? classNamed(e.right.name) : undefined;
+  const c = e.right.kind === "ident" ? host.classNamed(e.right.name) : undefined;
   // `Map`, `Set` and `Array` aren't classes in Fish; testing for one picks a union's member.
   if (!c && e.right.kind === "ident" && ["Map", "Set", "Array"].includes(e.right.name)) {
     if (h === undefined || h.kind === "literal" || h.kind === "pattern") {
-      throw new CompileError(`'instanceof' tests an object, and a '${typing.show(held)}' is never a ${e.right.name}`, e.start, e.end);
+      throw new CompileError(`'instanceof' tests an object, and a '${host.typing.show(held)}' is never a ${e.right.name}`, e.start, e.end);
     }
-    kindTests.set(e, e.right.name as Kind);
+    host.kindTests.set(e, e.right.name as Kind);
     return "boolean";
   }
   // A generic class written without its type arguments is the instance of it the value may be.
@@ -141,14 +141,14 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
   // A member may be one through its base, as `Words extends List<string>` is a `List`.
   const instances = c || !name ? [] : [...new TypeSet(members.flatMap((m) => {
     if (typeof m === "string") return [];
-    const r = typing.rec(m);
-    for (let x: ClassType | undefined = r.kind === "class" ? (m as ClassType) : undefined; x; x = typing.rec(x).base) if (typing.rec(x).generic?.name === name) return [x];
+    const r = host.typing.rec(m);
+    for (let x: ClassType | undefined = r.kind === "class" ? (m as ClassType) : undefined; x; x = host.typing.rec(x).base) if (host.typing.rec(x).generic?.name === name) return [x];
     return [];
   }))];
   if (instances.length > 1) throw new CompileError(`'${name}' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart; test a field that says which`, e.right.start, e.right.end);
   const tested = c ?? instances[0];
   if (!tested) throw new CompileError("the right side of 'instanceof' must be a class, or a generic class this value may be an instance of", e.right.start, e.right.end);
-  types.set(e.right, tested);
+  host.types.set(e.right, tested);
   return "boolean";
 }
 
@@ -190,19 +190,19 @@ type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
 
 // A value goes into the one union member it is or fits; a literal expression may also be a
 // literal member with its value. A union goes into a wider one member by member.
-export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { typing, types, coercions, excess, adapt }: Union) {
-  const kindOf = (t: Type) => (typeof t === "string" ? undefined : typing.rec(t).kind);
+export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, host: Union) {
+  const kindOf = (t: Type) => (typeof t === "string" ? undefined : host.typing.rec(t).kind);
   // A literal goes into the one number type a union holds.
-  const numbers = numberMembers(typing, to);
-  if (!typing.rec(to).members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
+  const numbers = numberMembers(host.typing, to);
+  if (!host.typing.rec(to).members.includes(type) && numbers.length === 1 && host.adapt(e, numbers[0]!)) type = numbers[0]!;
   // In an instance, a type parameter no member takes goes in as the members its type argument has.
   const unionMembers = (t: Type) => {
-    const r = typeof t === "string" ? undefined : typing.rec(t);
+    const r = typeof t === "string" ? undefined : host.typing.rec(t);
     return r?.kind === "union" ? r.members : [t];
   };
   const parts = (s: Type): Type[] => {
-    const r = typeof s === "string" ? undefined : typing.rec(s);
-    return unionMembers(r?.kind === "param" && r.concrete && typing.membersFor(s, to).length === 0 ? typing.lower(s) : s);
+    const r = typeof s === "string" ? undefined : host.typing.rec(s);
+    return unionMembers(r?.kind === "param" && r.concrete && host.typing.membersFor(s, to).length === 0 ? host.typing.lower(s) : s);
   };
   const sources = unionMembers(type).flatMap(parts);
   if (sources.some((s) => kindOf(s) === "generator")) throw unsupported("unions holding generators", e);
@@ -212,43 +212,43 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
     if (source === "never") continue;
     const value = literalValue(e);
     // A plain literal expression never becomes an enum's member.
-    const literal = typing.rec(to).members.find((m) => {
-      const r = typeof m === "string" ? undefined : typing.rec(m);
+    const literal = host.typing.rec(to).members.find((m) => {
+      const r = typeof m === "string" ? undefined : host.typing.rec(m);
       return r?.kind === "literal" && !r.owner && r.value === value;
     });
-    const r = literal === undefined || typeof literal === "string" ? undefined : typing.rec(literal);
-    if (literal && r?.kind === "literal" && sources.length === 1 && typing.baseOf(literal as LiteralType) === type) {
-      types.set(e, literal);
+    const r = literal === undefined || typeof literal === "string" ? undefined : host.typing.rec(literal);
+    if (literal && r?.kind === "literal" && sources.length === 1 && host.typing.baseOf(literal as LiteralType) === type) {
+      host.types.set(e, literal);
       break;
     }
-    let into = typing.membersFor(source, to);
+    let into = host.typing.membersFor(source, to);
     // A fresh object literal may fit a member through its literal fields, as `{ ok: true }`
     // fits `{ ok: true }`; when exactly one member takes it that way, it becomes that shape.
-    const shapes = into.length === 0 && sources.length === 1 ? typing.rec(to).members.map((m) => literalShape(typing, e, m, types)) : [];
+    const shapes = into.length === 0 && sources.length === 1 ? host.typing.rec(to).members.map((m) => literalShape(host.typing, e, m, host.types)) : [];
     if (shapes.filter((s) => s).length === 1) {
       const shape = shapes.find((s) => s)!;
-      shape.apply(coercions);
-      into = [typing.rec(to).members[shapes.indexOf(shape)]!];
+      shape.apply(host.coercions);
+      into = [host.typing.rec(to).members[shapes.indexOf(shape)]!];
     }
     if (into.length === 0) throw new CompileError(message, e.start, e.end);
     if (into.length > 1) {
-      throw new CompileError(`type '${typing.show(source)}' fits more than one member of '${typing.show(to)}': ${into.map((m) => `'${typing.show(m)}'`).join(" and ")}`, e.start, e.end);
+      throw new CompileError(`type '${host.typing.show(source)}' fits more than one member of '${host.typing.show(to)}': ${into.map((m) => `'${host.typing.show(m)}'`).join(" and ")}`, e.start, e.end);
     }
-    if (sources.length === 1) excess(e, into[0]!);
+    if (sources.length === 1) host.excess(e, into[0]!);
   }
-  coercions.set(e, to);
+  host.coercions.set(e, to);
 }
 
 // `typeof x === "number"` checks which kind of value x holds, which for a union is its tag.
-export function typeofComparison(e: Expr, { value, typing }: Union): Type | undefined {
+export function typeofComparison(e: Expr, host: Union): Type | undefined {
   const test = typeofTest(e);
   if (!test) return undefined;
-  const tested = value(test.operand);
-  const t = typeof tested === "string" ? undefined : typing.rec(tested);
+  const tested = host.read(test.operand);
+  const t = typeof tested === "string" ? undefined : host.typing.rec(tested);
   const held = t?.kind === "ref" ? t.to : tested;
-  const h = typeof held === "string" ? undefined : typing.rec(held);
-  if (h?.kind === "union" && h.members.some((t) => typing.isPlainJs(t))) throw new CompileError(`'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own`, test.operand.start, test.operand.end);
-  const names = typing.isPlainJs(held) ? JS_TYPEOF : TYPEOF;
+  const h = typeof held === "string" ? undefined : host.typing.rec(held);
+  if (h?.kind === "union" && h.members.some((t) => host.typing.isPlainJs(t))) throw new CompileError(`'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own`, test.operand.start, test.operand.end);
+  const names = host.typing.isPlainJs(held) ? JS_TYPEOF : TYPEOF;
   if (test.name.kind !== "string" || !names.has(test.name.value)) {
     throw new CompileError(`'typeof' can only be compared with ${[...names].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
   }
@@ -257,36 +257,36 @@ export function typeofComparison(e: Expr, { value, typing }: Union): Type | unde
 
 // `x === v` with x a union compares the member x holds with v, so it needs a member v might
 // equal.
-export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing, value, coercions }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
-  let [left, right] = [value(e.left), value(e.right)];
+export function unionComparison(e: Extract<Expr, { kind: "binary" }>, host: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
+  let [left, right] = [host.read(e.left), host.read(e.right)];
   // A literal compared with a union holding one number type takes that type.
-  const number = (t: Type) => numberMembers(typing, t, (u) => opened(typing, u));
+  const number = (t: Type) => numberMembers(host.typing, t, (u) => opened(host.typing, u));
   if (number(left).length === 1 && adapt(e.right, number(left)[0]!)) right = number(left)[0]!;
   if (number(right).length === 1 && adapt(e.left, number(right)[0]!)) left = number(right)[0]!;
   // A union of strings and patterns is a string once lowered, compared as one.
   const union = (t: Type) => {
-    const r = typeof t === "string" ? undefined : typing.rec(t);
+    const r = typeof t === "string" ? undefined : host.typing.rec(t);
     return r?.kind === "union" ? (t as UnionType) : undefined;
   };
-  const isUnion = (t: Type) => union(t) !== undefined && typing.lower(t) !== "string";
+  const isUnion = (t: Type) => union(t) !== undefined && host.typing.lower(t) !== "string";
   // In an instance, a union holding a type parameter is the union its type argument flattens into.
   const flat = (t: Type) => {
     const u = union(t);
-    return u && holdsArgument(typing, u) ? typing.lower(t) : t;
+    return u && holdsArgument(host.typing, u) ? host.typing.lower(t) : t;
   };
   const instanced = flat(left) !== left || flat(right) !== right;
   [left, right] = [flat(left), flat(right)];
   if (!isUnion(left) && !isUnion(right)) {
     if (!instanced) return undefined;
     // What's left is a plain value, which a literal on the other side becomes to be compared.
-    if (typing.lower(left) === "string" && typing.lower(right) !== "string") coercions.set(e.right, "string");
-    if (typing.lower(right) === "string" && typing.lower(left) !== "string") coercions.set(e.left, "string");
+    if (host.typing.lower(left) === "string" && host.typing.lower(right) !== "string") host.coercions.set(e.right, "string");
+    if (host.typing.lower(right) === "string" && host.typing.lower(left) !== "string") host.coercions.set(e.left, "string");
     if (isNumeric(left)) adapt(e.right, left);
     if (isNumeric(right)) adapt(e.left, right);
   }
-  if (objectsMeet(typing, left, right)) throw unsupported("comparisons of objects", e);
-  if (!comparable(typing, left, right)) {
-    throw new CompileError(`this comparison appears to be unintentional because the types '${typing.show(left)}' and '${typing.show(right)}' have no overlap`, e.start, e.end);
+  if (objectsMeet(host.typing, left, right)) throw unsupported("comparisons of objects", e);
+  if (!comparable(host.typing, left, right)) {
+    throw new CompileError(`this comparison appears to be unintentional because the types '${host.typing.show(left)}' and '${host.typing.show(right)}' have no overlap`, e.start, e.end);
   }
   return "boolean";
 }
