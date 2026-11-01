@@ -9,7 +9,10 @@ import { parse, type Stmt, type TypeMember, type TypeNode } from "./parser.ts";
 const CATEGORIES: Record<string, string> = { Expr: "AstExpr", Stmt: "AstStmt", TypeNode: "AstType", Pattern: "AstPattern" };
 // The parser's types that aren't part of the tree. A node's id is the compiler's own, so macros
 // never see one.
-const SKIPPED = new Set(["Span", "Id", "Cursor"]);
+const SKIPPED = new Set(["Span", "Id", "Cursor", "Parse"]);
+// Fields the compiler sets on nodes for its own passes, which a macro must not write: an
+// overload's narrowing downcast is made only by overload lowering.
+const INTERNAL = new Set(["narrows"]);
 
 type Field = { name: string; optional: boolean; type: string };
 type Shape = Field[];
@@ -24,13 +27,14 @@ export function astDeclarations(src: string): string {
   const span: Shape = [{ name: "start", optional: false, type: "i64" }, { name: "end", optional: false, type: "i64" }];
 
   // A type as Fish source, inside a field.
-  const typeText = (t: TypeNode, field?: string, kind?: string): string => {
+  const typeText = (t: TypeNode): string => {
     switch (t.kind) {
       case "ref": {
         if (t.name === "string" || t.name === "boolean") return t.name;
         if (t.name === "undefined") return "null";
-        if (t.name === "number") return kind === "float" && field === "value" ? "f64" : "i64";
-        if (t.name === "bigint") return "i64";
+        // The parser's offsets and counts are `usize`, but macros see every integer as `i64`.
+        if (t.name === "f64") return "f64";
+        if (t.name === "bigint" || /^[iu](8|16|32|64|128|size)$/.test(t.name)) return "i64";
         if (t.name === "Extract") {
           const from = t.args[0]!;
           return shapesText(shapes(from.kind === "ref" && aliases.has(from.name) ? aliases.get(from.name)! : from).filter((s) => extracted(s, t.args[1]!)));
@@ -41,11 +45,11 @@ export function astDeclarations(src: string): string {
       case "literal":
         return JSON.stringify((t.value as { value: string }).value);
       case "array": {
-        const element = typeText(t.element, field, kind);
+        const element = typeText(t.element);
         return t.element.kind === "union" ? `(${element})[]` : `${element}[]`;
       }
       case "union":
-        return t.types.map((m) => typeText(m, field, kind)).join(" | ");
+        return t.types.map((m) => typeText(m)).join(" | ");
       default:
         return shapesText(shapes(t));
     }
@@ -66,14 +70,14 @@ export function astDeclarations(src: string): string {
     const kinds = kind && kind.kind === "property" && kind.type?.kind === "union" ? kind.type.types : [kind && kind.kind === "property" ? kind.type : undefined];
     return kinds.map((k) => {
       const tag = k && k.kind === "literal" ? (k.value as { value: string }).value : undefined;
-      return t.members.map((m) => member(m, tag));
+      return t.members.filter((m) => !(m.kind === "property" && typeof m.name === "string" && INTERNAL.has(m.name))).map((m) => member(m, tag));
     });
   };
 
   const member = (m: TypeMember, kind: string | undefined): Field => {
     if (m.kind !== "property" || typeof m.name !== "string" || !m.type) throw new Error("the Ast generator reads only named fields");
     if (m.name === "kind" && kind !== undefined) return { name: "kind", optional: false, type: JSON.stringify(kind) };
-    return { name: m.name, optional: m.optional, type: typeText(m.type, m.name, kind) };
+    return { name: m.name, optional: m.optional, type: typeText(m.type) };
   };
 
   const extracted = (s: Shape, by: TypeNode): boolean => {

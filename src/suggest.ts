@@ -31,9 +31,9 @@ export function didYouMean(name: string, candidates: Iterable<string>): string {
 
 // Levenshtein distance with substitutions costing 2, or 0.1 for a change of case, given up
 // once it must exceed `max`.
-function distanceWithin(a: string, b: string, max: number): number | undefined {
+function distanceWithin(a: string, b: string, max: f64): f64 | undefined {
   let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
-  let current = new Array<number>(b.length + 1).fill(0);
+  let current = new Array<f64>(b.length + 1).fill(0);
   const big = max + 0.01;
   for (let i = 1; i <= a.length; i++) {
     const lowA = a[i - 1]!.toLowerCase();

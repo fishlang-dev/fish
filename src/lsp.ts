@@ -2,14 +2,15 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { Checked } from "./check.ts";
-import { newSession, type Session } from "./compilation.ts";
-import { CompileError, errorsOf, locate, shown, sourceOf, written, type Source } from "./diag.ts";
+import { compiledOf, type Checked } from "./check.ts";
+import { type Session } from "./compilation.ts";
+import { cachedSession } from "./stdcache.ts";
+import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
 import { analyze } from "./main.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
 
-type Message = { id?: number | string | null; method?: string; params?: Params };
+type Message = { id?: i64 | string | null; method?: string; params?: Params };
 // The parameters of the methods served, which all name a document.
 type Params = { textDocument: { uri: string; text: string }; contentChanges: { text: string }[]; range: Range };
 
@@ -34,19 +35,19 @@ export function frames(buffer: Buffer): { bodies: string[]; rest: Buffer } {
   return { bodies, rest: buffer };
 }
 
-type Position = { line: number; character: number };
+type Position = { line: usize; character: usize };
 type Range = { start: Position; end: Position };
 type Location = { uri: string; range: Range };
 
 // LSP's positions count UTF-16 code units, as the compiler's offsets into a JavaScript string do.
-function position(src: string, offset: number): Position {
+function position(src: string, offset: usize): Position {
   const { line, col } = locate(src, Math.min(offset, src.length));
   return { line: line - 1, character: col - 1 };
 }
 
 // Where a span of the program checked from `path` lies, in whichever of its files holds it; std
 // has no file an editor can open.
-function located(path: string, text: string, sources: Source[], start: number, end: number): Location | undefined {
+function located(path: string, text: string, sources: Source[], start: usize, end: usize): Location | undefined {
   if (start >= STD_BASE) return undefined;
   const at = sourceOf(text, path, start, sources);
   const range = { start: position(at.src, at.offset), end: position(at.src, at.offset + (end - start)) };
@@ -95,8 +96,8 @@ function named({ compilation: { names, typing } }: Checked, t: Type): string {
 // A hint after each fallible call and `await` in `text` within `range`, naming what it can throw.
 // A generic body's definition and its instances share nodes, so a place is hinted once.
 export function hints(checked: Checked, text: string, range: Range) {
-  const found = new Map<number, object>();
-  for (const instance of checked.instances) {
+  const found = new Map<usize, object>();
+  for (const instance of compiledOf(checked)) {
     for (const [at, raised] of instance.raises) {
       // Past the document's text is another file's.
       if (at.kind === "throw" || at.end > text.length || found.has(at.end)) continue;
@@ -106,7 +107,7 @@ export function hints(checked: Checked, text: string, range: Range) {
       found.set(at.end, { position: place, label: `throws ${named(checked, raised.from)}`, paddingLeft: true, ...(tooltip && { tooltip }) });
     }
   }
-  return [...found].sort(([a], [b]) => a - b).map(([, hint]) => hint);
+  return [...found].sort(([a], [b]) => (a as i64) - (b as i64)).map(([, hint]) => hint);
 }
 
 function send(message: object) {
@@ -119,7 +120,7 @@ export function serveLsp() {
   const exit = () => process.exit(shutdown ? 0 : 1);
   const notify = (method: string, params: unknown) => send({ method, params });
   // What every check this server runs shares, as std's parsed tree.
-  const session = newSession();
+  const session = cachedSession();
 
   // The open documents' text, by URI.
   const documents = new Map<string, string>();
@@ -220,4 +221,15 @@ export function serveLsp() {
     bodies.forEach(receive);
   });
   process.stdin.on("end", exit);
+}
+
+// The errors `e` stands for, each with its group's sources when it has none of its own, and the
+// names its group's compilation made up.
+export function errorsOf(e: CompileError): CompileError[] {
+  if (e.errors.length === 0) return [e];
+  for (const x of e.errors) {
+    if (x.sources.length === 0) x.sources = e.sources;
+    x.names = e.names;
+  }
+  return e.errors;
 }

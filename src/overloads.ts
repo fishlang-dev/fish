@@ -1,6 +1,7 @@
 import { CompileError } from "./diag.ts";
-import { nextId, renumber, type Ids } from "./nodes.ts";
+import { nextId, renumber, Rewrites, walk, type Ids } from "./nodes.ts";
 import type { ClassMember, ClassNode, Expr, Func, Param, Span, Stmt, TypeNode } from "./parser.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 import { unsupported } from "./unsupported.ts";
 
 // Overload signatures are the bodyless declarations of a name right before its implementation.
@@ -11,13 +12,12 @@ import { unsupported } from "./unsupported.ts";
 
 // The implementation's call in a signature's body, which no overload is chosen for.
 export type Direct = { implementation?: true };
-// The signature's return type, which the implementation's value is narrowed to.
-export type Narrowing = { narrows?: TypeNode };
 
 type Method = Extract<ClassMember, { kind: "method" }>;
 
 export function lowerOverloads(ids: Ids, program: Stmt[]): Stmt[] {
   const out: Stmt[] = [];
+  const rewrites = new Rewrites();
   for (let i = 0; i < program.length; i++) {
     const s = program[i]!;
     const f = functionOf(s);
@@ -32,16 +32,15 @@ export function lowerOverloads(ids: Ids, program: Stmt[]): Stmt[] {
     if (impl.async || impl.generator) throw unsupported("overloads of async functions and generators", impl);
     const wrappers = run.map((sig, n) => {
       const params = signatureParams(ids, sig);
-      const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name: impl.name, ...span(sig) }, typeArgs: [], args: params.map((p) => argument(ids, p)), optional: false, ...span(sig) };
-      Object.assign(call, { implementation: true });
+      const call = Object.assign<Expr, Direct>({ id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "ident", name: impl.name, ...span(sig) }, typeArgs: [], args: params.map((p) => argument(ids, p)), optional: false, ...span(sig) }, { implementation: true });
       return Object.assign({ ...sig, id: nextId(ids), name: `${impl.name} overload ${n + 1}`, params, body: wrapped(ids, sig, call), ...(sig.throws ?? impl.throws ? { throws: sig.throws ?? impl.throws } : {}) }, { signature: true as const });
     });
+    rewrites.replace(impl, { ...impl, overloads: wrappers } as Func);
     out.push(program[j]!, ...wrappers);
-    Object.assign(impl, { overloads: wrappers });
     i = j;
   }
-  holdsClasses(ids, out);
-  return out;
+  holdsClasses(ids, rewrites, out);
+  return rebuiltStmts(out, rewrites);
 }
 
 function functionOf(s: Stmt | undefined): Func | undefined {
@@ -51,15 +50,15 @@ function functionOf(s: Stmt | undefined): Func | undefined {
 }
 
 // Every class, declared or written as an expression, has its method overloads lowered.
-function holdsClasses(ids: Ids, node: unknown) {
-  if (!node || typeof node !== "object") return;
-  if (Array.isArray(node)) return node.forEach((n) => holdsClasses(ids, n));
-  const c = node as Partial<ClassNode> & { kind?: string };
-  if (c.kind === "class" && Array.isArray(c.members)) c.members = lowerMembers(ids, c as ClassNode);
-  for (const value of Object.values(node)) holdsClasses(ids, value);
+function holdsClasses(ids: Ids, rewrites: Rewrites, program: Stmt[]) {
+  walk("stmt", program, ({ of, node: c }) => {
+    if ((of !== "stmt" && of !== "expr") || c.kind !== "class") return;
+    const members = lowerMembers(ids, rewrites, c);
+    if (members.length !== c.members.length || members.some((m, i) => m !== c.members[i])) rewrites.replace(c, { ...c, members });
+  });
 }
 
-function lowerMembers(ids: Ids, c: ClassNode): ClassMember[] {
+function lowerMembers(ids: Ids, rewrites: Rewrites, c: ClassNode): ClassMember[] {
   const out: ClassMember[] = [];
   const members = c.members;
   const bodyless = (m: ClassMember | undefined, name: unknown): m is Method => m?.kind === "method" && !m.body && m.name === name && typeof name === "string";
@@ -84,13 +83,11 @@ function lowerMembers(ids: Ids, c: ClassNode): ClassMember[] {
       const mine = receiver(sig.params[0]);
       const params = signatureParams(ids, { params: mine ? sig.params.slice(1) : sig.params });
       const object: Expr = isStatic ? { id: nextId(ids), kind: "ident", name: c.name!, ...span(sig) } : { id: nextId(ids), kind: "this", ...span(sig) };
-      const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object, name: impl.name as string, optional: false, ...span(sig) }, typeArgs: [], args: params.map((p) => argument(ids, p)), optional: false, ...span(sig) };
-      Object.assign(call, { implementation: true });
-      const self = mine ?? (own && renumber(structuredClone(own), () => nextId(ids)));
+      const call = Object.assign<Expr, Direct>({ id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object, name: impl.name as string, optional: false, ...span(sig) }, typeArgs: [], args: params.map((p) => argument(ids, p)), optional: false, ...span(sig) }, { implementation: true });
+      const self = mine ?? (own && renumber("param", structuredClone(own), () => nextId(ids)));
       return Object.assign({ ...sig, id: nextId(ids), name: `${impl.name as string} overload ${n + 1}`, params: self ? [self, ...params] : params, body: wrapped(ids, sig, call), ...(sig.throws ?? impl.throws ? { throws: sig.throws ?? impl.throws } : {}) }, { signature: true as const });
     });
-    out.push(...wrappers, impl);
-    Object.assign(impl, { overloads: wrappers });
+    out.push(...wrappers, rewrites.replace(impl, { ...impl, overloads: wrappers } as Method));
     i = j;
   }
   return out;
@@ -114,7 +111,7 @@ function wrapped(ids: Ids, sig: Span & { returnType: TypeNode | undefined }, cal
   const returns = sig.returnType;
   if (!returns) throw new CompileError("E0410", "an overload signature needs its return type, as in 'function f(x: string): string;'", sig.start, sig.end);
   if (returns.kind === "ref" && returns.name === "void" && returns.args.length === 0) return [{ id: nextId(ids), kind: "expr", expr: call, ...span(sig) }];
-  const value: Expr = Object.assign({ id: nextId(ids), kind: "nonNull" as const, expr: call, ...span(sig) }, { narrows: returns });
+  const value: Expr = { id: nextId(ids), kind: "nonNull", expr: call, narrows: returns, ...span(sig) };
   return [{ id: nextId(ids), kind: "return", value, ...span(sig) }];
 }
 

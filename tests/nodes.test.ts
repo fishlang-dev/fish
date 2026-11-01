@@ -2,15 +2,20 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { check } from "../src/check.ts";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { bodyOf } from "../src/arenas.ts";
+import { check, compiledOf } from "../src/check.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { CompileError } from "../src/diag.ts";
 import { expandMacros } from "../src/macros.ts";
+import { analyze } from "../src/main.ts";
 import { flatten, load } from "../src/modules.ts";
-import { NodeMap, NodeSet, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
-import { parse, type Stmt } from "../src/parser.ts";
+import type { Id } from "../src/ids.ts";
+import { latest, NodeMap, NodeSet, Rewrites, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
+import { parse, type Expr, type Stmt } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
+import { Typing, TypeMap, TypeSet, type Type } from "../src/typing.ts";
 
 const src = join(import.meta.dir, "..", "src");
 const programs = join(import.meta.dir, "programs");
@@ -28,7 +33,8 @@ function audit(roots: unknown, ids: Map<number, object>, where: string): string[
     if (typeof n.start === "number" && typeof n.end === "number") {
       const at = `${where}: a ${String(n.kind ?? "node")} at ${n.start}`;
       if (typeof n.id !== "number") problems.push(`${at} has no id`);
-      else if (ids.has(n.id) && ids.get(n.id) !== n) problems.push(`${at} shares id ${n.id} with another node`);
+      // A replacement takes the id of the node it replaces.
+      else if (ids.has(n.id) && latest(ids.get(n.id) as Id) !== latest(n as Id)) problems.push(`${at} shares id ${n.id} with another node`);
       else ids.set(n.id, n);
     }
     Object.values(n).forEach(visit);
@@ -68,7 +74,7 @@ test("every node of the compiler's own source has an id of its own", () => {
 });
 
 test("every node of the test programs, parsed, expanded and checked, has an id of its own", () => {
-  const session = newSession();
+  const session = cachedSession();
   const problems: string[] = [];
   for (const p of corpus()) {
     const ids = new Map<number, object>();
@@ -84,15 +90,108 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
       expandMacros(compilation, loaded, false, (macros) => check(compilation, macros, false, true));
       written = flatten(compilation, loaded, false);
       problems.push(...audit([written, stdFor(compilation, written)], ids, p.name));
-      check(compilation, written);
+      const bodies = compiledOf(check(compilation, written)).map((i) => [bodyOf(i).params, bodyOf(i).body]);
+      problems.push(...stale(bodies, `${p.name}, compiled`));
     } catch (e) {
       if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
     }
-    // Checking rewrites parts of the tree in place, and those parts need ids too.
+    // Checking replaces parts of the tree, and the replacements need ids too.
     problems.push(...audit(written, ids, `${p.name}, checked`));
   }
   expect(problems.slice(0, 20)).toEqual([]);
 }, 120_000);
+
+// No node reachable from `roots` has been replaced: the rebuild put every replacement in place.
+function stale(roots: unknown, where: string): string[] {
+  const problems: string[] = [];
+  const visited = new Set<object>();
+  const visit = (v: unknown) => {
+    if (typeof v !== "object" || v === null || visited.has(v)) return;
+    visited.add(v);
+    if (Array.isArray(v)) return v.forEach(visit);
+    const n = v as Record<string, unknown>;
+    if (typeof n.id === "number" && latest(n as Id) !== n) problems.push(`${where}: a ${String(n.kind ?? "node")} at ${n.start} was replaced but is still in the tree`);
+    Object.values(n).forEach(visit);
+  };
+  visit(roots);
+  return problems;
+}
+
+// Every type reachable from `roots`, through the types it links to, is a primitive or the id of
+// a record in its program's arena.
+function auditTypes(roots: Type[], typing: Typing, where: string): string[] {
+  const problems: string[] = [];
+  const seen = new Set<Type>();
+  const visit = (t: Type) => {
+    if (typeof t === "string" || seen.has(t)) return;
+    seen.add(t);
+    if (typing.typeOf(t) === undefined) return void problems.push(`${where}: ${t} is no type of its arena`);
+    typing.links(t).forEach(visit);
+  };
+  roots.forEach(visit);
+  return problems;
+}
+
+test("every type of the checked test programs is in its arena", () => {
+  const session = cachedSession();
+  const problems: string[] = [];
+  let types = 0;
+  for (const p of corpus()) {
+    if (p.src.includes("// mode: parse")) continue;
+    try {
+      const { checked } = analyze(session, p.src, p.file);
+      const roots: Type[] = compiledOf(checked).flatMap((i) => [...i.types.values(), ...i.coercions.values(), ...i.bindings.values(), i.returns, ...(i.throws ? [i.throws] : [])]);
+      types += roots.length;
+      problems.push(...auditTypes(roots, checked.compilation.typing, p.name));
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  expect(types).toBeGreaterThan(100_000);
+  expect(problems.slice(0, 20)).toEqual([]);
+}, 240_000);
+
+// The records of an arena, by id: the module constants', then those the program made.
+function records(typing: Typing): [number, Record<string, unknown>][] {
+  const found: [number, Record<string, unknown>][] = [];
+  for (let id = 21; typing.typeOf(id) !== undefined; id++) found.push([id, typing.typeOf(id) as unknown as Record<string, unknown>]);
+  return found;
+}
+
+// Every Field array and Field object a record holds, in `fields`, a future's or generator's
+// `params` and `frame`, is its own: no two records share one, so each record can be a value.
+function sharedFields(typing: Typing, where: string): string[] {
+  const owners = new Map<object, number>();
+  const problems: string[] = [];
+  const own = (o: object, id: number, what: string) => {
+    const was = owners.get(o);
+    if (was !== undefined && was !== id) problems.push(`${where}: a ${(typing.typeOf(id) as { kind: string }).kind} type shares a ${what} with a ${(typing.typeOf(was) as { kind: string }).kind} type`);
+    else owners.set(o, id);
+  };
+  for (const [id, r] of records(typing)) {
+    for (const list of (r.kind === "future" || r.kind === "generator" ? [r.fields, r.params, r.frame] : [r.fields]) as object[][]) {
+      own(list, id, "Field array");
+      for (const f of list as object[]) own(f, id, "Field");
+    }
+  }
+  return problems;
+}
+
+test("no two types of the checked test programs share a Field array or Field", () => {
+  const session = cachedSession();
+  const problems: string[] = [];
+  for (const p of corpus()) {
+    if (p.src.includes("// mode: parse")) continue;
+    try {
+      problems.push(...sharedFields(analyze(session, p.src, p.file).checked.compilation.typing, p.name));
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  const kinds = new Map<string, number>();
+  for (const p of problems) kinds.set(p.replace(/^[^:]*: /, ""), (kinds.get(p.replace(/^[^:]*: /, "")) ?? 0) + 1);
+  expect([...kinds]).toEqual([]);
+}, 240_000);
 
 test("a node table refuses a second node with an id already in use", () => {
   const a = { id: 1, kind: "a" };
@@ -107,6 +206,23 @@ test("a node table refuses a second node with an id already in use", () => {
   expect(weak.get(a)).toBe("a");
   expect(() => weak.has(b)).toThrow("internal error: two nodes share id 1");
   expect(() => new WeakNodeSet<{ id: number }>().add(a).add(b)).toThrow("internal error: two nodes share id 1");
+});
+
+// A weak table keeps an entry while any version of its node lives: the node lowering replaced
+// is gone from the tree, but the replacement still reads the entry after a collection.
+test("a weak node table keeps an entry its node's replacement still reaches", async () => {
+  const weak = new WeakNodeMap<Expr, string>();
+  const rewrites = new Rewrites();
+  const by = ((): Expr => {
+    const node: Expr = { id: 7, kind: "ident", name: "x", start: 0, end: 1 };
+    weak.set(node, "kept");
+    return rewrites.replace(node, { id: 0, kind: "ident", name: "y", start: 0, end: 1 });
+  })();
+  for (let i = 0; i < 5; i++) {
+    Bun.gc(true);
+    await Bun.sleep(10);
+  }
+  expect(weak.get(by)).toBe("kept");
 });
 
 // The AST types a table may not be keyed by: every type in src/parser.ts carrying `Id`, and any
@@ -126,6 +242,146 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by an AST node", () => {
     for (const m of text.matchAll(alias)) names.push(m[1] ?? m[2]!);
     const keyed = new RegExp(`\\b(?:Weak)?(?:Map|Set)<\\s*(?:(?:Extract|Exclude)<\\s*)?(?:${names.join("|")}|Span)\\b(?!\\[)`, "g");
     for (const m of text.matchAll(keyed)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
+
+test("a type table keys primitives and types by id, in the order they were added", () => {
+  const typing = new Typing();
+  const a = typing.arrayType("i64");
+  const map = new TypeMap<Type, string>([["i64", "int"], [a, "a"]]);
+  expect([map.get("i64"), map.get("string"), map.get(a)]).toEqual(["int", undefined, "a"]);
+  expect([...map.keys()]).toEqual(["i64", a]);
+  expect([...new TypeSet<Type>(["bigint", a, "bigint"])]).toEqual(["bigint", a]);
+});
+
+// The types a table may not be keyed by: `Type`, `Bound`, each kind's id and record in
+// src/typing.ts, and any alias a file gives one, as `type Shape = ObjectType | UnionType`. A type
+// keys by its id through TypeMap and TypeSet, which give a primitive its own integer.
+test("no Map, WeakMap, Set or WeakSet in src is keyed by a type", () => {
+  const typing = readFileSync(join(src, "typing.ts"), "utf8");
+  const kinds = [...typing.matchAll(/^export type (\w+Type) = TypeId<(\w+Record)>;/gm)].flatMap((m) => [m[1]!, m[2]!]);
+  expect(kinds).toContain("ObjectType");
+  expect(kinds.length).toBe(48);
+  const types = ["Type", "Bound", "TypeRecord", ...kinds];
+  const offenders: string[] = [];
+  for (const f of readdirSync(src).filter((f) => f.endsWith(".ts"))) {
+    const text = readFileSync(join(src, f), "utf8");
+    const names = [...types];
+    const alias = new RegExp(`\\btype (\\w+) = (?:(?:Extract|Exclude)<(?:${names.join("|")})\\b|(?:${names.join("|")})(?: [&|]|;))`, "g");
+    for (const m of text.matchAll(alias)) names.push(m[1]!);
+    const keyed = new RegExp(`\\b(?:Weak)?(?:Map|Set)<\\s*(?:(?:Extract|Exclude)<\\s*)?(?:${names.join("|")})\\b(?![\\[.])`, "g");
+    for (const m of text.matchAll(keyed)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
+
+
+// The checker's other records a table may not be keyed by: an Instance, a Body, a Local and a
+// ClassInfo, and a list of type parameters. Instances, bodies and locals key by their ids, a class
+// by its type's, and a list by its first parameter.
+test("no Map, WeakMap, Set or WeakSet in src is keyed by an instance, body, local, class or type parameter list", () => {
+  const offenders: string[] = [];
+  for (const f of readdirSync(src).filter((f) => f.endsWith(".ts"))) {
+    const text = readFileSync(join(src, f), "utf8");
+    for (const m of text.matchAll(/\b(?:Weak)?(?:Map|Set)<\s*(?:Instance|Body|Local|ClassInfo|TypeParam\[\])(?![\w.])/g)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
+
+// The checker's records and its tables, by where each is declared. They name one another by id,
+// read back through the compilation's arenas, which alone hold the records themselves.
+const RECORDS: [string, string][] = [
+  ["compilation.ts", "Tables"], ["check.ts", "Checked"], ["check.ts", "Instance"], ["check.ts", "Local"], ["classes.ts", "Body"], ["classes.ts", "ClassInfo"], ["values.ts", "DynTable"],
+];
+
+test("no instance, body, local or class holds another, nor does a checker table, but through its id", () => {
+  const offenders: string[] = [];
+  for (const [f, name] of RECORDS) {
+    const text = readFileSync(join(src, f), "utf8");
+    const start = text.search(new RegExp(`^export type ${name} = `, "m"));
+    expect(start).toBeGreaterThanOrEqual(0);
+    const first = text.slice(start, text.indexOf("\n", start));
+    // A declaration whose first line opens a brace runs to the line closing it.
+    const declared = (first.endsWith("{") ? text.slice(start, text.indexOf("\n};", start)) : first).slice(`export type ${name} = `.length);
+    for (const line of declared.replace(/\/\/.*$/gm, "").split("\n")) {
+      if (/^\s*arenas: Arenas;$/.test(line)) continue;
+      for (const m of line.matchAll(/\b(?:Instance|Body|Local|ClassInfo)\b/g)) offenders.push(`${name}: ${line.trim()} (${m[0]})`);
+    }
+  }
+  expect(offenders).toEqual([]);
+});
+
+// The checker's files: the checker, codegen and what they share.
+const CHECKER = ["check", "values", "classes", "resolve", "typefns", "operators", "typing", "generics", "interfaces", "flow", "narrow", "match", "moves", "comptime", "unions", "enums", "registry", "unsupported", "compilation", "codegen", "layout", "arithmetic", "runtime", "locals", "warnings"];
+
+// The checker's working tables, its own and codegen's, hold ids too, keys and values alike.
+test("no Map or Set in the checker holds an instance, body, local or class", () => {
+  const offenders: string[] = [];
+  for (const f of CHECKER.map((name) => `${name}.ts`)) {
+    const text = readFileSync(join(src, f), "utf8");
+    for (const m of text.matchAll(/\b(?:Map|Set)<([^;=()]*)/g)) if (/\b(?:Instance|Body|Local|ClassInfo)\b/.test(m[1]!)) offenders.push(`${f}: ${m[0]}`);
+  }
+  expect(offenders).toEqual([]);
+});
+
+// Tables still keyed by objects, each until it is given a key of its own: a walk's set of the
+// values it has visited, the quote, call and scope tables keyed by tree nodes without ids, and
+// refusals held aside.
+const OBJECT_KEYED = [
+  "check.ts: Set<unknown", "locals.ts: Set<unknown", "warnings.ts: Set<unknown",
+  "compilation.ts: WeakMap<Stmt[]", "compilation.ts: WeakMap<object", "codegen.ts: WeakSet<object", "typing.ts: WeakSet<CompileError",
+];
+
+// Fish's Map and Set key on strings and integers, so every table the checker keeps does: by a
+// string, an integer, an arena id, a string-literal union, or through NodeMap, TypeMap and their
+// kin, which key by id. Type parameters, `K` and `T`, are a generic table's own.
+test("no Map, WeakMap, Set or WeakSet in the checker is keyed by anything but strings or integers", () => {
+  const offenders: string[] = [];
+  for (const f of CHECKER.map((name) => `${name}.ts`)) {
+    const text = readFileSync(join(src, f), "utf8");
+    for (const m of text.matchAll(/\b(?:Weak)?(?:Map|Set)<\s*([A-Za-z_][\w.]*(?:\[\])?|"[^"]*")/g)) {
+      if (/^(?:string|usize|isize|[iu](?:8|16|32|64|128)|f32|f64|number|bigint|boolean|BinaryOp|(?:Instance|Body|Local|Class)Id|[KT]|"[^"]*")$/.test(m[1]!)) continue;
+      const at = `${f}: ${m[0]}`;
+      if (!OBJECT_KEYED.includes(at)) offenders.push(at);
+    }
+  }
+  expect(offenders).toEqual([]);
+});
+
+
+// The passes that lower the tree, before checking and while it runs.
+const LOWERING = ["check", "values", "narrow", "classes", "generics", "overloads", "defaults", "modules", "js", "locals", "macros", "quote", "tests", "parseargs"];
+// Fields that hold a node's children, as the generated rebuild writes them; a `name` holds a node
+// only when computed, and a rename writes a string.
+const CHILDREN = [...new Set([...readFileSync(join(src, "rebuild.ts"), "utf8").matchAll(/^\s+m\.(\w+)/gm)].map((m) => m[1]!))].filter((f) => f !== "name").join("|");
+// What may still change in place, each for its reason:
+const IN_PLACE = [
+  // the spans of nodes just made, before any tree holds them;
+  "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
+  // a Body's overloads, given as ids, an enum's record and a Body's template mark, which are no nodes;
+  "check.ts: for (const f of this.funcs) if (f.overloads) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true",
+  // the rebuild itself, putting replacements in place once a body is checked;
+  "check.ts: for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam",
+  // lists of statements, which have no id to key a replacement by: a statement that becomes
+  // several, nested functions hoisted, a local declaration hoisted out, and an export a library
+  // lists, each where the list is read next.
+  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(this.cx.ids), kind: \"block\"", "check.ts: place.list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
+  "modules.ts: l.body[at] =", "macros.ts: statements.splice(",
+];
+
+// Lowering records a replacement in a rewrite table, which a rebuild puts in place, rather than
+// changing a node's kind or children where it is, as Fish can't through a shared reference.
+test("no lowering pass changes a node's kind or children in place", () => {
+  const writes = new RegExp(`\\b(?:e|s|d|p|n|node|x|c|call|callee|loop|impl|decl|main|f|arrow|same|at|made|given|local|m|t)(?:\\.\\w+)*\\.(?:${CHILDREN})(?:\\[[^\\]]*\\])?!? (?:=|\\?\\?=) |\\b(?:e|s|d|p|n|node|x|c|f|decl)\\.(?:${CHILDREN})\\.(?:push|splice|unshift)\\(`);
+  const lists = /\b(?:list|stmts|statements|place\.list|l\.body)(?:\.splice\(|\[[^\]]+\] = )/;
+  const offenders: string[] = [];
+  for (const f of LOWERING.map((name) => `${name}.ts`)) {
+    for (const line of readFileSync(join(src, f), "utf8").split("\n")) {
+      const text = `${f}: ${line.trim()}`;
+      const found = /Object\.assign\((?!\{|<)/.test(line) || /\bdelete \(/.test(line) || writes.test(line) || lists.test(line);
+      if (found && !IN_PLACE.some((allowed) => text.startsWith(allowed))) offenders.push(text);
+    }
   }
   expect(offenders).toEqual([]);
 });

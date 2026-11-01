@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CompileError, CompileErrors, errorsOf, formatError, shown } from "../src/diag.ts";
+import { CompileError, CompileErrors, formatError, shown } from "../src/diag.ts";
+import { errorsOf } from "../src/lsp.ts";
 
 const src = "let a = 1\nuse(a)\n";
 
@@ -22,6 +23,12 @@ test("a note renders after the error at its own location", () => {
   const e = new CompileError("E0201", "bad", 14, 15, { message: "moved here", start: 4, end: 5 });
   expect(formatError(e, "f.fsh", src)).toBe(
     ["f.fsh:2:5: error[E0201]: bad", " 2 | use(a)", "   |     ^", "f.fsh:1:5: note: moved here", " 1 | let a = 1", "   |     ^"].join("\n"),
+  );
+});
+
+test("an error at the start of a file that opens with a newline points at its first line", () => {
+  expect(formatError(new CompileError("E0405", "no main() function; execution starts there", 0, 0), "f.fsh", "\nfunction f() {}\n")).toBe(
+    ["f.fsh:1:1: error[E0405]: no main() function; execution starts there", " 1 | ", "   | ^"].join("\n"),
   );
 });
 

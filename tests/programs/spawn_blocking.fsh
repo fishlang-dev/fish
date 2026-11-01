@@ -175,3 +175,11 @@ function twice(x: i64): i64 {
 async function main() {
   const v = await spawnBlocking(twice);
 }
+
+// case: spawn_blocking_array_element
+// expect: 2
+async function main() {
+  const fs: (() => i64)[] = [() => 1, () => 2];
+  const v = await spawnBlocking(fs[1]!);
+  console.log(v);
+}

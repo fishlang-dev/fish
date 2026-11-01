@@ -17,19 +17,19 @@ export type Action = "reject" | "unsupported" | "guided" | "auto";
 // `feature` names the planned Fish feature that lifts a rule Fish doesn't support yet.
 type Rule = { id: string; action: Action; title: string; feature?: string };
 // `module` names the Node built-in an import of one brings in.
-type Example = { file: string; line: number; col: number; note?: string; module?: string };
-export type RuleCount = Rule & { count: number; examples: Example[] };
+type Example = { file: string; line: usize; col: usize; note?: string; module?: string };
+export type RuleCount = Rule & { count: usize; examples: Example[] };
 export type Report = {
-  files: number; lines: number; unread: { files: number; lines: number }; score: number;
+  files: usize; lines: usize; unread: { files: usize; lines: usize }; score: f64;
   // None when less than half the lines could be read, since the score wouldn't speak for them.
   grade: string | null;
-  counts: Record<Action, number>; rules: RuleCount[]; waiting: RuleCount[];
+  counts: Record<Action, usize>; rules: RuleCount[]; waiting: RuleCount[];
   // What the project's package.json depends on, when it has one.
   dependencies?: Dependencies;
   // The Node built-ins the project imports, the most used first, when it imports any.
   builtins?: Builtin[];
 };
-export type Builtin = { module: string; files: number; equivalent?: { name: string; planned: boolean } };
+export type Builtin = { module: string; files: usize; equivalent?: { name: string; planned: boolean } };
 
 const RULES: Rule[] = [
   { id: "R1", action: "reject", title: "eval and new Function: a native binary has no compiler to run code made at run time" },
@@ -91,11 +91,11 @@ const RULES: Rule[] = [
 ];
 
 // A rejected construct has no Fish equivalent and needs a redesign; a guided one, a rewrite.
-const WEIGHTS: Record<Action, number> = { reject: 10, guided: 3, auto: 0, unsupported: 0 };
+const WEIGHTS: Record<Action, usize> = { reject: 10, guided: 3, auto: 0, unsupported: 0 };
 // Score per 1000 lines at the top of each grade, set so published TypeScript packages spread
 // across them: a careful codebase scores near 5, a library leaning on `any` near 40, a DOM
 // implementation patching prototypes near 90.
-const GRADES: [string, number][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
+const GRADES: [string, f64][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
 
 // Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
@@ -126,7 +126,7 @@ export function sources(dir: string): string[] {
 
 // One file as surveyed: its non-blank lines, whether it could be read, and what it shows, in
 // source order.
-export type FileScan = { file: string; lines: number; read: boolean; findings: [string, Example][] };
+export type FileScan = { file: string; lines: usize; read: boolean; findings: [string, Example][] };
 
 export function scanFiles(dir: string): FileScan[] {
   return sources(dir).sort().map((path) => scanFile(path, relative(dir, path)));
@@ -202,7 +202,7 @@ const FEATURES = new Map(RULES.flatMap((r) => (r.feature ? [[r.id, r.feature] as
 
 export function survey(dir: string): Report {
   const scans = scanFiles(dir);
-  const found = new Map<string, { count: number; examples: Example[] }>();
+  const found = new Map<string, { count: usize; examples: Example[] }>();
   let lines = 0;
   const unread = { files: 0, lines: 0 };
   for (const f of scans) {
@@ -231,19 +231,19 @@ function builtinsOf(scans: FileScan[]): Builtin[] {
   return [...files].map(([module, set]) => {
     const equivalent = BUILTINS.get(module);
     return { module, files: set.size, ...(equivalent && { equivalent }) };
-  }).sort((a, b) => b.files - a.files || (a.module < b.module ? -1 : 1));
+  }).sort((a, b) => (b.files as i64) - (a.files as i64) || (a.module < b.module ? -1 : 1));
 }
 
 // A report from its rules' counts: the counts by action, the score and the grade, so a saved
 // report read back is scored by the same rules as a fresh one.
-function report(files: number, lines: number, unread: { files: number; lines: number }, all: RuleCount[]): Report {
-  const counts: Record<Action, number> = { reject: 0, unsupported: 0, guided: 0, auto: 0 };
+function report(files: usize, lines: usize, unread: { files: usize; lines: usize }, all: RuleCount[]): Report {
+  const counts: Record<Action, usize> = { reject: 0, unsupported: 0, guided: 0, auto: 0 };
   for (const r of all) counts[r.action] += r.count;
   const weighted = all.reduce((sum, r) => sum + WEIGHTS[r.action] * r.count, 0);
   // Per 1000 lines, and never per fewer, so one finding in a small script doesn't swing the grade.
   const score = Math.round((weighted * 1000) / Math.max(lines, 1000) * 10) / 10;
   const graded = lines > 0 && lines >= unread.lines;
-  const byCount = (a: RuleCount, b: RuleCount) => WEIGHTS[b.action] - WEIGHTS[a.action] || b.count - a.count;
+  const byCount = (a: RuleCount, b: RuleCount) => (WEIGHTS[b.action] as i64) - (WEIGHTS[a.action] as i64) || (b.count as i64) - (a.count as i64);
   return {
     files, lines, unread, score, grade: graded ? grade(score) : null, counts,
     rules: all.filter((r) => r.action !== "unsupported").sort(byCount),
@@ -252,29 +252,29 @@ function report(files: number, lines: number, unread: { files: number; lines: nu
 }
 
 // Records a finding, keeping three examples.
-function add(found: Map<string, { count: number; examples: Example[] }>, id: string, example: Example) {
+function add(found: Map<string, { count: usize; examples: Example[] }>, id: string, example: Example) {
   const entry = found.get(id) ?? { count: 0, examples: [] };
   found.set(id, entry);
   entry.count++;
   if (entry.examples.length < 3) entry.examples.push(example);
 }
 
-function position(src: string, offset: number) {
+function position(src: string, offset: usize) {
   const { line, col } = locate(src, offset);
   return { line, col };
 }
 
-export function grade(score: number): string {
+export function grade(score: f64): string {
   return GRADES.find(([, top]) => score <= top)?.[0] ?? "F";
 }
 
 // Where each local class or enum using its function's variables starts. Hoisting renames the
 // tree it reads, so it reads a copy, and a file it can't hoist adds none.
-function captures(program: Stmt[]): number[] {
-  const found: number[] = [];
+function captures(program: Stmt[]): usize[] {
+  const found: usize[] = [];
   try {
     const ids = { last: 0 };
-    hoistLocals({ names: { local: new Set(), madeUp: new Map() }, ids }, renumber(structuredClone(program), () => nextId(ids)), (local) => found.push(local.start));
+    hoistLocals({ names: { local: new Set(), madeUp: new Map() }, ids }, renumber("stmt", structuredClone(program), () => nextId(ids)), (local) => found.push(local.start));
   } catch {
     return [];
   }
@@ -284,7 +284,7 @@ function captures(program: Stmt[]): number[] {
 // Walks a program without recursion, so a deeply nested file can't overflow the stack. `depth`
 // counts the functions a node sits in, and `ambient` marks declarations under `declare`. `path` is
 // the file's, whose packages its imports name.
-function scan(path: string, program: unknown[], note: (id: string, offset: number, module?: string) => void) {
+function scan(path: string, program: unknown[], note: (id: string, offset: usize, module?: string) => void) {
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
     if (!isNode(top)) continue;
@@ -299,7 +299,7 @@ function scan(path: string, program: unknown[], note: (id: string, offset: numbe
     const whole = (s.namespace ?? s.default) as string | undefined;
     if (name && whole) wholes.set(whole, { module: builtinModule(s.module), has: stdExports(name), names: NAME_MODULES[name] ?? {} });
   }
-  const stack: [unknown, number, boolean][] = program.map((s) => [s, 0, false]);
+  const stack: [unknown, usize, boolean][] = program.map((s) => [s, 0, false]);
   const scanning: Scanning = { path, envKeys: new WeakSet(), statementDestructures: new WeakSet() };
   const heads = new WeakSet<object>();
   // Spreads written as call arguments, which fill only a rest parameter.
@@ -325,7 +325,7 @@ function scan(path: string, program: unknown[], note: (id: string, offset: numbe
       if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.add(a);
       for (const [id, at, module] of classify(scanning, o, depth, ambient, heads.has(o), inCalls.has(o))) note(id, at, module);
       const whole = o.kind === "member" && isNode(o.object) && o.object.kind === "ident" ? wholes.get(o.object.name as string) : undefined;
-      if (whole && !whole.has.has(o.name as string)) note("nodeBuiltins", o.start as number, Object.hasOwn(whole.names, o.name as string) ? whole.names[o.name as string] : whole.module);
+      if (whole && !whole.has.has(o.name as string)) note("nodeBuiltins", o.start as usize, Object.hasOwn(whole.names, o.name as string) ? whole.names[o.name as string] : whole.module);
       if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note, o.kind === "arrow");
       if (Array.isArray(o.params) && "body" in o) inner++;
       if (o.kind === "declare") under = true;
@@ -370,12 +370,12 @@ function takesDefault(p: Record<string, unknown>, after: Record<string, unknown>
   return !property && after.every((q) => isNode(q.default) || q.optional || q.rest) && (isNode(p.type) || literal) && (!nullable(p.type) || empty);
 }
 
-function params(list: Record<string, unknown>[], note: (id: string, offset: number) => void, arrow: boolean) {
+function params(list: Record<string, unknown>[], note: (id: string, offset: usize) => void, arrow: boolean) {
   for (const [i, p] of list.entries()) {
     if (isNode(p.default) && !takesDefault(p, list.slice(i + 1))) note("defaults", p.default.start);
-    if (p.rest && arrow) note("spread", p.start as number);
+    if (p.rest && arrow) note("spread", p.start as usize);
     if (isNode(p.pattern) && p.pattern.kind !== "ident" && (isNode(p.default) || !fishPattern(p.pattern))) note("destructuring", p.pattern.start);
-    if (p.optional) note("A2", p.start as number);
+    if (p.optional) note("A2", p.start as usize);
   }
 }
 
@@ -389,8 +389,8 @@ type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures:
 // `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
 const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
 
-function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, depth: number, ambient: boolean, head: boolean, argument: boolean): [string, number, string?][] {
-  const found: [string, number, string?][] = [];
+function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean, argument: boolean): [string, usize, string?][] {
+  const found: [string, usize, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
   switch (n.kind) {
@@ -609,7 +609,7 @@ export function formatReport(r: Report): string {
     .map((x) => `  ${String(x.count).padStart(5)}  ${x.title}\n         e.g. ${example(x.examples[0]!)}`);
   const rewrites = top(r.rules.filter((x) => x.action !== "auto"));
   const waiting = top(r.waiting);
-  const plural = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+  const plural = (n: usize, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
   const unread = r.unread.files > 0 ? [`  unread:   ${plural(r.unread.files, "file")} (${plural(r.unread.lines, "line")}), not in the score`] : [];
   const share = r.lines + r.unread.lines === 0 ? 0 : Math.round((r.lines * 100) / (r.lines + r.unread.lines));
   const verdict = r.grade ? `grade ${r.grade} (score ${r.score} per 1000 lines${share < 100 ? `, from ${share}% of the lines` : ""})`
@@ -633,7 +633,7 @@ export function formatReport(r: Report): string {
 
 // A summary of one survey, as a comparison shows it then and now.
 type Summary = Pick<Report, "files" | "lines" | "unread" | "score" | "grade" | "counts">;
-type Moved = { id: string; action: Action; title: string; then: number; now: number; change: number };
+type Moved = { id: string; action: Action; title: string; then: usize; now: usize; change: i64 };
 export type Comparison = { then: Summary; now: Summary; rules: Moved[] };
 
 // A saved `fishc survey --json` report, checked enough to compare with, and scored again by
@@ -661,7 +661,7 @@ export function readReport(text: string): Report {
   }
   const unread = (o.unread ?? { files: 0, lines: 0 }) as { files: unknown; lines: unknown };
   if (!count(o.files) || !count(o.lines) || typeof unread !== "object" || unread === null || !count(unread.files) || !count(unread.lines)) throw bad;
-  return report(o.files as number, o.lines as number, unread as { files: number; lines: number }, all as RuleCount[]);
+  return report(o.files as usize, o.lines as usize, unread as { files: usize; lines: usize }, all as RuleCount[]);
 }
 
 // What changed between two surveys: the summaries, and every rule whose count moved, the
@@ -677,7 +677,7 @@ export function compare(then: Report, now: Report): Comparison {
   };
   tally(then, "then");
   tally(now, "now");
-  const rules = [...moved.values()].map((m) => ({ ...m, change: m.now - m.then })).filter((m) => m.change !== 0)
+  const rules = [...moved.values()].map((m) => ({ ...m, change: (m.now as i64) - (m.then as i64) })).filter((m) => m.change !== 0)
     .sort((a, b) => Math.abs(b.change) - Math.abs(a.change) || (a.id < b.id ? -1 : 1));
   const summary = ({ files, lines, unread, score, grade, counts }: Report): Summary => ({ files, lines, unread, score, grade, counts });
   return { then: summary(then), now: summary(now), rules };
@@ -685,11 +685,11 @@ export function compare(then: Report, now: Report): Comparison {
 
 export function formatComparison(c: Comparison): string {
   const { then, now } = c;
-  const delta = (a: number, b: number) => {
+  const delta = (a: f64, b: f64) => {
     const d = Math.round((b - a) * 10) / 10;
     return d === 0 ? "" : ` (${d > 0 ? "+" : ""}${d})`;
   };
-  const pair = (label: string, a: number, b: number) => `  ${label.padEnd(10)}${a} -> ${b}${delta(a, b)}`;
+  const pair = (label: string, a: usize, b: usize) => `  ${label.padEnd(10)}${a} -> ${b}${delta(a as f64, b as f64)}`;
   const line = (m: Moved) => `  ${((m.change > 0 ? "+" : "") + m.change).padStart(6)}  ${m.title} (${m.then} -> ${m.now})`;
   const porter = c.rules.filter((m) => m.action !== "unsupported");
   const waiting = c.rules.filter((m) => m.action === "unsupported");

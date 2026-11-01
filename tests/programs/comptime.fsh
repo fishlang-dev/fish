@@ -858,3 +858,11 @@ const v = comptime one();
 function main() {
   console.log(v);
 }
+
+// case: comptime_argument_tuple_element
+// expect: 2
+const K: [i64, string] = [1, "a"];
+function up(comptime n: i64): i64 { return n + 1; }
+function main() {
+  console.log(up(K[0]));
+}

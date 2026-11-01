@@ -3,13 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build, compile, runtimeUnits } from "../src/main.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
 // `fishc build --leaks`: what a program never freed, reported at exit by where it was allocated.
 setDefaultTimeout(60_000);
 
 const MAIN = join(import.meta.dir, "..", "src", "main.ts");
-const session = newSession();
+const session = cachedSession();
 const root = mkdtempSync(join(tmpdir(), "fish-leaks-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 

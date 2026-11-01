@@ -199,3 +199,111 @@ function pick(n: i64): i64 throws A {
 }
 function main(): void {}
 // error: the JSDoc says '@throws {A | B}' but the function says 'throws A'
+// case: jsdoc_throws_alias
+// A tag on a function type's alias is that type's throws clause, wherever the alias is used.
+class ParseError {
+  constructor(public message: string) {}
+}
+/** @throws {ParseError} */
+type Item = (n: i64) => i64;
+/** @throws {ParseError} */
+function item(n: i64): i64 {
+  if (n > 2) throw new ParseError("too far");
+  return n;
+}
+/** @throws {ParseError} */
+function each(f: Item): i64 {
+  return f(1) + f(3);
+}
+class Holder {
+  f: Item
+  constructor(f: Item) {
+    this.f = f
+  }
+}
+/** @throws {ParseError} */
+function call(h: Ref<Holder>, n: i64): i64 {
+  return h.f(n);
+}
+/** @throws {ParseError} */
+function maybe(f: Item | null, n: i64): i64 {
+  if (f === null) return 0;
+  return f(n);
+}
+function main(): void {
+  try { console.log(each((n) => n * 10)); } catch (e) { console.log(e.message); }
+  try { console.log(each((n) => item(n))); } catch (e) { console.log(e.message); }
+  const g: Item = (n) => item(n);
+  const h = new Holder(g);
+  try { console.log(call(h, 1)); console.log(call(h, 5)); } catch (e) { console.log(e.message); }
+  try { console.log(maybe(null, 9)); console.log(maybe(h.f, 9)); } catch (e) { console.log(e.message); }
+}
+// expect: 40
+// expect: too far
+// expect: 1
+// expect: too far
+// expect: 0
+// expect: too far
+// case: jsdoc_throws_generic_alias
+// A generic alias, exported or local, carries its tag into every instance.
+class ParseError {
+  constructor(public message: string) {}
+}
+class Cursor {
+  pos: i64 = 0
+}
+/** @throws {ParseError} */
+export type Parse<T> = (c: Mut<Cursor>) => T;
+class Parser {
+  c: Cursor = new Cursor()
+  /** @throws {ParseError} */
+  list<T>(this: Mut<this>, item: Parse<T>): T[] {
+    let out: T[] = [];
+    for (let i = 0; i < 3; i++) out.push(item(this.c));
+    return out;
+  }
+}
+function main(): void {
+  /** @throws {ParseError} */
+  type Step = (n: i64) => string;
+  /** @throws {ParseError} */
+  const run = (s: Step): string => s(1);
+  let p = new Parser();
+  try {
+    console.log(p.list((c) => { c.pos++; return c.pos; }).length);
+    p.list((c) => { c.pos++; if (c.pos > 4) throw new ParseError("at " + c.pos); return "x"; });
+  } catch (e) {
+    console.log(e.message);
+  }
+  try { run((n): string => { throw new ParseError("step " + n); }); } catch (e) { console.log(e.message); }
+}
+// expect: 3
+// expect: at 5
+// expect: step 1
+// case: jsdoc_throws_untagged_alias
+// Without the tag the alias throws nothing, so a throwing closure is refused.
+class ParseError {
+  constructor(public message: string) {}
+}
+type Item = (n: i64) => i64;
+/** @throws {ParseError} */
+function item(n: i64): i64 {
+  if (n > 2) throw new ParseError("too far");
+  return n;
+}
+function each(f: Item): i64 {
+  return f(1) + f(3);
+}
+function main(): void {
+  console.log(each((n) => item(n)));
+}
+// error: 'item' can throw 'ParseError', but the closure is given as '(n: i64) => i64', which throws nothing
+// case: jsdoc_throws_alias_not_function
+// A tag on an alias of anything but a function type declares nothing.
+/** @throws {string} */
+type N = i64;
+function main(): void {
+  const n: N = 3;
+  console.log(n);
+}
+// expect: 3

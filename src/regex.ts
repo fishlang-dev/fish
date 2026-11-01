@@ -4,23 +4,23 @@
 // points.
 
 // Inclusive ranges of code units or code points, sorted and merged.
-export type Ranges = [number, number][];
+export type Ranges = [u32, u32][];
 
 export type RegexNode =
   | { kind: "empty" }
-  | { kind: "char"; c: number; fold: boolean }
+  | { kind: "char"; c: u32; fold: boolean }
   | { kind: "dot"; dotAll: boolean }
   // A class: what it matches as ranges, or, under `v`, also strings; `fold` when it ignores case.
   | { kind: "set"; ranges: Ranges; negated: boolean; strings: string[]; fold: boolean }
   | { kind: "seq"; items: RegexNode[] }
   | { kind: "alt"; options: RegexNode[] }
-  | { kind: "group"; index: number | undefined; body: RegexNode }
+  | { kind: "group"; index: usize | undefined; body: RegexNode }
   | { kind: "look"; behind: boolean; negated: boolean; body: RegexNode }
   | { kind: "assert"; which: "start" | "end" | "word" | "notWord"; multiline: boolean; fold: boolean }
   // A backreference to every group of a name, or to one by number.
-  | { kind: "backref"; groups: number[]; fold: boolean }
+  | { kind: "backref"; groups: u32[]; fold: boolean }
   // `captures` are the groups inside, which each pass resets.
-  | { kind: "repeat"; min: number; max: number; greedy: boolean; body: RegexNode; captures: [number, number] };
+  | { kind: "repeat"; min: usize; max: f64; greedy: boolean; body: RegexNode; captures: [usize, usize] };
 
 export type Capture = { name: string | undefined; optional: boolean };
 
@@ -55,7 +55,7 @@ export function normalize(ranges: Ranges): Ranges {
   return out;
 }
 
-export function complement(ranges: Ranges, top: number): Ranges {
+export function complement(ranges: Ranges, top: u32): Ranges {
   const out: Ranges = [];
   let next = 0;
   for (const [lo, hi] of normalize(ranges)) {
@@ -78,7 +78,7 @@ const STRING_PROPERTIES = new Set(["Basic_Emoji", "Emoji_Keycap_Sequence", "RGI_
 // What property escapes match and which characters fold together, worked out from the engine
 // running the compiler, each by a scan of every character, so the caller keeps them between
 // patterns. `folds` is keyed by 'u' for Unicode's case folding and '' for the other.
-export type RegexTables = { properties: Map<string, Ranges>; folds: Map<string, number[][]> };
+export type RegexTables = { properties: Map<string, Ranges>; folds: Map<string, u32[][]> };
 
 // What a property escape matches, worked out from the engine running the compiler, which knows
 // Unicode's tables.
@@ -116,11 +116,11 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
   if (sets && flags.includes("u")) fail(`invalid flags supplied to RegExp constructor '${flags}'`);
   const unicode = sets || flags.includes("u");
   const top = unicode ? 0x10ffff : 0xffff;
-  const text = unicode ? [...source].map((c) => c.codePointAt(0)!) : [...Array(source.length).keys()].map((i) => source.charCodeAt(i));
+  const text = unicode ? [...source].map((c) => c.codePointAt(0)!) : [...Array(source.length).keys()].map((i) => source.charCodeAt(i) as u32);
   let pos = 0;
   const captures: Capture[] = [];
-  const names = new Map<string, number[]>();
-  const backrefs: { name?: string; index?: number }[] = [];
+  const names = new Map<string, u32[]>();
+  const backrefs: { name?: string; index?: usize }[] = [];
   let backtracks = false;
   // Named groups make `\k` a backreference even without `u`, as Annex B says.
   const named = groupOpenings().some((i) => text[i + 1] === at("?") && text[i + 2] === at("<") && text[i + 3] !== at("=") && text[i + 3] !== at("!"));
@@ -136,8 +136,8 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     pos++;
     return true;
   };
-  const isDigit = (c: number | undefined) => c !== undefined && c >= 0x30 && c <= 0x39;
-  const hexValue = (c: number | undefined) => (c === undefined ? -1 : isDigit(c) ? c - 0x30 : (c | 0x20) >= 0x61 && (c | 0x20) <= 0x66 ? (c | 0x20) - 0x61 + 10 : -1);
+  const isDigit = (c: u32 | undefined) => c !== undefined && c >= 0x30 && c <= 0x39;
+  const hexValue = (c: u32 | undefined) => (c === undefined ? -1 : isDigit(c) ? c - 0x30 : (c | 0x20) >= 0x61 && (c | 0x20) <= 0x66 ? (c | 0x20) - 0x61 + 10 : -1);
 
   function disjunction(): RegexNode {
     const options = [alternative()];
@@ -166,9 +166,9 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
 
   // A quantifier here, read and consumed, or none. Without `u`, a `{` that doesn't begin one is
   // an ordinary character.
-  function quantifierHere(): [number, number, boolean] | undefined {
+  function quantifierHere(): [usize, f64, boolean] | undefined {
     const c = peek();
-    let min: number, max: number;
+    let min: usize, max: f64;
     if (c === at("*")) [min, max] = [0, Infinity];
     else if (c === at("+")) [min, max] = [1, Infinity];
     else if (c === at("?")) [min, max] = [0, 1];
@@ -176,14 +176,14 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
       const braced = bracedQuantifier();
       if (!braced) return undefined;
       [min, max] = braced;
-      if (min > max) fail("numbers out of order in {} quantifier");
+      if ((min as f64) > max) fail("numbers out of order in {} quantifier");
       return [min, max, !eat("?")];
     } else return undefined;
     pos++;
     return [min, max, !eat("?")];
   }
 
-  function bracedQuantifier(): [number, number] | undefined {
+  function bracedQuantifier(): [usize, f64] | undefined {
     const start = pos;
     pos++;
     const number = () => {
@@ -260,14 +260,14 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     if (name !== undefined) {
       if (alternativeNames.some((s) => s.has(name))) fail("duplicate group specifier name");
       alternativeNames.at(-1)!.add(name);
-      names.set(name, [...(names.get(name) ?? []), captures.length + 1]);
+      names.set(name, [...(names.get(name) ?? []), (captures.length + 1) as u32]);
     }
     captures.push({ name, optional: false });
     return scoped(captures.length);
   }
 
   // A group's body, its own scope for the names its alternatives use.
-  function scoped(index: number | undefined): [RegexNode, boolean] {
+  function scoped(index: usize | undefined): [RegexNode, boolean] {
     const outer = alternativeNames;
     alternativeNames = [...outer, new Set()];
     const body = disjunction();
@@ -328,7 +328,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
 
   // After `\u`: four hex digits, a surrogate pair of them under `u`, or `{...}` under `u` (or in
   // a group name, always); undefined when what follows isn't one.
-  function unicodeEscape(braces: boolean): number | undefined {
+  function unicodeEscape(braces: boolean): u32 | undefined {
     const start = pos;
     if ((unicode || braces) && eat("{")) {
       let v = 0, digits = 0;
@@ -406,8 +406,8 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
 
   // Where each `(` outside a class and not escaped is, which a backreference may count before
   // its group is reached.
-  function groupOpenings(): number[] {
-    const out: number[] = [];
+  function groupOpenings(): usize[] {
+    const out: usize[] = [];
     let inClass = false;
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
@@ -419,11 +419,11 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return out;
   }
 
-  function countGroups(): number {
+  function countGroups(): usize {
     return groupOpenings().filter((i) => text[i + 1] !== at("?") || (text[i + 2] === at("<") && text[i + 3] !== at("=") && text[i + 3] !== at("!"))).length;
   }
 
-  function octal(): number {
+  function octal(): u32 {
     let v = text[pos++]! - 0x30;
     if (peek() !== undefined && peek()! >= 0x30 && peek()! <= 0x37) {
       v = v * 8 + (text[pos++]! - 0x30);
@@ -457,7 +457,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
   }
 
   // A character escape's value; `inClass` for the forms only a class allows.
-  function characterEscape(inClass: boolean): number {
+  function characterEscape(inClass: boolean): u32 {
     const c = text[pos++]!;
     switch (c) {
       case at("f"): return 0x0c;
@@ -545,7 +545,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return s.negated ? complement(s.ranges, top) : s.ranges;
   }
 
-  function classAtom(): number | Extract<RegexNode, { kind: "set" }> {
+  function classAtom(): u32 | Extract<RegexNode, { kind: "set" }> {
     const c = text[pos]!;
     if (c !== at("\\")) {
       pos++;
@@ -577,7 +577,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
           pos += 2;
           const strings: string[] = [];
           const ranges: Ranges = [];
-          let current: number[] = [];
+          let current: u32[] = [];
           const finish = () => {
             if (current.length === 1) ranges.push([current[0]!, current[0]!]);
             else strings.push(String.fromCodePoint(...current));
@@ -615,7 +615,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
       pos++;
       return { ranges: [[c, c]], strings: [] };
     };
-    const single = (): { ranges: Ranges; strings: string[]; character?: number } => {
+    const single = (): { ranges: Ranges; strings: string[]; character?: u32 } => {
       const start = pos;
       const first = operand();
       // A lone character may start a range.
@@ -673,7 +673,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
 }
 
 // A named backreference points at every group of its name.
-function resolveNames(n: RegexNode, names: Map<string, number[]>) {
+function resolveNames(n: RegexNode, names: Map<string, u32[]>) {
   const named = n as RegexNode & { name?: string };
   if (n.kind === "backref" && named.name !== undefined) {
     n.groups = names.get(named.name)!;
@@ -713,15 +713,15 @@ export const BACKWARD = 32;
 export const HEADER = 4;
 export const PROGRAM_LIMIT = 1 << 20;
 
-export function compile(p: Pattern, tables: RegexTables): number[] {
-  const code: number[] = [];
-  const emit = (...words: number[]) => {
+export function compile(p: Pattern, tables: RegexTables): u32[] {
+  const code: u32[] = [];
+  const emit = (...words: u32[]) => {
     code.push(...words);
     if (code.length > PROGRAM_LIMIT) fail("regular expression too large");
     return code.length - words.length;
   };
   let registers = 0;
-  const registerOf = new Map<RegexNode, number>();
+  const registerOf = new Map<RegexNode, u32>();
   let folds = false;
   const top = p.unicode ? 0x10ffff : 0xffff;
 
@@ -731,7 +731,7 @@ export function compile(p: Pattern, tables: RegexTables): number[] {
       case "empty":
         return;
       case "char": {
-        const ranges = n.fold ? foldRanges(tables, [[n.c, n.c]], p.unicode) : [[n.c, n.c] as [number, number]];
+        const ranges = n.fold ? foldRanges(tables, [[n.c, n.c]], p.unicode) : [[n.c, n.c] as [u32, u32]];
         if (ranges.length === 1 && ranges[0]![0] === ranges[0]![1]) emit(OP.char | dir, n.c);
         else set(ranges, false, dir);
         return;
@@ -755,37 +755,37 @@ export function compile(p: Pattern, tables: RegexTables): number[] {
         for (const item of back ? n.items.toReversed() : n.items) node(item, back);
         return;
       case "alt": {
-        const jumps: number[] = [];
+        const jumps: usize[] = [];
         n.options.forEach((option, i) => {
           if (i < n.options.length - 1) {
             const split = emit(OP.split, 0, 0);
-            code[split + 1] = code.length;
+            code[split + 1] = code.length as u32;
             node(option, back);
             jumps.push(emit(OP.jump, 0));
-            code[split + 2] = code.length;
+            code[split + 2] = code.length as u32;
           } else node(option, back);
         });
-        for (const j of jumps) code[j + 1] = code.length;
+        for (const j of jumps) code[j + 1] = code.length as u32;
         return;
       }
       case "group":
         if (n.index === undefined) return node(n.body, back);
-        emit(OP.save, n.index * 2 + (back ? 1 : 0));
+        emit(OP.save, (n.index * 2 + (back ? 1 : 0)) as u32);
         node(n.body, back);
-        emit(OP.save, n.index * 2 + (back ? 0 : 1));
+        emit(OP.save, (n.index * 2 + (back ? 0 : 1)) as u32);
         return;
       case "assert":
-        emit(OP.assert, ["start", "end", "word", "notWord"].indexOf(n.which), n.multiline ? 1 : 0, n.fold && p.unicode ? 1 : 0);
+        emit(OP.assert, ["start", "end", "word", "notWord"].indexOf(n.which) as u32, n.multiline ? 1 : 0, n.fold && p.unicode ? 1 : 0);
         return;
       case "backref":
         folds ||= n.fold;
-        emit(OP.backref | dir, n.fold ? 1 : 0, n.groups.length, ...n.groups);
+        emit(OP.backref | dir, n.fold ? 1 : 0, n.groups.length as u32, ...n.groups);
         return;
       case "look": {
         const look = emit(OP.look, n.negated ? 1 : 0, 0);
         node(n.body, n.behind);
         emit(OP.lookEnd);
-        code[look + 2] = code.length;
+        code[look + 2] = code.length as u32;
         return;
       }
       case "repeat":
@@ -793,8 +793,8 @@ export function compile(p: Pattern, tables: RegexTables): number[] {
     }
   }
 
-  function set(ranges: Ranges, negated: boolean, dir: number) {
-    emit(OP.set | dir, ranges.length, ...ranges.flat());
+  function set(ranges: Ranges, negated: boolean, dir: u32) {
+    emit(OP.set | dir, ranges.length as u32, ...ranges.flat());
   }
 
   // `{min,max}`: the body min times, then, for an unbounded repeat, a loop; each pass resets the
@@ -802,12 +802,12 @@ export function compile(p: Pattern, tables: RegexTables): number[] {
   function repeat(n: Extract<RegexNode, { kind: "repeat" }>, back: boolean) {
     const [from, to] = n.captures;
     const pass = () => {
-      if (to > from) emit(OP.reset, from + 1, to + 1);
+      if (to > from) emit(OP.reset, (from + 1) as u32, (to + 1) as u32);
       node(n.body, back);
     };
     if (n.min > 0 && n.max === 1 && n.min === 1) return pass();
     for (let i = 0; i < n.min; i++) pass();
-    if (n.max === n.min) return;
+    if (n.max === (n.min as f64)) return;
     // Each repeat has its own register, used again by every copy a bounded repeat makes of it.
     let register = registerOf.get(n);
     if (register === undefined) registerOf.set(n, register = registers++);
@@ -818,16 +818,16 @@ export function compile(p: Pattern, tables: RegexTables): number[] {
       emit(OP.mark, register);
       pass();
       emit(OP.check, register);
-      emit(OP.jump, loop);
+      emit(OP.jump, loop as u32);
       const out = code.length;
-      code[split + 1] = n.greedy ? into : out;
-      code[split + 2] = n.greedy ? out : into;
+      code[split + 1] = (n.greedy ? into : out) as u32;
+      code[split + 2] = (n.greedy ? out : into) as u32;
       return;
     }
     // A bounded repeat's optional passes nest, so a later one runs only after an earlier one;
     // each that is skipped skips the rest, to the end.
-    const splits: [number, number][] = [];
-    for (let left = n.max - n.min; left > 0; left--) {
+    const splits: [usize, usize][] = [];
+    for (let left = n.max - (n.min as f64); left > 0; left--) {
       const split = emit(OP.split, 0, 0);
       splits.push([split, code.length]);
       emit(OP.mark, register!);
@@ -836,39 +836,39 @@ export function compile(p: Pattern, tables: RegexTables): number[] {
     }
     const out = code.length;
     for (const [split, into] of splits) {
-      code[split + 1] = n.greedy ? into : out;
-      code[split + 2] = n.greedy ? out : into;
+      code[split + 1] = (n.greedy ? into : out) as u32;
+      code[split + 2] = (n.greedy ? out : into) as u32;
     }
   }
 
-  emit(p.captures.length + 1, 0, flagsOf(p), 0);
+  emit((p.captures.length + 1) as u32, 0, flagsOf(p), 0);
   emit(OP.save, 0);
   node(p.tree, false);
   emit(OP.save, 1);
   emit(OP.match);
   code[1] = registers;
-  code[3] = code.length;
+  code[3] = code.length as u32;
   // A backreference that ignores case compares characters by what they fold to, from a table
   // after the instructions.
   if (folds) {
     const table = foldTable(tables, p.unicode);
-    code.push(table.length / 2, ...table);
+    code.push((table.length / 2) as u32, ...table);
     code[2] = code[2]! | 8;
   }
   // The groups' names, as UTF-8 bytes, for a replacement's $<name>.
   const named = p.captures.flatMap((c, i) => (c.name === undefined ? [] : [[i + 1, c.name] as const]));
   if (named.length > 0) {
-    code.push(named.length);
+    code.push(named.length as u32);
     for (const [group, name] of named) {
       const bytes = new TextEncoder().encode(name);
-      code.push(group, bytes.length, ...bytes);
+      code.push(group as u32, bytes.length as u32, ...bytes);
     }
     code[2] = code[2]! | 16;
   }
   return code;
 }
 
-function flagsOf(p: Pattern): number {
+function flagsOf(p: Pattern): u32 {
   return (p.unicode ? 1 : 0) | (p.flags.includes("y") ? 2 : 0) | (p.backtracks ? 4 : 0) | (p.flags.includes("g") ? 32 : 0);
 }
 
@@ -876,21 +876,21 @@ function flagsOf(p: Pattern): number {
 // smallest of its class. Without `u` or `v` a character folds to its upper case when that is
 // one code unit and doesn't take a non-ASCII character to ASCII; with them, by Unicode's
 // simple case folding, checked here against the engine running the compiler.
-function classesOf(tables: RegexTables, unicode: boolean): number[][] {
+function classesOf(tables: RegexTables, unicode: boolean): u32[][] {
   let found = tables.folds.get(unicode ? "u" : "");
   if (found) return found;
   const top = unicode ? 0x10ffff : 0xffff;
   const parent = new Int32Array(top + 1).map((_, i) => i);
-  const root = (c: number): number => {
+  const root = (c: u32): u32 => {
     while (parent[c] !== c) c = parent[c] = parent[parent[c]!]!;
     return c;
   };
-  const join = (a: number, b: number) => {
+  const join = (a: u32, b: u32) => {
     const [x, y] = [root(a), root(b)];
     if (x !== y) parent[Math.max(x, y)] = Math.min(x, y);
   };
   const single = (s: string) => (unicode ? ([...s].length === 1 ? s.codePointAt(0)! : -1) : s.length === 1 ? s.charCodeAt(0) : -1);
-  const longUppers = new Map<string, number>();
+  const longUppers = new Map<string, u32>();
   for (let c = 0; c <= top; c++) {
     if (c >= 0xd800 && c <= 0xdfff) continue;
     const ch = String.fromCodePoint(c);
@@ -909,7 +909,7 @@ function classesOf(tables: RegexTables, unicode: boolean): number[][] {
       else join(c, first);
     }
   }
-  const groups = new Map<number, number[]>();
+  const groups = new Map<u32, u32[]>();
   for (let c = 0; c <= top; c++) {
     const r = root(c);
     const group = groups.get(r);
@@ -921,7 +921,7 @@ function classesOf(tables: RegexTables, unicode: boolean): number[][] {
     if (members.length < 2) continue;
     if (!unicode) {
       // Two characters are one when their upper cases are.
-      const byKey = new Map<number, number[]>();
+      const byKey = new Map<u32, u32[]>();
       for (const m of members) {
         const up = single(String.fromCharCode(m).toUpperCase());
         const key = up >= 0 && !(m >= 128 && up < 128) ? up : m;
@@ -947,7 +947,7 @@ function classesOf(tables: RegexTables, unicode: boolean): number[][] {
 
 // A set closed under case folding: with every character that folds like one in it.
 export function foldRanges(tables: RegexTables, ranges: Ranges, unicode: boolean): Ranges {
-  const has = (c: number) => {
+  const has = (c: u32) => {
     let [lo, hi] = [0, ranges.length - 1];
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
@@ -965,8 +965,8 @@ export function foldRanges(tables: RegexTables, ranges: Ranges, unicode: boolean
 
 // The pairs of characters and the key each folds to, for backreferences that ignore case, which
 // compare at run time.
-export function foldTable(tables: RegexTables, unicode: boolean): number[] {
-  const pairs: [number, number][] = [];
+export function foldTable(tables: RegexTables, unicode: boolean): u32[] {
+  const pairs: [u32, u32][] = [];
   for (const members of classesOf(tables, unicode)) {
     const key = Math.min(...members);
     for (const m of members) if (m !== key) pairs.push([m, key]);

@@ -2,12 +2,13 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { CompileError, errorsOf, formatError } from "../src/diag.ts";
+import { CompileError, formatError } from "../src/diag.ts";
+import { errorsOf } from "../src/lsp.ts";
 import { buildAsync } from "../src/main.ts";
 import { parse } from "../src/parser.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // Each program in tests/programs states its expectations in comments:
 //   // expect: <line>   the next line of stdout, in order

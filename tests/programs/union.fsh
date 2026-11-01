@@ -281,3 +281,17 @@ function main() {
 // expect: 100 false
 // expect: 5
 // expect: down and true done
+// case: union_literal_names_member_among_literal_union
+// An object literal names its member by `kind` even beside a member whose `kind` is one of several literals.
+type Span = { start: usize; end: usize }
+type E = Span & ({ kind: "null" } | { kind: "ident"; name: string } | { kind: "as" | "satisfies"; x: i64 })
+function make(w: string): E {
+  const span: Span = { start: 0, end: 1 }
+  if (w === "null") return { kind: "null", ...span }
+  if (w === "as") return { kind: "as", x: 2, ...span }
+  return { kind: "ident", name: w, ...span }
+}
+function main() {
+  print(make("null").kind, make("as").kind, make("y").kind)
+}
+// expect: null as ident

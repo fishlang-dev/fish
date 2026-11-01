@@ -10,7 +10,7 @@ export type Dependency = {
   name: string; version: string; dev: boolean; group: Group; kind: "native" | "pure" | "unknown";
   equivalent?: { name: string; planned: boolean };
 };
-export type Dependencies = { counts: Record<Group, number>; list: Dependency[]; problem?: string };
+export type Dependencies = { counts: Record<Group, usize>; list: Dependency[]; problem?: string };
 
 // What replaces a package: Fish's std, or a planned feature named by its title.
 const IN_STD = (name: string) => ({ name, planned: false });
@@ -57,7 +57,7 @@ const PLATFORMS = /(^|[-/@])(darwin|linux|win32|freebsd|android)-(x64|arm64|ia32
 export function dependencies(dir: string): Dependencies | undefined {
   const path = join(dir, "package.json");
   if (!existsSync(path)) return undefined;
-  const counts: Record<Group, number> = { std: 0, planned: 0, native: 0, pure: 0, unknown: 0 };
+  const counts: Record<Group, usize> = { std: 0, planned: 0, native: 0, pure: 0, unknown: 0 };
   let manifest: Record<string, unknown>;
   try {
     manifest = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
@@ -112,7 +112,7 @@ function kindOf(dir: string): "native" | "pure" | "unknown" {
 }
 
 // Whether a compiled `.node` file sits in a directory or the levels below it.
-function hasAddon(dir: string, depth: number): boolean {
+function hasAddon(dir: string, depth: usize): boolean {
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });

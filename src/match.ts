@@ -27,26 +27,30 @@ export type PatternTest =
   | { kind: "array"; element: Type; items: Pattern[] };
 export type PatternInfo = { type: Type } & PatternTest;
 
-export type LiteralValue = string | bigint | boolean | number | null;
+export type LiteralValue = string | bigint | boolean | f64 | null;
 
 // What an object pattern can take apart: an object, an instance, or a type parameter bounded by
 // an object type or an interface, as a parameter typed with one is.
 export type Shape = ObjectType | ClassType | ParamType;
 
 // A pattern's information with each type it holds as an instance sees it.
-export function lowerPattern({ lower }: Typing, info: PatternInfo): PatternInfo {
-  const type = lower(info.type);
-  if (info.kind === "variant") return { ...info, type, variant: lower(info.variant) as VariantType };
-  if (info.kind === "some") return { ...info, type, inner: lower(info.inner) };
+export function lowerPattern(typing: Typing, info: PatternInfo): PatternInfo {
+  const type = typing.lower(info.type);
+  if (info.kind === "variant") return { ...info, type, variant: typing.lower(info.variant) as VariantType };
+  if (info.kind === "some") return { ...info, type, inner: typing.lower(info.inner) };
   if (info.kind === "object") {
-    const shapes = info.shapes.map(lower);
+    const shapes = info.shapes.map((t) => typing.lower(t));
     // An interface's field may be an accessor in the instance that meets it.
     for (const [key, p] of info.fields) {
-      if (shapes.some((s) => typeof s !== "string" && s.kind === "class" && !objectFields(s).some((f) => f.name === key))) throw unsupported("object patterns reading a field a getter provides", p);
+      const getter = (s: Type) => {
+        const r = typeof s === "string" ? undefined : typing.rec(s);
+        return r?.kind === "class" && !objectFields(typing, s as ClassType).some((f) => f.name === key);
+      };
+      if (shapes.some(getter)) throw unsupported("object patterns reading a field a getter provides", p);
     }
-    return { ...info, type, shapes, fields: info.fields.map(([k, p, t]) => [k, p, lower(t)]) };
+    return { ...info, type, shapes, fields: info.fields.map(([k, p, t]) => [k, p, typing.lower(t)]) };
   }
-  if (info.kind === "array") return { ...info, type, element: lower(info.element) };
+  if (info.kind === "array") return { ...info, type, element: typing.lower(info.element) };
   return { ...info, type };
 }
 
@@ -96,16 +100,18 @@ type Case =
   | { kind: "open"; type: Type };
 
 function cases(typing: Typing, t: Type): Case[] {
-  const { literalType, unionType } = typing;
-  if (t === "boolean") return [literalType(true), literalType(false)].map((type) => ({ kind: "literal", type }));
-  const members = typeof t !== "string" && t.kind === "union" ? t.members : [t];
-  if (members.includes("null") && members.length > 1) return [{ kind: "none" }, { kind: "some", inner: unionType(members.filter((m) => m !== "null")) }];
+  if (t === "boolean") return [typing.literalType(true), typing.literalType(false)].map((type) => ({ kind: "literal", type }));
+  const r = typeof t === "string" ? undefined : typing.rec(t);
+  const members = r?.kind === "union" ? r.members : [t];
+  if (members.includes("null") && members.length > 1) return [{ kind: "none" }, { kind: "some", inner: typing.unionType(members.filter((m) => m !== "null")) }];
   return members.flatMap((m): Case[] => {
     if (m === "boolean") return cases(typing, m);
     if (m === "null") return [{ kind: "none" }];
-    if (typeof m !== "string" && m.kind === "literal") return [{ kind: "literal", type: m }];
-    if (typeof m !== "string" && m.kind === "variant") return [{ kind: "variant", variant: m }];
-    if (typeof m !== "string" && (m.kind === "object" || m.kind === "class" || (m.kind === "param" && (m.bound?.kind === "object" || m.bound?.kind === "interface")))) return [{ kind: "object", type: m }];
+    if (typeof m === "string") return [{ kind: "open", type: m }];
+    const r = typing.rec(m);
+    if (r.kind === "literal") return [{ kind: "literal", type: m as LiteralType }];
+    if (r.kind === "variant") return [{ kind: "variant", variant: m as VariantType }];
+    if (r.kind === "object" || r.kind === "class" || (r.kind === "param" && (typing.recOf(r.bound)?.kind === "object" || typing.recOf(r.bound)?.kind === "interface"))) return [{ kind: "object", type: m as Shape }];
     return [{ kind: "open", type: m }];
   });
 }
@@ -123,10 +129,10 @@ export function uncovered(typing: Typing, ids: Ids, rows: Row[], types: Type[], 
   const [type, ...rest] = types as [Type, ...Type[]];
   const expanded = rows.flatMap((row) => alternatives(row[0]!, info).map((p) => [p, ...row.slice(1)]));
   for (const c of cases(typing, type)) {
-    const fields = fieldTypes(c);
+    const fields = fieldTypes(typing, c);
     const kept: Row[] = [];
     for (const [p, ...tail] of expanded) {
-      const parts = specialize(ids, p!, c, fields.length, info);
+      const parts = specialize(typing, ids, p!, c, fields.length, info);
       if (parts) kept.push([...parts, ...tail]);
     }
     const missing = uncovered(typing, ids, kept, [...fields, ...rest], recorded);
@@ -140,15 +146,15 @@ function alternatives(p: Pattern, info: (p: Pattern) => PatternInfo): Pattern[] 
   return found.kind === "or" ? found.alternatives.flatMap((a) => alternatives(a, info)) : [p];
 }
 
-function fieldTypes(c: Case): Type[] {
-  if (c.kind === "variant") return c.variant.fields.map((f) => f.type);
-  if (c.kind === "object") return objectFields(c.type).map((f) => f.type);
+function fieldTypes(typing: Typing, c: Case): Type[] {
+  if (c.kind === "variant") return typing.rec(c.variant).fields.map((f) => f.type);
+  if (c.kind === "object") return objectFields(typing, c.type).map((f) => f.type);
   if (c.kind === "some") return [c.inner];
   return [];
 }
 
 // The patterns for a case's fields when `p` can match a value of that case, or undefined.
-function specialize(ids: Ids, p: Pattern, c: Case, arity: number, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
+function specialize(typing: Typing, ids: Ids, p: Pattern, c: Case, arity: usize, info: (p: Pattern) => PatternInfo): Pattern[] | undefined {
   const found = info(p);
   const wild: Pattern[] = Array.from({ length: arity }, (): Pattern => ({ id: nextId(ids), kind: "wildcard", start: p.start, end: p.end }));
   // On an Option, a pattern for a value is a pattern for what `Some` holds.
@@ -157,7 +163,7 @@ function specialize(ids: Ids, p: Pattern, c: Case, arity: number, info: (p: Patt
     case "any":
       return wild;
     case "literal":
-      return c.kind === "literal" && (c.type === found.member || c.type.value === found.value) ? [] : undefined;
+      return c.kind === "literal" && (c.type === found.member || typing.rec(c.type).value === found.value) ? [] : undefined;
     case "none":
       return c.kind === "none" ? [] : undefined;
     case "some":
@@ -167,7 +173,7 @@ function specialize(ids: Ids, p: Pattern, c: Case, arity: number, info: (p: Patt
     case "object": {
       // A field the pattern leaves out matches anything.
       if (c.kind !== "object" || !found.shapes.includes(c.type)) return undefined;
-      return objectFields(c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { id: nextId(ids), kind: "wildcard", start: p.start, end: p.end });
+      return objectFields(typing, c.type).map((f) => found.fields.find(([k]) => k === f.name)?.[1] ?? { id: nextId(ids), kind: "wildcard", start: p.start, end: p.end });
     }
     default:
       return undefined;
@@ -176,24 +182,25 @@ function specialize(ids: Ids, p: Pattern, c: Case, arity: number, info: (p: Patt
 
 // The fields an object pattern can test: an object's, or an instance's public ones, its bases'
 // included.
-export function objectFields(t: Shape): Field[] {
-  if (t.kind === "object" || t.kind === "param") return t.fields;
-  return [...(t.base ? objectFields(t.base) : []), ...t.fields].filter((f) => (f.access ?? "public") === "public");
+export function objectFields(typing: Typing, t: Shape): Field[] {
+  const r = typing.rec(t);
+  if (r.kind === "param" || r.kind === "object") return typing.fieldsOf(t);
+  return [...(r.base ? objectFields(typing, r.base) : []), ...r.fields].filter((f) => (f.access ?? "public") === "public");
 }
 
-function render({ show }: Typing, c: Case, fields: string[]): string {
+function render(typing: Typing, c: Case, fields: string[]): string {
   switch (c.kind) {
     case "literal":
-      return show(c.type);
+      return typing.show(c.type);
     case "none":
       return "null";
     case "some":
       return fields[0]!;
     case "variant":
-      return fields.length > 0 ? `${c.variant.name}(${fields.join(", ")})` : c.variant.name;
+      return fields.length > 0 ? `${typing.rec(c.variant).name}(${fields.join(", ")})` : typing.rec(c.variant).name;
     case "object": {
       // A field left out of an object pattern matches anything, so only the telling ones show.
-      const shown = objectFields(c.type).flatMap((f, i) => (fields[i] === "_" ? [] : [`${f.name}: ${fields[i]}`]));
+      const shown = objectFields(typing, c.type).flatMap((f, i) => (fields[i] === "_" ? [] : [`${f.name}: ${fields[i]}`]));
       return shown.length > 0 ? `{ ${shown.join(", ")} }` : "_";
     }
     case "open":
@@ -202,7 +209,7 @@ function render({ show }: Typing, c: Case, fields: string[]): string {
 }
 
 // The message for a value no arm covers: the case to add, or the catch-all.
-export function missing({ show }: Typing, example: string, type: Type): string {
-  if (example === "_") return `this match doesn't cover every '${show(type)}'; add 'case _ =>' for the rest`;
+export function missing(typing: Typing, example: string, type: Type): string {
+  if (example === "_") return `this match doesn't cover every '${typing.show(type)}'; add 'case _ =>' for the rest`;
   return `this match doesn't cover ${example}; add 'case ${example} =>', or 'case _ =>' for the rest`;
 }

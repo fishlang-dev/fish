@@ -16,11 +16,11 @@ export type Placed = {
 };
 
 // A node as attachment sees it: anything with a span, plus the blocks the tree has no node for.
-type Node = { start: number; end: number; kind?: string } & Record<string, unknown>;
+type Node = { start: usize; end: usize; kind?: string } & Record<string, unknown>;
 
 // A braced statement list the tree keeps only as an array: a function's body, an `if`'s
 // branches, a class's members. Its span runs from `{` to `}`, found in the source.
-export type Block = { kind: "$block"; body: unknown[]; start: number; end: number };
+export type Block = { kind: "$block"; body: unknown[]; start: usize; end: usize };
 
 export type Attachment = {
   // Each node's comments, in source order.
@@ -30,7 +30,7 @@ export type Attachment = {
   all: Placed[];
   root: Block;
   // Each comment's start by its end, for reading the source backwards past them.
-  commentStarts: Map<number, number>;
+  commentStarts: Map<usize, usize>;
 };
 
 const isNode = (v: unknown): v is Node =>
@@ -151,12 +151,12 @@ export function moveToLeading(attachment: Attachment, moves: [Placed, object][])
 type Ctx = {
   src: string;
   comments: Comment[];
-  commentAt: Map<number, number>;
-  commentStarts: Map<number, number>;
+  commentAt: Map<usize, usize>;
+  commentStarts: Map<usize, usize>;
   blocks: Map<unknown[], Block>;
   children: Map<object, Node[]>;
   // The next character past whitespace and comments, by where the search starts.
-  next: Map<number, string>;
+  next: Map<usize, string>;
 };
 
 type Decorated = { enclosingNode: Node | undefined; precedingNode: Node | undefined; followingNode: Node | undefined; ancestors: Node[] };
@@ -185,7 +185,7 @@ function decorate(node: Node, comment: Comment, ctx: Ctx, enclosing: Node | unde
   if (enclosing?.kind === "template" && Array.isArray(enclosing.exprs)) {
     const exprs = enclosing.exprs as Node[];
     const opens = exprs.map((x) => ctx.src.lastIndexOf("${", x.start));
-    const substitution = (at: number) => opens.filter((o) => o < at).length - 1;
+    const substitution = (at: usize) => opens.filter((o) => o < at).length - 1;
     const index = substitution(comment.start);
     if (precedingNode && substitution(precedingNode.start) !== index) precedingNode = undefined;
     if (followingNode && substitution(followingNode.start) !== index) followingNode = undefined;
@@ -262,7 +262,7 @@ const isMember = (n: Node) => "modifiers" in n && "decorators" in n;
 // The position of `ch` from `from` on, past whitespace, comments, string literals and, when
 // `separators`, the `;` and `,` that end members; undefined if something else comes first that
 // can't come before it.
-function scanFor(ctx: Ctx, from: number, ch: string, separators = false): number | undefined {
+function scanFor(ctx: Ctx, from: usize, ch: string, separators = false): usize | undefined {
   const src = ctx.src;
   let i = from;
   while (i < src.length) {
@@ -289,7 +289,7 @@ function scanFor(ctx: Ctx, from: number, ch: string, separators = false): number
 
 // Whether `word` ends just before `at`, past whitespace, opening parentheses and the comments
 // `commentStarts` gives the start of by their end.
-export function follows(src: string, at: number, word: string, commentStarts?: Map<number, number>): boolean {
+export function follows(src: string, at: usize, word: string, commentStarts?: Map<usize, usize>): boolean {
   let i = at;
   for (;;) {
     while (i > 0 && /[\s(]/.test(src[i - 1]!)) i--;
@@ -314,7 +314,7 @@ const isBlockComment = (c: Comment) => c.kind === "block";
 
 // Prettier's hasNewline: a line break right after `at`, or right before it going `backwards`,
 // past spaces and tabs.
-export function hasNewline(src: string, at: number, backwards = false): boolean {
+export function hasNewline(src: string, at: usize, backwards = false): boolean {
   if (backwards) {
     let i = at - 1;
     while (i >= 0 && (src[i] === " " || src[i] === "\t")) i--;
@@ -325,14 +325,14 @@ export function hasNewline(src: string, at: number, backwards = false): boolean 
   return i < src.length && (src[i] === "\n" || src[i] === "\r");
 }
 
-function hasNewlineInRange(src: string, from: number, to: number): boolean {
+function hasNewlineInRange(src: string, from: usize, to: usize): boolean {
   for (let i = from; i < to; i++) if (src[i] === "\n") return true;
   return false;
 }
 
 // Prettier's isNextLineEmpty: past the rest of the line (`,` and `;`, block comments and a line
 // comment), whether the next line is blank.
-export function isNextLineEmpty(src: string, at: number): boolean {
+export function isNextLineEmpty(src: string, at: usize): boolean {
   let i = at;
   let previous = -1;
   while (i !== previous) {
@@ -352,7 +352,7 @@ export function isNextLineEmpty(src: string, at: number): boolean {
 }
 
 // Prettier's isPreviousLineEmpty: whether the line before the one holding `at` is blank.
-export function isPreviousLineEmpty(src: string, at: number): boolean {
+export function isPreviousLineEmpty(src: string, at: usize): boolean {
   let i = at - 1;
   while (i >= 0 && (src[i] === " " || src[i] === "\t")) i--;
   if (src[i] !== "\n") return false;
@@ -364,8 +364,8 @@ export function isPreviousLineEmpty(src: string, at: number): boolean {
 
 // The next character past whitespace and comments, remembered per comment end in `ctx`, so each
 // comment in a long run is skipped once rather than once per comment before it.
-function nextCharacter({ src, next }: Ctx, at: number): string {
-  const path: number[] = [];
+function nextCharacter({ src, next }: Ctx, at: usize): string {
+  const path: usize[] = [];
   let i = at;
   let found: string | undefined;
   for (;;) {
@@ -395,9 +395,9 @@ const onlySpaces = (text: string) => !/[\S\n\u2028\u2029]/.test(text);
 function placements(decorated: (Decorated & { comment: Comment })[], src: string): ("ownLine" | "endOfLine" | "remaining")[] {
   const sharesRun = (a: Decorated & { comment: Comment }, b: Decorated & { comment: Comment }, side: "precedingNode" | "followingNode") =>
     a[side] !== undefined && a[side] === b[side] && onlySpaces(src.slice(a.comment.end, b.comment.start));
-  const runStart: number[] = [];
+  const runStart: usize[] = [];
   decorated.forEach((d, i) => (runStart[i] = i > 0 && sharesRun(decorated[i - 1]!, d, "precedingNode") ? runStart[i - 1]! : d.comment.start));
-  const runEnd: number[] = [];
+  const runEnd: usize[] = [];
   for (let i = decorated.length - 1; i >= 0; i--) {
     const d = decorated[i]!;
     runEnd[i] = i + 1 < decorated.length && sharesRun(d, decorated[i + 1]!, "followingNode") ? runEnd[i + 1]! : d.comment.end;
@@ -438,7 +438,7 @@ function handleIf(c: Context): boolean {
   }
   if (p === consequent && f === bodyOf(c, e, "else")) {
     const elseAt = src.indexOf("else", p!.end);
-    if (comment.start >= elseAt) c.add(f, comment, "leading");
+    if ((comment.start as i64) >= elseAt) c.add(f, comment, "leading");
     else if (!isBlockNode(p) && (!isBlockComment(comment) || !hasNewlineInRange(src, comment.start, comment.end)) && !hasNewlineInRange(src, p!.end, comment.start)) {
       c.add(p!, comment, "trailing");
     } else c.add(e, comment, "dangling");
@@ -731,7 +731,7 @@ function handleBeforeIndex(c: Context): boolean {
   const { enclosingNode: e, precedingNode: p, comment, src } = c;
   if (e?.kind !== "index" || !p || p !== e.object) return false;
   const open = src.indexOf("[", p.end);
-  if (open === -1 || comment.start > open) return false;
+  if (open === -1 || (comment.start as i64) > open) return false;
   c.add(p, comment, "trailing");
   return true;
 }
@@ -765,7 +765,7 @@ function handleSpecifiers(c: Context): boolean {
     return true;
   }
   // The default or namespace name has no node; a comment after it trails the import.
-  if (e?.kind === "import" && "module" in e && !p && comment.start < src.indexOf("{", e.start)) {
+  if (e?.kind === "import" && "module" in e && !p && (comment.start as i64) < src.indexOf("{", e.start)) {
     c.add(e, comment, "trailing");
     return true;
   }
@@ -787,7 +787,7 @@ function handleDefaultPattern(c: Context): boolean {
 // A comment before a mapped type's `[` dangles inside its braces.
 function handleMapped(c: Context): boolean {
   const { enclosingNode: e, comment, src } = c;
-  if (e?.kind === "mapped" && comment.end < src.indexOf("[", e.start)) {
+  if (e?.kind === "mapped" && (comment.end as i64) < src.indexOf("[", e.start)) {
     c.add(e, comment, "dangling");
     return true;
   }
@@ -848,7 +848,7 @@ function handleCallOpen(c: Context): boolean {
   const args = (e?.args as Node[] | undefined) ?? [];
   if (!isCall(e) || !p || p !== e!.callee || args.length === 0) return false;
   const open = src.indexOf("(", p!.end);
-  if (open === -1 || comment.start <= open || comment.end > args[0]!.start) return false;
+  if (open === -1 || (comment.start as i64) <= open || comment.end > args[0]!.start) return false;
   c.add(args[0]!, comment, "leading");
   return true;
 }
@@ -872,7 +872,7 @@ function handleAssignment(c: Context): boolean {
     (isObjectExpression(f) || isArrayExpression(f) || f.kind === "template" || f.kind === "tagged" || isTypeLiteral(f) || isBlockComment(comment))) {
     return lead();
   }
-  if (e?.kind === "typeAlias" && comment.start >= src.indexOf("=", e.start)) return lead();
+  if (e?.kind === "typeAlias" && (comment.start as i64) >= src.indexOf("=", e.start)) return lead();
   return false;
 }
 

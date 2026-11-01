@@ -833,6 +833,15 @@ const JSDOC_THROWS: [string, string][] = [
   ["/** @throws {E} */ export const f = (x: i64) => x", "E at 'E'"],
   ["/** @throws {E} */ const a = () => 1, b = () => 2", "none"],
   ["/** @throws {E} */ const n = 1", "none"],
+  ["/** @throws {E} */ type F = (n: i64) => i64", "E at 'E'"],
+  ["/** @throws {E} */\nexport type Parse<T> = (c: Mut<Cursor>) => T", "E at 'E'"],
+  ["/**\n * @throws {A}\n * @throws {B}\n */\ntype F = () => void", "(A | B) at 'A}\n * @throws {B'"],
+  ["/** @throws {E} */ type F = () => void throws E", "E at 'E'"],
+  ["function g() {\n  /** @throws {E} */\n  type F = () => void\n}", "E at 'E'"],
+  ["/** @throws {E} */ type F = string", "none"],
+  ["/** @throws {E} */ type F = (() => void) | null", "none"],
+  ["/** @throws {E} */ type F = { f: () => void }", "none"],
+  ["/** @throws E */ type F = () => void", "none"],
   ["function g() {\n  /** @throws {E} */\n  function f() {}\n}", "E at 'E'"],
   ["/** @throws {@link E} */ function f() {}", "none"],
   ["/** @throws {*} */ function f() {}", "none"],
@@ -852,6 +861,7 @@ test("a JSDoc @throws tag parses as the written clause does", () => {
   const bare = (src: string) => JSON.stringify(parse(src, { last: 0 }), (k, v) => (k === "id" || k === "start" || k === "end" ? undefined : v));
   expect(bare("/** @throws {A | B<i64>} */ function f(): void {}")).toBe(bare("function f(): void throws A | B<i64> {}"));
   expect(bare("class C { /** @throws {E} */ m(): void {} }")).toBe(bare("class C { m(): void throws E {} }"));
+  expect(bare("/** @throws {E} */ type Parse<T> = (c: Mut<Cursor>) => T;")).toBe(bare("type Parse<T> = (c: Mut<Cursor>) => T throws E;"));
 });
 
 test("JSDoc @throws errors point into the comment", () => {
@@ -860,6 +870,7 @@ test("JSDoc @throws errors point into the comment", () => {
   }));
   expect(() => parse("/** @throws {1} */ function f() throws 1 {}", { last: 0 })).not.toThrow();
   expect(() => parse("/** @throws {1} */ function f() throws 2 {}", { last: 0 })).toThrow("the JSDoc says '@throws {1}' but the function says 'throws 2'");
+  expect(() => parse("/** @throws {A} */ type F = () => void throws B", { last: 0 })).toThrow("the JSDoc says '@throws {A}' but the function says 'throws B'");
 });
 
 test("TypeScript with JSDoc types Fish can't read still parses", () => {

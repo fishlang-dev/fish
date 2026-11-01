@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { CompileError } from "../src/diag.ts";
 import { buildAsync, callsEngine, compile, ENGINE, ENGINE_SOURCES } from "../src/main.ts";
 import { sanitized as sanitize } from "./sanitized.ts";
-import { newSession } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
 // Programs here may import the compiler's own test hook.
-const session = newSession();
+const session = cachedSession();
 session.engineHook = true;
 
 // Each test builds a program with the JS engine, whose sources take several seconds to compile.
@@ -203,7 +203,7 @@ test.each([
 test("a program can't import the test hook", () => {
   const [file, src] = [join(dir, "hook.fsh"), `import { evaluate } from "fish:engine";\nfunction main() {}\n`];
   writeFileSync(file, src);
-  expect(() => compile(newSession(), src, file)).toThrow(
+  expect(() => compile(cachedSession(), src, file)).toThrow(
     new CompileError("E0903", "'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", 0, 0),
   );
 });

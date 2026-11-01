@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { check } from "../src/check.ts";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { parse } from "../src/parser.ts";
 
-const session = newSession();
+const session = cachedSession();
 // `src` checked as a program of its own, its nodes numbered by its compilation.
 const checkSource = (src: string, library = false) => {
   const compilation = newCompilation(session);
@@ -44,7 +45,7 @@ const MEMBERS: [string, string, string][] = [
 const INTERSECTIONS: [string, string, string][] = [
   ["i64 & { a: i64 }", "intersections with primitive types", "i64"],
   ["{ a: i64 } & A", "intersections with classes", "A"],
-  ["{ a: i64 } & (1 | 2)", "intersections with unions", "1 | 2"],
+  ["{ a: i64 } & (1 | 2)", "intersections with unions of other than object types", "1 | 2"],
 ];
 
 for (const [type, what, part] of INTERSECTIONS) {

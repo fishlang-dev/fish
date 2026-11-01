@@ -1,26 +1,26 @@
 import type { Tables } from "./compilation.ts";
-import { nextId, type Ids } from "./nodes.ts";
+import { nextId, Rewrites, walk, type Id, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
-import type { Type } from "./typing.ts";
+import { rebuiltStmts } from "./rebuild.ts";
+import type { Type, Typing } from "./typing.ts";
 
 // Default parameter values, lowered before checking. A parameter `x: T = v` becomes an optional
 // parameter under a name no source can write, and the body starts with `const x: T = <it> ?? v`,
 // so the default runs in the callee each time the argument is left out, after the parameters
 // before it, which it may read. The checker holds calls and defaults to `T` itself.
 
-export function lowerDefaults(tables: Tables, node: unknown) {
-  if (!node || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    for (const x of node) lowerDefaults(tables, x);
-    return;
-  }
-  const f = node as { kind?: string; params?: unknown; body?: unknown };
-  if (Array.isArray(f.params) && f.body !== undefined) lowered(tables, f as { kind?: string; params: Param[]; body: Expr | Stmt[] });
-  for (const value of Object.values(node)) lowerDefaults(tables, value);
+export function lowerDefaults(tables: Tables, program: Stmt[]) {
+  const rewrites = new Rewrites();
+  // Whatever has parameters and a body: functions, arrows, methods, accessors and constructors.
+  walk("stmt", program, ({ node }) => {
+    const f = node as { kind?: string; params?: unknown; body?: unknown };
+    if (Array.isArray(f.params) && f.body !== undefined) lowered(tables, rewrites, f as Id & { kind?: string; params: Param[]; body: Expr | Stmt[] });
+  });
+  rebuiltStmts(program, rewrites);
 }
 
-function lowered(tables: Tables, f: { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
+function lowered(tables: Tables, rewrites: Rewrites, f: Id & { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
   const { defaulted, fallbacks, renamed, prologues, ids } = tables;
   const firsts: Stmt[] = [];
   f.params.forEach((p, i) => {
@@ -34,7 +34,7 @@ function lowered(tables: Tables, f: { kind?: string; params: Param[]; body: Expr
       prologues.add(binding);
       firsts.push(binding);
       renamed.set(p, "_");
-      Object.assign(p, { pattern: { id: nextId(ids), kind: "ident", name: hidden, ...at } });
+      rewrites.replace(p, { ...p, pattern: { id: nextId(ids), kind: "ident", name: hidden, ...at } });
       return;
     }
     if (!p.default) return;
@@ -58,15 +58,14 @@ function lowered(tables: Tables, f: { kind?: string; params: Param[]; body: Expr
     const binding: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name, ...at }, type, init, ...at }], ...at };
     prologues.add(binding);
     firsts.push(binding);
-    Object.assign(p, { pattern: { ...p.pattern, id: nextId(ids), name: hidden }, type, optional: true, default: undefined });
+    rewrites.replace(p, { ...p, pattern: { ...p.pattern, id: nextId(ids), name: hidden }, type, optional: true, default: undefined });
     defaulted.set(p, { name, empty });
   });
   if (firsts.length === 0) return;
-  if (Array.isArray(f.body)) f.body.unshift(...firsts);
-  else {
-    const value = f.body;
-    f.body = [...firsts, { id: nextId(ids), kind: "return", value, start: value.start, end: value.end }];
-  }
+  const value = f.body;
+  const body = Array.isArray(value) ? [...firsts, ...value] : [...firsts, { id: nextId(ids), kind: "return" as const, value, start: value.start, end: value.end }];
+  // Any node with parameters and a body, typed as one of them.
+  rewrites.replace(f, { ...f, body } as unknown as Expr);
 }
 
 // The type a literal default says: `1` an i64, `1.5` an f64, `"a"` a string, `true` a boolean.
@@ -86,6 +85,8 @@ export function writtenName(tables: Tables, p: Param): string {
 }
 
 // Whether a type is `null` or an Option, which a call may pass in place of a default.
-export function holdsNull(t: Type): boolean {
-  return t === "null" || (typeof t !== "string" && t.kind === "union" && t.members.includes("null"));
+export function holdsNull(typing: Typing, t: Type): boolean {
+  if (typeof t === "string") return t === "null";
+  const r = typing.rec(t);
+  return r.kind === "union" && r.members.includes("null");
 }
