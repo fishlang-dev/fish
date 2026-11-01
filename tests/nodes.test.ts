@@ -11,8 +11,8 @@ import { expandMacros } from "../src/macros.ts";
 import { analyze } from "../src/main.ts";
 import { flatten, load } from "../src/modules.ts";
 import type { Id } from "../src/ids.ts";
-import { latest, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
-import { parse, type Stmt } from "../src/parser.ts";
+import { latest, NodeMap, NodeSet, Rewrites, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
+import { parse, type Expr, type Stmt } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
 import { Typing, TypeMap, TypeSet, type Type } from "../src/typing.ts";
@@ -206,6 +206,23 @@ test("a node table refuses a second node with an id already in use", () => {
   expect(weak.get(a)).toBe("a");
   expect(() => weak.has(b)).toThrow("internal error: two nodes share id 1");
   expect(() => new WeakNodeSet<{ id: number }>().add(a).add(b)).toThrow("internal error: two nodes share id 1");
+});
+
+// A weak table keeps an entry while any version of its node lives: the node lowering replaced
+// is gone from the tree, but the replacement still reads the entry after a collection.
+test("a weak node table keeps an entry its node's replacement still reaches", async () => {
+  const weak = new WeakNodeMap<Expr, string>();
+  const rewrites = new Rewrites();
+  const by = ((): Expr => {
+    const node: Expr = { id: 7, kind: "ident", name: "x", start: 0, end: 1 };
+    weak.set(node, "kept");
+    return rewrites.replace(node, { id: 0, kind: "ident", name: "y", start: 0, end: 1 });
+  })();
+  for (let i = 0; i < 5; i++) {
+    Bun.gc(true);
+    await Bun.sleep(10);
+  }
+  expect(weak.get(by)).toBe("kept");
 });
 
 // The AST types a table may not be keyed by: every type in src/parser.ts carrying `Id`, and any

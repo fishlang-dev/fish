@@ -259,6 +259,9 @@ export class Rewrites {
     if (was === by) return by;
     // Seen only by the node tables' check that two nodes don't share an id, kept off the tree.
     Object.defineProperty(was, REPLACED_BY, { value: by, configurable: true });
+    // A weak node table registers the first node stored under an id and drops the entry when
+    // that node is collected, so the replacement keeps what it replaced alive.
+    Object.defineProperty(by, REPLACES, { value: was, configurable: true });
     by.id = node.id;
     this.table.set(node.id, by);
     return by;
@@ -270,6 +273,7 @@ export class Rewrites {
 }
 
 const REPLACED_BY = "replaced by";
+const REPLACES = "replaces";
 
 // What `node` is now: the last of its replacements, or itself.
 export function latest<T extends Id>(node: T): T {
