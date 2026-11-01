@@ -384,9 +384,9 @@ class Headers {
   }
 }
 
-// A cookie's attributes, with Bun's names. maxAge is in seconds and expires in milliseconds since
-// the epoch, as Date.now() gives.
-type CookieInit = { path?: string; domain?: string; maxAge?: i64; expires?: i64; secure?: boolean; httpOnly?: boolean; sameSite?: "strict" | "lax" | "none"; partitioned?: boolean };
+// A cookie's attributes, with Bun's names. maxAge is in seconds and expires a Date or milliseconds
+// since the epoch, as Date.now() gives.
+type CookieInit = { path?: string; domain?: string; maxAge?: i64; expires?: i64 | Date; secure?: boolean; httpOnly?: boolean; sameSite?: "strict" | "lax" | "none"; partitioned?: boolean };
 
 // Cookies by name, as Bun's CookieMap: read from a Cookie header as RFC 6265 reads one, the
 // first of a repeated name kept, and changed by set and delete, each change a Set-Cookie line
@@ -502,9 +502,10 @@ function __cookieLine(name: string, value: string, options: CookieInit | null): 
   if (options !== null) {
     const expires = options.expires;
     if (expires !== null) {
+      const ms = expires instanceof Date ? expires.getTime() : expires;
       // An HTTP date has a four-digit year, so 0000-01-01 to 9999-12-31 can be written.
-      assert(expires >= -62167219200000 && expires <= 253402300799999, "cookie '" + name + "' can't expire at " + String(expires) + "; give milliseconds since the epoch within the years 0000 to 9999");
-      line = line + "; Expires=" + __cookieDate(expires);
+      assert(ms >= -62167219200000 && ms <= 253402300799999, "cookie '" + name + "' can't expire at " + String(ms) + "; give a time within the years 0000 to 9999");
+      line = line + "; Expires=" + new Date(ms).toUTCString();
     }
     const maxAge = options.maxAge;
     if (maxAge !== null) line = line + "; Max-Age=" + String(maxAge);
@@ -522,31 +523,6 @@ function __cookieAttribute(name: string, attribute: string, value: string): stri
     assert(c >= 32 && c < 127 && c !== 59, "cookie '" + name + "' can't have a " + attribute + " holding ';', a control character or a character outside ASCII");
   }
   return value;
-}
-
-// Milliseconds since the epoch as an IMF-fixdate, the form HTTP writes dates in.
-function __cookieDate(ms: i64): string {
-  let days = ms / 86400000;
-  let rest = ms % 86400000;
-  if (rest < 0) {
-    days -= 1;
-    rest += 86400000;
-  }
-  // Howard Hinnant's days_from_civil, run backwards: the date of a day count from 1970-01-01.
-  const z = days + 719468;
-  const era = (z >= 0 ? z : z - 146096) / 146097;
-  const doe = z - era * 146097;
-  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-  const mp = (5 * doy + 2) / 153;
-  const day = doy - (153 * mp + 2) / 5 + 1;
-  const month = mp < 10 ? mp + 3 : mp - 9;
-  const year = yoe + era * 400 + (month <= 2 ? 1 : 0);
-  // 1970-01-01 was a Thursday.
-  const weekday = ((days % 7) + 11) % 7;
-  const seconds = rest / 1000;
-  const two = (n: i64) => (n < 10 ? "0" : "") + String(n);
-  return "Sun,Mon,Tue,Wed,Thu,Fri,Sat".split(",")[weekday as usize] + ", " + two(day) + " " + "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec".split(",")[(month - 1) as usize] + " " + String(year).padStart(4, "0") + " " + two(seconds / 3600) + ":" + two(seconds / 60 % 60) + ":" + two(seconds % 60) + " GMT";
 }
 
 type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal };
@@ -1249,7 +1225,7 @@ async function __staticResponse(req: Request, skip: usize, root: string): Promis
   const tag = "W/\\"" + __staticHex(size) + "-" + __staticHex(mtime) + "\\"";
   let headers = new Headers();
   headers.set("etag", tag);
-  headers.set("last-modified", __cookieDate(mtime));
+  headers.set("last-modified", new Date(mtime).toUTCString());
   const asked = req.headers.get("if-none-match");
   if (asked !== null && __staticMatches(asked, tag)) return new Response(null, { status: 304, headers: headers });
   headers.set("content-type", __staticType(path));
@@ -3084,7 +3060,7 @@ const BYTE_METHODS = ["toBase64", "toHex"];
 const BYTE_STATICS = ["fromBase64", "fromHex"];
 const URL_NAMES = ["URL", "URLSearchParams"];
 // std's names a program may declare its own of, which std's own code then reaches under another.
-const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
+const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
@@ -3273,6 +3249,80 @@ function btoa(data: string): string throws TypeError {
     }
   }
   return __arrayBase64Text(bytes, false, true);
+}
+`;
+const DATE = String.raw`
+// A point in time as JavaScript's Date holds one, in milliseconds since 1970-01-01T00:00:00Z,
+// read in UTC. A time JavaScript would make an Invalid Date of panics where it is made, as Fish
+// panics where JavaScript throws a RangeError, so every Date can be written out.
+class Date {
+  #time: i64;
+
+  constructor(ms?: i64) {
+    const time = ms ?? Date.now();
+    assert(time >= -8640000000000000 && time <= 8640000000000000, "a Date holds a time within 8640000000000000 milliseconds of 1970-01-01, so " + String(time) + " can't be one");
+    this.#time = time;
+  }
+
+  getTime(): i64 { return this.#time; }
+  valueOf(): i64 { return this.#time; }
+  equals(other: Ref<Date>): boolean { return this.#time === other.getTime(); }
+
+  getUTCFullYear(): i64 { return __dateCivil(this.#time)[0]; }
+  getUTCMonth(): i64 { return __dateCivil(this.#time)[1]; }
+  getUTCDate(): i64 { return __dateCivil(this.#time)[2]; }
+  getUTCDay(): i64 { return __dateCivil(this.#time)[3]; }
+  getUTCHours(): i64 { return __dateCivil(this.#time)[4]; }
+  getUTCMinutes(): i64 { return __dateCivil(this.#time)[5]; }
+  getUTCSeconds(): i64 { return __dateCivil(this.#time)[6]; }
+  getUTCMilliseconds(): i64 { return __dateCivil(this.#time)[7]; }
+
+  // Years outside 0000 to 9999 take a sign and six digits, as ECMAScript's expanded years do.
+  toISOString(): string {
+    const c = __dateCivil(this.#time);
+    const y = c[0];
+    const year = y >= 0 && y <= 9999 ? __datePad(y, 4) : (y < 0 ? "-" : "+") + __datePad(y < 0 ? -y : y, 6);
+    return year + "-" + __datePad(c[1] + 1, 2) + "-" + __datePad(c[2], 2) + "T" + __datePad(c[4], 2) + ":" + __datePad(c[5], 2) + ":" + __datePad(c[6], 2) + "." + __datePad(c[7], 3) + "Z";
+  }
+
+  toJSON(): string { return this.toISOString(); }
+
+  // The IMF-fixdate HTTP writes, with a year past four digits or before zero written as
+  // ECMAScript's toUTCString writes it.
+  toUTCString(): string {
+    const c = __dateCivil(this.#time);
+    const y = c[0];
+    return "Sun,Mon,Tue,Wed,Thu,Fri,Sat".split(",")[c[3] as usize] + ", " + __datePad(c[2], 2) + " " + "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec".split(",")[c[1] as usize] + " " + (y < 0 ? "-" : "") + __datePad(y < 0 ? -y : y, 4) + " " + __datePad(c[4], 2) + ":" + __datePad(c[5], 2) + ":" + __datePad(c[6], 2) + " GMT";
+  }
+}
+
+function __datePad(n: i64, width: usize): string {
+  return String(n).padStart(width, "0");
+}
+
+// A time's year, month from 0, day of the month, weekday from Sunday, hours, minutes, seconds
+// and milliseconds in UTC.
+function __dateCivil(ms: i64): [i64, i64, i64, i64, i64, i64, i64, i64] {
+  let days = ms / 86400000;
+  let rest = ms % 86400000;
+  if (rest < 0) {
+    days -= 1;
+    rest += 86400000;
+  }
+  // Howard Hinnant's days_from_civil, run backwards: the date of a day count from 1970-01-01.
+  const z = days + 719468;
+  const era = (z >= 0 ? z : z - 146096) / 146097;
+  const doe = z - era * 146097;
+  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const mp = (5 * doy + 2) / 153;
+  const day = doy - (153 * mp + 2) / 5 + 1;
+  const month = mp < 10 ? mp + 3 : mp - 9;
+  const year = yoe + era * 400 + (month <= 2 ? 1 : 0);
+  // 1970-01-01 was a Thursday.
+  const weekday = ((days % 7) + 11) % 7;
+  const seconds = rest / 1000;
+  return [year, month - 1, day, weekday, seconds / 3600, seconds / 60 % 60, seconds % 60, rest % 1000];
 }
 `;
 const ATOB = `
@@ -4096,7 +4146,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB + DATE;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -4181,6 +4231,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const bytes = next(BYTES);
   const btoa = next(BTOA);
   const atob = next(ATOB);
+  const dates = next(DATE);
   renameValue([...json, ...jsonName]);
   const astNames = ast.flatMap(declaredNames);
   const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]]] as const;
@@ -4189,7 +4240,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // program can write.
   const declared = new Set(written.flatMap(declaredNames));
   const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
-  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url, ...bytes, ...btoa, ...atob], own);
+  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url, ...bytes, ...btoa, ...atob, ...dates], own);
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   const httpUsed = uses(written, http, HTTP_NAMES);
@@ -4200,7 +4251,8 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa and atob call them too.
   const encoding = linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
-  return [...prelude, ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : [])];
+  const dated = httpUsed || uses(written, dates, ["Date"]);
+  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : [])];
 }
 
 // A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.
@@ -4217,7 +4269,7 @@ function hideHelpers(nodes: unknown) {
   if (typeof nodes !== "object" || nodes === null) return;
   const node = nodes as Record<string, unknown>;
   const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
-  if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url)/.test(node.name)) {
+  if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url|date)/.test(node.name)) {
     node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
   }
   Object.values(node).forEach(hideHelpers);

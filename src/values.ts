@@ -2275,11 +2275,15 @@ export function expressions(ctx: Context) {
   }
 
   // `Date.now()` and `performance.now()`, unless a name of the program's hides `Date` or
-  // `performance`; their other members aren't there yet.
+  // `performance`; their other members aren't there yet. std's Date class, under its own name or
+  // the one it takes beside a program's own Date, is the clock's owner rather than a hiding name.
   function clockOf(callee: Expr): "Date.now" | "performance.now" | undefined {
     if (callee.kind !== "member" || callee.object.kind !== "ident") return undefined;
-    const owner = callee.object.name;
-    if ((owner !== "Date" && owner !== "performance") || lookup(owner) || classes.has(owner) || byName.has(owner) || byName.has(`const ${owner}`) || enums.has(owner)) return undefined;
+    const std = callee.object.name === "std Date" && callee.start >= STD_BASE;
+    const owner = std ? "Date" : callee.object.name;
+    const declared = classes.get(owner);
+    const hidden = declared !== undefined && !(owner === "Date" && declared.constructor.start >= STD_BASE);
+    if ((owner !== "Date" && owner !== "performance") || (!std && (lookup(owner) || hidden || byName.has(owner) || byName.has(`const ${owner}`) || enums.has(owner)))) return undefined;
     if (callee.name !== "now") throw new CompileError("E0801", `'${owner}.${callee.name}' isn't supported yet; '${owner}.now()' is`, callee.start, callee.end);
     return `${owner}.now` as "Date.now" | "performance.now";
   }
