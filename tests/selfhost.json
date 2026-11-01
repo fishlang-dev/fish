@@ -45,6 +45,7 @@
     "publish.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "quote.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "rank.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
+    "rebuild.ts": "'m.args[i1]' can't be moved out of its array; use 'm.args[i1].clone()' to take a copy, or 'pop()' to take the last element out",
     "regex.ts": "functions returned without a function return type are not supported yet",
     "registry.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "registry_index.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
@@ -67,5 +68,5 @@
     "values.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet"
   },
-  "count": 66
+  "count": 67
 }

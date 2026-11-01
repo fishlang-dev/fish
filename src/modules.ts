@@ -13,7 +13,9 @@ import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.ts";
 import { ENGINE_HOOK, STD, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
-import { forEachChild, nextId, NodeMap, shiftSpans, walk, type AnyNode, type Ids } from "./nodes.ts";
+import type { Id } from "./ids.ts";
+import { forEachChild, nextId, NodeMap, Rewrites, shiftSpans, walk, type AnyNode, type Ids } from "./nodes.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
 // offset range, so a position anywhere in the program says which file it is in.
@@ -181,6 +183,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
         return;
       }
       const overloads = jsOverloads(ids, declared, made, name, specifier, index as usize);
+      if (overloads.length > 0 && made.kind === "function") made = { ...made, js: { ...made.js!, overloads } };
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
       for (const s of [made, ...overloads]) shiftSpans("stmt", s, base);
@@ -642,6 +645,7 @@ function scoped(matters: (name: string) => boolean, visit: (n: Record<string, un
 // block's declaration or a catch clause takes the name, it means that instead.
 function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Module; explicit: boolean }>, bind: (alias: string, from: Module, name: string, at: Span) => void, valued: Map<string, "value" | "table"> = new Map()) {
   const bound = new Set<string>();
+  const rewrites = new Rewrites();
   const named = (d: string) => spaces.has(d) || valued.has(d);
   const walk = scoped(named, (n, hidden, walk) => {
     const object = n.object as { kind?: string; name?: string } | undefined;
@@ -660,17 +664,15 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     if ((n.kind === "member" || n.kind === "index") && !n.optional && imported?.kind === "ident" && valued.get(imported.name!) === "table" && !hidden.has(imported.name!)) {
       const key = n.kind === "member" ? { id: nextId(ids), kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
       walk({ of: "expr", node: key as Expr }, hidden);
-      const callee = { id: nextId(ids), kind: "ident", name: imported.name, start: imported.start, end: imported.end };
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
-      Object.assign(n, { kind: "call", callee, typeArgs: [], args: [key], optional: false });
+      const callee: Expr = { id: nextId(ids), kind: "ident", name: imported.name!, start: imported.start!, end: imported.end! };
+      rewrites.replace(n as Id, { id: 0, kind: "call", callee, typeArgs: [], args: [key as Expr], optional: false, start: n.start as usize, end: n.end as usize });
       return true;
     }
     // `argv` imported by name reads as a value, calling it, except where it is called.
     if (n.kind === "ident" && valued.has(n.name as string) && !hidden.has(n.name as string)) {
       if (valued.get(n.name as string) === "table") throw new CompileError(`'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as usize, n.end as usize);
-      const callee = { id: nextId(ids), kind: "ident", name: n.name, start: n.start, end: n.end };
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
-      Object.assign(n, { kind: "call", callee, typeArgs: [], args: [], optional: false });
+      const callee: Expr = { id: nextId(ids), kind: "ident", name: n.name as string, start: n.start as usize, end: n.end as usize };
+      rewrites.replace(n as Id, { id: 0, kind: "call", callee, typeArgs: [], args: [], optional: false, start: n.start as usize, end: n.end as usize });
       return true;
     }
     const keyed = (n.kind === "member" || n.kind === "index") && !n.optional ? table(n.object) : undefined;
@@ -680,8 +682,8 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
       bound.add(alias);
       const key = n.kind === "member" ? { id: nextId(ids), kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
       walk({ of: "expr", node: key as Expr }, hidden);
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
-      Object.assign(n, { kind: "call", callee: { id: nextId(ids), kind: "ident", name: alias, start: n.start, end: n.end }, typeArgs: [], args: [key], optional: false });
+      const at = { start: n.start as usize, end: n.end as usize };
+      rewrites.replace(n as Id, { id: 0, kind: "call", callee: { id: nextId(ids), kind: "ident", name: alias, ...at }, typeArgs: [], args: [key as Expr], optional: false, ...at });
       return true;
     }
     // A call's callee is the function itself; a value member elsewhere reads through its function.
@@ -716,12 +718,13 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     const alias = `${owner}:${name}`;
     if (!bound.has(alias)) bind(alias, space.from, name, n as unknown as Span);
     bound.add(alias);
-    for (const key of Object.keys(n)) if (key !== "start" && key !== "end" && key !== "id") delete n[key];
-    const ident = { id: nextId(ids), kind: "ident", name: alias, start: n.start, end: n.end };
-    Object.assign(n, read && kind === "value" ? { kind: "call", callee: ident, typeArgs: [], args: [], optional: false } : { ...ident, id: n.id });
+    const at = { start: n.start as usize, end: n.end as usize };
+    const ident: Expr = { id: nextId(ids), kind: "ident", name: alias, ...at };
+    rewrites.replace(n as Id, read && kind === "value" ? { id: 0, kind: "call", callee: ident, typeArgs: [], args: [], optional: false, ...at } : { ...ident });
     return true;
   };
   walk({ of: "stmts", node: body }, new Set());
+  rebuiltStmts(body, rewrites);
 }
 
 // `readFile(path, "utf8")` and `readFile(path, { encoding: "utf8" })` give a string, which
@@ -827,6 +830,7 @@ export function renameIn(ids: Ids, statements: Stmt[], to: (name: string) => str
     return as === undefined ? name : [as, ...rest].join(".");
   };
   const seen = new Set<unknown>();
+  const rewrites = new Rewrites();
   walk("stmt", statements, ({ of, node: n }) => {
     if (seen.has(n)) return false;
     seen.add(n);
@@ -834,10 +838,11 @@ export function renameIn(ids: Ids, statements: Stmt[], to: (name: string) => str
     if (of === "objectProp" && n.kind === "shorthand") {
       const as = to(n.name);
       // `{ x }` keeps its key while its value takes the new name.
-      if (as !== undefined) Object.assign(n, { kind: "property", key: n.name, value: { id: nextId(ids), kind: "ident", name: as, start: n.start, end: n.end } });
+      if (as !== undefined) rewrites.replace(n, { id: 0, kind: "property", key: n.name, value: { id: nextId(ids), kind: "ident", name: as, start: n.start, end: n.end }, start: n.start, end: n.end });
     } else if (typeof node.name === "string" && NAMED.has(node.kind as string)) node.name = renamed(node.name);
     if (Array.isArray(node.typeParams)) for (const p of node.typeParams as { name: string }[]) p.name = renamed(p.name);
   });
+  rebuiltStmts(statements, rewrites);
 }
 
 // A syntax tree as text, its keys in order and without its spans.

@@ -3,7 +3,8 @@ import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
-import { nextId, renumber, walk as walkTree, type Ids } from "./nodes.ts";
+import { nextId, renumber, Rewrites, walk as walkTree, type Ids } from "./nodes.ts";
+import { rebuiltExpr, rebuiltStmt, rebuiltTypeNode } from "./rebuild.ts";
 import type { ObjectType, Type, UnionType, Typing } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the
@@ -245,6 +246,7 @@ export type Free = Map<string, string>;
 
 function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode", h: Hygiene, file: usize, bound: Map<string, string>, free: Free): unknown {
   const copy = renumber(of, structuredClone(tree), () => nextId(ids));
+  const rewrites = new Rewrites();
   const names = h.namesIn(file);
   const bind = (name: unknown) => {
     if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, h.fresh(name));
@@ -290,13 +292,12 @@ function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode
     // `{ x }` naming a renamed variable is `{ x: x@m0 }`.
     if (n.kind === "shorthand" && typeof n.name === "string" && renamed(n.name)) {
       const key = n.name;
-      const value = { id: nextId(ids), kind: "ident", name: renamed(key), start: n.start, end: n.end };
-      for (const k of Object.keys(n)) if (k !== "id") delete n[k];
-      Object.assign(n, { kind: "property", key, value, start: value.start, end: value.end });
+      const value: Expr = { id: nextId(ids), kind: "ident", name: renamed(key)!, start: n.start as usize, end: n.end as usize };
+      rewrites.replace(node as Expr, { id: 0, kind: "property", key, value, start: value.start, end: value.end });
     }
     if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) p.name = bound.get(p.name) ?? p.name;
   });
-  return copy;
+  return of === "expr" ? rebuiltExpr(copy as Expr, rewrites) : of === "stmt" ? rebuiltStmt(copy as Stmt, rewrites) : rebuiltTypeNode(copy as TypeNode, rewrites);
 }
 
 // Without `at`, every node keeps its own span, as a declaration a macro takes does. `scope`

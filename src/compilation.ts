@@ -2,7 +2,7 @@ import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.ts"
 import type { Value } from "./comptime.ts";
 import type { Names } from "./diag.ts";
 import type { Kind } from "./narrow.ts";
-import { WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
+import { Rewrites, WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
@@ -29,8 +29,9 @@ import type { DynTable } from "./values.ts";
 // `fileNames`: for a linked program, each file's top-level names by its base offset: the name each
 // declaration it reaches takes in the program, to the name the file writes for it.
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
+// `rewrites`: the nodes lowering replaced, by id, until each body's rebuild puts them in place.
 export type Compilation = {
-  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string }[]; rust: RustTables;
+  session: Session; ids: Ids; rewrites: Rewrites; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string }[]; rust: RustTables;
   enumInits: [usize, usize, string][]; fileNames: WeakMap<Stmt[], Map<usize, Map<string, string>>>; generated: WeakNodeSet<Id>;
 };
 
@@ -65,7 +66,7 @@ export function newSession(): Session {
 }
 
 export function newCompilation(session: Session): Compilation {
-  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet() };
+  return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet() };
 }
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
@@ -74,11 +75,12 @@ export function newCompilation(session: Session): Compilation {
 export type Tables = {
   // What every check of the program shares: its types, its instances, bodies, locals and classes,
   // the upcasts its macros wrote, the counter for the nodes checking makes, its counts, its regex
-  // tables, files and Rust names.
+  // tables, files and Rust names, and the nodes lowering replaced.
   typing: Typing;
   arenas: Arenas;
   upcasts: Set<string>;
   ids: Ids;
+  rewrites: Rewrites;
   counts: Counts;
   regex: RegexTables;
   files: Compilation["files"];
@@ -298,12 +300,13 @@ export type Tables = {
   computing: Set<InstanceId>;
 };
 
-export function newTables({ typing, arenas, upcasts, ids, counts, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
     typing,
     arenas,
     upcasts,
     ids,
+    rewrites,
     counts,
     regex,
     files,

@@ -1,14 +1,16 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { walkerSource, WALK } from "../scripts/walkgen.ts";
-import { childrenOf, walk } from "../src/nodes.ts";
-import { parse, parseExpression } from "../src/parser.ts";
+import { rebuildSource, REBUILD, walkerSource, WALK } from "../scripts/walkgen.ts";
+import { childrenOf, Rewrites, walk } from "../src/nodes.ts";
+import { parse, parseExpression, type Expr } from "../src/parser.ts";
+import { rebuiltExpr } from "../src/rebuild.ts";
 
 const ROOT = join(import.meta.dir, "..");
 
-test("the walkers are generated from the parser's current AST types; run 'bun scripts/walkgen.ts' when they aren't", () => {
+test("the walkers and the rebuild are generated from the parser's current AST types; run 'bun scripts/walkgen.ts' when they aren't", () => {
   expect(readFileSync(WALK, "utf8")).toBe(walkerSource(readFileSync(join(ROOT, "src", "parser.ts"), "utf8")));
+  expect(readFileSync(REBUILD, "utf8")).toBe(rebuildSource(readFileSync(join(ROOT, "src", "parser.ts"), "utf8")));
 });
 
 // Every object with an id under `roots`, found by reading every field, as a walk once did.
@@ -58,4 +60,20 @@ test("children come in the order their type lists the fields, each list of state
     return (node as { kind: string }).kind !== "arrow";
   });
   expect(kinds).toEqual(["call", "ident", "ref", "ident", "arrow"]);
+});
+
+test("a rebuild puts each replacement where its node was, under that node's id, replacements within replacements too", () => {
+  const ids = { last: 0 };
+  const e = parseExpression("f(a, g(b))", ids);
+  if (e.kind !== "call") throw new Error("not a call");
+  const [a, inner] = e.args as [Expr, Expr];
+  if (inner.kind !== "call") throw new Error("not a call");
+  const r = new Rewrites();
+  const by = r.replace(inner, { ...inner, id: 0, args: [...inner.args] });
+  const c = r.replace(inner.args[0]!, { id: 0, kind: "ident" as const, name: "c", start: 0, end: 0 });
+  expect(r.current(inner)).toBe(by);
+  expect(rebuiltExpr(e, r)).toBe(e);
+  expect(e.args).toEqual([a, by]);
+  expect(by.id).toBe(inner.id);
+  expect((by as typeof inner).args[0]).toBe(c);
 });

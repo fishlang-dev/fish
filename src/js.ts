@@ -1,5 +1,5 @@
 import { CompileError } from "./diag.ts";
-import type { ClassNode, Interface, JsName, Param, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
+import type { ClassNode, Func, Interface, JsName, Param, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import type { Declared } from "./typings.ts";
 import { nextId, renumber, walk, type Ids } from "./nodes.ts";
 
@@ -21,7 +21,7 @@ export function jsDeclaration(ids: Ids, declared: Declared, name: string, specif
   lowerTypes(d);
   switch (d.kind) {
     case "function":
-      return Object.assign(d, { name, body: undefined, js });
+      return { ...d, name, body: undefined, js };
     case "let": {
       const one = d.declarations.find((x) => x.target.kind === "ident" && x.target.name === name) ?? d.declarations[0]!;
       const type: TypeNode = one.type ?? { id: nextId(ids), kind: "ref", name: "JsValue", args: [], start: d.start, end: d.end };
@@ -35,12 +35,12 @@ export function jsDeclaration(ids: Ids, declared: Declared, name: string, specif
         return u !== unwrap(declared.at) && u.kind === "interface" && u.name === d.name ? unwrap(renumber("stmt", structuredClone(x), () => nextId(ids))) : [];
       }) as Interface[];
       merged.forEach(lowerTypes);
-      return Object.assign(d, { name, js, jsSource: declared.at, members: shapeMembers(ids, [...d.members, ...merged.flatMap((m) => m.members)]) });
+      return { ...d, name, js, jsSource: declared.at, members: shapeMembers(ids, [...d.members, ...merged.flatMap((m) => m.members)]) } as Stmt;
     }
     case "typeAlias":
-      return Object.assign(d, { name, js });
+      return { ...d, name, js };
     case "class":
-      return Object.assign(classShape(ids, d, name, js), { jsSource: declared.at });
+      return { ...classShape(ids, d, name, js), jsSource: declared.at } as Stmt;
     default:
       throw new CompileError(`'${name}' from '${specifier}' is ${KINDS[d.kind] ?? "a declaration"}, which can't be imported from a package yet`, at.start, at.end);
   }
@@ -48,16 +48,15 @@ export function jsDeclaration(ids: Ids, declared: Declared, name: string, specif
 
 // The other signatures of a function declared more than once, each as a function of its own,
 // named apart; the first declared is `name`'s, which lists them, as a call tries them in order.
-export function jsOverloads(ids: Ids, declared: Declared, made: Stmt, name: string, specifier: string, pkg: usize): Stmt[] {
+export function jsOverloads(ids: Ids, declared: Declared, made: Stmt, name: string, specifier: string, pkg: usize): Func[] {
   const first = unwrap(declared.at);
   if (first.kind !== "function" || made.kind !== "function") return [];
   const others = declared.scope.filter((s) => s !== declared.at && unwrap(s).kind === "function" && (unwrap(s) as { name: string }).name === first.name);
   const signatures = others.map((s, i) => {
     const d = unwrap(renumber("stmt", structuredClone(s), () => nextId(ids))) as Extract<Stmt, { kind: "function" }>;
     lowerTypes(d);
-    return Object.assign(d, { name: `${name} signature ${i + 2}`, body: undefined, js: { module: specifier, package: pkg, name } });
+    return { ...d, name: `${name} signature ${i + 2}`, body: undefined, js: { module: specifier, package: pkg, name } };
   });
-  if (others.length > 0) made.js = { ...made.js!, overloads: signatures };
   return signatures;
 }
 

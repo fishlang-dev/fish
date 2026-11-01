@@ -12,3 +12,8 @@ export type Ids = { last: usize };
 export function nextId(ids: Mut<Ids>): usize {
   return ++ids.last;
 }
+
+// What a rebuild reads each node's replacement through: the node itself when it has none.
+export interface Replacements {
+  current<T extends Id>(node: T): T;
+}
