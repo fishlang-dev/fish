@@ -6,14 +6,14 @@ import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
 import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
-import { parse, shiftSpans, type ClassMember, type Expr, type Func, type Span, type Specifier, type Stmt } from "./parser.ts";
+import { parse, type ClassMember, type Expr, type Func, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { fishFiles } from "./fmt.ts";
 import { MANIFEST, type RustDependency } from "./manifest.ts";
 import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.ts";
 import { ENGINE_HOOK, STD, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
-import { nextId, NodeMap, type Ids } from "./nodes.ts";
+import { nextId, NodeMap, shiftSpans, type Ids } from "./nodes.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
 // offset range, so a position anywhere in the program says which file it is in.

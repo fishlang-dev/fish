@@ -258,7 +258,9 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
   // put into a union, taken out of one, or moved between unions. The checker has made sure
   // `from` fits `to`, through exactly one member when `to` is a union.
   function convert(v: string, from: Type, to: Type): string {
-    if (from === to) return v;
+    // Types that lower to the same one, as a field's type written with `?` and the type read from
+    // it do, are laid out the same.
+    if (from === to || typing.lower(from) === typing.lower(to)) return v;
     // A recursive type's value lives in its block: read where another type is wanted, it is
     // loaded, and a value meeting one moves into a new block.
     // A union holding the block itself takes it, or gives it, as is.

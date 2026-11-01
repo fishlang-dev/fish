@@ -572,9 +572,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             state.loans.delete(object.start);
             lend(place, true, object, undefined, name, e, e.end - 1);
           }
-          // A method that changes its object, or a base's constructor, may keep what is lent.
+          // A method that changes its object, or a base's constructor, may keep what is lent,
+          // when the object has somewhere to keep a reference.
           const keeper = object ?? (e.callee.kind === "super" ? e.callee : undefined);
-          if (keeper && (self?.mutable || e.callee.kind === "super")) keeps = () => keep(keeper, e.args.filter((a) => holdsRef(coercions.get(a) ?? types.get(a)!)));
+          const keeperType = keeper && types.get(keeper);
+          const holder = keeperType === undefined || holdsRef(isRef(keeperType) ? keeperType.to : keeperType);
+          if (keeper && holder && (self?.mutable || e.callee.kind === "super")) keeps = () => keep(keeper, e.args.filter((a) => holdsRef(coercions.get(a) ?? types.get(a)!)));
         });
         keeps?.();
         if (instance.raises.has(e)) raising();

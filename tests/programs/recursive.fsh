@@ -434,3 +434,29 @@ function main() {
   const n: Tree = { kind: "node", kids: [{ kind: "leaf", v: 2 }] };
   console.log(id(t).kind, id(n).kind);
 }
+// case: recursive_array_of_optional_fields
+// An array built in a variable goes into a recursive union's member intact, its elements holding fields written `T | undefined`.
+type Span = { start: usize; end: usize }
+type Id = { id: usize }
+type Stmt = Span & Id & (
+  | { kind: "let"; decls: Declarator[] }
+  | { kind: "expr"; expr: Expr }
+) | Func
+type Expr = Span & Id & ({ kind: "num"; v: i64 } | { kind: "fn"; body: Stmt[] })
+type Func = Span & Id & { kind: "function"; name: string; body: Stmt[] | undefined }
+type Declarator = Span & Id & { target: string; type: string | undefined; init: Expr | undefined }
+function declarator(n: usize): Declarator {
+  return { id: n, target: "a", type: undefined, init: undefined, start: n, end: n }
+}
+function make(): Stmt {
+  let decls: Declarator[] = []
+  decls.push(declarator(1))
+  decls.push(declarator(2))
+  const start: usize = 0
+  return { id: 0, kind: "let", decls, start, end: start }
+}
+function main(): void {
+  const s = make()
+  if (s.kind === "let") console.log(s.decls.length, s.decls[1]!.start)
+}
+// expect: 2 2

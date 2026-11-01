@@ -2,18 +2,9 @@
 // Node ids, and the tables keyed by them. Fish's `Map` and `Set` key on strings and integers,
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
-// Every node's own number, unique in its compilation, which the compiler's per-node tables key on.
-export type Id = { id: usize };
+import type { Id } from "./ids.ts";
 
-// The counter ids come from, the last one given. Each compilation holds its own, which serves
-// every tree it parses or makes, at any time, so none share an id; a tree parsed on its own, as
-// the formatter's, has a counter of its own.
-export type Ids = { last: usize };
-
-// A fresh id from `ids`.
-export function nextId(ids: Ids): usize {
-  return ++ids.last;
-}
+export { nextId, type Id, type Ids } from "./ids.ts";
 
 // Gives every node in `tree` a fresh id: a copy made by `structuredClone` or deserializing shares
 // its original's ids, or another process's. A node reached twice, as a shared object, keeps the
@@ -30,6 +21,17 @@ export function renumber<T>(tree: T, next: () => usize): T {
   };
   walk(tree);
   return tree;
+}
+
+// Moves every span in a parsed tree by `by`, for a source placed past others in one program.
+export function shiftSpans(v: unknown, by: usize, seen: Set<unknown> = new Set<unknown>()) {
+  if (typeof v !== "object" || v === null || seen.has(v)) return;
+  seen.add(v);
+  if (Array.isArray(v)) return v.forEach((x) => shiftSpans(x, by, seen));
+  const node = v as Record<string, unknown>;
+  if (typeof node.start === "number") node.start += by;
+  if (typeof node.end === "number") node.end += by;
+  Object.values(node).forEach((x) => shiftSpans(x, by, seen));
 }
 
 // The node behind each id is kept, so a different object arriving with an id already in use, a

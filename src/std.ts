@@ -6,8 +6,8 @@ import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AST } from "./ast.ts";
 import { cacheDir, partial } from "./mathlib.ts";
-import { nextId, renumber } from "./nodes.ts";
-import { parse, shiftSpans, type Pattern, type Stmt } from "./parser.ts";
+import { nextId, renumber, shiftSpans } from "./nodes.ts";
+import { parse, type Pattern, type Stmt } from "./parser.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
