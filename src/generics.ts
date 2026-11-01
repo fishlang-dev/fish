@@ -697,7 +697,8 @@ export class Instancing {
 
   // A parameter typed with an interface or an object type is an implicit type parameter, so
   // each concrete argument type gets its own instance instead of being copied down. A
-  // parameter property and a setter's parameter keep their type, since it is a field's.
+  // parameter property and a setter's parameter keep their type, since it is a field's, save a
+  // parameter property of a function type.
   implicitOf(this: Mut<this>, f: Body): Map<usize, Bound> {
     let found = this.host.instancingState.implicits.get(f.bodyId);
     if (found) return found;
@@ -714,9 +715,11 @@ export class Instancing {
       // A reference to an interface or object type is one over what it borrows.
       const w = written && typeof written !== "string" ? this.typing.rec(written) : undefined;
       const type = w?.kind === "ref" ? w.to : written;
-      // An optional parameter is an Option of its type, not a type parameter.
-      if (!type || typeof type === "string" || p.modifiers.length > 0 || p.optional) return;
+      // An optional parameter is an Option of its type, not a type parameter. A function-typed
+      // parameter property takes a closure as a declared field assigned from a parameter does.
+      if (!type || typeof type === "string" || p.optional) return;
       const t = this.typing.rec(type);
+      if (p.modifiers.length > 0 && t.kind !== "function") return;
       if (f.accessor && t.kind === "interface") {
         throw new CompileError(`a setter's parameter can't have the interface type '${t.name}'`, p.start, p.end);
       }

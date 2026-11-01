@@ -311,3 +311,20 @@ function main() {
   fs[0](2);
   print(1);
 }
+
+// case: callable_parameter_property
+// expect: 2 6 10
+class Holder {
+  constructor(public f: (n: i64) => i64) {}
+}
+class Scaled {
+  constructor(private readonly by: (n: i64) => i64, public base: i64) {}
+  run(): i64 { return this.by(this.base); }
+}
+function main() {
+  const k = 3;
+  const a = new Holder((n: i64): i64 => n + 1);
+  const b = new Holder(move (n: i64): i64 => n * k);
+  const s = new Scaled((n: i64): i64 => n * 2, 5);
+  console.log(a.f(1), b.f(2), s.run());
+}
