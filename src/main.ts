@@ -483,8 +483,9 @@ export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa
 // Whether the IR calls into the JS engine: an instruction, not a declaration or a string's bytes.
 export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/m.test(ir);
 
-// Whether the IR calls into the TLS runtime, as fetch, serve and the tls module do.
-export const callsTls = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_tls_/m.test(ir);
+// Whether the IR calls into the OpenSSL half of the runtime, as fetch, serve and the tls module do
+// for TLS, and the postgres module for its authentication's hashes.
+export const callsTls = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_(?:tls|crypto)_/m.test(ir);
 
 // What links OpenSSL into a program calling the TLS runtime, when it was found; without it the
 // runtime's TLS calls say how to install it.

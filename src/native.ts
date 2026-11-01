@@ -7466,6 +7466,8 @@ export const TLS_NATIVE = String.raw`
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 // A stream's SSL object, or a listener's context its connections are made from. A clone of a
 // stream may read on one thread while another writes, and OpenSSL's calls on one SSL object
@@ -7783,6 +7785,27 @@ fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
   listener->tls_ops = &fsh_tls_calls;
   return fsh_tls_said("");
 }
+
+// Into out, 32 bytes, or 16 for MD5: SHA-256 of data (0), HMAC-SHA-256 of data keyed by key (1),
+// PBKDF2-HMAC-SHA-256 of the password key salted with data over rounds (2), or MD5 of data (3).
+// 1 when OpenSSL did it; each call's own success value is checked, as they differ.
+int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, int64_t rounds, uint8_t *out) {
+  unsigned int n = 0;
+  int ok = 0;
+  switch (which) {
+    case 0: ok = EVP_Digest(data, (size_t)length, out, &n, EVP_sha256(), NULL) == 1 && n == 32; break;
+    case 1: ok = HMAC(EVP_sha256(), key, (int)key_length, data, (size_t)length, out, &n) != NULL && n == 32; break;
+    case 2: ok = rounds > 0 && rounds <= INT_MAX && PKCS5_PBKDF2_HMAC((const char *)key, (int)key_length, data, (int)length, (int)rounds, EVP_sha256(), 32, out) == 1; break;
+    case 3: ok = EVP_Digest(data, (size_t)length, out, &n, EVP_md5(), NULL) == 1 && n == 16; break;
+  }
+  ERR_clear_error();
+  return ok;
+}
+
+// Why the crypto calls can't work: nothing, with OpenSSL linked.
+const char *fsh_rt_crypto_missing(void) {
+  return "";
+}
 `;
 
 // The runtime's TLS calls where OpenSSL wasn't found: each says why and how to get it.
@@ -7795,6 +7818,14 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
 
 fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
   return fsh_rt_str_from_cstring(${said});
+}
+
+int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, int64_t rounds, uint8_t *out) {
+  return 0;
+}
+
+const char *fsh_rt_crypto_missing(void) {
+  return ${said};
 }
 `;
 }
