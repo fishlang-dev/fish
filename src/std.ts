@@ -525,7 +525,8 @@ function __cookieAttribute(name: string, attribute: string, value: string): stri
   return value;
 }
 
-type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal };
+// unix is a socket path to send the request over in place of the URL's host and port.
+type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal; unix?: string };
 
 // A body given as text or bytes, as the bytes sent.
 function __httpBody(body: string | u8[]): u8[] {
@@ -1826,11 +1827,14 @@ const FETCH = `
 // Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
 // is a response, not an error, and a redirect is returned rather than followed.
 async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
+  const unix = init !== null ? init.unix : null;
   const req = __urlFetchRequest(input, init);
   const signal = req.signal.clone();
   const to = __urlFetchAddress(req.url);
   const sent = Http1.requestBytes(req, to.authority, to.path);
-  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  let conn: TcpStream;
+  if (unix !== null) conn = await TcpStream.unix(unix, signal.clone());
+  else conn = await TcpStream.connect(to.host, to.port, signal.clone());
   await conn.write(sent, signal.clone());
   let res = await Http1.receive(conn, req.method === "HEAD", signal);
   res.url = to.url;
