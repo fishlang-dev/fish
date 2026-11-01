@@ -2,8 +2,10 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { walkerSource, WALK } from "../scripts/walkgen.ts";
+import { Rewrites } from "../src/ids.ts";
 import { childrenOf, walk } from "../src/nodes.ts";
-import { parse, parseExpression } from "../src/parser.ts";
+import { parse, parseExpression, type Expr } from "../src/parser.ts";
+import { rebuiltExpr } from "../src/walk.ts";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -58,4 +60,20 @@ test("children come in the order their type lists the fields, each list of state
     return (node as { kind: string }).kind !== "arrow";
   });
   expect(kinds).toEqual(["call", "ident", "ref", "ident", "arrow"]);
+});
+
+test("a rebuild puts each replacement where its node was, under that node's id, replacements within replacements too", () => {
+  const ids = { last: 0 };
+  const e = parseExpression("f(a, g(b))", ids);
+  if (e.kind !== "call") throw new Error("not a call");
+  const [a, inner] = e.args as [Expr, Expr];
+  if (inner.kind !== "call") throw new Error("not a call");
+  const r = new Rewrites();
+  const by = r.replace(inner, { ...inner, id: 0, args: [...inner.args] });
+  const c = r.replace(inner.args[0]!, { id: 0, kind: "ident", name: "c", start: 0, end: 0 });
+  expect(r.current(inner)).toBe(by);
+  expect(rebuiltExpr(e, r)).toBe(e);
+  expect(e.args).toEqual([a, by]);
+  expect(by.id).toBe(inner.id);
+  expect((by as typeof inner).args[0]).toBe(c);
 });

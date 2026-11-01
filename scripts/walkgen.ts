@@ -121,6 +121,92 @@ export function walkerSource(parserSource: string): string {
     out.push(`// ${members.map(show).join(" | ")}`, ...fn(name, members.map(show).join(" | "), body));
   }
 
+  // The rebuild: each node replaced by what the rewrite table holds for it, its children first
+  // rebuilt in turn. `get` reads a place holding nodes of type `t`, `set` writes it.
+  let rebuildDepth = 0;
+  const rebuilds = (t: TypeNode, get: string, set: string): string[] => {
+    const f = formOf(t);
+    switch (f.form) {
+      case "json":
+      case "plain":
+      case "bigint":
+        return [];
+      case "node":
+        return [`${set} = rebuilt${f.name}(${get}, r);`];
+      case "union":
+        return holdsNodes(f.members) ? [`${set} = rebuilt${unionName(f.members).slice("visit".length)}(${get}, r);`] : [];
+      case "array": {
+        if (ref(f.element, "Stmt")) return [`rebuiltStmts(${get}, r);`];
+        const i = `i${++rebuildDepth}`;
+        const inner = rebuilds(f.element, `${get}[${i}]!`, `${get}[${i}]`);
+        rebuildDepth--;
+        return inner.length ? [`for (let ${i} = 0; ${i} < ${get}.length; ${i}++) {`, ...inner.map((l) => `  ${l}`), `}`] : [];
+      }
+      case "option": {
+        const inner = rebuilds(f.inner, `${set}!`, set);
+        return inner.length ? [`if (${set} !== undefined) {`, ...inner.map((l) => `  ${l}`), `}`] : [];
+      }
+      case "object":
+        return fieldRebuilds(f.fields, get);
+    }
+  };
+  const fieldRebuilds = (fields: { name: string; optional: boolean; type: TypeNode }[], value: string): string[] =>
+    fields.flatMap((f) => {
+      const inner = rebuilds(f.type, `${value}.${f.name}${f.optional ? "!" : ""}`, `${value}.${f.name}`);
+      return f.optional && inner.length ? [`if (${value}.${f.name} !== undefined) {`, ...inner.map((l) => `  ${l}`), `}`] : inner;
+    });
+  const hasId = (name: string) => shapes(aliases.get(name)!).every((s) => s.fields.some((f) => f.name === "id"));
+  const rebuildChildren = (name: string): string[] => {
+    const all = shapes(aliases.get(name)!);
+    if (all.length === 1 && all[0]!.kind === undefined) return fieldRebuilds(all[0]!.fields, "m");
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const s of all) {
+      if (s.kind === undefined || seen.has(s.kind)) continue;
+      seen.add(s.kind);
+      const body = fieldRebuilds(s.fields, "m");
+      if (body.length) out.push(`  case ${JSON.stringify(s.kind)}:`, ...body.map((l) => `    ${l}`), `    break;`);
+    }
+    return out.length ? [`switch (m.kind) {`, ...out, `}`] : [];
+  };
+  const rebuilt: string[] = [];
+  for (const name of nodes) {
+    rebuilt.push(
+      `export function rebuilt${name}(n: ${name}, ${"r"}: Ref<Rewrites>): ${name} {`,
+      `  const m = ${hasId(name) ? "r.current(n)" : "n"};`,
+      ...rebuildChildren(name).map((l) => `  ${l}`),
+      `  return m;`,
+      `}`,
+      ``,
+    );
+  }
+  rebuilt.push(`export function rebuiltStmts(n: Stmt[], r: Ref<Rewrites>): Stmt[] {`, `  for (let i = 0; i < n.length; i++) {`, `    n[i] = rebuiltStmt(n[i]!, r);`, `  }`, `  return n;`, `}`, ``);
+  for (let i = 0; i < unions.size; i++) {
+    const [, { name, members }] = [...unions][i]!;
+    const type = members.map(show).join(" | ");
+    const body: string[] = [];
+    let rest = members.flatMap(expand).filter((m) => !ref(m, "string"));
+    const array = rest.find((m) => m.kind === "array");
+    if (array) {
+      body.push(`if (Array.isArray(n)) {`, ...rebuilds(array, "n", "n").map((l) => `  ${l}`), `  return n;`, `}`);
+      rest = rest.filter((m) => m !== array);
+    }
+    if (members.flatMap(expand).some((m) => ref(m, "string"))) body.unshift(`if (typeof n === "string") return n;`);
+    const owner = (m: TypeNode) => (m.kind === "ref" && m.name === "Extract" && m.args[0]!.kind === "ref" ? m.args[0]!.name : m.kind === "ref" ? m.name : "");
+    if (rest.length === 1) body.push(`return rebuilt${owner(rest[0]!)}(n, r) as ${type};`);
+    else {
+      const seen = new Set<string>();
+      body.push(`switch (n.kind) {`);
+      for (const m of rest) {
+        const kinds = shapes(m).flatMap((s) => (s.kind === undefined || seen.has(s.kind) ? [] : [s.kind]));
+        kinds.forEach((k) => seen.add(k));
+        for (const k of kinds) body.push(`  case ${JSON.stringify(k)}:`, `    return rebuilt${owner(m)}(n, r) as ${type};`);
+      }
+      body.push(`}`, `return n;`);
+    }
+    rebuilt.push(`// ${type}`, `export function rebuilt${name.slice("visit".length)}(n: ${type}, r: Ref<Rewrites>): ${type} {`, ...body.map((l) => `  ${l}`), `}`, ``);
+  }
+
   const visitor = [
     `// What a walk does at each node it reaches, by the node's type. A method visits a node's children`,
     `// by calling the matching \`childrenOf\` function, or skips them by not calling it.`,
@@ -131,15 +217,18 @@ export function walkerSource(parserSource: string): string {
     `}`,
     ``,
   ];
-  const imports = [...aliases.keys()].filter((name) => out.some((l) => new RegExp(`\\b${name}\\b`).test(l)));
+  const imports = [...aliases.keys()].filter((name) => [...out, ...rebuilt].some((l) => new RegExp(`\\b${name}\\b`).test(l)));
   return [
     `// Generated from the parser's AST types by \`bun scripts/walkgen.ts\`; a test fails when it is stale.`,
     `// Each \`childrenOf\` function hands each node a node holds to the visitor, in the order its type`,
-    `// lists the fields.`,
+    `// lists the fields. Each \`rebuilt\` function gives a node as the rewrite table has it, with each`,
+    `// node under it put in place the same way.`,
+    `import type { Rewrites } from "./ids.ts";`,
     `import type { ${imports.join(", ")} } from "./parser.ts";`,
     ``,
     ...visitor,
     ...out,
+    ...rebuilt,
   ].join("\n").trimEnd() + "\n";
 }
 

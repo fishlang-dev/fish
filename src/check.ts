@@ -9,6 +9,7 @@ import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, 
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
+import { rebuiltParam, rebuiltStmts } from "./walk.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
@@ -410,7 +411,7 @@ export function check(compilation: Compilation, written: Stmt[], library = false
 }
 
 function checkAll(compilation: Compilation, written: Stmt[], library: boolean, macros: boolean, module: boolean): Checked {
-  const { arenas, counts, ids, rust: { names: rustNames, classNodes: rustClassNodes } } = compilation;
+  const { arenas, counts, ids, rewrites, rust: { names: rustNames, classNodes: rustClassNodes } } = compilation;
   const localOf = (id: LocalId): Local => arenas.localOf(id);
   const tables = newTables(compilation);
   const { typing } = tables;
@@ -1579,6 +1580,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const at = f.returnType ?? f;
       throw new CompileError("not all code paths return a value", at.start, at.end);
     }
+    // From here on the body is read as a plain tree, its replacements in place.
+    for (let i = 0; i < f.params.length; i++) f.params[i] = rebuiltParam(f.params[i]!, rewrites);
+    rebuiltStmts(f.body, rewrites);
     checkMoves(f, instance, origins);
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (self && classOf(self.type).methods.get("clone") === f.bodyId && (f.params.length > 0 || type !== self.type)) {
