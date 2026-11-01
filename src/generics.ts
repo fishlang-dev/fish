@@ -49,7 +49,7 @@ export function typeParamsOf(f: Body): TypeParam[] {
 // Binds the type parameters `node` names by matching it against an argument's type, looking
 // through the check's type aliases.
 export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
-  const { aliases, expanding, typing: { sameCallable, heldArgument, sameLowered, show, yieldsOf, withoutNull, arrayType } } = tables;
+  const { aliases, expanding, typing: { sameCallable, heldArgument, sameLowered, show, yieldsOf, withoutNull, arrayType, unionType, promiseElement } } = tables;
   arg = unfold(arg);
   // `Pair<T>` naming a generic alias matches what the alias stands for, its parameters given
   // as written.
@@ -83,6 +83,20 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
       throw new CompileError(`the type argument for '${node.name}' can't be both '${show(earlier)}' and '${show(arg)}'`, at.start, at.end);
     }
     bindings.set(node.name, arg);
+    return;
+  }
+  // `T | null`, `Option<T>` and `T | string` against a value: the members the written ones
+  // already cover say nothing, and the rest are T, as TypeScript infers. Absence alone gives no T.
+  const option = node.kind === "ref" && node.name === "Option" && node.args.length === 1 && !names.has(node.name);
+  const members = node.kind === "union" ? node.types : option ? node.args : undefined;
+  if (members) {
+    const open = members.filter((n) => holdsNode(n, (x) => x.kind === "ref" && names.has(x.name as string)));
+    if (open.length !== 1) return;
+    const covers = (n: TypeNode, m: Type) =>
+      (n.kind === "ref" && n.args.length === 0 && (m === "null" ? n.name === "null" || n.name === "undefined" : n.name === show(m) || n.name === show(widenLet(m)))) ||
+      (n.kind === "literal" && typeof m !== "string" && m.kind === "literal" && "value" in n.value && n.value.value === m.value);
+    const rest = (typeof arg !== "string" && arg.kind === "union" ? arg.members : [arg]).filter((m) => !(option && m === "null") && !members.some((n) => n !== open[0] && covers(n, m)));
+    if (rest.length > 0) infer(tables, open[0]!, rest.length === 1 ? rest[0]! : unionType(rest), names, bindings, at);
     return;
   }
   // `Ref<T>` against a value or a reference borrows a T.
@@ -137,6 +151,12 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
   const trait = typeof arg !== "string" && arg.kind === "dyn" ? arg.of : arg;
   if (node.kind === "ref" && typeof trait !== "string" && trait.kind === "interface" && trait.generic?.name === node.name) {
     node.args.forEach((n, i) => trait.generic!.args[i] && infer(tables, n, trait.generic!.args[i]!, names, bindings, at));
+    return;
+  }
+  // `Promise<T>` against a promise matches what it gives.
+  if (node.kind === "ref" && node.name === "Promise" && node.args.length === 1 && !names.has(node.name)) {
+    const gives = typeof arg !== "string" && arg.kind === "future" ? arg.gives : promiseElement(arg);
+    if (gives !== undefined) infer(tables, node.args[0]!, gives, names, bindings, at);
     return;
   }
   // `Generator<T>` against a generator matches what it yields.
@@ -267,7 +287,7 @@ export function comptimeName(p: Param): string {
 
 export function instancing({ tables, resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
   const { typing } = tables;
-  const { callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
+  const { callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, promiseInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
   const concrete = concreteness(typing);
   const explicit = new WeakMap<Body, Map<string, Type>>();
   const instances = new Map<Body, Map<string, Instance>>();
@@ -483,8 +503,8 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     // An argument from inside another instance may be one of its type parameters; the instance
     // is keyed by what that stands for, and the call site remembers the parameter itself.
     const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
-    // A `Generator<T>` bound names the function's own type parameters, which the call has just
-    // decided, so the argument is checked against what they stand for.
+    // A `Generator<T>` or `Promise<T>` bound names the function's own type parameters, which the
+    // call has just decided, so the argument is checked against what they stand for.
     // So does a function type's, and the class's own parameters stand for what this class
     // instance gives them.
     const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
@@ -493,9 +513,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
       ...[...outer].flatMap(([name, held]): [Type, Type][] => (f.scope?.has(name) ? [[held, f.scope.get(name)!]] : [])),
     ]);
     for (const [i, bound] of implicitOf(f)) {
-      const element = generatorElement(bound);
-      const asyncElement = generatorElement(bound, true);
-      const meant = element !== undefined && decided.size > 0 ? generatorInterface(replaced(element, decided)) : asyncElement !== undefined && decided.size > 0 ? asyncGeneratorInterface(replaced(asyncElement, decided)) : (bound.kind === "function" || (bound.kind === "interface" && bound.generic)) && decided.size > 0 ? replaced(bound, decided) as Bound : bound;
+      const meant = rebound(bound, decided);
       own.set(`#${i}`, implicitArgument(args[i]!, argTypes[i]!, meant, lent.get(f)!.has(i)));
       const given = argTypes[i]!;
       const held = typeof given !== "string" && given.kind === "ref" ? given.to : given;
@@ -544,8 +562,23 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
   function paramTypes(instance: Instance, scope: Map<string, Type> = instance.bindings): Type[] {
     const f = instance.body;
     const implicit = implicitOf(f);
+    // A generic class's instance gives its parameters what they stand for there, in an implicit
+    // parameter's bound too, as a call decides the function's own.
+    const outer = classPlaceholders(tables, classParams(f), (t, s) => withScope(s, () => resolveType(t)));
+    const decided = new Map([...outer].flatMap(([name, held]): [Type, Type][] => (scope.has(name) && scope.get(name) !== held ? [[held, scope.get(name)!]] : [])));
     return signing(f, () => withScope(scope, () => f.params.map((p, i) =>
-      lentAs(f, i, scope.get(`#${i}`) ?? implicit.get(i)) ?? paramType(p, f.self?.constructor))));
+      lentAs(f, i, scope.get(`#${i}`) ?? (implicit.has(i) ? rebound(implicit.get(i)!, decided) : undefined)) ?? paramType(p, f.self?.constructor))));
+  }
+
+  // An implicit parameter's bound with the type parameters a call or a class instance decided
+  // replaced by what they stand for.
+  function rebound(bound: Bound, decided: Map<Type, Type>): Bound {
+    if (decided.size === 0) return bound;
+    const [element, asyncElement, promised] = [generatorElement(bound), generatorElement(bound, true), promiseElement(bound)];
+    if (element !== undefined) return generatorInterface(replaced(element, decided));
+    if (asyncElement !== undefined) return asyncGeneratorInterface(replaced(asyncElement, decided));
+    if (promised !== undefined) return promiseInterface(replaced(promised, decided));
+    return bound.kind === "function" || (bound.kind === "interface" && bound.generic) ? replaced(bound, decided) as Bound : bound;
   }
 
   // What a concrete instance's body sees: each of its type parameters, and those of a generic
