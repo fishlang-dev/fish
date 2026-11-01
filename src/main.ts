@@ -259,7 +259,13 @@ function linked(session: Session, ir: string, instances: Instance[], out: string
   try {
     const object = join(dir, "program.o");
     timed(timings, "compile", () => clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", release ? "-O2" : "-O0", ...g], program));
-    timed(timings, "link", () => clang([...clangArgs(out, release, links, objects, shim, target, [object]), ...g]));
+    timed(timings, "link", () => {
+      clang([...clangArgs(out, release, links, objects, shim, target, [object]), ...g]);
+      // On macOS the debug info stays in the object, deleted below; clang gathers it into a .dSYM
+      // only when it compiles and links in one call, so it is gathered here.
+      const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
+      if (debug && darwin) clang(["dsymutil", out]);
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
