@@ -161,6 +161,8 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_tcp_bind(ptr, i64, ptr, ptr)",
   "declare i64 @fsh_rt_tcp_port(ptr)",
   "declare i32 @fsh_rt_unix_bind(ptr, ptr, ptr)",
+  "declare ptr @fsh_rt_tls_client(ptr, ptr, ptr)",
+  "declare ptr @fsh_rt_tls_listen(ptr, ptr, ptr)",
   "declare i32 @fsh_rt_unix_connect(ptr, ptr, ptr, ptr, ptr)",
   "declare void @fsh_rt_unix_unlink(ptr)",
   "declare i32 @fsh_rt_udp_bind(ptr, i64, ptr, ptr)",

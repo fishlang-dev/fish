@@ -186,7 +186,9 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["http", PLANNED("HTTP client")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
   ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
-  ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
+  // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
+  // Node's own connect and its sockets with events.
+  ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("URL and query strings")], ["querystring", PLANNED("URL and query strings")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Typed arrays and DataView")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
@@ -515,7 +517,9 @@ function stdHas(n: Node, specifier: string): boolean {
 // equivalent, by the built-in each is filed under. Node's randomBytes gives a Buffer and std's a
 // u8[], so code calling Buffer methods on it, as 'randomBytes(16).toString("hex")', waits on typed
 // arrays. randomInt has no plan item, so it is filed under its own name, which nothing replaces.
-const NAME_MODULES: Record<string, Record<string, string>> = { crypto: { randomBytes: "buffer", randomInt: "crypto.randomInt" } };
+// Node's tls.connect takes options and gives a socket with events, where std's is awaited and
+// gives a TcpStream, so it waits on Node's tls.
+const NAME_MODULES: Record<string, Record<string, string>> = { crypto: { randomBytes: "buffer", randomInt: "crypto.randomInt" }, tls: { connect: "tls" } };
 
 // What a std module exports that ports as written: its functions and its consts, less those.
 function stdExports(name: string): Set<string> {

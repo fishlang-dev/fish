@@ -2879,7 +2879,8 @@ export function expressions(ctx: Context) {
     const sockets = ["accept", "read", "write"].includes(callee.name);
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
     const methods: Record<string, number> = t.which === "Semaphore" ? { acquire: 0, available: 0 } : t.which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
-      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" || t.which === "UnixListener" ? { accept: 0 } : t.which === "TcpStream" || t.which === "UnixStream" ? { read: 1, write: 1 } : {};
+      : t.which === "AbortController" ? { abort: 0 } : t.which === "AbortSignal" ? { throwIfAborted: 0 } : t.which === "TcpListener" || t.which === "UnixListener" ? { accept: 0, ...(e.start >= STD_BASE ? { listenTls: 2 } : {}) }
+      : t.which === "TcpStream" || t.which === "UnixStream" ? { read: 1, write: 1, ...(e.start >= STD_BASE ? { startTls: 2 } : {}) } : {};
     if (!(callee.name in methods)) {
       const has = t.which === "Semaphore" ? "it has 'acquire' and 'available'" : t.which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
         : t.which === "AbortController" ? "it has 'abort' and 'signal'" : t.which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
@@ -2898,6 +2899,16 @@ export function expressions(ctx: Context) {
       coerce(e.args[0]!, given, of, `argument of type '${show(given)}' is not assignable to parameter of type '${show(of)}'`);
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
+    // std's own TLS setup, `startTls(serverName, ca)` on a stream and `listenTls(cert, key)` on a
+    // listener, giving why it failed, or an empty string.
+    if (callee.name === "startTls" || callee.name === "listenTls") {
+      for (const arg of e.args) {
+        expect(arg, "string");
+        const given = value(arg);
+        coerce(arg, given, "string", `'${callee.name}' takes strings, not '${show(given)}'`);
+      }
+      return { type: "string", what: `'${callee.name}'` };
+    }
     if (callee.name === "accept") return { type: leafFuture("accept", t.which === "UnixListener" ? blockType("UnixStream") : "void", socketError(signalled), signalled), what: "'accept'" };
     // `read(max)` gives at most max bytes, and `write(bytes)` takes its bytes to send them all.
     if (callee.name === "read" || callee.name === "write") {

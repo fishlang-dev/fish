@@ -97,8 +97,7 @@ async function main(): Promise<void> throws IoError | AbortError {
 // expect: long chunk line: the response's chunk size line is over 1 KiB
 // expect: too big: the response's status line and headers are over 64 KiB
 // expect: header: can't fetch 'http://127.0.0.1:PORT/': header 'x-a' holds a line break or isn't a header name
-// expect: ftp: can't fetch 'ftp://example.test/': only http: URLs are supported
-// expect: https: can't fetch 'https://example.test/': https: needs TLS, which isn't supported yet
+// expect: ftp: can't fetch 'ftp://example.test/': only http: and https: URLs are supported
 // expect: no host: can't fetch 'http://': it isn't a valid URL
 // expect: user: can't fetch 'http://me@example.test/': a URL can't hold a user name or password
 // expect: port: can't fetch 'http://example.test:0/': the port isn't a number from 1 to 65535
@@ -168,7 +167,6 @@ async function main(): Promise<void> throws IoError {
   h.set("x-a", "1\r\nx-b: 2");
   await attempt("header", url, { headers: h }, port);
   await attempt("ftp", "ftp://example.test/", {}, port);
-  await attempt("https", "https://example.test/", {}, port);
   await attempt("no host", "http://", {}, port);
   await attempt("user", "http://me@example.test/", {}, port);
   await attempt("port", "http://example.test:0/", {}, port);

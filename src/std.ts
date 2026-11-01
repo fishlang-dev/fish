@@ -525,8 +525,9 @@ function __cookieAttribute(name: string, attribute: string, value: string): stri
   return value;
 }
 
-// unix is a socket path to send the request over in place of the URL's host and port.
-type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal; unix?: string };
+// unix is a socket path to send the request over in place of the URL's host and port; tls.ca is
+// PEM certificates an https: server's is verified against in place of the system's, as Bun's is.
+type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal; unix?: string; tls?: { ca?: string } };
 
 // A body given as text or bytes, as the bytes sent.
 function __httpBody(body: string | u8[]): u8[] {
@@ -746,11 +747,12 @@ function __sseLine(value: string): string {
 
 type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
-// unix is a socket path to serve on in place of a port, removed when serve stops.
-type ServeOptions = { port?: i64; hostname?: string; unix?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
+// unix is a socket path to serve on in place of a port, removed when serve stops. tls has the
+// server speak HTTPS with a PEM certificate chain and its private key, as Bun's does.
+type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
 type ServeHandler = (req: Request) => Promise<Response>;
 // What serve's options settle for each connection, under a name no program can write.
-type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64 };
+type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean };
 // A router's internal names take forms no program can write, so a program's own never hides
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
@@ -776,6 +778,7 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     maxBodySize: Http1.option(options.maxBodySize, 134217728, "maxBodySize", "bytes"),
     headerTimeout: Http1.option(options.headerTimeout, 60000, "headerTimeout", "milliseconds, or 0 for no timeout"),
     idleTimeout: Http1.option(options.idleTimeout, 10000, "idleTimeout", "milliseconds, or 0 for no timeout"),
+    secure: options.tls !== null,
   };
   // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
   const given = options.signal;
@@ -786,6 +789,12 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     let listener: TcpListener;
     if (unix !== null) listener = await TcpListener.unix(unix);
     else listener = await TcpListener.bind(hostname, port);
+    // Each connection's handshake runs in its first read, in its own task and within the limits.
+    const tls = options.tls;
+    if (tls !== null) {
+      const why = listener.listenTls(tls.cert, tls.key);
+      if (why.length > 0) throw new IoError("serve can't use its tls option: " + why);
+    }
     const bound = listener.port;
     const listen = options.onListen;
     if (listen !== null) listen({ hostname: unix ?? hostname, port: bound });
@@ -886,7 +895,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const done = new AbortController();
       const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
       // The body is set after, not passed in init, which would copy it.
-      let req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, signal: signal.clone() });
+      let req = new Request((limits.secure ? "https://" : "http://") + authority + head.target, { method: method, headers: head.headers, signal: signal.clone() });
       req.body = body;
       // The handler runs as a task of its own, so a panic in it ends only that task: its client
       // gets a bare 500 and the connection closes, and the server goes on serving.
@@ -1824,10 +1833,11 @@ class Http1 {
 
 // fetch, whose URLs the URL library's parser reads.
 const FETCH = `
-// Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
-// is a response, not an error, and a redirect is returned rather than followed.
+// Fetches a URL over HTTP/1.1, or HTTPS, one connection per request, as the Fetch API does: a
+// 4xx or 5xx is a response, not an error, and a redirect is returned rather than followed.
 async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
   const unix = init !== null ? init.unix : null;
+  const ca = init !== null ? init.tls?.ca ?? "" : "";
   const req = __urlFetchRequest(input, init);
   const signal = req.signal.clone();
   const to = __urlFetchAddress(req.url);
@@ -1835,6 +1845,7 @@ async function fetch(input: string | Request | URL, init?: RequestInit): Promise
   let conn: TcpStream;
   if (unix !== null) conn = await TcpStream.unix(unix, signal.clone());
   else conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  if (to.secure) await __tlsClient(conn, to.host, ca, signal.clone());
   await conn.write(sent, signal.clone());
   let res = await Http1.receive(conn, req.method === "HEAD", signal);
   res.url = to.url;
@@ -1859,26 +1870,27 @@ function __urlFetchRequest(input: string | Request | URL, init?: RequestInit): R
   return req;
 }
 
-// Where an http: URL points: host and port to connect to, the Host header, the path and query
+// Where an http: or https: URL points: host and port to connect to, the Host header, the path and query
 // sent, and the URL without its fragment.
-function __urlFetchAddress(url: string): { host: string; port: i64; authority: string; path: string; url: string } throws IoError {
+function __urlFetchAddress(url: string): { host: string; port: i64; secure: boolean; authority: string; path: string; url: string } throws IoError {
   const parsed = __urlFetchTarget(url);
   if (typeof parsed === "string") throw new IoError("can't fetch '" + url + "': " + parsed);
   const authority = parsed.port >= 0 ? parsed.host + ":" + String(parsed.port) : parsed.host.clone();
   const query = parsed.hasQuery ? "?" + parsed.query : "";
   // An IPv6 host connects without the brackets it has in the URL and the Host header.
   const host = parsed.host.startsWith("[") ? parsed.host.slice(1, (parsed.host.length as i64) - 1) : parsed.host.clone();
-  return { host: host, port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
+  const secure = parsed.scheme === "https";
+  return { host: host, port: parsed.port >= 0 ? parsed.port : secure ? 443 : 80, secure: secure, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
 }
 `;
 
 // A request's path in a program without the URL library, whose requests all come from the server.
 const SERVED = String.raw`
 // A request's path, read with the parser's path rules from its URL as the server writes it:
-// "http://", a Host header the server checked, and a target starting with '/'.
+// "http://" or "https://", a Host header the server checked, and a target starting with '/'.
 function __urlRequestPath(url: string): string {
   const input = __urlInput(url);
-  let p: i64 = 7;
+  let p: i64 = url.startsWith("https:") ? 8 : 7;
   while (p < (input.length as i64) && input[p as usize] !== 47) p++;
   let record = __urlEmpty();
   record.scheme = "http";
@@ -2741,12 +2753,11 @@ function __urlRequestPath(url: string): string {
   return typeof parsed === "string" ? "" : __urlPathText(parsed);
 }
 
-// Where an http: URL points, for fetch: its record, or why it can't be fetched.
+// Where an http: or https: URL points, for fetch: its record, or why it can't be fetched.
 function __urlFetchTarget(url: string): __urlRecord | string {
   const parsed = __urlParse(url, null);
   if (typeof parsed === "string") return parsed.startsWith("Invalid URL: ") ? parsed.slice(13) : "it isn't a valid URL";
-  if (parsed.scheme === "https") return "https: needs TLS, which isn't supported yet";
-  if (parsed.scheme !== "http") return "only http: URLs are supported";
+  if (parsed.scheme !== "http" && parsed.scheme !== "https") return "only http: and https: URLs are supported";
   if (parsed.username.length > 0 || parsed.password.length > 0) return "a URL can't hold a user name or password";
   if (parsed.port === 0) return "the port isn't a number from 1 to 65535";
   return parsed;
@@ -3404,6 +3415,17 @@ async function readLine(): Promise<string | null> {
   if (end > 0 && line[end - 1] === 10) end--;
   if (end > 0 && line[end - 1] === 13) end--;
   return new TextDecoder().decode(line.slice(0, end as i64));
+}
+`;
+
+// A TLS client on a connected stream, in a program that fetches or names the tls module.
+const TLS = String.raw`
+// Starts TLS as the client on a connected stream and finishes the handshake, so a server whose
+// certificate doesn't verify fails here: an empty write sends nothing past the handshake.
+async function __tlsClient(conn: Ref<TcpStream>, serverName: string, ca: string, signal: AbortSignal): Promise<void> throws IoError | AbortError {
+  const why = conn.startTls(serverName, ca);
+  if (why.length > 0) throw new IoError(why);
+  await conn.write([], signal);
 }
 `;
 
@@ -4116,6 +4138,21 @@ export function spawnSyncText(command: string, args: string[] = [], options: Spa
   return new SpawnSyncReturns<string>(r.pid, r.status, r.signal, text.decode(r.stdout), text.decode(r.stderr), r.error);
 }
 `,
+  // TLS client streams as a global module: tls.connect gives a TcpStream whose bytes are
+  // encrypted, once the handshake has verified the server's certificate.
+  tls: String.raw`
+// serverName is the name the certificate must be for, when it isn't host; ca is PEM certificates
+// trusted in place of the system's.
+export type ConnectOptions = { serverName?: string; ca?: string; signal?: AbortSignal };
+
+export async function connect(host: string, port: i64, options: ConnectOptions = {}): Promise<TcpStream> throws IoError | AbortError {
+  const given = options.signal;
+  const signal = given ?? new AbortController().signal;
+  const conn = await TcpStream.connect(host, port, signal.clone());
+  await __tlsClient(conn, options.serverName ?? host, options.ca ?? "", signal);
+  return conn;
+}
+`,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
   // buffer so readers can be mixed.
   stdin: String.raw`
@@ -4206,7 +4243,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB + DATE + STDIN;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB + DATE + STDIN + TLS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -4293,6 +4330,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const atob = next(ATOB);
   const dates = next(DATE);
   const reading = next(STDIN);
+  const tls = next(TLS);
   renameValue([...json, ...jsonName]);
   const astNames = ast.flatMap(declaredNames);
   const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]], [reading, ["readLine"]]] as const;
@@ -4313,7 +4351,8 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // btoa and atob call them too.
   const encoding = linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
   const dated = httpUsed || uses(written, dates, ["Date"]);
-  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : [])];
+  const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
+  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(secure ? tls : [])];
 }
 
 // A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.
