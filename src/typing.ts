@@ -488,8 +488,13 @@ export function holdsInterior(t: Type): InteriorType | undefined {
 }
 
 // A short name for what `description` describes, the same in every program that has it: six
-// base-36 digits of its hash.
-export const digest = (description: string): string => Bun.hash(description).toString(36).slice(-6);
+// base-36 digits of its 64-bit FNV-1a hash over UTF-8. The hash is written here rather than taken
+// from Bun so that a compiler built by Fish names instances exactly as this one does.
+export function digest(description: string): string {
+  let h = 0xcbf29ce484222325n;
+  for (const b of new TextEncoder().encode(description)) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
+  return h.toString(36).slice(-6);
+}
 
 // A tuple's element types, in order.
 export function elementsOf(t: ObjectType): Type[] {
