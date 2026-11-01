@@ -122,3 +122,56 @@ async function main() {
   await sleep(10);
   console.log("main done");
 }
+// case: spawn_blocking_argument_first
+// expect: make a
+// expect: after spawn
+// expect: 7
+function make(tag: string): () => i64 {
+  console.log("make", tag);
+  return () => 7;
+}
+async function main() {
+  const h = spawnBlocking(make("a"));
+  console.log("after spawn");
+  await sleep(50);
+  const r = await h;
+  console.log(r);
+}
+// case: spawn_blocking_argument_borrows
+// expect: 6 3
+function summer(xs: Ref<i64[]>): () => i64 {
+  const n = xs.length as i64;
+  return () => n * 2;
+}
+async function main() {
+  const xs = [1, 2, 3];
+  const v = await spawnBlocking(summer(xs));
+  console.log(v, xs.length);
+}
+// case: spawn_blocking_async_function
+// error: 'spawnBlocking' runs a synchronous function on a thread of its own; run async work with 'spawn' instead
+async function work(): Promise<i64> {
+  await sleep(10);
+  return 3;
+}
+async function main() {
+  const p = await spawnBlocking(work);
+}
+// case: spawn_blocking_not_function
+// error: 'spawnBlocking' needs a function taking no arguments, like 'spawnBlocking(() => work())', not 'i64'
+async function main() {
+  const v = await spawnBlocking(5);
+}
+// case: spawn_blocking_parameters
+// error: 'spawnBlocking' calls its function with no arguments, so it can't take parameters; capture what it needs instead
+async function main() {
+  const v = await spawnBlocking((x: i64) => x);
+}
+// case: spawn_blocking_function_parameters
+// error: 'spawnBlocking' calls its function with no arguments, but this one takes 1; wrap it, as in 'spawnBlocking(() => f(x))'
+function twice(x: i64): i64 {
+  return x * 2;
+}
+async function main() {
+  const v = await spawnBlocking(twice);
+}
