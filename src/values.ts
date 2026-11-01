@@ -273,7 +273,7 @@ export type DynTable = { methods: (Instance | undefined)[]; fields: (Instance | 
 
 export function expressions(ctx: Context) {
   const {
-    asserts, awaitedNow, clocks, combinedCalls, computed, declaredTypes, deepEqualities, defaulted, joinCalls, integerCalls,
+    asserts, awaitedNow, blockingRuns, clocks, combinedCalls, computed, declaredTypes, deepEqualities, defaulted, joinCalls, integerCalls,
     dynCalls, dynMembers, boxedMembers, madeArrows, equalities, fallbacks, fileCalls, filling, fills, fixedFills,
     fixedPrints, formatCalls, inspectCalls, jsAccessors, jsBodies, jsCalledAt, jsCalls, jsClasses,
     jsCrossings, jsEmptyTests, jsEvaluations, jsExports, jsGiven, jsMembers, jsMethods, jsNews,
@@ -887,10 +887,32 @@ export function expressions(ctx: Context) {
     return e.callee.kind === "member" && linked(e.callee) && result.type !== "void" ? { ...result, type: optional(result.type, e) } : result;
   }
 
+  // The call `spawnBlocking` makes of a function it was given by name or value must take no
+  // arguments and give no Promise.
+  function blockingRun(callee: Extract<Expr, { kind: "ident" }>): void {
+    const sync = "'spawnBlocking' runs a synchronous function on a thread of its own; run async work with 'spawn' instead";
+    const declared = !lookup(callee.name) ? byName.get(callee.name) : undefined;
+    let wrong: string | undefined;
+    if (declared) {
+      const needed = declared.params.filter((p) => !p.optional && !p.default && !p.rest).length;
+      wrong = declared.async ? sync : needed > 0 ? `'spawnBlocking' calls its function with no arguments, but this one takes ${needed}; wrap it, as in 'spawnBlocking(() => f(x))'` : undefined;
+    } else {
+      const t = value(callee);
+      const through = lower(isRefType(t) ? t.to : t);
+      const fn = isCallable(through) ? callableOf.get((through as DynType).of) : typeof through !== "string" && (through.kind === "closure" || through.kind === "function") ? through : undefined;
+      wrong = !fn ? `'spawnBlocking' needs a function taking no arguments, like 'spawnBlocking(() => work())', not '${show(t)}'`
+        : fn.params.length > 0 ? `'spawnBlocking' calls its function with no arguments, but this one takes ${fn.params.length}; wrap it, as in 'spawnBlocking(() => f(x))'`
+        : typeof fn.returns !== "string" && fn.returns.kind === "future" ? sync
+        : undefined;
+    }
+    if (wrong) throw new CompileError("E0305", wrong, callee.start, callee.end);
+  }
+
   function callee(e: Call): { type: Type; what: string } {
     // `t[0](x)` calls a tuple's element, as a field holding a callable is called.
     untuple(e.callee);
     const { callee } = e;
+    if (blockingRuns.has(e) && callee.kind === "ident") blockingRun(callee);
     if (e.optional) throw unsupported("optional calls", e);
     if (callee.kind === "super") {
       if (e !== superCall) throw new CompileError("E0703", "'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
@@ -1121,8 +1143,29 @@ export function expressions(ctx: Context) {
     // `spawn(p)`: the future runs as a task of its own, on any thread, and its handle awaits it.
     // The std library's code calls the built-ins, whatever a program names its own functions.
     const inStd = e.start >= STD_BASE;
-    // std's `timer spawn` is `spawn` with the task's first poll run at once.
-    if (callee.kind === "ident" && ((callee.name === "spawn" && (!byName.has("spawn") || inStd)) || (callee.name === "timer spawn" && inStd))) {
+    // `spawnBlocking(f)` is `spawn(async () => f())` with the task polled on the blocking pool, so
+    // f may block or compute for long without holding up the async workers. An `f` that is neither
+    // an arrow nor a name is made here, on the caller's thread, as `f |> spawn(async () => %())`.
+    if (callee.kind === "ident" && callee.name === "spawnBlocking" && (!byName.has("spawnBlocking") || inStd)) {
+      if (!ctx.async) throw new CompileError("E0301", "'spawnBlocking' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
+      const f = e.args[0];
+      if (e.args.length !== 1 || !f) throw new CompileError("E0305", "'spawnBlocking' takes the function to run, like 'spawnBlocking(() => hash(data))'", e.start, e.end);
+      if (f.kind === "arrow" && f.async) throw new CompileError("E0305", "'spawnBlocking' runs a synchronous function on a thread of its own; run async work with 'spawn' instead", f.start, f.end);
+      if (f.kind === "arrow" && f.params.length > 0) throw new CompileError("E0305", "'spawnBlocking' calls its function with no arguments, so it can't take parameters; capture what it needs instead", f.start, f.end);
+      const made = f.kind !== "arrow" && f.kind !== "ident";
+      const fn: Expr = made ? { id: nextId(ids), kind: "topic", start: f.start, end: f.end } : f;
+      const run: Expr = { id: nextId(ids), kind: "call", callee: fn, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
+      if (f.kind !== "arrow") blockingRuns.add(run);
+      const arrow: Expr = { id: nextId(ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: run, start: f.start, end: f.end };
+      const task: Expr = { id: nextId(ids), kind: "call", callee: arrow, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
+      e.callee = { id: nextId(ids), kind: "ident", name: "blocking spawn", start: callee.start, end: callee.end };
+      e.args[0] = made ? { id: nextId(ids), kind: "pipe", value: f, body: task, start: f.start, end: f.end } : arrow;
+      return call(e);
+    }
+    // std's `timer spawn` is `spawn` with the task's first poll run at once; `blocking spawn` is
+    // what `spawnBlocking` becomes.
+    const spawning = callee.kind === "ident" && callee.name === "blocking spawn" ? "spawnBlocking" : "spawn";
+    if (callee.kind === "ident" && ((callee.name === "spawn" && (!byName.has("spawn") || inStd)) || (callee.name === "timer spawn" && inStd) || callee.name === "blocking spawn")) {
       if (!ctx.async) throw new CompileError("E0301", "'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("E0305", "'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
@@ -1134,7 +1177,7 @@ export function expressions(ctx: Context) {
       if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP || leafOf.has(t)) throw new CompileError("E0305", `'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       const blocker = unsent(t);
       if (blocker) {
-        throw new CompileError("E0303", `'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
+        throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
       }
       return { type: handleType(t.gives, t.throws), what: "'spawn'" };
     }
