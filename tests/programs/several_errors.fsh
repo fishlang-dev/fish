@@ -154,3 +154,24 @@ function main(): void {
   const c = new C();
   try { console.log(c.m()); } catch (e) { console.log("caught"); }
 }
+// case: errors_try_around_own_recursive_call
+// A recursive function's 'try' that can't throw is reported, though the function it calls is itself.
+// error: errors_try_around_own_recursive_call.fsh:3:27: error[E0603]: nothing in this 'try' can throw
+function f(n: i64): i64 { try { return f(n - 1); } catch (e) { return 0; } }
+function main() { console.log(f(3)); }
+// case: errors_try_around_mutually_recursive_calls
+// errors: 2
+// error: errors_try_around_mutually_recursive_calls.fsh:4:27: error[E0603]: nothing in this 'try' can throw
+// error: errors_try_around_mutually_recursive_calls.fsh:5:27: error[E0603]: nothing in this 'try' can throw
+function f(n: i64): i64 { try { return g(n - 1); } catch (e) { return 0; } }
+function g(n: i64): i64 { try { if (n > 0) { return f(n); } return 1; } catch (e) { return 0; } }
+function main() { console.log(f(3)); }
+// case: errors_refused_implements_other_interface
+// A class refused for one interface is still reported where it meets another it doesn't fit.
+// errors: 2
+// error: errors_refused_implements_other_interface.fsh:7:21: error[E0702]: class 'Sq' incorrectly implements 'Shape'
+// error: errors_refused_implements_other_interface.fsh:8:41: error[E0101]: type 'Sq' is not assignable to type 'Dyn<Label>'
+interface Shape { area(): i64; }
+interface Label { area(): boolean; }
+class Sq implements Shape { constructor() {} area(): string { return "1"; } }
+function main() { const l: Dyn<Label> = new Sq(); console.log(l.area()); }

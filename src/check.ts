@@ -433,10 +433,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const claimErrors = new Set<CompileError>();
   const refused: Members["refused"] = [];
   const tryCallees = new Map<CompileError, Body[]>();
+  // A callee only accounts for a `try` when its failure is reported itself: a recursive function's
+  // failure may be that very `try`'s.
   const followsOn = (e: CompileError) =>
-    (!claimErrors.has(e) && refused.some(({ type, reason }) => e.message.includes(`'${type}'`) && e.message.includes(reason))) || (tryCallees.get(e)?.some((b) => failed.has(b) && !b.throws) ?? false);
+    (!claimErrors.has(e) && refused.some(({ type, trait, reason }) => e.message.includes(`'${type}'`) && e.message.includes(`'${trait}'`) && e.message.includes(reason)))
+    || (tryCallees.get(e)?.some((b) => failed.has(b) && !b.throws && !tryCallees.has(failed.get(b)!)) ?? false);
   const stopOnErrors = () => {
-    const reported = errors.filter((e) => !followsOn(e));
+    const held = errors.filter((e) => !followsOn(e));
+    // Errors are never all held back, or a program that failed would build.
+    const reported = held.length > 0 ? held : errors;
     if (reported.length === 1) throw reported[0];
     if (reported.length > 1) throw new CompileErrors(reported.sort((a, b) => a.start - b.start || a.end - b.end));
   };
