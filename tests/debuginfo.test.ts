@@ -117,3 +117,13 @@ test.skipIf(!Bun.which("lldb"))("lldb stops at a breakpoint on a .fsh line", () 
   expect(out).toContain("Breakpoint 1: where = prog`main + ");
   expect(out).toMatch(/frame #0: .* prog`main at main\.fsh:6:13/);
 });
+
+// A timed build compiles and links in two clang calls, which on macOS must still leave a .dSYM.
+test.skipIf(!Bun.which("lldb"))("lldb resolves a .fsh breakpoint in a build timed with --timings", () => {
+  const file = place("timed", { "main.fsh": PROGRAM });
+  const dir = join(root, "timed");
+  expect(fishc(dir, ["build", file, "-g", "--timings", "-o", "prog"]).code).toBe(0);
+  if (process.platform === "darwin") expect(readdirSync(dir)).toContain("prog.dSYM");
+  const session = Bun.spawnSync(["lldb", "-b", "-o", "b main.fsh:6", "prog"], { cwd: dir });
+  expect(session.stdout.toString()).toContain("Breakpoint 1: where = prog`main + ");
+});

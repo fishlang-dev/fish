@@ -95,7 +95,11 @@ const emptyDir = () => mkdtempSync(join(tmpdir(), "fish-cc-"));
 // The unit's object, compiled first if the cache has none.
 export function cachedObject(session: Session, u: Unit): string {
   const out = objectPath(session, u);
-  if (existsSync(out)) return out;
+  if (existsSync(out)) {
+    if (session.timings) session.timings.objects.cached++;
+    return out;
+  }
+  session.timings?.objects.built.push(u.name);
   const temp = partial(out);
   const cwd = emptyDir();
   try {
