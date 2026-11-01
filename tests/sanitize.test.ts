@@ -135,3 +135,49 @@ async function main() {
   expect(err).toContain("WARNING: ThreadSanitizer: data race");
   expect(err).toMatch(/#0 fsh\.bump [^\n]*main\.fsh:5/);
 });
+
+test.skipIf(noThread !== undefined)("the runtime's executor, channels, locks and blocking pool run clean under the thread sanitizer", () => {
+  const src = `class Pool {
+  hits: Atomic<i64> = new Atomic(0);
+  log: Lock<string[]> = new Lock<string[]>([]);
+}
+
+type State = { count: i64; pool: Pool };
+
+async function work(state: shared<State>, out: Channel<i64>, n: i64): Promise<i64> {
+  for (let i = 0; i < 50; i++) {
+    state.pool.hits.add(1);
+    state.update((s) => s.count++);
+    if (i % 10 === 0) await yieldNow();
+  }
+  state.pool.log.update((l) => l.push("task" + n));
+  await out.send(n);
+  return n;
+}
+
+async function spin(): Promise<i64> {
+  let n = 0;
+  while (true) n++;
+  return n;
+}
+
+async function main() {
+  const state = shared<State>({ count: 0, pool: new Pool() });
+  const out = new Channel<i64>(4);
+  let handles: JoinHandle<i64>[] = [];
+  for (let n = 0; n < 8; n++) handles.push(spawn(work(state.clone(), out.clone(), n)));
+  let sum = 0;
+  for (let n = 0; n < 8; n++) {
+    const v = await out.receive();
+    sum += v!;
+  }
+  for (let n = 0; n < 8; n++) await handles.pop()!;
+  const blocked = await spawnBlocking(() => 6 * 7);
+  const count = state.update((s) => s.count);
+  console.log(sum, count, state.pool.hits.load(), state.pool.log.update((l) => l.length), blocked);
+  // Main ends while a task is still busy, so the runtime abandons its workers.
+  const _busy = spawn(spin());
+}
+`;
+  expect(run("clean", src, ["--sanitize", "thread"])).toEqual({ code: 0, out: "28 400 400 8 42\n", err: "" });
+});
