@@ -14,7 +14,7 @@ type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames } from "./flow.ts";
 import { declareEnum, type EnumInfo } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
-import { comparable, objectsMeet } from "./unions.ts";
+import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, genericClasses, instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
@@ -2363,12 +2363,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
               const before = new Set(shared.values());
               let test = c.test && value(c.test);
               // A literal case takes the discriminant's type, or its union's one number type.
-              const numbers = union ? union.members.filter(isNumeric) : [type];
+              const numbers = union ? numberMembers(tables.typing.lower, union) : [type];
               if (test && test !== type && numbers.length === 1 && adapt(c.test!, numbers[0]!)) test = numbers[0]!;
               // A discriminant whose type is still open takes an integer case's.
               if (test && test !== type && isInteger(test) && !literalOnly(s.discriminant, false) && adapt(s.discriminant, test)) test = type;
               if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
-              if (test && test !== type && !comparable(type, test)) {
+              if (test && test !== type && !comparable(tables.typing.lower(type), test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
               const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();

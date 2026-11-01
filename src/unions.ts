@@ -140,6 +140,20 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, { kindTest
   return "boolean";
 }
 
+// The number types a union holds. In an instance, a union holding a type parameter is read as
+// the union it flattens into, so a literal meeting `T | 0` with T = `i32 | string` is an i32 as
+// it is meeting `i32 | string | 0`.
+export function numberMembers(lower: Typing["lower"], t: Type, members: (u: UnionType) => Type[] = (u) => u.members): Type[] {
+  if (typeof t === "string" || t.kind !== "union") return [];
+  const flat = holdsArgument(t) ? lower(t) : t;
+  return (typeof flat !== "string" && flat.kind === "union" ? members(flat) : [flat]).filter(isNumeric);
+}
+
+// Whether an instance's union holds a type parameter, which stands for its type argument there.
+export function holdsArgument(t: UnionType): boolean {
+  return t.members.some((m) => typeof m !== "string" && m.kind === "param" && m.concrete !== undefined);
+}
+
 // A `?:` whose sides have different types makes the union of both, as in TypeScript.
 export function bothSides({ show, unionType }: Typing, e: Extract<Expr, { kind: "conditional" }>, then: Type, otherwise: Type, coerce: Coerce): Type {
   const both = [then, otherwise];
@@ -158,11 +172,16 @@ type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
 // A value goes into the one union member it is or fits; a literal expression may also be a
 // literal member with its value. A union goes into a wider one member by member.
 export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { typing, types, coercions, excess, adapt }: Union) {
-  const { membersFor, show } = typing;
+  const { membersFor, show, lower } = typing;
   // A literal goes into the one number type a union holds.
-  const numbers = to.members.filter(isNumeric);
+  const numbers = numberMembers(typing.lower, to);
   if (!to.members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
-  const sources = typeof type !== "string" && type.kind === "union" ? type.members : [type];
+  // In an instance, a type parameter no member takes goes in as the members its type argument has.
+  const parts = (s: Type): Type[] => {
+    const flat = typeof s !== "string" && s.kind === "param" && s.concrete && membersFor(s, to).length === 0 ? lower(s) : s;
+    return typeof flat !== "string" && flat.kind === "union" ? flat.members : [flat];
+  };
+  const sources = (typeof type !== "string" && type.kind === "union" ? type.members : [type]).flatMap(parts);
   if (sources.some((s) => typeof s !== "string" && s.kind === "generator")) throw unsupported("unions holding generators", e);
   if (sources.some((s) => typeof s !== "string" && s.kind === "future")) throw unsupported("unions holding promises", e);
   for (const source of sources) {
@@ -209,15 +228,26 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
 
 // `x === v` with x a union compares the member x holds with v, so it needs a member v might
 // equal.
-export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing: { lower, show }, value }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
+export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing: { lower, show }, value, coercions }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
   let [left, right] = [value(e.left), value(e.right)];
   // A literal compared with a union holding one number type takes that type.
-  const number = (t: Type) => (typeof t !== "string" && t.kind === "union" ? opened(t).filter(isNumeric) : []);
+  const number = (t: Type) => numberMembers(lower, t, opened);
   if (number(left).length === 1 && adapt(e.right, number(left)[0]!)) right = number(left)[0]!;
   if (number(right).length === 1 && adapt(e.left, number(right)[0]!)) left = number(right)[0]!;
   // A union of strings and patterns is a string once lowered, compared as one.
   const isUnion = (t: Type) => typeof t !== "string" && t.kind === "union" && lower(t) !== "string";
-  if (!isUnion(left) && !isUnion(right)) return undefined;
+  // In an instance, a union holding a type parameter is the union its type argument flattens into.
+  const flat = (t: Type) => (typeof t !== "string" && t.kind === "union" && holdsArgument(t) ? lower(t) : t);
+  const instanced = flat(left) !== left || flat(right) !== right;
+  [left, right] = [flat(left), flat(right)];
+  if (!isUnion(left) && !isUnion(right)) {
+    if (!instanced) return undefined;
+    // What's left is a plain value, which a literal on the other side becomes to be compared.
+    if (lower(left) === "string" && lower(right) !== "string") coercions.set(e.right, "string");
+    if (lower(right) === "string" && lower(left) !== "string") coercions.set(e.left, "string");
+    if (isNumeric(left)) adapt(e.right, left);
+    if (isNumeric(right)) adapt(e.left, right);
+  }
   if (objectsMeet(left, right)) throw unsupported("comparisons of objects", e);
   if (!comparable(left, right)) {
     throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
