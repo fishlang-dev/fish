@@ -1,6 +1,6 @@
 import { inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import type { Span } from "./parser.ts";
-import { TypeMap, field, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
+import { TypeMap, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
 
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
@@ -101,7 +101,7 @@ function same(typing: Typing, a: Type, b: Type): boolean {
 
 function check(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
   const { typing } = members;
-  const { fits, show, promiseElement, generatorElement, replaced, lower } = typing;
+  const { field, fits, show, promiseElement, generatorElement, replaced, lower } = typing;
   // A return type fits an interface method's when it fits, or, for an interface, satisfies it.
   const returns = (actual: Type, expected: Type) =>
     typeof expected !== "string" && expected.kind === "interface" ? unsatisfied(actual, expected, members, at) === undefined : fits(actual, expected);

@@ -11,7 +11,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { TypeMap, TypeSet, allFields, elementsOf, isPlainJs, jsShape, type InterfaceType, type ClosureType, type FixedType, type RefType, field, fieldPath, holdsPart, INTEGERS, isCopy, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, isOption, redundantBang, bare, optionRef, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, unfold, isTuple, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
+import { TypeMap, TypeSet, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric, type Typing } from "./typing.ts";
 import { NodeSet, NodeMap, walk } from "./nodes.ts";
 
 const isRef = (t: Type) => typeof t !== "string" && t.kind === "ref";
@@ -91,9 +91,6 @@ const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt"]);
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
 
-// Whether a value of the type holds a Rust handle, which only moves.
-const holdsRust = (t: Type) => holdsPart(t, (u) => rustClassOf(u) !== undefined);
-
 // How a narrow value crosses to C, which expects it widened by its caller: a boolean, a byte
 // holding 0 or 1, and unsigned integers zero-extended, signed ones sign-extended.
 const extension = (type: Type) => (type === "boolean" || type === "u8" || type === "u16" ? "zeroext" : type === "i8" || type === "i16" ? "signext" : "");
@@ -123,7 +120,7 @@ function shimGives(llvm: Llvm, c: Crossing | undefined): { returns: string; out?
 }
 
 // What a Rust function gives, as it crosses: a constructor gives its handle.
-const rustGiven = (i: Instance): Crossing | undefined => (i.body.self?.constructor ? rustCrossing(i.body.owner!, true) : i.returns === "void" ? undefined : rustCrossing(i.returns, true));
+const rustGiven = (i: Instance): Crossing | undefined => (i.body.self?.constructor ? rustCrossing(i.tables.typing, i.body.owner!, true) : i.returns === "void" ? undefined : rustCrossing(i.tables.typing, i.returns, true));
 
 // A library has no C `main`; each export gets a C function under its own name instead.
 // `sources` holds the program's files other than the entry, for panic locations.
@@ -143,11 +140,13 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, typing, regex: regexTables,
     joinCalls, integerCalls,
   } = noted;
-  const {
+  const { allFields, elementsOf, field, fieldPath, holdsPart, isCopy, isOption, isPlainJs, isTuple, jsShape, optionRef, unfold,
     tiedBy, show, lower, unionType, arrayType, leafOf, blockType, callableOf, promiseElement, keyOf, described, sharesDyn, stored: storedType, lentPromise,
     interiorType, nextResult, leafFuture, tupleType, handleType, combinedOf, settledParts, regexType, matchType,
   } = typing;
   const llvm = layoutOf(typing);
+  // Whether a value of the type holds a Rust handle, which only moves.
+  const holdsRust = (t: Type) => holdsPart(t, (u) => rustClassOf(u) !== undefined);
   const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
   // In a debug or `--leaks` build each of the program's own functions keeps a frame on the
   // runtime's shadow stack, `{ site, name, prev }`, for a panic's backtrace and a leak's site:
@@ -287,7 +286,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         declaredRust.add(rust);
         const self = instance.body.self && !instance.body.self.constructor ? ["ptr"] : [];
         const gives = shimGives(llvm, rustGiven(instance));
-        const params = [...self, ...instance.signature!.flatMap((t) => shimParams(llvm, rustCrossing(t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
+        const params = [...self, ...instance.signature!.flatMap((t) => shimParams(llvm, rustCrossing(typing, t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
         out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
         continue;
       }
@@ -7415,7 +7414,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       emit(`store ${ARRAY} ${v}, ptr ${slot}`);
       return slot;
     };
-    args.forEach((a, i) => passed.push(...pass(rustCrossing(target.signature![i]!), target.signature![i]!, a.slice(a.lastIndexOf(" ") + 1))));
+    args.forEach((a, i) => passed.push(...pass(rustCrossing(typing, target.signature![i]!), target.signature![i]!, a.slice(a.lastIndexOf(" ") + 1))));
     const gives = rustGiven(target);
     const shim = shimGives(llvm, gives);
     const out = shim.out ? alloca(shim.out) : undefined;

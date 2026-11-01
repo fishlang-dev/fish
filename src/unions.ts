@@ -3,7 +3,7 @@ import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
 import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { TypeSet, baseOf, field, isNumeric, isPlainJs, unfold } from "./typing.ts";
+import { TypeSet, isNumeric } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, Typing, UnionType } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
@@ -27,7 +27,7 @@ export type Union = {
 // fields of `to`, and how to record that: each such property is coerced to its field's
 // literal type, and the literal gets the shape. Undefined when it doesn't fit that way.
 export function literalShape(typing: Typing, e: Expr, to: Type, types: NodeMap<Expr, Type>): { type: Type; apply(coercions: NodeMap<Expr, Type>): void } | undefined {
-  const { fits, objectType } = typing;
+  const { field, unfold, fits, objectType } = typing;
   to = unfold(to);
   // Meeting a union, it takes the shape of the first member it can, as a nested literal of a
   // recursive type does.
@@ -102,7 +102,7 @@ export function intoMember({ show }: Typing, target: Expr, types: NodeMap<Expr, 
 
 // A field every member of a union has, read without narrowing first: its type is the union
 // of the members' field types. This is how a discriminant like `x.kind` is read.
-export function unionField({ unionType }: Typing, union: UnionType, name: string, at: Span): Type | undefined {
+export function unionField({ field, unionType }: Typing, union: UnionType, name: string, at: Span): Type | undefined {
   const found = union.members.map((m) => (typeof m === "string" ? undefined : field(m, name)));
   if (found.some((f) => !f || (f.access ?? "public") !== "public")) return undefined;
   return unionType(found.map((f) => f!.type));
@@ -172,7 +172,7 @@ type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
 // A value goes into the one union member it is or fits; a literal expression may also be a
 // literal member with its value. A union goes into a wider one member by member.
 export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, { typing, types, coercions, excess, adapt }: Union) {
-  const { membersFor, show, lower } = typing;
+  const { baseOf, membersFor, show, lower } = typing;
   // A literal goes into the one number type a union holds.
   const numbers = numberMembers(typing.lower, to);
   if (!to.members.includes(type) && numbers.length === 1 && adapt(e, numbers[0]!)) type = numbers[0]!;
@@ -213,7 +213,7 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, {
 }
 
 // `typeof x === "number"` checks which kind of value x holds, which for a union is its tag.
-export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
+export function typeofComparison(e: Expr, { value, typing: { isPlainJs } }: Union): Type | undefined {
   const test = typeofTest(e);
   if (!test) return undefined;
   const tested = value(test.operand);
@@ -228,10 +228,11 @@ export function typeofComparison(e: Expr, { value }: Union): Type | undefined {
 
 // `x === v` with x a union compares the member x holds with v, so it needs a member v might
 // equal.
-export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing: { lower, show }, value, coercions }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
+export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing, value, coercions }: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
+  const { lower, show } = typing;
   let [left, right] = [value(e.left), value(e.right)];
   // A literal compared with a union holding one number type takes that type.
-  const number = (t: Type) => numberMembers(lower, t, opened);
+  const number = (t: Type) => numberMembers(lower, t, (u) => opened(typing, u));
   if (number(left).length === 1 && adapt(e.right, number(left)[0]!)) right = number(left)[0]!;
   if (number(right).length === 1 && adapt(e.left, number(right)[0]!)) left = number(right)[0]!;
   // A union of strings and patterns is a string once lowered, compared as one.
@@ -249,7 +250,7 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, { typing: 
     if (isNumeric(right)) adapt(e.left, right);
   }
   if (objectsMeet(left, right)) throw unsupported("comparisons of objects", e);
-  if (!comparable(left, right)) {
+  if (!comparable(typing, left, right)) {
     throw new CompileError(`this comparison appears to be unintentional because the types '${show(left)}' and '${show(right)}' have no overlap`, e.start, e.end);
   }
   return "boolean";
@@ -265,7 +266,7 @@ export function objectsMeet(a: Type, b: Type): boolean {
 }
 
 // A type's members, a member that holds itself standing for the members it holds.
-function opened(t: Type): Type[] {
+function opened({ unfold }: Typing, t: Type): Type[] {
   return (typeof t !== "string" && t.kind === "union" ? t.members : [t]).flatMap((m) => {
     const inner = unfold(m);
     return inner !== m && typeof inner !== "string" && inner.kind === "union" ? inner.members : [m];
@@ -274,9 +275,9 @@ function opened(t: Type): Type[] {
 
 // Whether a value of `a` might equal one of `b`: the same primitive, a literal and its base,
 // or two literals of one value, for any members of either when it is a union.
-export function comparable(a: Type, b: Type): boolean {
-  const members = opened;
-  const base = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : typeof t !== "string" && t.kind === "pattern" ? "string" : t);
+export function comparable(typing: Typing, a: Type, b: Type): boolean {
+  const members = (t: Type) => opened(typing, t);
+  const base = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (typing.baseOf(t) ?? t) : typeof t !== "string" && t.kind === "pattern" ? "string" : t);
   return members(a).some((x) => members(b).some((y) => {
     if (typeof x !== "string" && x.kind === "literal" && typeof y !== "string" && y.kind === "literal") return x.value === y.value;
     return base(x) === base(y) && typeof base(x) === "string";

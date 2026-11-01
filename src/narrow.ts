@@ -1,7 +1,7 @@
 import type { Local } from "./check.ts";
 import type { Expr } from "./parser.ts";
 import type { Tables } from "./compilation.ts";
-import { holdsPlainJs, isNumeric, isSubclass, unfold, type Type, type Typing } from "./typing.ts";
+import { isNumeric, type Type, type Typing } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
@@ -24,7 +24,7 @@ export function category(t: Type): string {
 
 export type Kind = "Map" | "Set" | "Array";
 
-export function ofKind(t: Type, kind: Kind): boolean {
+export function ofKind({ unfold }: Typing, t: Type, kind: Kind): boolean {
   const held = unfold(t);
   if (typeof held === "string") return false;
   return kind === "Array" ? held.kind === "array" : held.kind === "map" && held.set === (kind === "Set");
@@ -58,7 +58,7 @@ export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usiz
 
 export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, Local>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
   const { kindTests, typing } = tables;
-  const { fits, refType, unionType } = typing;
+  const { holdsPlainJs, isSubclass, unfold, fits, refType, unionType } = typing;
   const nothing: Guard = { yes: new NodeMap(), no: new NodeMap() };
   const of = (x: Expr) => guard(tables, x, types, locals, narrowable, predicate);
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
@@ -73,7 +73,7 @@ export function guard(tables: Tables, e: Expr, types: NodeMap<Expr, Type>, local
     return { yes: inner.no, no: inner.yes };
   }
   const kind = kindTests.get(e);
-  if (kind) return split(e.kind === "call" ? e.args[0]! : (e as Extract<Expr, { kind: "binary" }>).left, (m) => (ofKind(m, kind) ? "yes" : "no"), true);
+  if (kind) return split(e.kind === "call" ? e.args[0]! : (e as Extract<Expr, { kind: "binary" }>).left, (m) => (ofKind(typing, m, kind) ? "yes" : "no"), true);
   if (e.kind !== "binary") return nothing;
   if (e.op === "&&" || e.op === "||") {
     const [a, b] = [of(e.left), of(e.right)];

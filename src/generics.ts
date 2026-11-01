@@ -6,7 +6,7 @@ import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
-import { TypeSet, TypeMap, digest, unfold, elementsOf, field, holdsPart, widenLet, type FunctionType, isTuple, widenEnum, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { TypeSet, TypeMap, digest, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
 import { WeakNodeMap, NodeMap, NodeSet, forEachChild, type AnyNode } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
@@ -52,7 +52,7 @@ export function typeParamsOf(f: Body): TypeParam[] {
 // Binds the type parameters `node` names by matching it against an argument's type, looking
 // through the check's type aliases.
 export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
-  const { aliases, expanding, typing: { sameCallable, heldArgument, sameLowered, show, yieldsOf, withoutNull, arrayType, unionType, promiseElement } } = tables;
+  const { aliases, expanding, typing: { elementsOf, field, isTuple, unfold, widenEnum, widenLet, sameCallable, heldArgument, sameLowered, show, yieldsOf, withoutNull, arrayType, unionType, promiseElement } } = tables;
   arg = unfold(arg);
   // `Pair<T>` naming a generic alias matches what the alias stands for, its parameters given
   // as written.
@@ -290,7 +290,7 @@ export function comptimeName(p: Param): string {
 
 export function instancing({ tables, resolveType, paramType, withScope, signing, members, checking, classParams, comptimeArgument }: Checker) {
   const { typing } = tables;
-  const { callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, promiseInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
+  const { holdsPart, unfold, widenLet, callableOf, lower, functionType, openThrows, fits, show, stored, refType, typeParameter, described, keyOf, heldArgument, generatorElement, generatorInterface, asyncGeneratorInterface, promiseInterface, replaced, unlocks, holdsPattern, wrapped, promiseElement, holdsRef } = typing;
   const concrete = concreteness(typing);
   const explicit = new WeakNodeMap<Body, Map<string, Type>>();
   const instances = new NodeMap<Body, Map<string, Instance>>();
@@ -720,7 +720,7 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
     if (!fits(type, bound)) throw new CompileError(message, arg.start, arg.end);
     // A value leaving out an optional field is copied into the parameter's type, which fills
     // it in empty; a reference can't be.
-    const missing = lacks(type, bound);
+    const missing = lacks(typing, type, bound);
     if (missing && borrowed) throw new CompileError(`${message}: it has no '${missing}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
     return arg.kind === "object" || missing ? bound : type;
   }
@@ -729,12 +729,12 @@ export function instancing({ tables, resolveType, paramType, withScope, signing,
 
 // The path to a field of `to`, at any depth, that a value of `from` leaves out: an optional one,
 // since `from` fits.
-function lacks(from: Type, to: Type, path = ""): string | undefined {
+function lacks(typing: Typing, from: Type, to: Type, path = ""): string | undefined {
   if (typeof from === "string" || typeof to === "string" || to.kind !== "object") return undefined;
   for (const f of to.fields) {
-    const found = field(from, f.name);
+    const found = typing.field(from, f.name);
     const at = `${path}${f.name}`;
-    const deeper = found ? lacks(found.type, f.type, `${at}.`) : at;
+    const deeper = found ? lacks(typing, found.type, f.type, `${at}.`) : at;
     if (deeper) return deeper;
   }
   return undefined;

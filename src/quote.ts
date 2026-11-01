@@ -4,7 +4,7 @@ import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
 import { nextId, renumber, walk as walkTree, type Ids } from "./nodes.ts";
-import { field, unfold, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
+import type { ObjectType, Type, UnionType, Typing } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the
 // `Ast` value it stands for, with each `${x}` a splice of another node.
@@ -118,7 +118,7 @@ export function holesOf(typing: Typing, q: Quote, types: Record<Category, Type>,
 
 // The member of a union a node is: the object of its kind with all its fields, a string, an
 // array or a number.
-function memberFor(node: unknown, union: UnionType): Type | undefined {
+function memberFor({ unfold, field }: Typing, node: unknown, union: UnionType): Type | undefined {
   const members = union.members.map(unfold);
   if (node === null || node === undefined) return members.includes("null") ? "null" : undefined;
   if (Array.isArray(node)) return union.members.find((m) => typeof unfold(m) !== "string" && (unfold(m) as { kind: string }).kind === "array");
@@ -144,9 +144,9 @@ function walk(typing: Typing, node: unknown, type: Type, types: Record<Category,
   }
   if (node === null || node === undefined || typeof t === "string") return;
   if (t.kind === "union") {
-    const splice = spliceIn(node, t, types, q.asExpressions);
+    const splice = spliceIn(typing, node, t, types, q.asExpressions);
     if (splice) return hole(splice.i, splice.category);
-    const member = memberFor(node, t);
+    const member = memberFor(typing, node, t);
     if (member) walk(typing, node, member, types, q, hole);
     return;
   }
@@ -159,19 +159,19 @@ function walk(typing: Typing, node: unknown, type: Type, types: Record<Category,
 
 // The splice a node in a union's place stands for: a statement written as a splice alone, or a
 // splice where an expression or a type goes.
-function spliceIn(node: unknown, t: UnionType, types: Record<Category, Type>, asExpressions: Set<usize>): { i: usize; category: Category } | undefined {
+function spliceIn(typing: Typing, node: unknown, t: UnionType, types: Record<Category, Type>, asExpressions: Set<usize>): { i: usize; category: Category } | undefined {
   const n = node as { kind?: string; expr?: unknown };
-  const member = memberFor(node, t);
-  const statements = unfold(types.AstStmt) as UnionType;
+  const member = memberFor(typing, node, t);
+  const statements = typing.unfold(types.AstStmt) as UnionType;
   if (n.kind === "expr" && spliceOf(n.expr) !== undefined && !asExpressions.has(spliceOf(n.expr)!) && member && statements.members.includes(member)) return { i: spliceOf(n.expr)!, category: "AstStmt" };
   const i = spliceOf(node);
   if (i === undefined) return undefined;
-  if ((node as { kind: string }).kind === "ident" && isUnionOf(t, types.AstExpr)) return { i, category: "AstExpr" };
-  if ((node as { kind: string }).kind === "ref" && isUnionOf(t, types.AstType)) return { i, category: "AstType" };
+  if ((node as { kind: string }).kind === "ident" && isUnionOf(typing, t, types.AstExpr)) return { i, category: "AstExpr" };
+  if ((node as { kind: string }).kind === "ref" && isUnionOf(typing, t, types.AstType)) return { i, category: "AstType" };
   return undefined;
 }
 
-function isUnionOf(t: Type, category: Type): boolean {
+function isUnionOf({ unfold }: Typing, t: Type, category: Type): boolean {
   const c = unfold(category);
   return typeof t !== "string" && t.kind === "union" && typeof c !== "string" && c.kind === "union" && c.members.every((m) => t.members.includes(m));
 }
@@ -295,9 +295,9 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
     const t = typing.unfolded(type);
     if (typeof t !== "string" && t.kind === "union") {
       if (node === null || node === undefined) return b.member(b.none, t, "null");
-      const splice = spliceIn(node, t, types, q.asExpressions);
+      const splice = spliceIn(typing, node, t, types, q.asExpressions);
       if (splice) return b.splice(splice.i, type);
-      const member = memberFor(node, t);
+      const member = memberFor(typing, node, t);
       if (!member) throw new Error("internal error: a quoted node fits no member of its Ast type");
       return b.member(make(node, member, here), t, member);
     }

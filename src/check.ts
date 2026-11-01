@@ -21,7 +21,7 @@ import { registry } from "./registry.ts";
 import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
-import { TypeSet, TypeMap, ANY_REGEX, allFields, holdsPart, isPlainJs, elementsOf, isTuple, type ObjectType, field, interiorMutable, YIELD_NOW, type FutureType, optionRef, isCopy, type Field, type GeneratorType, widenLet, isInteger, isNumeric, widenEnum, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing } from "./typing.ts";
+import { TypeSet, TypeMap, ANY_REGEX, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { lowerOverloads } from "./overloads.ts";
@@ -402,7 +402,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   const { counts, ids, rust: { names: rustNames, classNodes: rustClassNodes } } = compilation;
   const tables = newTables(compilation);
   const { typing } = tables;
-  const {
+  const { allFields, elementsOf, field, holdsPart, interiorMutable, isCopy, isTuple, optionRef, widenLet,
     fits, lowersVariants, lowersInterfaces, lowersClasses, promiseInterface, functionType, typeParameter, literalType, setJsError, jsUncalled, jsConverts, holdsRef,
     lower, show, blockType, jsTakes, uncrossable, jsView, replaced, stored, generatorType, generatorElement, futureType, promiseElement, lockCallbacks,
     sharedCallbacks, openThrows, unionType, holdsPattern, arrayType, refType, closureType, leafOf, yieldsOf, tupleType,
@@ -773,7 +773,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // An abstract member and a template are checked but never compiled; each concrete class's copy is.
   const compiled = new NodeSet([...funcs.filter((f) => !f.macro || macros), ...[...infoOf.values()].flatMap(bodiesOf).filter((f) => !f.abstract && !f.template)]);
   // So is an instance made for an abstract class, which only a template's check makes.
-  const checkedOnly = (i: Instance): boolean => i.body.template === true || [...i.bindings.values()].some(abstractPart) || (i.body.closure !== undefined && checkedOnly(i.body.closure.parent));
+  const checkedOnly = (i: Instance): boolean => i.body.template === true || [...i.bindings.values()].some((t) => abstractPart(typing, t)) || (i.body.closure !== undefined && checkedOnly(i.body.closure.parent));
   const compiledInstances = [...all().filter((i) => i.concrete && compiled.has(i.body) && !i.body.js && !checkedOnly(i)), ...closures.filter((i) => i.concrete && !checkedOnly(i))];
   unreached(equalities, compiledInstances, (i) => i.body.abstract === true || checkedOnly(i));
   // A package's const whose value has no JS form yet stops the program where it is read.
@@ -1022,7 +1022,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     }
     if (!f.returnType && !constructor) throw new CompileError(`${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
     const refuse = (t: Type, giving: boolean, at: Span) => {
-      const why = crossingOf(t, giving);
+      const why = crossingOf(typing, t, giving);
       if (typeof why === "string") throw new CompileError(`${giving ? `${what} can't give` : "a Rust function can't take"} a '${show(t)}': ${why}`, at.start, at.end);
     };
     const params = paramTypes(instance, scopeOf(instance));
@@ -2365,7 +2365,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
               // A discriminant whose type is still open takes an integer case's.
               if (test && test !== type && isInteger(test) && !literalOnly(s.discriminant, false) && adapt(s.discriminant, test)) test = type;
               if (test && objectsMeet(type, test)) throw unsupported("comparisons of objects", c.test!);
-              if (test && test !== type && !comparable(tables.typing.lower(type), test)) {
+              if (test && test !== type && !comparable(tables.typing, tables.typing.lower(type), test)) {
                 throw new CompileError(`type '${show(test)}' is not comparable to type '${show(type)}'`, c.test!.start, c.test!.end);
               }
               const tested: Facts = c.test ? proves({ id: nextId(ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new NodeMap();
@@ -2811,7 +2811,7 @@ export type Origin = usize | "this";
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 
 // An abstract class a type holds as a value, not one embedded as a concrete class's base.
-function abstractPart(t: Type): ClassType | undefined {
+function abstractPart({ holdsPart }: Typing, t: Type): ClassType | undefined {
   const bases = new TypeSet<Type>();
   let found: ClassType | undefined;
   holdsPart(t, (u) => {
@@ -2840,7 +2840,7 @@ export function unreached(equalities: Tables["equalities"], compiled: Instance[]
     const found = reached.find(([, target]) => dropped(target));
     if (!found) continue;
     const [at, target, through] = found;
-    const abstract = (target.body.abstract ? target.body.owner : undefined) ?? [...target.bindings.values()].map(abstractPart).find((t) => t) ?? target.body.declared ?? target.body.owner;
+    const abstract = (target.body.abstract ? target.body.owner : undefined) ?? [...target.bindings.values()].map((t) => abstractPart(target.tables.typing, t)).find((t) => t) ?? target.body.declared ?? target.body.owner;
     const root = (i.body.closure ? closureRoot(i) : i).body;
     const member = (root.owner ? root.name.slice(root.owner.name.length + 1) : root.name).replace(/#.*$/, "");
     // The name the call wrote, rather than the prelude function it may run.

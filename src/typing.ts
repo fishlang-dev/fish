@@ -150,34 +150,8 @@ export function splitTemplate(s: string, quasis: string[]): string[] | undefined
   return parts;
 }
 
-// Whether a hole of type `t` takes `text`: any text for a string, the text a number of that type
-// prints as for a number type, a literal's own text, or for a union, what any member takes.
-export function textFits(text: string, t: Type): boolean {
-  if (t === "string") return true;
-  if (t === "boolean") return text === "true" || text === "false";
-  // A number's text must be what that number prints as, so `-0` and `01` aren't integers.
-  if (isInteger(t)) {
-    if (!/^-?(0|[1-9]\d*)$/.test(text) || text === "-0") return false;
-    const { bits, signed } = INTEGERS[t];
-    const n = BigInt(text);
-    return signed ? n >= -(1n << BigInt(bits - 1)) && n < 1n << BigInt(bits - 1) : n >= 0n && n < 1n << BigInt(bits);
-  }
-  // As TypeScript's `${number}`: any text JavaScript reads as a finite number.
-  if (isFloat(t)) return text.trim() !== "" && Number.isFinite(Number(text));
-  if (typeof t === "string") return false;
-  if (t.kind === "literal") return !t.owner && String(t.value) === text;
-  if (t.kind === "union") return t.members.some((m) => textFits(text, m));
-  if (t.kind === "pattern") {
-    const parts = splitTemplate(text, t.quasis);
-    return parts !== undefined && parts.every((p, i) => textFits(p, t.holes[i]!));
-  }
-  return false;
-}
 export const isFloat = (t: Type): t is "f32" | "f64" => t === "f32" || t === "f64";
 export const isNumeric = (t: Type): t is Numeric => isInteger(t) || isFloat(t);
-
-// Whether a type is an Option: a union one of whose members is the empty value.
-export const isOption = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union" && t.members.includes("null");
 
 // A `!` on a value that can't be empty is that value itself in every stage. The checker marks
 // it where it first types the `!`, which for a generic body is its definition, so every
@@ -192,13 +166,6 @@ export function redundantBang(e: Expr): boolean {
 export function bare(e: Expr): Expr {
   while (e.kind === "nonNull" && redundantBang(e)) e = e.expr;
   return e;
-}
-
-// The reference a `Ref<T> | null` holds when it isn't empty.
-export function optionRef(t: Type | undefined): RefType | undefined {
-  if (!t || !isOption(t) || t.members.length !== 2) return undefined;
-  const ref = t.members.find((m) => m !== "null")!;
-  return typeof ref !== "string" && ref.kind === "ref" ? ref : undefined;
 }
 
 // The values an integer type holds.
@@ -340,23 +307,12 @@ export type SharedType = { kind: "shared"; typeId: usize; of: Type; fields: Fiel
 // for the same interface and key, which `lower` gives.
 export type DynType = { kind: "dyn"; typeId: usize; of: InterfaceType; fields: Field[]; shown?: string };
 
-// The shape a JS handle's declaration gives it, when it has one.
-export function jsShape(t: Type): InterfaceType | ObjectType | undefined {
-  if (typeof t === "string" || t.kind !== "block" || t.which !== "JsValue" || typeof t.of === "string") return undefined;
-  return t.of.kind === "interface" || t.of.kind === "object" ? t.of : undefined;
-}
-
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
 // which tasks wait on without holding a thread. A Permit holds a count on its Semaphore. An
 // `AbortController` and its `AbortSignal`s are handles to one block.
 // A FileJob is a file read or write handed to the runtime's blocking pool.
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
 export type BlockType = { kind: "block"; typeId: usize; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
-
-// A JsValue a program holds without knowing its type, not a package's handle of a known shape.
-export const isPlainJs = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue" && t.of === "void";
-// The same, or a reference to one.
-export const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.kind === "ref" ? t.to : t);
 
 // The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
 // the runtime: each frame holds its state, a count on the block (or a sleep's deadline), and for
@@ -388,7 +344,6 @@ export const SLEEP: FutureType = { kind: "future", typeId: 21, name: "sleep", gi
 // values and a flag per future instead. `aggregate` is the AggregateError an `any` throws when
 // every future fails.
 export type Combined = { kind: "all" | "race" | "allSettled" | "any"; futures: (FutureType | HandleType | DynType)[]; array?: ArrayType; aggregate?: ClassType; at: { start: usize; end: usize } };
-const thrownBy = (f: FutureType | HandleType | DynType): Type | undefined => (f.kind === "dyn" ? undefined : f.throws);
 
 // `yieldNow()`'s future, which is pending once, then done.
 export const YIELD_NOW: FutureType = { kind: "future", typeId: 22, name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true };
@@ -414,191 +369,13 @@ export const ANY_REGEX: RegexType = { kind: "regex", typeId: 23, source: "", pat
 // they stand for.
 export type RecursiveType = { kind: "recursive"; typeId: usize; name: string; args: Type[]; of: Type; fields: Field[] };
 
-// The part of a type that keeps `===` from comparing its values, or undefined when every part
-// compares: primitives, strings and literals, and objects, tuples, arrays and unions of them. A
-// class compares through its `equals`, and a data enum when it derives Eq; `eq` says which do.
-export function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
-  if (typeof t === "string" || seen.has(t)) return undefined;
-  seen.add(t);
-  const part = (u: Type) => unequal(u, eq, seen);
-  switch (t.kind) {
-    case "literal":
-    case "pattern":
-    case "pointer":
-      return undefined;
-    case "ref":
-      return part(t.to);
-    case "recursive":
-      return part(t.of);
-    // An open type parameter is judged in each instance, where it is concrete.
-    case "param":
-      return t.concrete ? part(t.concrete) : undefined;
-    case "union":
-      return t.members.map(part).find((p) => p !== undefined);
-    case "array":
-    case "fixed":
-      return part(t.element);
-    case "object":
-      return t.match ? t : t.fields.map((f) => part(f.type)).find((p) => p !== undefined);
-    case "class":
-      return eq(t) ? undefined : t;
-    case "variant":
-      if (!eq(t)) return t;
-      return (t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t])
-        .flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields : []))
-        .map((f) => part(f.type)).find((p) => p !== undefined);
-    default:
-      return t;
-  }
-}
-
-// The part of a type that `console.log` can't print as Node's util.inspect would, or undefined:
-// every value but functions, handles and other runtime objects prints, a type parameter in each
-// instance once it is concrete.
-export function uninspectable(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
-  if (typeof t === "string") return t === "void" ? t : undefined;
-  if (seen.has(t)) return undefined;
-  seen.add(t);
-  const part = (u: Type) => uninspectable(u, seen);
-  const first = (parts: Type[]) => parts.map(part).find((p) => p !== undefined);
-  switch (t.kind) {
-    case "literal":
-    case "pattern":
-      return undefined;
-    case "ref":
-      return part(t.to);
-    case "recursive":
-      return part(t.of);
-    case "param":
-      return t.concrete ? part(t.concrete) : undefined;
-    case "union":
-      return first(t.members);
-    case "array":
-    case "fixed":
-      return part(t.element);
-    case "map":
-      return first(t.set ? [t.key] : [t.key, t.value]);
-    case "object":
-      return t.match ? t : first(t.fields.map((f) => f.type));
-    case "class":
-      // The prelude's Error prints its cause through what ErrorLike gives.
-      if ((t.name === "Error" && !t.generic) || t.generic?.name === "AggregateError") return t.generic ? part(t.generic.args[0]!) : undefined;
-      // A JsError prints as an Error, the JS value it keeps left out.
-      if (t.name === "JsError" && !t.generic) return undefined;
-      return first([...(t.base ? [t.base] : []), ...t.fields.filter((f) => !f.name.startsWith("#")).map((f) => f.type)]);
-    case "variant":
-      return first((t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t]).flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields.map((f) => f.type) : [])));
-    default:
-      return t;
-  }
-}
-
-// The type a recursive type stands for, or the type itself.
-export const unfold = (t: Type): Type => (typeof t !== "string" && t.kind === "recursive" ? t.of : t);
-
 // A generator: what it yields, its parameters, which say what it borrows, and the frame its
 // state lives in, filled once the body is checked. It has no properties, so `fields` stays
 // empty. One per generator instance, so `===` is nominal identity. An async one's `next()` gives
 // a future, and its body may await between yields.
 export type GeneratorType = { kind: "generator"; typeId: usize; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean };
 
-// An enum's member widens to its enum where TypeScript widens it: a `let`, a field, a type
-// argument or a property, since the place may later hold another member.
-export function widenEnum(t: Type): Type {
-  if (typeof t !== "string" && t.kind === "variant" && t.of) return t.of;
-  return typeof t !== "string" && t.kind === "literal" && t.owner?.of ? t.owner.of : t;
-}
-
-// A `let` holds its literal's whole type too, as in TypeScript: `let s = "a"` is a string.
-export function widenLet(t: Type): Type {
-  if (typeof t !== "string" && t.kind === "literal" && !t.owner && typeof t.value === "string") return "string";
-  // A \`let\` may later hold another regex, so it holds any.
-  if (typeof t !== "string" && t.kind === "regex") return ANY_REGEX;
-  return widenEnum(t);
-}
-
-// The type a literal's value belongs to, if Fish has it yet.
-export function baseOf(t: LiteralType): "i64" | "boolean" | "string" {
-  return typeof t.value === "bigint" ? "i64" : typeof t.value === "boolean" ? "boolean" : "string";
-}
-
-// Primitives, literals, references, and unions of nothing else are copied; objects,
-// instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
-// lent again rather than moved, so it copies too.
-// Whether a type is the class `c`, or a class extending it: what `instanceof c` tests.
-export function isSubclass(t: Type, c: Type): boolean {
-  for (let x: Type | undefined = t; typeof x !== "string" && x?.kind === "class"; x = x.base) if (x === c) return true;
-  return false;
-}
-
-export function isCopy(t: Type): boolean {
-  if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer" || t.kind === "regex") return true;
-  // A closure copies when what it captures does, and it changes nothing through it.
-  if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
-  // A parameter of a generic function type holds a generic function value, which captures nothing.
-  if (t.kind === "param" && t.bound?.kind === "function" && t.bound.generic) return true;
-  // A fixed array copies when its elements do, as Rust's `[T; N]` does.
-  if (t.kind === "fixed") return isCopy(t.element) && !holdsMut(t.element);
-  // A tuple copies when everything in it does, as a union does.
-  // A copy of a mutable reference would be a second one, so a tuple holding one moves.
-  if (isTuple(t)) return (t as ObjectType).fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
-  return t.kind === "union" && t.members.every(isCopy);
-}
-
-// Whether a value of `t` holds a mutable reference anywhere, which a copy would alias.
-export function holdsMut(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): boolean {
-  if (typeof t === "string" || seen.has(t)) return false;
-  seen.add(t);
-  const inner = (u: Type) => holdsMut(u, seen);
-  if (t.kind === "ref") return t.mutable;
-  if (t.kind === "recursive") return holdsPart(t.of, (u) => typeof u !== "string" && u.kind === "ref" && u.mutable);
-  if (t.kind === "param") return t.concrete ? inner(t.concrete) : t.bound !== undefined && inner(t.bound);
-  if (t.kind === "union") return t.members.some(inner);
-  if (t.kind === "array" || t.kind === "fixed") return inner(t.element);
-  if (t.kind === "map") return inner(t.value);
-  if (t.kind === "variant") return t.fields.some((f) => inner(f.type));
-  if (t.kind === "class") return t.fields.some((f) => inner(f.type)) || (t.base !== undefined && inner(t.base));
-  if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => inner(f.type));
-  return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => inner(f.type));
-}
-
-// Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
-// reference it holds. What a `shared` holds isn't its own part: copies of it are the same value.
-export function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, seen: TypeSet<Type> = new TypeSet<Type>()): boolean {
-  const holds = (u: Type) => holdsPart(u, found, throughRefs, seen);
-  if (found(t)) return true;
-  if (typeof t === "string") return false;
-  // A type that holds itself, through an array of itself, is looked into once.
-  if (seen.has(t)) return false;
-  seen.add(t);
-  if (t.kind === "ref") return throughRefs && holds(t.to);
-  if (t.kind === "param") return t.concrete !== undefined && holds(t.concrete);
-  if (t.kind === "union") return t.members.some(holds);
-  if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
-  if (t.kind === "map") return holds(t.key) || holds(t.value);
-  if (t.kind === "interior" || t.kind === "recursive") return holds(t.of);
-  if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
-  if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holds(f.type));
-  return (t.kind === "object" || t.kind === "closure" || t.kind === "variant") && t.fields.some((f) => holds(f.type));
-}
-
-// Whether a value owns a JoinHandle, or with `throughRefs` borrows one: only one place may
-// await a task's result.
-export const holdsHandle = (t: Type, throughRefs = false) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "handle", throughRefs);
-
 export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
-
-// Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock, a
-// shared value, or a Dyn, whose hidden value may hold them. Readers of a shared value borrow
-// such fields without its lock.
-export const interiorMutable = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && (u.kind === "shared" || u.kind === "dyn" || (u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && u.which !== "Permit")));
-
-// The first Atomic, Lock or Cell a value holds, if any.
-export function holdsInterior(t: Type): InteriorType | undefined {
-  let found: InteriorType | undefined;
-  holdsPart(t, (u) => typeof u !== "string" && u.kind === "interior" && (found = u) !== undefined);
-  return found;
-}
 
 // A short name for what `description` describes, the same in every program that has it: six
 // base-36 digits of its 64-bit FNV-1a hash over UTF-8. The hash is written here rather than taken
@@ -609,46 +386,278 @@ export function digest(description: string): string {
   return h.toString(36).slice(-6);
 }
 
-// A tuple's element types, in order.
-export function elementsOf(t: ObjectType): Type[] {
-  return t.fields.filter((f) => /^\d+$/.test(f.name)).toSorted((a, b) => Number(a.name) - Number(b.name)).map((f) => f.type);
-}
-
 // Why a generic function type can't be held where it is: as `where` it would be boxed, and a box
 // holds one function, where a generic one is a family made one per call.
 export function familyHeld(where: string): string {
   return `${where} can't hold a generic function type: that would box it in a Dyn, whose table holds one function, and a generic function is a family made one per call; give it one type, as '(x: i64) => i64', or take it as a parameter`;
 }
 
-export const isTuple = (t: Type): boolean => typeof t !== "string" && t.kind === "object" && t.tuple === true;
-
-// A field of an object, or of an instance or the bases it embeds.
-export function field(t: Exclude<Type, string>, name: string): Field | undefined {
-  const own = t.fields.find((f) => f.name === name);
-  return own ?? (t.kind === "class" && t.base ? field(t.base, name) : undefined);
-}
-
-// The indices that reach a field inside a value of `t`, through any embedded bases.
-export function fieldPath(t: ObjectType | ClassType, name: string): usize[] {
-  const embeds = t.kind === "class" && t.base;
-  const i = t.fields.findIndex((f) => f.name === name);
-  if (i >= 0) return [i + (embeds ? 1 : 0)];
-  return [0, ...fieldPath((t as ClassType).base!, name)];
-}
-
-// Every field of an instance: its bases' first, then its own.
-export function allFields(t: ClassType): Field[] {
-  return [...(t.base ? allFields(t.base) : []), ...t.fields];
-}
-
-// Whether `t` embeds `base`, directly or through another base.
-export function derives(t: ClassType, base: ClassType): boolean {
-  return t.base !== undefined && (t.base === base || derives(t.base, base));
-}
-
 // One program's types: the tables its types are interned in, so `===` is identity within it, and
 // the operations over them. Each compilation makes its own, so no type of one meets another's.
 export function newTyping() {
+  // The record a type that isn't a primitive stands for. A type is its record for now, so this
+  // gives it back.
+  function rec<T extends Exclude<Type, string>>(t: T): T {
+    return t;
+  }
+
+  // Whether a hole of type `t` takes `text`: any text for a string, the text a number of that type
+  // prints as for a number type, a literal's own text, or for a union, what any member takes.
+  function textFits(text: string, t: Type): boolean {
+    if (t === "string") return true;
+    if (t === "boolean") return text === "true" || text === "false";
+    // A number's text must be what that number prints as, so `-0` and `01` aren't integers.
+    if (isInteger(t)) {
+      if (!/^-?(0|[1-9]\d*)$/.test(text) || text === "-0") return false;
+      const { bits, signed } = INTEGERS[t];
+      const n = BigInt(text);
+      return signed ? n >= -(1n << BigInt(bits - 1)) && n < 1n << BigInt(bits - 1) : n >= 0n && n < 1n << BigInt(bits);
+    }
+    // As TypeScript's `${number}`: any text JavaScript reads as a finite number.
+    if (isFloat(t)) return text.trim() !== "" && Number.isFinite(Number(text));
+    if (typeof t === "string") return false;
+    if (t.kind === "literal") return !t.owner && String(t.value) === text;
+    if (t.kind === "union") return t.members.some((m) => textFits(text, m));
+    if (t.kind === "pattern") {
+      const parts = splitTemplate(text, t.quasis);
+      return parts !== undefined && parts.every((p, i) => textFits(p, t.holes[i]!));
+    }
+    return false;
+  }
+
+  // Whether a type is an Option: a union one of whose members is the empty value.
+  const isOption = (t: Type): t is UnionType => typeof t !== "string" && t.kind === "union" && t.members.includes("null");
+
+  // The reference a `Ref<T> | null` holds when it isn't empty.
+  function optionRef(t: Type | undefined): RefType | undefined {
+    if (!t || !isOption(t) || t.members.length !== 2) return undefined;
+    const ref = t.members.find((m) => m !== "null")!;
+    return typeof ref !== "string" && ref.kind === "ref" ? ref : undefined;
+  }
+
+  // The shape a JS handle's declaration gives it, when it has one.
+  function jsShape(t: Type): InterfaceType | ObjectType | undefined {
+    if (typeof t === "string" || t.kind !== "block" || t.which !== "JsValue" || typeof t.of === "string") return undefined;
+    return t.of.kind === "interface" || t.of.kind === "object" ? t.of : undefined;
+  }
+
+  // A JsValue a program holds without knowing its type, not a package's handle of a known shape.
+  const isPlainJs = (t: Type) => typeof t !== "string" && t.kind === "block" && t.which === "JsValue" && t.of === "void";
+
+  // The same, or a reference to one.
+  const holdsPlainJs = (t: Type) => isPlainJs(typeof t !== "string" && t.kind === "ref" ? t.to : t);
+
+  const thrownBy = (f: FutureType | HandleType | DynType): Type | undefined => (f.kind === "dyn" ? undefined : f.throws);
+
+  // The part of a type that keeps `===` from comparing its values, or undefined when every part
+  // compares: primitives, strings and literals, and objects, tuples, arrays and unions of them. A
+  // class compares through its `equals`, and a data enum when it derives Eq; `eq` says which do.
+  function unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
+    if (typeof t === "string" || seen.has(t)) return undefined;
+    seen.add(t);
+    const part = (u: Type) => unequal(u, eq, seen);
+    switch (t.kind) {
+      case "literal":
+      case "pattern":
+      case "pointer":
+        return undefined;
+      case "ref":
+        return part(t.to);
+      case "recursive":
+        return part(t.of);
+      // An open type parameter is judged in each instance, where it is concrete.
+      case "param":
+        return t.concrete ? part(t.concrete) : undefined;
+      case "union":
+        return t.members.map(part).find((p) => p !== undefined);
+      case "array":
+      case "fixed":
+        return part(t.element);
+      case "object":
+        return t.match ? t : t.fields.map((f) => part(f.type)).find((p) => p !== undefined);
+      case "class":
+        return eq(t) ? undefined : t;
+      case "variant":
+        if (!eq(t)) return t;
+        return (t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t])
+          .flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields : []))
+          .map((f) => part(f.type)).find((p) => p !== undefined);
+      default:
+        return t;
+    }
+  }
+
+  // The part of a type that `console.log` can't print as Node's util.inspect would, or undefined:
+  // every value but functions, handles and other runtime objects prints, a type parameter in each
+  // instance once it is concrete.
+  function uninspectable(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
+    if (typeof t === "string") return t === "void" ? t : undefined;
+    if (seen.has(t)) return undefined;
+    seen.add(t);
+    const part = (u: Type) => uninspectable(u, seen);
+    const first = (parts: Type[]) => parts.map(part).find((p) => p !== undefined);
+    switch (t.kind) {
+      case "literal":
+      case "pattern":
+        return undefined;
+      case "ref":
+        return part(t.to);
+      case "recursive":
+        return part(t.of);
+      case "param":
+        return t.concrete ? part(t.concrete) : undefined;
+      case "union":
+        return first(t.members);
+      case "array":
+      case "fixed":
+        return part(t.element);
+      case "map":
+        return first(t.set ? [t.key] : [t.key, t.value]);
+      case "object":
+        return t.match ? t : first(t.fields.map((f) => f.type));
+      case "class":
+        // The prelude's Error prints its cause through what ErrorLike gives.
+        if ((t.name === "Error" && !t.generic) || t.generic?.name === "AggregateError") return t.generic ? part(t.generic.args[0]!) : undefined;
+        // A JsError prints as an Error, the JS value it keeps left out.
+        if (t.name === "JsError" && !t.generic) return undefined;
+        return first([...(t.base ? [t.base] : []), ...t.fields.filter((f) => !f.name.startsWith("#")).map((f) => f.type)]);
+      case "variant":
+        return first((t.of && typeof t.of !== "string" && t.of.kind === "union" ? t.of.members : [t]).flatMap((v) => (typeof v !== "string" && v.kind === "variant" ? v.fields.map((f) => f.type) : [])));
+      default:
+        return t;
+    }
+  }
+
+  // The type a recursive type stands for, or the type itself.
+  const unfold = (t: Type): Type => (typeof t !== "string" && t.kind === "recursive" ? t.of : t);
+
+  // An enum's member widens to its enum where TypeScript widens it: a `let`, a field, a type
+  // argument or a property, since the place may later hold another member.
+  function widenEnum(t: Type): Type {
+    if (typeof t !== "string" && t.kind === "variant" && t.of) return t.of;
+    return typeof t !== "string" && t.kind === "literal" && t.owner?.of ? t.owner.of : t;
+  }
+
+  // A `let` holds its literal's whole type too, as in TypeScript: `let s = "a"` is a string.
+  function widenLet(t: Type): Type {
+    if (typeof t !== "string" && t.kind === "literal" && !t.owner && typeof t.value === "string") return "string";
+    // A \`let\` may later hold another regex, so it holds any.
+    if (typeof t !== "string" && t.kind === "regex") return ANY_REGEX;
+    return widenEnum(t);
+  }
+
+  // The type a literal's value belongs to, if Fish has it yet.
+  function baseOf(t: LiteralType): "i64" | "boolean" | "string" {
+    return typeof t.value === "bigint" ? "i64" : typeof t.value === "boolean" ? "boolean" : "string";
+  }
+
+  // Primitives, literals, references, and unions of nothing else are copied; objects,
+  // instances, interface values and type parameters move. A closure copies like what it holds. A mutable reference passed on is
+  // lent again rather than moved, so it copies too.
+  // Whether a type is the class `c`, or a class extending it: what `instanceof c` tests.
+  function isSubclass(t: Type, c: Type): boolean {
+    for (let x: Type | undefined = t; typeof x !== "string" && x?.kind === "class"; x = x.base) if (x === c) return true;
+    return false;
+  }
+
+  function isCopy(t: Type): boolean {
+    if (typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "ref" || t.kind === "pointer" || t.kind === "regex") return true;
+    // A closure copies when what it captures does, and it changes nothing through it.
+    if (t.kind === "closure") return t.fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
+    // A parameter of a generic function type holds a generic function value, which captures nothing.
+    if (t.kind === "param" && t.bound?.kind === "function" && t.bound.generic) return true;
+    // A fixed array copies when its elements do, as Rust's `[T; N]` does.
+    if (t.kind === "fixed") return isCopy(t.element) && !holdsMut(t.element);
+    // A tuple copies when everything in it does, as a union does.
+    // A copy of a mutable reference would be a second one, so a tuple holding one moves.
+    if (isTuple(t)) return (t as ObjectType).fields.every((f) => isCopy(f.type) && !holdsMut(f.type));
+    return t.kind === "union" && t.members.every(isCopy);
+  }
+
+  // Whether a value of `t` holds a mutable reference anywhere, which a copy would alias.
+  function holdsMut(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): boolean {
+    if (typeof t === "string" || seen.has(t)) return false;
+    seen.add(t);
+    const inner = (u: Type) => holdsMut(u, seen);
+    if (t.kind === "ref") return t.mutable;
+    if (t.kind === "recursive") return holdsPart(t.of, (u) => typeof u !== "string" && u.kind === "ref" && u.mutable);
+    if (t.kind === "param") return t.concrete ? inner(t.concrete) : t.bound !== undefined && inner(t.bound);
+    if (t.kind === "union") return t.members.some(inner);
+    if (t.kind === "array" || t.kind === "fixed") return inner(t.element);
+    if (t.kind === "map") return inner(t.value);
+    if (t.kind === "variant") return t.fields.some((f) => inner(f.type));
+    if (t.kind === "class") return t.fields.some((f) => inner(f.type)) || (t.base !== undefined && inner(t.base));
+    if (t.kind === "generator" || t.kind === "future") return t.params.some((f) => inner(f.type));
+    return (t.kind === "object" || t.kind === "closure") && t.fields.some((f) => inner(f.type));
+  }
+
+  // Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
+  // reference it holds. What a `shared` holds isn't its own part: copies of it are the same value.
+  function holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, seen: TypeSet<Type> = new TypeSet<Type>()): boolean {
+    const holds = (u: Type) => holdsPart(u, found, throughRefs, seen);
+    if (found(t)) return true;
+    if (typeof t === "string") return false;
+    // A type that holds itself, through an array of itself, is looked into once.
+    if (seen.has(t)) return false;
+    seen.add(t);
+    if (t.kind === "ref") return throughRefs && holds(t.to);
+    if (t.kind === "param") return t.concrete !== undefined && holds(t.concrete);
+    if (t.kind === "union") return t.members.some(holds);
+    if (t.kind === "array" || t.kind === "fixed") return holds(t.element);
+    if (t.kind === "map") return holds(t.key) || holds(t.value);
+    if (t.kind === "interior" || t.kind === "recursive") return holds(t.of);
+    if (t.kind === "class") return t.fields.some((f) => holds(f.type)) || (t.base !== undefined && holds(t.base));
+    if (t.kind === "generator" || t.kind === "future") return [...t.params, ...t.frame].some((f) => holds(f.type));
+    return (t.kind === "object" || t.kind === "closure" || t.kind === "variant") && t.fields.some((f) => holds(f.type));
+  }
+
+  // Whether a value owns a JoinHandle, or with `throughRefs` borrows one: only one place may
+  // await a task's result.
+  const holdsHandle = (t: Type, throughRefs = false) => holdsPart(t, (u) => typeof u !== "string" && u.kind === "handle", throughRefs);
+
+  // Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock, a
+  // shared value, or a Dyn, whose hidden value may hold them. Readers of a shared value borrow
+  // such fields without its lock.
+  const interiorMutable = (t: Type) => holdsPart(t, (u) => typeof u !== "string" && (u.kind === "shared" || u.kind === "dyn" || (u.kind === "interior" && u.which !== "Cell") || (u.kind === "block" && u.which !== "Permit")));
+
+  // The first Atomic, Lock or Cell a value holds, if any.
+  function holdsInterior(t: Type): InteriorType | undefined {
+    let found: InteriorType | undefined;
+    holdsPart(t, (u) => typeof u !== "string" && u.kind === "interior" && (found = u) !== undefined);
+    return found;
+  }
+
+  // A tuple's element types, in order.
+  function elementsOf(t: ObjectType): Type[] {
+    return t.fields.filter((f) => /^\d+$/.test(f.name)).toSorted((a, b) => Number(a.name) - Number(b.name)).map((f) => f.type);
+  }
+
+  const isTuple = (t: Type): boolean => typeof t !== "string" && t.kind === "object" && t.tuple === true;
+
+  // A field of an object, or of an instance or the bases it embeds.
+  function field(t: Exclude<Type, string>, name: string): Field | undefined {
+    const own = t.fields.find((f) => f.name === name);
+    return own ?? (t.kind === "class" && t.base ? field(t.base, name) : undefined);
+  }
+
+  // The indices that reach a field inside a value of `t`, through any embedded bases.
+  function fieldPath(t: ObjectType | ClassType, name: string): usize[] {
+    const embeds = t.kind === "class" && t.base;
+    const i = t.fields.findIndex((f) => f.name === name);
+    if (i >= 0) return [i + (embeds ? 1 : 0)];
+    return [0, ...fieldPath((t as ClassType).base!, name)];
+  }
+
+  // Every field of an instance: its bases' first, then its own.
+  function allFields(t: ClassType): Field[] {
+    return [...(t.base ? allFields(t.base) : []), ...t.fields];
+  }
+
+  // Whether `t` embeds `base`, directly or through another base.
+  function derives(t: ClassType, base: ClassType): boolean {
+    return t.base !== undefined && (t.base === base || derives(t.base, base));
+  }
+
   // Function types whose error is a type parameter the call hasn't decided: an arrow given as one
   // infers what it throws, which then decides that parameter.
   const openThrows = new TypeSet<FunctionType>();
@@ -1918,6 +1927,8 @@ export function newTyping() {
   }
 
   return {
+    rec, textFits, isOption, optionRef, jsShape, isPlainJs, holdsPlainJs, unequal, uninspectable, unfold, widenEnum, widenLet, baseOf, isSubclass,
+    isCopy, holdsMut, holdsPart, holdsHandle, interiorMutable, holdsInterior, elementsOf, isTuple, field, fieldPath, allFields, derives,
     openThrows, patternType, holdsPattern, sameLowered, interiorType, sharedType, dynType, callableOf, uncrossable, jsUntyped, jsOptional, jsUncalled,
     setJsError, jsView, timerCallback, callableType, sameCallable, stored, heldArgument, jsConverts, keptByJs, jsTakes, jsRead, blockType, leafOf,
     leafFuture, handleType, joinedType, futureType, combinedOf, settledType, settledParts, combinedFuture, promiseInterface, borrowing, lentPromise, sharesDyn,

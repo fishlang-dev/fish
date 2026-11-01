@@ -9,7 +9,7 @@ import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { TypeMap, TypeSet, widenEnum, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -32,7 +32,7 @@ type Checker = {
 
 export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
   const { typing, ids } = tables;
-  const { optionalField, holdsPattern, fits, show, blockFor } = typing;
+  const { widenEnum, optionalField, holdsPattern, fits, show, blockFor } = typing;
   // Every class by its type, and those not yet laid out and checked.
   const infoOf = new TypeMap<ClassType, ClassInfo>();
   const unsettled: ClassInfo[] = [];

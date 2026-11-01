@@ -6,7 +6,7 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap, walk } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { TypeMap, ANY_REGEX, familyHeld, jsShape, type RecursiveType, field, isFloat, splitTemplate, textFits, holdsHandle, holdsPart, type BlockType, isInteger, type MapType, type ArrayType, optionRef, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { TypeMap, ANY_REGEX, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, type ArrayType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, typeFunctions } from "./typefns.ts";
@@ -44,7 +44,7 @@ export function typeName(name: string, at: Span, ...namespaces: Map<string, unkn
 // A field holds a value, and an interface type describes values without being one. A
 // function type in a field would be a boxed callable, which needs the heap.
 export function storable(typing: Typing, written: Type, at: Span): Type {
-  const { stored } = typing;
+  const { holdsPart, optionRef, stored } = typing;
   if (typeof written !== "string" && written.kind === "function" && written.generic) throw new CompileError(familyHeld("a field"), at.start, at.end);
   const type = stored(written);
   if (typeof type !== "string" && type.kind === "interface") {
@@ -65,7 +65,7 @@ export function resolver(tables: Tables, aliases: Map<string, TypeAlias>, classN
   conforms: (from: Type, to: Type, at: Span) => boolean, typeNames: (at: usize) => string[]) {
   const { declaredTypes, defaulted, presetTypes, ids } = tables;
   const { typing } = tables;
-  const {
+  const { field, holdsPart, jsShape, textFits,
     lowersRecursive, keyOf, recursiveType, show, standsFor, heldArgument, holdsRef, holdsPattern, variantType, unionType, holdsBlock, lower, stored,
     promiseElement, arrayType, fixedType, replaced, refType, functionType, objectType, tupleType, pointerType, generatorElement, dynType, blockType,
     handleType, promiseInterface, generatorInterface, asyncGeneratorInterface, literalType, interfaceType, shapeKey, jsUntyped, jsOptional, optionalField, withoutNull, typeParameter, fits,
@@ -894,7 +894,7 @@ class Open {
 // integer type for an integer's text, a boolean literal, a float type, or the text itself, the
 // first of these the bound takes; or nothing when the bound takes none.
 function inferredText(typing: Typing, text: string, bound: Type): Type | undefined {
-  const { literalType, fits } = typing;
+  const { textFits, literalType, fits } = typing;
   const members = typeof bound !== "string" && bound.kind === "union" ? bound.members : [bound];
   // A bound taking any string keeps the text as written, as TypeScript does.
   if (members.includes("string")) return literalType(text);
@@ -990,7 +990,7 @@ export function interior(typing: Typing, which: InteriorType["which"], given: Ty
 // function type, can't be held where its value is laid out once for every use, as a channel, a
 // shared value and a lock hold theirs.
 function abstractless(typing: Typing, of: Type, holder: string, at: Span) {
-  const { lower, show } = typing;
+  const { holdsPart, lower, show } = typing;
   let found: Type | undefined;
   holdsPart(lower(of), (u) => typeof u !== "string" && (u.kind === "interface" || u.kind === "function") && (found = u) !== undefined);
   if (found) throw new CompileError(`${holder} can't hold a '${show(found)}' yet: name a concrete type`, at.start, at.end);
@@ -999,7 +999,7 @@ function abstractless(typing: Typing, of: Type, holder: string, at: Span) {
 // A `shared<T>` holding a T every thread may use at once: nothing in it borrows, points
 // unchecked, or changes without a lock.
 export function shareable(typing: Typing, given: Type, at: Span): SharedType {
-  const { heldArgument, lower, show, sharedType } = typing;
+  const { holdsHandle, holdsPart, heldArgument, lower, show, sharedType } = typing;
   unboxedClosure(typing, given, at);
   const of = heldArgument(given);
   const held = lower(of);
@@ -1021,7 +1021,7 @@ export function shareable(typing: Typing, given: Type, at: Span): SharedType {
 // A `Channel<T>` carrying values from one task to another: nothing in them borrows, points
 // unchecked, or changes without a lock.
 export function channel(typing: Typing, given: Type, at: Span): BlockType {
-  const { heldArgument, lower, show, holdsPattern, blockType } = typing;
+  const { holdsPart, heldArgument, lower, show, holdsPattern, blockType } = typing;
   unboxedClosure(typing, given, at);
   const of = heldArgument(given);
   const held = lower(of);

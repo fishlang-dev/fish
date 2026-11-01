@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { AssignOp, BinaryOp, Span } from "./parser.ts";
-import { isFloat, isInteger, isNumeric, isOption, type Type, type Typing } from "./typing.ts";
+import { isFloat, isInteger, isNumeric, type Type, type Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 
 // Which operators have a meaning so far, and the types they take and give.
@@ -20,7 +20,7 @@ export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
 };
 
 // The result of a binary operator, or an error when its operands don't suit it.
-export function binaryType({ show }: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type {
+export function binaryType({ isOption, show }: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type {
   // Value equality comes through Eq, which objects don't have yet. A literal's value is known.
   const comparable = (t: Type) => typeof t === "string" || t.kind === "literal" || t.kind === "pattern" || t.kind === "pointer";
   if ((op === "===" || op === "!==") && (!comparable(left) || !comparable(right))) {

@@ -5,7 +5,7 @@ import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import type { Tables } from "./compilation.ts";
-import { baseOf, elementsOf, isSubclass, isTuple, field, INTEGERS, range, redundantBang, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
+import { INTEGERS, range, redundantBang, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -218,7 +218,7 @@ const constName = (c: Instance) => c.body.name.slice("const ".length);
 
 function interpreter(tables: Tables) {
   const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files, asserts, clocks, integerCalls } = tables;
-  const { show, lower } = typing;
+  const { elementsOf, isSubclass, isTuple, show, lower } = typing;
   let steps = 0;
   let depth = 0;
   return { expr, block, constant, call };
@@ -913,7 +913,7 @@ function interpreter(tables: Tables) {
       case "any":
         return true;
       case "literal":
-        return info.member ? same(v, literalValue(info.member) ?? info.member.value) : same(v, expr(f, (p as Extract<Pattern, { kind: "literal" }>).value));
+        return info.member ? same(typing, v, literalValue(info.member) ?? info.member.value) : same(typing, v, expr(f, (p as Extract<Pattern, { kind: "literal" }>).value));
       case "none":
         return v === null;
       case "some":
@@ -1150,7 +1150,7 @@ function retag(typing: Typing, value: Value, from: Type | undefined, to: Type | 
   const v = unwrap(value);
   if (v && typeof v === "object" && v.kind === "record" && typeof to !== "string" && (to.kind === "object" || to.kind === "class")) {
     // A field the value leaves out is an optional one, which is empty.
-    for (const f of to.fields) v.fields.set(f.name, v.fields.has(f.name) ? retag(typing, v.fields.get(f.name), field(v.type, f.name)?.type, f.type) : retag(typing, null, "null", f.type));
+    for (const f of to.fields) v.fields.set(f.name, v.fields.has(f.name) ? retag(typing, v.fields.get(f.name), typing.field(v.type, f.name)?.type, f.type) : retag(typing, null, "null", f.type));
   }
   if (v && typeof v === "object" && v.kind === "array" && typeof to !== "string" && to.kind === "array") {
     const element = typeof from !== "string" && from?.kind === "array" ? from.element : undefined;
@@ -1165,7 +1165,7 @@ function memberType(typing: Typing, v: Value, t: Type | undefined): Type | undef
   if (v && typeof v === "object" && v.kind === "member") return memberType(typing, v.value, v.type);
   const own = deref(t);
   if (typeof own !== "string" && own?.kind === "union") return memberOf(typing, v, own);
-  if (typeof own !== "string" && own?.kind === "literal") return baseOf(own) ?? own;
+  if (typeof own !== "string" && own?.kind === "literal") return typing.baseOf(own) ?? own;
   return own;
 }
 
@@ -1178,9 +1178,9 @@ function equal(typing: Typing, a: Value, ta: Type | undefined, b: Value, tb: Typ
   const [ma, mb] = [memberType(typing, a, ta), memberType(typing, b, tb)];
   // A literal stands for its base type: members of two enums that share a value are equal, as
   // they are at run time.
-  const plain = (t: Type | undefined) => (typeof t !== "string" && t?.kind === "literal" ? (baseOf(t) ?? t) : t);
+  const plain = (t: Type | undefined) => (typeof t !== "string" && t?.kind === "literal" ? (typing.baseOf(t) ?? t) : t);
   if (ma !== undefined && mb !== undefined && plain(ma) !== plain(mb)) return false;
-  return same(a, b, eq);
+  return same(typing, a, b, eq);
 }
 
 // The value an enum member's literal type stands for, or undefined for any other type.
@@ -1194,24 +1194,24 @@ function enumName(e: Expr): boolean {
 }
 
 // Values compare as `===` compares them: primitives by value, variants by member and payload.
-function same(x: Value, y: Value, eq?: Equals): boolean {
+function same(typing: Typing, x: Value, y: Value, eq?: Equals): boolean {
   // Two members of a union are equal when they are the same member holding equal values.
   if (x && y && typeof x === "object" && typeof y === "object" && x.kind === "member" && y.kind === "member") {
-    const plain = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (baseOf(t) ?? t) : t);
+    const plain = (t: Type) => (typeof t !== "string" && t.kind === "literal" ? (typing.baseOf(t) ?? t) : t);
     if (plain(x.type) !== plain(y.type)) return false;
   }
   const [a, b] = [unwrap(x), unwrap(y)];
   if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "variant" && b.kind === "variant") {
-    return a.type === b.type && a.args.every((v, i) => same(v, b.args[i], eq));
+    return a.type === b.type && a.args.every((v, i) => same(typing, v, b.args[i], eq));
   }
   // Objects and arrays compare part by part.
   if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "record" && b.kind === "record") {
     const written = eq?.(a, b);
     if (written !== undefined) return written;
-    return a.fields.size === b.fields.size && [...a.fields].every(([k, v]) => b.fields.has(k) && same(v, b.fields.get(k), eq));
+    return a.fields.size === b.fields.size && [...a.fields].every(([k, v]) => b.fields.has(k) && same(typing, v, b.fields.get(k), eq));
   }
   if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "array" && b.kind === "array") {
-    return a.items.length === b.items.length && a.items.every((v, i) => same(v, b.items[i], eq));
+    return a.items.length === b.items.length && a.items.every((v, i) => same(typing, v, b.items[i], eq));
   }
   return a === b;
 }

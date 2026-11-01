@@ -12,7 +12,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { TypeSet, allFields, unequal, uninspectable, unfold, elementsOf, isTuple, baseOf, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, isOption, redundantBang, bare, type Bang, range, derives, field, holdsHandle, holdsPart, type DynType, type HandleType, type BlockType, holdsInterior, interiorMutable, type SharedType, holdsMut, INTERIORS, type InteriorType, optionRef, isCopy, widenEnum, widenLet, isPlainJs, jsShape, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -49,15 +49,15 @@ export const printStream = (callee: Expr): 1 | 2 => (callee.kind === "member" &&
 const isRefType = (t: Type): t is RefType => typeof t !== "string" && t.kind === "ref";
 
 // Whether a value of the type can hold a float anywhere inside it.
-function holdsFloat(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): boolean {
+function holdsFloat(typing: Typing, t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): boolean {
   if (typeof t === "string") return isFloat(t);
   if (seen.has(t)) return false;
   seen.add(t);
-  const x = t as unknown as Record<string, unknown>;
+  const x = typing.rec(t) as unknown as Record<string, unknown>;
   const parts = ["to", "of", "concrete", "element", "key", "value", "base"].flatMap((k) => ((typeof x[k] === "object" && x[k] !== null) || typeof x[k] === "string" ? [x[k] as Type] : []));
   if (Array.isArray(x.members)) parts.push(...(x.members as Type[]));
   if (Array.isArray(x.fields)) parts.push(...(x.fields as Field[]).map((f) => f.type));
-  return parts.some((p) => holdsFloat(p, seen));
+  return parts.some((p) => holdsFloat(typing, p, seen));
 }
 
 const printable = (t: Type): boolean =>
@@ -282,7 +282,7 @@ export function expressions(ctx: Context) {
     syncFileCalls, tagCalls, timerCalls, timerNames, timerSets, timerWrappers, tupleLiterals,
     unusedDefaults, restStarts, upcasts, typing, ids, regex, files
   } = ctx.tables;
-  const {
+  const { allFields, baseOf, derives, elementsOf, field, holdsHandle, holdsInterior, holdsMut, holdsPart, interiorMutable, isCopy, isOption, isPlainJs, isTuple, jsShape, optionRef, unequal, unfold, uninspectable, widenEnum, widenLet,
     show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, pointerType, handleType, leafFuture,
     arrayType, timerCallback, jsUncalled, fits, jsTakes, promiseElement, genericFunctionType, stored: storedType, matchType, functionType, tupleType, regexType,
     holdsPattern, unjson, sameLowered, heldArgument, jsUntyped, jsOptional, uncrossable, keptByJs, jsConverts, interiorType, lockCallbacks, sharedCallbacks,
@@ -786,7 +786,7 @@ export function expressions(ctx: Context) {
           coerce(p.value, t, numeric, `'${show(t)}' can't match a '${show(numeric)}'`);
           t = numeric;
         }
-        if (!comparable(type, t)) throw never();
+        if (!comparable(typing, type, t)) throw never();
         return record({ kind: "literal", value: literalOf(p.value) });
       }
       case "variant": {
@@ -797,7 +797,7 @@ export function expressions(ctx: Context) {
         }
         const member = enumMember(p);
         if (member) {
-          if (!comparable(type, member)) throw never();
+          if (!comparable(typing, type, member)) throw never();
           return record({ kind: "literal", value: member.value, member });
         }
         const v = variantNamed(members, p.name);
@@ -2510,7 +2510,7 @@ export function expressions(ctx: Context) {
       return { type: name === "includes" ? "boolean" : "i64", what: `'${name}'` };
     }
     if (objectsMeet(array.element, t)) throw new CompileError(`'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
-    if (!comparable(array.element, t)) throw new CompileError(`'${name}' can never find a '${show(widenLet(t))}' among elements of type '${show(array.element)}'`, sought.start, sought.end);
+    if (!comparable(typing, array.element, t)) throw new CompileError(`'${name}' can never find a '${show(widenLet(t))}' among elements of type '${show(array.element)}'`, sought.start, sought.end);
     if (from) argument(from, "i64");
     return { type: name === "includes" ? "boolean" : "i64", what: `'${name}'` };
   }
@@ -4695,7 +4695,7 @@ export function expressions(ctx: Context) {
           for (const a of [e.left, e.right]) {
             const t = value(a);
             once.add(a);
-            if (holdsFloat(t)) throw new CompileError("'isDeepStrictEqual' over floats isn't supported yet: Node's compares them as Object.is does, NaN equal to NaN and -0 apart from 0, unlike '==='", a.start, a.end);
+            if (holdsFloat(typing, t)) throw new CompileError("'isDeepStrictEqual' over floats isn't supported yet: Node's compares them as Object.is does, NaN equal to NaN and -0 apart from 0, unlike '==='", a.start, a.end);
           }
         }
         // The migration lint rewrites loose equality to strict, so native code never uses it.

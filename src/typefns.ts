@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { TypeSet, allFields, isNumeric, type ClassType, type Field, type Hole, type ParamType, type Type, type Typing } from "./typing.ts";
+import { TypeSet, isNumeric, type ClassType, type Field, type Hole, type ParamType, type Type, type Typing } from "./typing.ts";
 
 // A type-level function: its type arguments, the span of the whole use and of each argument.
 type Utility = (args: Type[], at: Span, argAt: Span[]) => Type;
@@ -41,7 +41,7 @@ export function standIn(typing: Typing, types: Type[], what: string, at: Span, d
 // `layout` does when first asked, saying whether they are known yet.
 // `conforms` is whether a type fits another, an interface by shape, as `extends` asks.
 export function typeFunctions(typing: Typing, layout: (c: ClassType) => boolean, deferring: () => boolean, conforms: (from: Type, to: Type, at: Span) => boolean) {
-  const { show, unionType, literalType, objectType, optionalField, withoutNull, promiseElement, patternType } = typing;
+  const { allFields, show, unionType, literalType, objectType, optionalField, withoutNull, promiseElement, patternType } = typing;
   // The fields a type-level function reads: an object type's, or a class's public fields, which
   // are its data (a class's methods aren't values in Fish).
   function fieldsOf(t: Type, what: string, at: Span): Field[] {

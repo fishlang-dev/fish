@@ -6,7 +6,7 @@ import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
 import { indexText, restText, MAP_CHANGES } from "./values.ts";
 import { holdsNode } from "./check.ts";
-import { field, holdsHandle, holdsPart, holdsMut, optionRef, redundantBang, bare, isCopy, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { redundantBang, bare, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 import { NodeSet, nextId, NodeMap } from "./nodes.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -56,7 +56,7 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
   const { kindTests, asserts, computed, jsCrossings, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts, typing, ids } = instance.tables;
-  const { holdsRef, yieldsOf, lower, callableOf, keptByJs, partOfItself } = typing;
+  const { field, holdsHandle, holdsMut, holdsPart, isCopy, optionRef, holdsRef, yieldsOf, lower, callableOf, keptByJs, partOfItself } = typing;
   // A place put into a `Ref<T> | null` is lent to the reference the Option holds.
   const coercions = new NodeMap(instance.coercions);
   for (const [e, to] of coercions) {

@@ -3,7 +3,7 @@ import { category, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Tables } from "./compilation.ts";
-import { baseOf, field, fieldPath, INTEGERS, isInteger, isPlainJs, isSubclass, optionRef, unfold, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
+import { INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -83,7 +83,7 @@ export const compound = (t: Type): boolean => typeof t !== "string" && ["object"
 
 export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
   const { emit, temp, label, startBlock, alloca, deep, typing } = b;
-  const { membersFor } = typing;
+  const { baseOf, field, fieldPath, isPlainJs, isSubclass, optionRef, unfold, membersFor } = typing;
   const llvm = layoutOf(typing);
   return { convert, test, equals, unionField, holds, holdsWhere, eachMember };
 
@@ -95,7 +95,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     if (instance) {
       const tested = e.kind === "call" ? e.args[0]! : (e as Extract<Expr, { kind: "binary" }>).left;
       const [type, v] = [typeOf(tested), value(tested)];
-      return holdsWhere(v, type, (m) => ofKind(m, instance));
+      return holdsWhere(v, type, (m) => ofKind(typing, m, instance));
     }
     if (e.kind !== "binary") return undefined;
     if (e.op === "instanceof") {
