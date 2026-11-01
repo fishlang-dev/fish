@@ -19,7 +19,7 @@ import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, genericClasses, instancing, typeParamsOf } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { registry } from "./registry.ts";
-import { addAlias, paramName, resolver, tagStrings, typeName } from "./resolve.ts";
+import { addAlias, paramName, Resolver, tagStrings, typeName } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
 import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing } from "./typing.ts";
@@ -601,28 +601,32 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     assuming: new Set(),
   };
   const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
-    tables, classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+    tables, classes, templates, members, resolveType: (t) => resolver.resolveType(t), withScope: (b, f) => resolver.withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
     classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
   });
   classes.forEach((c) => register(arenas.classOf(c)));
   const { classNamed, construct, start, define, definedClass } = genericClasses({
-    tables, classes, templates, register, layout, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
+    tables, classes, templates, register, layout, members, resolveType: (t) => resolver.resolveType(t), withScope: (b, f) => resolver.withScope(b, f),
   });
-  const { resolveType, paramType, withScope, withSight, setSight, enumInstance, validate, interfaceInstance } = resolver(tables, aliases, classNamed, interfaces, enums, slots, (c) => layout(classOf(c)), (name, at, shadowed) => valueTypeOf(name, at, shadowed),
+  const resolver = new Resolver(tables, aliases, interfaces, enums, slots, {
+    classNamed: (name, args, at) => classNamed(name, args, at),
+    layout: (c) => layout(classOf(c)),
+    valueType: (name, at, shadowed) => valueTypeOf(name, at, shadowed),
     // An interface is met by shape, as a conditional type's `extends` asks of it.
-    (from, to, at) => {
+    conforms(from, to, at) {
       const trait = recOf(to);
       return trait?.kind === "interface" ? unsatisfied(from, to as InterfaceType, members, at) === undefined : typing.fits(from, to);
     },
-    (at) => reached([...aliases.keys(), ...classes.keys(), ...templates.keys(), ...interfaces.keys(), ...enums.keys()], at));
+    typeNames: (at) => reached([...aliases.keys(), ...classes.keys(), ...templates.keys(), ...interfaces.keys(), ...enums.keys()], at),
+  });
   typing.lowersInstances({
     // A generic enum's variant made with other type arguments, while lowering.
     variantInstance(v, args) {
       const r = typing.rec(v);
-      return enumInstance(enums.get(r.enum)!, args, (checking && bodyOf(checking)) ?? { start: 0, end: 0 }).variants.get(r.member)!;
+      return resolver.enumInstance(enums.get(r.enum)!, args, (checking && bodyOf(checking)) ?? { start: 0, end: 0 }).variants.get(r.member)!;
     },
-    interfaceInstance: (t, args) => interfaceInstance(t, args),
+    interfaceInstance: (t, args) => resolver.interfaceInstance(t, args),
     // A class first made while lowering is reported at the function being checked.
     classInstance: (c, args) => classNamed(typing.rec(c).generic!.name, args, (checking && bodyOf(checking)) ?? { start: 0, end: 0 })!,
   });
@@ -646,8 +650,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // How many new demands the body being checked made itself, not counting its callees'.
   let demanded = 0;
   const { instanceOf, instantiate, callbackType, paramTypes, scopeOf, declaredParams, implicitOf, definition, pending, all, siteOf, returnTypeOf, constructs } = instancing({
-    tables, resolveType, paramType, withScope, members, checking: () => checking,
-    signing: (f, run) => withSight((n, at) => writtenIn(f, at) && f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n), run),
+    tables, resolveType: (t) => resolver.resolveType(t), paramType: (p, property) => resolver.paramType(p, property), withScope: (b, f) => resolver.withScope(b, f), members, checking: () => checking,
+    signing: (f, run) => resolver.withSight({ inSight: (n, at) => writtenIn(f, at) && f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === n) }, run),
     classParams: (f) => (f.scope?.size && f.owner ? classOf(f.owner).node.typeParams : []),
     comptimeArgument: (arg) => comptimeLiteral(arg),
   });
@@ -780,8 +784,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // Aliases are checked once classes are laid out, since one may read a class's fields or a
   // function's inferred result, and so is an enum with no type parameters, made now so a
   // payload naming no type is caught unused.
-  validate();
-  for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = enumInstance(e, [], e.data.at).type;
+  resolver.validate();
+  for (const e of enums.values()) if (e.data && e.data.params.length === 0) e.type = resolver.enumInstance(e, [], e.data.at).type;
   classes.forEach((c) => implementsSignatures(arenas.classOf(c)));
   // An enum with computed members is settled when first read; one nothing reads still reports
   // a bad initializer.
@@ -1043,7 +1047,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (!crosses(params[i]!)) throw new CompileError(`a C function's parameter can't be a '${typing.show(params[i]!)}'; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
     });
     instance.signature = params;
-    const returns = resolveType(f.returnType);
+    const returns = resolver.resolveType(f.returnType);
     if (returns !== "void" && !crosses(returns)) throw new CompileError(`a C function can't return a '${typing.show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
     instance.returns = returns;
     done.add(instance.id);
@@ -1059,7 +1063,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A Rust `Result`'s `Err` is thrown: as Fish's `Error`, made from its Display text, or as the
     // Rust type it is, declared as a class.
     if (f.throws) {
-      const error = resolveType(f.throws);
+      const error = resolver.resolveType(f.throws);
       const r = recOf(error);
       const isError = r?.kind === "class" && r.name === "Error" && !r.generic;
       if (!isError && !rustClassOf(typing, error)) throw new CompileError(`${what} throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a '${typing.show(error)}'`, f.throws.start, f.throws.end);
@@ -1077,7 +1081,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       refuse(params[i]!, false, p);
     });
     instance.signature = params;
-    const returns = f.returnType ? resolveType(f.returnType) : "void";
+    const returns = f.returnType ? resolver.resolveType(f.returnType) : "void";
     if (returns !== "void") refuse(returns, true, f.returnType!);
     // A constructor gives the handle to the value it made.
     instance.returns = constructor ? f.owner! : returns;
@@ -1132,7 +1136,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       if (why) throw refuse(`${named} takes a '${typing.show(params[i]!)}', which can't cross between Fish and JS yet: ${why}`, p.type ?? p);
     });
     instance.signature = params;
-    const returns = typing.jsView(f.returnType ? withScope(concrete, () => resolveType(f.returnType!)) : typing.blockType("JsValue"));
+    const returns = typing.jsView(f.returnType ? resolver.withScope(concrete, () => resolver.resolveType(f.returnType!)) : typing.blockType("JsValue"));
     const why = returns === "void" ? undefined : typing.uncrossable(returns);
     if (why) throw refuse(`${named} gives a '${typing.show(returns)}', which can't cross between Fish and JS yet: ${why}`, f.returnType!);
     instance.returns = returns;
@@ -1216,7 +1220,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   // What a call of an instance may throw, as its caller sees it.
   function errorOf(instance: Instance): Type | undefined {
     const f = bodyOf(instance);
-    return f.throws && withScope(instance.bindings, () => resolveType(f.throws!));
+    return f.throws && resolver.withScope(instance.bindings, () => resolver.resolveType(f.throws!));
   }
 
   function returnOf(instance: Instance, at: Span): Type {
@@ -1264,7 +1268,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         demanded = 0;
         try {
           // A body sees its own names, not those of a body whose check needed it.
-          withSight(undefined, () => withScope(scopeOf(instance), () => checkInstance(instance)));
+          resolver.withSight(undefined, () => resolver.withScope(scopeOf(instance), () => checkInstance(instance)));
         } catch (e) {
           inProgress.delete(instance.id);
           if (!(e instanceof CompileError) || demanded === 0) throw bodyOf(instance).signature ? incompatible(bodyOf(instance), e) : e;
@@ -1320,7 +1324,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // A closure returns the number type the function type it meets returns, so its literals
     // take that type.
     const given = f.closure?.expected && typing.rec(f.closure.expected).returns;
-    let declared = f.closure ? (f.returnType ? typing.stored(resolveType(f.returnType)) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
+    let declared = f.closure ? (f.returnType ? typing.stored(resolver.resolveType(f.returnType)) : given && isNumeric(given) ? given : undefined) : returnTypeOf(f, scopeOf(instance));
     // A generator's declared `Generator<T>`, or an async one's `AsyncGenerator<T>`, says what it
     // yields; calling it gives its own type.
     const generator = f.generator ? (instance.generator ??= madeBy(typing.generatorType(f.name, instance.concrete, f.async === true), instance)) : undefined;
@@ -1356,7 +1360,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // Only a type written inside the body sees them: one written elsewhere, a class's field or
     // another signature, is resolved here only because the body needed it.
     const inSight = (name: string, at: Span): boolean => writtenIn(f, at) && (scopes.some((s) => s.has(name)) || f.params.some((p) => named(p, name)) || (outer?.inSight(name, at) ?? false));
-    setSight(inSight);
+    resolver.setSight({ inSight });
     const targets: Target[] = [];
     // What the conditions guarding the code being checked prove, innermost last. A `let`
     // narrows only when nothing assigns to its name.
@@ -1387,7 +1391,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const p = target && bodyOf(target).returnType;
       if (!target || p?.kind !== "predicate" || !p.type) return undefined;
       const index = bodyOf(target).params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name) as usize;
-      const type = withScope(target.bindings, () => resolveType(p.type!));
+      const type = resolver.withScope(target.bindings, () => resolver.resolveType(p.type!));
       return { index, type, narrows: (yes: boolean, no: boolean) => void ((yes || no) && (instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no })) };
     };
     const proves = (e: Expr) => guard(tables, e, types, locals as NodeMap<Expr, LocalId>, narrowable, predicate);
@@ -1407,14 +1411,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // In a member of a generic class's instance, `this` is the class made from the type
     // parameters as this body sees them, so it reads through their bounds as the definition did.
     const generic = f.self && typing.rec(f.self.type).generic;
-    const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolveType({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
+    const viewed = generic && classNamed(generic.name, classOf(f.self!.type).node.typeParams.map((p) => resolver.resolveType({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: f.start, end: f.start })), f)!;
     // A closure sees the `this` of the body it is written in, which it only reads.
     const enclosing = f.closure && selfOf(arenas, f);
     const self = f.closure ? enclosing && { ...enclosing, constructor: false, mutable: false, owned: false } : f.self && { ...f.self, type: viewed ?? f.self.type };
     const captures = instance.captures;
 
     const { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely } = expressions({
-      tables, types, locals, coercions, calls, setters, byName, classes, enums, enumInstance, patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
+      tables, types, locals, coercions, calls, setters, byName, classes, enums, enumInstance: (info, given, at) => resolver.enumInstance(info, given, at), patterns: instance.patterns, copiesOut: instance.copiesOut, construct, members,
       templateParams, definedClass, returnOf, resultOf, sourcesOf, borrowsFrom: instance.borrowsFrom, classOf, instanceOf, instantiate, paramTypes, lookup, peek, reach,
       names: (at) => [...inScope(), ...reached([...byName.keys()].map((n) => n.replace(/^const /, "")), at)],
       classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
@@ -1480,9 +1484,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       depthOf: (l) => depths.get(l.localId)!,
       closure,
       liftArrow,
-      resolveWith: (t, scope) => withScope(scope, () => resolveType(t)),
+      resolveWith: (t, scope) => resolver.withScope(scope, () => resolver.resolveType(t)),
       closureBody: (t) => arenas.instanceOf(closureBodies.get(t)!),
-      resolveType,
+      resolveType: (t) => resolver.resolveType(t),
       implicitOf,
       callbackType,
       constructs,
@@ -1512,7 +1516,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // can throw; a nested function declares its own.
     const contextual = f.closure && !f.throws && f.closure.self === undefined && !f.async && f.closure.expected && !typing.openThrows.has(f.closure.expected) ? f.closure.expected : undefined;
     const inferring = f.closure !== undefined && !f.throws && f.closure.self === undefined && !contextual ? [] as [Expr | Stmt, Type][] : undefined;
-    let errorType = f.throws ? resolveType(f.throws) : contextual && typing.rec(contextual).throws;
+    let errorType = f.throws ? resolver.resolveType(f.throws) : contextual && typing.rec(contextual).throws;
     if (errorType === "void") throw new CompileError("a function can't throw 'void'; throw a value", f.throws!.start, f.throws!.end);
     if (errorType && typing.holdsRef(errorType)) throw unsupported("errors holding references", f.throws!);
     instance.throws = errorType;
@@ -1630,14 +1634,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       selfCalls.add(e);
       calls.set(e, instance.id);
       if (errorType) raise(e, errorType, `'${name}'`);
-      return { type: resolveType(f.returnType), what: `'${name}'` };
+      return { type: resolver.resolveType(f.returnType), what: `'${name}'` };
     }
 
     // `let x: T` declares a variable that holds nothing until assigned; the moves check refuses
     // every use before that, as TypeScript's definite assignment does.
     function unassigned(s: Stmt, d: Declarator, name: string): undefined {
       if (!d.type) throw new CompileError(`'${name}' needs a type to be declared without a value, like 'let ${name}: string'; Fish doesn't work it out from later assignments`, d.start, d.end);
-      const type = typing.stored(resolveType(d.type));
+      const type = typing.stored(resolver.resolveType(d.type));
       if (typing.lower(type) === "void") throw new CompileError(`'${name}' can't be of type 'void', which no value has`, d.start, d.end);
       if (isInterface(type)) throw new CompileError(`'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
       const r = recOf(type);
@@ -2068,7 +2072,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       inner.changed = new Set();
       inner.moved = new Set();
       closures.push(inner.id);
-      withSight(inSight, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
+      resolver.withSight({ inSight }, () => checkInstance(inner, { lookup, peek, inScope, reach, narrowed, thisReady, noteThis, changesLocal, changesThis, constant, inSight }));
       const sup = [...inner.types.keys()].find((u) => u.kind === "super");
       if (sup) throw unsupported("'super' in closures", sup);
       const captured = [...inner.captures].map(([alias, from]): [Local, Local | "this"] => [localOf(alias), from === "this" ? from : localOf(from)]);
@@ -2166,7 +2170,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       const plain = !p.rest && !p.optional && !p.default && p.modifiers.length === 0 && p.decorators.length === 0 && paramName(p) !== "this";
       // A declared function's parameter, named as a value, is typed where the function is declared.
       // A closure is one compiled function, so a function it takes is a stored callable.
-      const written = presetParams.get(p) ?? (!p.type && given && plain ? given : paramType(p));
+      const written = presetParams.get(p) ?? (!p.type && given && plain ? given : resolver.paramType(p));
       const w = recOf(written);
       const type = w?.kind === "function" && !w.generic ? typing.stored(written) : written;
       const to = isRef(type) ? typing.rec(type).to : type;
@@ -2236,7 +2240,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           if (!d.init) return unassigned(s, d, d.target.name);
           if (isAwait(d.init)) awaiting(d.init);
           // A function type there makes the variable a stored callable.
-          const declared = (d.type && typing.stored(resolveType(d.type))) || demands.get(s) || partType(s);
+          const declared = (d.type && typing.stored(resolver.resolveType(d.type))) || demands.get(s) || partType(s);
           // A generic function type describes the value, which keeps its own type, as an
           // interface's does.
           const named = recOf(declared);
