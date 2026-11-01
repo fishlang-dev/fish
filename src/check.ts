@@ -792,10 +792,12 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       jsUncalled.set(f, e);
     }
   });
-  // Once a body has failed, a generic class's instances aren't settled: their definitions were
-  // checked, and an instance's error then is most often one a refused call already reported.
+  // Once a body has failed, a generic body's or class's instances aren't checked: their
+  // definitions were, and an instance's error then is most often one a refused call already
+  // reported.
   while (!unending && (unsettled.length > 0 || pending.length > 0)) {
     if (errors.length > 0) {
+      pending.length = 0;
       const kept = unsettled.filter((c) => declaredClasses.has(c));
       unsettled.length = 0;
       unsettled.push(...kept);
