@@ -2,7 +2,7 @@
 // Node ids, and the tables keyed by them. Fish's `Map` and `Set` key on strings and integers,
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
-import type { Id } from "./ids.ts";
+import { latest, type Id } from "./ids.ts";
 import type { Span } from "./parser.ts";
 import { childrenOfClassMember, childrenOfClassNode, childrenOfDeclarator, childrenOfEnumMember, childrenOfExpr, childrenOfFunc, childrenOfInterface, childrenOfJsName, childrenOfMatchArm, childrenOfObjectProp, childrenOfParam, childrenOfPattern, childrenOfPatternProp, childrenOfSpecifier, childrenOfStmt, childrenOfStmts, childrenOfSwitchCase, childrenOfTupleElement, childrenOfTypeAlias, childrenOfTypeMember, childrenOfTypeNode, childrenOfTypeParam, type Visitor } from "./walk.ts";
 
@@ -89,11 +89,12 @@ export function shiftSpans<K extends RootKind>(of: K, tree: NodeOf<K> | NodeOf<K
 }
 
 // The node behind each id is kept, so a different object arriving with an id already in use, a
-// copy that kept its original's id, fails loudly instead of reading or replacing its entry.
+// copy that kept its original's id, fails loudly instead of reading or replacing its entry; a
+// node lowering replaced and its replacement are one node to a table, which gives the latest.
 function idOf(node: Id, known: Id | undefined): usize {
   const id = node.id;
   if (typeof id !== "number") throw new Error(`internal error: a ${(node as { kind?: string }).kind ?? "node"} node has no id`);
-  if (known !== undefined && known !== node) throw new Error(`internal error: two nodes share id ${id}`);
+  if (known !== undefined && known !== node && latest(known) !== latest(node)) throw new Error(`internal error: two nodes share id ${id}`);
   return id;
 }
 
@@ -131,7 +132,7 @@ export class NodeMap<K extends Id, V> {
   }
 
   *keys(): IterableIterator<K> {
-    for (const e of this.table.values()) yield e.node;
+    for (const e of this.table.values()) yield latest(e.node);
   }
 
   *values(): IterableIterator<V> {
@@ -139,7 +140,7 @@ export class NodeMap<K extends Id, V> {
   }
 
   *entries(): IterableIterator<[K, V]> {
-    for (const e of this.table.values()) yield [e.node, e.value];
+    for (const e of this.table.values()) yield [latest(e.node), e.value];
   }
 
   [Symbol.iterator](): IterableIterator<[K, V]> {
@@ -147,7 +148,7 @@ export class NodeMap<K extends Id, V> {
   }
 
   forEach(each: (value: V, node: K) => void): void {
-    for (const e of this.table.values()) each(e.value, e.node);
+    for (const e of this.table.values()) each(e.value, latest(e.node));
   }
 }
 
@@ -180,16 +181,16 @@ export class NodeSet<K extends Id> {
     this.table.clear();
   }
 
-  values(): IterableIterator<K> {
-    return this.table.values();
+  *values(): IterableIterator<K> {
+    for (const node of this.table.values()) yield latest(node);
   }
 
   [Symbol.iterator](): IterableIterator<K> {
-    return this.table.values();
+    return this.values();
   }
 
   forEach(each: (node: K) => void): void {
-    for (const node of this.table.values()) each(node);
+    for (const node of this.table.values()) each(latest(node));
   }
 }
 

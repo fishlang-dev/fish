@@ -70,7 +70,7 @@ test("a rebuild puts each replacement where its node was, under that node's id, 
   if (inner.kind !== "call") throw new Error("not a call");
   const r = new Rewrites();
   const by = r.replace(inner, { ...inner, id: 0, args: [...inner.args] });
-  const c = r.replace(inner.args[0]!, { id: 0, kind: "ident", name: "c", start: 0, end: 0 });
+  const c = r.replace(inner.args[0]!, { id: 0, kind: "ident" as const, name: "c", start: 0, end: 0 });
   expect(r.current(inner)).toBe(by);
   expect(rebuiltExpr(e, r)).toBe(e);
   expect(e.args).toEqual([a, by]);

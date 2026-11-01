@@ -21,6 +21,7 @@ export class Rewrites {
 
   // Records `by`, a node made for the purpose, as `node`'s replacement, and gives it.
   replace<T extends Id>(node: Ref<Id>, by: T): T {
+    replacements.set(this.current(node), by);
     by.id = node.id;
     this.table.set(node.id, by);
     return by;
@@ -29,4 +30,15 @@ export class Rewrites {
   current<T extends Id>(node: T): T {
     return (this.table.get(node.id) as T | undefined) ?? node;
   }
+}
+
+// Each replaced node's replacement, for the node tables' check that two nodes don't share an id:
+// a node and what replaced it share one by design, and a table holding either holds the latest.
+const replacements = new WeakMap<object, Id>();
+
+// What `node` is now: the last of its replacements, or itself.
+export function latest<T extends Id>(node: T): T {
+  let n: Id = node;
+  for (let next = replacements.get(n); next !== undefined; next = replacements.get(n)) n = next;
+  return n as T;
 }

@@ -1782,7 +1782,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // `for` head's go in a block around the loop, which scopes them as the head does.
     function separate(list: Stmt[]) {
       for (let i = list.length - 1; i >= 0; i--) {
-        const s = list[i]!;
+        const s = rewrites.current(list[i]!);
         if (s.kind === "expr" && s.expr.kind === "destructure") {
           list.splice(i, 1, ...destructuring(s.expr));
           continue;
@@ -1792,10 +1792,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           continue;
         }
         let loop = s;
-        while (loop.kind === "labeled") loop = loop.body;
+        while (loop.kind === "labeled") loop = rewrites.current(loop.body);
         if (loop.kind === "for" && loop.init?.kind === "let" && loop.init.declarations.length > 1) {
           list[i] = { id: nextId(ids), kind: "block", body: [loop.init, s], start: s.start, end: s.end };
-          loop.init = undefined;
+          rewrites.replace(loop, { ...loop, init: undefined });
         }
       }
     }
@@ -1822,7 +1822,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // pattern is a declaration of its own, destructured in turn. A default is taken when its
     // part is null.
     function destructured(s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>, place: { list: Stmt[]; at: usize } | undefined): undefined {
-      if (!place || place.list[place.at] !== s) throw unsupported("destructuring patterns here", pattern);
+      if (!place || rewrites.current(place.list[place.at]!) !== s) throw unsupported("destructuring patterns here", pattern);
       // A place is read part by part where it is, so only the parts named move out of it, as in
       // Rust; any other value goes to a variable named for the pattern, as messages show it.
       if (!d.init) throw new CompileError("a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
@@ -1855,10 +1855,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           return { ...e, id: nextId(ids), object: copy(e.object, at), index, start: at.start, end: at.end };
         };
         from = (at) => copy(init, at);
-        Object.assign(s, { kind: "empty" });
+        rewrites.replace(s, { id: 0, kind: "empty", start: s.start, end: s.end });
       } else {
         const held = patternText(pattern);
-        Object.assign(d, { target: { id: nextId(ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+        rewrites.replace(d, { ...d, target: { id: nextId(ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
         statement(s);
         type = localOf(locals.get(s)!).type;
         from = (at) => ({ id: nextId(ids), kind: "ident", name: held, start: at.start, end: at.end });
@@ -1989,10 +1989,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
         loopParts.add(declarator);
         return { id: nextId(ids), kind: "let", keyword: (s.left as Extract<Stmt, { kind: "let" }>).keyword, declarations: [declarator], ...at };
       });
-      Object.assign(d, { target: { id: nextId(ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+      const left = s.left as Extract<Stmt, { kind: "let" }>;
+      const target: Declarator = rewrites.replace(d, { ...d, target: { id: nextId(ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
       // The loop's own body is a block inside the parts' scope, so it may declare their names.
       const body: Stmt = { id: nextId(ids), kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
-      s.body = [...lets, body];
+      return rewrites.replace(s, { ...s, left: rewrites.replace(left, { ...left, declarations: [target] }), body: [...lets, body] });
     }
 
     // A name a loop's pattern binds: its part of the element, borrowed when the element is.
@@ -2175,7 +2176,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       return type;
     }
 
-    function statement(s: Stmt): Facts | undefined {
+    function statement(written: Stmt): Facts | undefined {
+      const s = rewrites.current(written);
       const declaration = unsupportedDeclaration(s);
       if (declaration) throw declaration;
       switch (s.kind) {
@@ -2187,9 +2189,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
             const topic = { id: nextId(ids), kind: "ident" as const, name: "%", start, end };
             const each: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: topic, type: undefined, init: undefined, start, end }], start, end };
             const body: Stmt[] = [{ id: nextId(ids), kind: "expr", expr: { id: nextId(ids), kind: "yield", value: { ...topic, id: nextId(ids) }, delegate: false, start, end }, start, end }];
-            Object.assign(s, { kind: "forOf", await: false, left: each, right: value, body });
-            delete (s as { expr?: unknown }).expr;
-            return statement(s);
+            return statement(rewrites.replace(s, { id: 0, kind: "forOf", await: false, left: each, right: value, body, start: s.start, end: s.end }));
           }
           if (s.expr.kind === "yield") {
             yielding(s.expr);
@@ -2229,7 +2229,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           return;
         case "let": {
           if (s.keyword === "var") throw new CompileError("'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
-          const d = s.declarations[0]!;
+          const d = rewrites.current(s.declarations[0]!);
           if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) return lift(s, d.target.name, arrowFunction(ids, d.target.name, d.init, d));
           if (d.target.kind === "array" || d.target.kind === "object") return destructured(s, d, d.target, siblings);
           if (loopParts.has(d)) return loopPart(s, d);
@@ -2290,11 +2290,10 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const at = { start: s.start, end: s.end };
           const arrow: Expr = { id: nextId(ids), kind: "arrow", move: false, async: s.async, typeParams: [], params: s.params, returnType: s.returnType, ...(s.throws && { throws: s.throws }), body: s.body, ...at };
           nestedFunctions.set(arrow, s.name);
-          Object.assign(s, { kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }] });
-          // The body is the arrow's now; left here too, walks over the statement would find it twice,
-          // as an async function's frame did, taking the function's loops and awaits for its own.
-          for (const key of ["body", "params", "returnType", "throws", "typeParams"] as const) delete (s as Partial<Func>)[key];
-          return statement(s);
+          // The body is the arrow's now; the statement holds nothing else, or walks over it would find
+          // the body twice, as an async function's frame did, taking the function's loops and awaits
+          // for its own.
+          return statement(rewrites.replace(s, { id: 0, kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }], ...at }));
         }
         // Checked as the code it is; it runs while compiling, where its locals are its own.
         case "comptime":
@@ -2342,7 +2341,7 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           const left = s.left;
           if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
           const d = left.declarations[0]!;
-          if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) loopPattern(s, d, d.target);
+          if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) return statement(loopPattern(s, d, d.target));
           if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (d.type) throw new CompileError("a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
           const through = value(s.right);
@@ -2703,16 +2702,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // function of its own, instantiated per call, so it can use nothing of the body around it.
     function lift(s: Stmt, name: string, fn: Func): undefined {
       lifted(s, name, fn, `'${name}'`);
-      Object.assign(s, { kind: "empty" });
-      return statement(s) as undefined;
+      return statement(rewrites.replace(s, { id: 0, kind: "empty", start: s.start, end: s.end })) as undefined;
     }
 
     // A generic arrow written as a value is a generic function of its own, as one a const holds
     // is, and the arrow becomes its name.
-    function liftArrow(e: Extract<Expr, { kind: "arrow" }>) {
+    function liftArrow(e: Extract<Expr, { kind: "arrow" }>): Expr {
       const fn = lifted(e, "", arrowFunction(ids, "", e, e), "this arrow");
-      for (const key of Object.keys(e)) if (key !== "start" && key !== "end" && key !== "id") delete (e as Record<string, unknown>)[key];
-      Object.assign(e, { kind: "ident", name: fn.name });
+      return rewrites.replace(e, { id: 0, kind: "ident", name: fn.name, start: e.start, end: e.end });
     }
 
     // Lifts a generic function out of the body around it, once per place it is written. `who`

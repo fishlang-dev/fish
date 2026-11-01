@@ -175,7 +175,7 @@ export type Context = {
   // A closure written inside `unsafe` is checked inside it too.
   closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType, unsafe?: boolean, owning?: boolean): ClosureType;
   // Makes a generic arrow written as a value a generic function of its own, the arrow its name.
-  liftArrow(e: Extract<Expr, { kind: "arrow" }>): void;
+  liftArrow(e: Extract<Expr, { kind: "arrow" }>): Expr;
   // A type node resolved with type parameters bound, as a generic function type's for a call.
   resolveWith(t: TypeNode, scope: Map<string, Type>): Type;
   closureBody(t: ClosureType): Instance;
@@ -277,7 +277,7 @@ export function expressions(ctx: Context) {
     ofElements, packed, pairs, parsedArgs, parses, presetParams, presetTypes, printCalls, printed,
     promiseVariants, quotes, regexCalls, regexNews, regexStringCalls, stringBuilds, substituted,
     syncFileCalls, tagCalls, timerCalls, timerNames, timerSets, timerWrappers, tupleLiterals,
-    unusedDefaults, restStarts, upcasts, typing, ids, regex, files, arenas
+    unusedDefaults, restStarts, upcasts, typing, ids, regex, files, arenas, rewrites
   } = ctx.tables;
   const { rec, fieldsOf, callableFrom, allFields, baseOf, derives, elementsOf, field, holdsHandle, holdsInterior, holdsMut, holdsPart, interiorMutable, isCopy, isOption, isPlainJs, isTuple, jsShape, optionRef, unequal, unfold, uninspectable, widenEnum, widenLet,
     show, unfolded, callableOf, leafOf, unionType, holdsRef, refType, borrowing, lower, blockType, jsView, yieldsOf, pointerType, handleType, leafFuture,
@@ -1542,7 +1542,7 @@ export function expressions(ctx: Context) {
   // arguments: given a function type, its parameters take that type's, and the call inside
   // infers the generic function's types from them.
   function instanceArrow(e: Expr) {
-    if (e.kind === "arrow" && e.typeParams.some((p) => !isLifetime(p))) ctx.liftArrow(e);
+    if (e.kind === "arrow" && e.typeParams.some((p) => !isLifetime(p))) e = ctx.liftArrow(e);
     if (e.kind !== "ident") return;
     const local = lookup(e.name);
     const held = local && lower(isRefType(local.type) ? rec(local.type).to : local.type);
@@ -4264,7 +4264,8 @@ export function expressions(ctx: Context) {
     return declared;
   }
 
-  function value(e: Expr): Type {
+  function value(written: Expr): Type {
+    const e = rewrites.current(written);
     if (once.delete(e)) return types.get(e)!;
     const type = typeOf(e);
     // An abstract class's code sees `this` as the abstract class, which exists only embedded in
@@ -4617,8 +4618,7 @@ export function expressions(ctx: Context) {
         // A generic arrow is a family of functions: a generic function value, named by the
         // function it is lifted to.
         if (e.typeParams.some((p) => !isLifetime(p))) {
-          ctx.liftArrow(e);
-          return typeOf(e);
+          return typeOf(ctx.liftArrow(e));
         }
         return closure(e, expecting.get(e), unsafeDepth > 0, owning.has(e));
       // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
