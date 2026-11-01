@@ -3,7 +3,7 @@ import { category, ofKind, typeofTest } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Tables } from "./compilation.ts";
-import { type LiteralType, INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
+import { isLock, type LiteralType, INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -27,7 +27,7 @@ export function layoutOf(typing: Typing): (t: Type) => string {
     if (r.kind === "dyn") return DYN;
     if (r.kind === "union") return `{ i32, [${words(typing, t as UnionType)} x i64] }`;
     // Atomic instructions need whole bytes, so an atomic boolean is a byte.
-    if (r.kind === "interior") return r.which === "Lock" ? `{ i32, ${llvm(r.of)} }` : r.which === "Atomic" && typing.lower(r.of) === "boolean" ? "i8" : llvm(r.of);
+    if (r.kind === "interior") return isLock(r) ? `{ i32, ${llvm(r.of)} }` : r.which === "Atomic" && typing.lower(r.of) === "boolean" ? "i8" : llvm(r.of);
     const parts = [...(r.kind === "class" && r.base ? [llvm(r.base)] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.fields).map((f) => llvm(f.type))];
     return parts.length === 0 ? "{}" : `{ ${parts.join(", ")} }`;
   };
@@ -65,7 +65,7 @@ function size(typing: Typing, t: Type): [usize, usize] {
   if (r.kind === "ref" || r.kind === "pointer" || r.kind === "handle" || r.kind === "shared" || r.kind === "block" || r.kind === "map" || r.kind === "regex" || r.kind === "recursive") return [8, 8];
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (r.kind === "union") return [8 + 8 * words(typing, t as UnionType), 8];
-  if (r.kind === "interior" && r.which !== "Lock") return size(typing, r.of);
+  if (r.kind === "interior" && !isLock(r)) return size(typing, r.of);
   const parts = r.kind === "interior" ? [[4, 4] as [usize, usize], size(typing, r.of)] : [...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.kind === "param" ? (r.bound ? typing.rec(r.bound).fields : []) : r.fields).map((f) => f.type)].map((p) => size(typing, p));
   const align = Math.max(1, ...parts.map(([, a]) => a));
   let bytes = 0;

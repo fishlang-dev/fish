@@ -44,7 +44,7 @@ export function warnings({ arenas, declarations, generated, prologues }: Tables,
       const at = l.param ? (node as Param).pattern : variable(node as Stmt);
       if (!at || at.kind !== "ident" || generated.has(at) || generated.has(node) || !warnable(at.name)) continue;
       const what = param ? "parameter" : "variable";
-      const entry = found.get(at.start) ?? { warning: new CompileError(`unused ${what} '${at.name}'; if it's intentional, name it '_${at.name}'`, at.start, at.start + at.name.length), used: false };
+      const entry = found.get(at.start) ?? { warning: new CompileError("W0001", `unused ${what} '${at.name}'; if it's intentional, name it '_${at.name}'`, at.start, at.start + at.name.length), used: false };
       entry.used ||= used.has(id);
       found.set(at.start, entry);
     }
@@ -78,7 +78,7 @@ function unreachableIn(generated: Tables["generated"], stmts: Stmt[], i: Instanc
     const why = leaves(s, i);
     if (!why) continue;
     const next = stmts.slice(k + 1).find((x) => !HOISTED.has(x.kind) && !(x.kind === "let" && !variable(x)) && !generated.has(x));
-    if (next && next.start < STD_BASE) out.set(next.start, new CompileError(`unreachable code after ${why}`, next.start, next.end));
+    if (next && next.start < STD_BASE) out.set(next.start, new CompileError("W0002", `unreachable code after ${why}`, next.start, next.end));
     return;
   }
 }

@@ -90,19 +90,19 @@ function escape(src: string, i: usize): [string, usize] {
   if (c === "\r" && src.charAt((i + 2) as i64) === "\n") return ["", i + 3];
   if (c === "\n" || c === "\r" || c === " " || c === " ") return ["", i + 2];
   if (c === "0" && !isDigit(src.charAt((i + 2) as i64))) return ["\0", i + 2];
-  if (isDigit(c)) throw new CompileError("octal escapes are not allowed; use '\\x' or '\\u'", i, i + 2);
+  if (isDigit(c)) throw new CompileError("E0002", "octal escapes are not allowed; use '\\x' or '\\u'", i, i + 2);
   if (c !== "x" && c !== "u") return [c, i + 2];
   // The digits run from `from` to `to`; a `\u{...}` escape ends past its `}`.
   const braced = c === "u" && hexRun(src, i + 2, 4) < 4 && src.charAt((i + 2) as i64) === "{";
   const from = braced ? i + 3 : i + 2;
   const n = hexRun(src, from, braced ? src.length : c === "x" ? 2 : 4);
   const valid = braced ? n > 0 && src.charAt((from + n) as i64) === "}" : n === (c === "x" ? 2 : 4);
-  if (!valid) throw new CompileError(`invalid escape '\\${c}'`, i, i + 2);
+  if (!valid) throw new CompileError("E0002", `invalid escape '\\${c}'`, i, i + 2);
   const end = braced ? from + n + 1 : from + n;
   // Past 0x10ffff the exact value doesn't matter, so it stops growing there.
   let code: i64 = 0;
   for (let k = from; k < from + n; k++) if (code <= 0x10ffff) code = code * 16 + hexValue(src.charAt(k as i64));
-  if (code > 0x10ffff) throw new CompileError("unicode escape is out of range", i, end);
+  if (code > 0x10ffff) throw new CompileError("E0002", "unicode escape is out of range", i, end);
   return [String.fromCodePoint(code as u32), end];
 }
 
@@ -115,7 +115,7 @@ function template(src: string, from: usize): [string, usize, boolean] {
   // Where the text not yet added to `value` starts, so plain runs are added in one piece.
   let run = i;
   for (;;) {
-    if (i >= src.length) throw new CompileError("unterminated template literal", i);
+    if (i >= src.length) throw new CompileError("E0002", "unterminated template literal", i);
     const c = src.charAt(i as i64);
     if (c === "`") return [value + src.slice(run as i64, i as i64), i + 1, false];
     if (c === "$" && src.charAt((i + 1) as i64) === "{") return [value + src.slice(run as i64, i as i64), i + 2, true];
@@ -212,7 +212,7 @@ export class Lexer {
       const c = src.charAt(i as i64);
       if (c === "" || c === "\n" || c === "\r") {
         this.i = i;
-        throw new CompileError("unterminated regular expression", slash.start, i);
+        throw new CompileError("E0002", "unterminated regular expression", slash.start, i);
       }
       if (c === "\\") i++;
       else if (c === "[") inClass = true;
@@ -264,7 +264,7 @@ export class Lexer {
       this.comment("line", start);
     } else if (c === "/" && after === "*") {
       const close = src.indexOf("*/", (start + 2) as i64);
-      if (close < 0) throw new CompileError("unterminated comment", start, start + 2);
+      if (close < 0) throw new CompileError("E0002", "unterminated comment", start, start + 2);
       if (src.slice(start as i64, close).includes("\n")) this.newlineBefore = true;
       this.i = (close as usize) + 2;
       this.comment("block", start);
@@ -319,7 +319,7 @@ export class Lexer {
     // `this.i` keeps up with the scan, so an error leaves it where the scan stopped.
     for (this.i = run; src.charAt(this.i as i64) !== quote;) {
       const c = src.charAt(this.i as i64);
-      if (c === "" || c === "\n") throw new CompileError("unterminated string literal", start, this.i);
+      if (c === "" || c === "\n") throw new CompileError("E0002", "unterminated string literal", start, this.i);
       if (c === "\\") {
         const [escaped, end] = escape(src, this.i);
         value += src.slice(run as i64, this.i as i64) + escaped;
@@ -346,7 +346,7 @@ export class Lexer {
         break;
       }
     }
-    if (p === "") throw new CompileError(`unexpected character '${src.charAt(start as i64)}'`, start);
+    if (p === "") throw new CompileError("E0002", `unexpected character '${src.charAt(start as i64)}'`, start);
     this.i += p.length;
     const open = this.substitutions.length;
     if (open > 0 && p === "{") this.substitutions[open - 1] = this.substitutions[open - 1]! + 1;

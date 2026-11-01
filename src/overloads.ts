@@ -74,7 +74,7 @@ function lowerMembers(ids: Ids, rewrites: Rewrites, c: ClassNode): ClassMember[]
     const isStatic = impl.modifiers.includes("static");
     const run = members.slice(i, j) as Method[];
     const mixed = run.find((s) => s.modifiers.includes("static") !== isStatic);
-    if (mixed) throw new CompileError(`the overload signatures of '${impl.name as string}' have to be static or not as its implementation is`, mixed.start, mixed.end);
+    if (mixed) throw new CompileError("E0410", `the overload signatures of '${impl.name as string}' have to be static or not as its implementation is`, mixed.start, mixed.end);
     if (impl.generator || impl.modifiers.includes("async")) throw unsupported("overloads of async methods and generator methods", impl);
     if (isStatic && c.name === undefined) throw unsupported("static method overloads in unnamed classes", impl);
     const receiver = (p: Param | undefined) => (p?.pattern.kind === "ident" && p.pattern.name === "this" ? p : undefined);
@@ -96,7 +96,7 @@ function lowerMembers(ids: Ids, rewrites: Rewrites, c: ClassNode): ClassMember[]
 // A signature's parameters as its function's: a destructured one named, since it is only passed on.
 function signatureParams(ids: Ids, sig: { params: Param[] }): Param[] {
   return sig.params.map((p, i) => {
-    if (p.default) throw new CompileError("an overload signature can't give a parameter a default; give it in the implementation", p.default.start, p.default.end);
+    if (p.default) throw new CompileError("E0410", "an overload signature can't give a parameter a default; give it in the implementation", p.default.start, p.default.end);
     return p.pattern.kind === "ident" ? p : { ...p, id: nextId(ids), pattern: { id: nextId(ids), kind: "ident", name: `argument ${i}`, ...span(p.pattern) } };
   });
 }
@@ -109,7 +109,7 @@ function argument(ids: Ids, p: Param): Expr {
 // The signature's body: the implementation's call, its value given as the signature's type.
 function wrapped(ids: Ids, sig: Span & { returnType: TypeNode | undefined }, call: Expr): Stmt[] {
   const returns = sig.returnType;
-  if (!returns) throw new CompileError("an overload signature needs its return type, as in 'function f(x: string): string;'", sig.start, sig.end);
+  if (!returns) throw new CompileError("E0410", "an overload signature needs its return type, as in 'function f(x: string): string;'", sig.start, sig.end);
   if (returns.kind === "ref" && returns.name === "void" && returns.args.length === 0) return [{ id: nextId(ids), kind: "expr", expr: call, ...span(sig) }];
   const value: Expr = { id: nextId(ids), kind: "nonNull", expr: call, narrows: returns, ...span(sig) };
   return [{ id: nextId(ids), kind: "return", value, ...span(sig) }];

@@ -59,5 +59,5 @@ export function unsupportedDeclaration(s: Stmt): CompileError | undefined {
 }
 
 export function unsupported(what: string, at: Span): CompileError {
-  return new CompileError(`${what} are not supported yet`, at.start, at.end);
+  return new CompileError("E0801", `${what} are not supported yet`, at.start, at.end);
 }

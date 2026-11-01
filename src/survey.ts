@@ -181,7 +181,7 @@ const STD = (name: string) => ({ name, planned: false });
 const PLANNED = (title: string) => ({ name: title, planned: true });
 const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // `net` is TCP here; a socket path (Unix domain sockets) isn't told apart from an address.
-  ["net", STD("TcpListener and TcpStream")], ["worker_threads", STD("spawn")], ["string_decoder", STD("TextDecoder")],
+  ["net", STD("TcpListener and TcpStream")], ["worker_threads", STD("spawn and spawnBlocking")], ["string_decoder", STD("TextDecoder")],
   ["timers/promises", STD("sleep")],
   // `http` is a client as well as a server, and Fish has only the server so far.
   ["http", PLANNED("HTTP client")], ["console", PLANNED("The rest of console")],

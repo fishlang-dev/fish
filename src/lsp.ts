@@ -63,22 +63,28 @@ function diagnose(session: Session, path: string, text: string, read: (path: str
     const uri = pathToFileURL(path).href;
     const warnings = checked.warnings.flatMap((w) => {
       const at = located(path, text, sources, w.start, w.end);
-      return at?.uri === uri ? [{ range: at.range, severity: 2, source: "fish", message: shown(w.message, w.names) }] : [];
+      return at?.uri === uri ? [{ range: at.range, severity: 2, code: w.code, source: "fish", message: shown(w.message, w.names) }] : [];
     });
     return { diagnostics: warnings, checked };
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
-    const uri = pathToFileURL(path).href;
-    const at = located(path, text, e.sources, e.start, e.end);
-    const note = e.note && located(path, text, e.sources, e.note.start, e.note.end);
-    const related = [...(note ? [{ location: note, message: shown(e.note!.message, e.names) }] : [])];
-    if (at?.uri === uri) return { diagnostics: [{ range: at.range, severity: 1, source: "fish", message: shown(e.message, e.names), ...(related.length > 0 && { relatedInformation: related }) }] };
-    const elsewhere = sourceOf(text, path, e.start, e.sources);
-    const { line, col } = locate(elsewhere.src, Math.min(elsewhere.offset, elsewhere.src.length));
-    if (at) related.unshift({ location: at, message: shown(e.message, e.names) });
-    const start = { line: 0, character: 0 };
-    return { diagnostics: [{ range: { start, end: start }, severity: 1, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message, e.names)}`, ...(related.length > 0 && { relatedInformation: related }) }] };
+    return { diagnostics: errorsOf(e).map((x) => diagnostic(x, path, text)) };
   }
+}
+
+// An error as a diagnostic of the document at `path`; one in another file is shown at its start,
+// naming where it is.
+function diagnostic(e: CompileError, path: string, text: string) {
+  const uri = pathToFileURL(path).href;
+  const at = located(path, text, e.sources, e.start, e.end);
+  const note = e.note && located(path, text, e.sources, e.note.start, e.note.end);
+  const related = [...(note ? [{ location: note, message: shown(e.note!.message, e.names) }] : [])];
+  if (at?.uri === uri) return { range: at.range, severity: 1, code: e.code, source: "fish", message: shown(e.message, e.names), ...(related.length > 0 && { relatedInformation: related }) };
+  const elsewhere = sourceOf(text, path, e.start, e.sources);
+  const { line, col } = locate(elsewhere.src, Math.min(elsewhere.offset, elsewhere.src.length));
+  if (at) related.unshift({ location: at, message: shown(e.message, e.names) });
+  const start = { line: 0, character: 0 };
+  return { range: { start, end: start }, severity: 1, code: e.code, source: "fish", message: `${elsewhere.file}:${line}:${col}: ${shown(e.message, e.names)}`, ...(related.length > 0 && { relatedInformation: related }) };
 }
 
 const before = (a: Position, b: Position) => a.line < b.line || (a.line === b.line && a.character <= b.character);
@@ -215,4 +221,15 @@ export function serveLsp() {
     bodies.forEach(receive);
   });
   process.stdin.on("end", exit);
+}
+
+// The errors `e` stands for, each with its group's sources when it has none of its own, and the
+// names its group's compilation made up.
+export function errorsOf(e: CompileError): CompileError[] {
+  if (e.errors.length === 0) return [e];
+  for (const x of e.errors) {
+    if (x.sources.length === 0) x.sources = e.sources;
+    x.names = e.names;
+  }
+  return e.errors;
 }

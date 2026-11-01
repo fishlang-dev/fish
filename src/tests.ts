@@ -21,9 +21,9 @@ function testOf(s: Stmt): { name: Extract<Expr, { kind: "string" }>; body: Body 
   const { args, typeArgs, optional } = s.expr;
   const [name, body] = args;
   const shaped = args.length === 2 && typeArgs.length === 0 && !optional && name?.kind === "string" && (body?.kind === "arrow" || (body?.kind === "function" && !body.generator));
-  if (!shaped || body.params.length > 0 || body.typeParams.length > 0) throw new CompileError(SHAPE, s.expr.start, s.expr.end);
+  if (!shaped || body.params.length > 0 || body.typeParams.length > 0) throw new CompileError("E1106", SHAPE, s.expr.start, s.expr.end);
   // `--list` and the report give each test one line.
-  if (/[\n\r]/.test(name.value)) throw new CompileError("a test's name is one line, so it can't hold a line break", name.start, name.end);
+  if (/[\n\r]/.test(name.value)) throw new CompileError("E1106", "a test's name is one line, so it can't hold a line break", name.start, name.end);
   return { name, body };
 }
 
@@ -43,7 +43,7 @@ export function liftTests({ names, ids }: Compilation, modules: Module[]): Test[
       if (!found) return s;
       const { name, body } = found;
       const twin = tests.find((t) => t.name === name.value);
-      if (twin) throw new CompileError(`there is already a test named '${name.value}' in '${twin.module.file}'; give each test a name of its own`, name.start, name.end);
+      if (twin) throw new CompileError("E1106", `there is already a test named '${name.value}' in '${twin.module.file}'; give each test a name of its own`, name.start, name.end);
       tests.push({ name: name.value, module, index: tests.length, async: body.async });
       const symbol = `test ${JSON.stringify(name.value)}`;
       names.madeUp.set(symbol, `the test '${name.value}'`);

@@ -327,7 +327,186 @@ function main() {
   let it = g();
   const r = it.next(5);
 }
-// error: values sent into 'next' are not supported yet
+// error: this generator takes nothing through 'next'; to send it values, declare what it takes, as in 'Generator<i64, void, string>'
+// case: generator_send
+function* accumulate(): Generator<i64, void, i64> {
+  let total = 0;
+  while (true) {
+    const n = yield total;
+    total += n;
+  }
+}
+
+class Log { last: string = ""; count: i64 = 0; }
+
+function* echo(): Generator<string, void, string> {
+  let log = new Log();
+  let seen = "start";
+  while (true) {
+    log.last = yield seen + "!";
+    seen = log.last;
+    yield "dropped " + seen;
+  }
+}
+
+function* until(): Generator<string, undefined, string> {
+  let line = yield "ready";
+  while (line !== "quit") line = yield "got " + line;
+}
+
+function drive<G extends Generator<i64, void, i64>>(g: Mut<G>, values: i64[]): i64 {
+  let last = 0;
+  for (const v of values) {
+    const r = g.next(v);
+    if (r.done === false) last = r.value;
+  }
+  return last;
+}
+
+function main() {
+  let g = accumulate();
+  g.next(100);
+  const a = g.next(5);
+  if (a.done === false) console.log(a.value);
+  const b = g.next(7);
+  if (b.done === false) console.log(b.value);
+  let e = echo();
+  const first = e.next("never seen" + 1);
+  if (first.done === false) console.log(first.value);
+  const second = e.next("hi" + 2);
+  if (second.done === false) console.log(second.value);
+  const third = e.next("not taken" + 3);
+  if (third.done === false) console.log(third.value);
+  let u = until();
+  u.next();
+  for (const line of ["a" + 1, "quit", "late" + 2]) {
+    const r = u.next(line);
+    if (r.done === false) console.log(r.value);
+    else console.log("done");
+  }
+  let h = accumulate();
+  console.log(drive(h, [0, 1, 2, 3]));
+}
+// expect: 5
+// expect: 12
+// expect: start!
+// expect: dropped hi2
+// expect: hi2!
+// expect: got a1
+// expect: done
+// expect: done
+// expect: 6
+// case: generator_send_finishes
+function* takes(): Generator<string, void, string> {
+  const x = yield "a";
+  console.log("got", x);
+}
+
+function* drops(): Generator<string, void, string> {
+  yield "a";
+}
+
+function* never(): Generator<string, void, string> {
+  console.log("ran");
+}
+
+function* stops(): Generator<string, void, string> {
+  while (true) {
+    const x = yield "more";
+    if (x === "stop1") return;
+    console.log("kept", x);
+  }
+}
+
+function main() {
+  let a = takes();
+  a.next();
+  console.log(a.next("hi" + 1).done);
+  console.log(a.next("late" + 1).done);
+  let b = drops();
+  b.next();
+  console.log(b.next("hi" + 2).done);
+  let c = never();
+  console.log(c.next("hi" + 3).done);
+  let d = stops();
+  d.next();
+  d.next("go" + 1);
+  console.log(d.next("stop" + 1).done);
+}
+// expect: got hi1
+// expect: true
+// expect: true
+// expect: true
+// expect: ran
+// expect: true
+// expect: kept go1
+// expect: true
+// case: generator_send_missing
+function* g(): Generator<i64, void, i64> {
+  const n = yield 1;
+  yield n;
+}
+
+function main() {
+  let it = g();
+  it.next();
+  it.next();
+}
+// panic: generator resumed without a value
+// case: generator_send_moved
+class Job { id: i64 = 0; }
+
+function* g(): Generator<i64, void, Job> {
+  const job = yield 1;
+  yield job.id;
+}
+
+function main() {
+  let it = g();
+  it.next();
+  const job = new Job();
+  it.next(job);
+  console.log(job.id);
+}
+// error: 'job' moved here
+// case: generator_send_undeclared
+function* g(): Generator<i64> {
+  const n = yield 1;
+}
+
+function main() {
+  let it = g();
+}
+// error: this 'yield' gives what 'next(x)' sends, so declare what that is, as in 'Generator<i64, void, string>'
+// case: generator_send_wrong_type
+function* g(): Generator<i64, void, i64> {
+  const n = yield 1;
+}
+
+function main() {
+  let it = g();
+  it.next("one");
+}
+// error: argument of type '"one"' is not assignable to parameter of type 'i64'
+// case: generator_send_return_type
+function* g(): Generator<i64, string, i64> {
+  yield 1;
+}
+
+function main() {
+  let it = g();
+}
+// error: generator return values are not supported yet
+// case: generator_send_compound
+function* g(): Generator<i64, void, i64> {
+  let n = 0;
+  n += yield 1;
+}
+
+function main() {
+  let it = g();
+}
+// error: 'yield' can only be assigned with '=' to a variable or a field for now
 // case: generator_next_const
 function* g(): Generator<i64> {
   yield 1;
@@ -486,14 +665,114 @@ function main() {
 }
 // error: 'g' would keep borrowing this temporary
 // case: generator_throws
+function* parse(items: string[]): Generator<i64> throws string {
+  for (const s of items) {
+    if (s === "bad") throw "bad item: " + s;
+    yield s.length as i64;
+  }
+}
+
+function total(items: string[]): i64 throws string {
+  let sum = 0;
+  for (const n of parse(items)) sum += n;
+  return sum;
+}
+
+function main() {
+  let it = parse(["ab", "bad", "c"]);
+  try {
+    const a = it.next();
+    if (a.done === false) console.log("first", a.value);
+    it.next();
+    console.log("unreachable");
+  } catch (e) {
+    console.log("caught", e);
+  }
+  try {
+    const after = it.next();
+    console.log("after", after.done);
+  } catch (e) {
+    console.log("not again", e);
+  }
+  try {
+    for (const n of parse(["xyz", "bad"])) console.log("loop", n);
+  } catch (e) {
+    console.log("loop caught", e);
+  }
+  try {
+    console.log(total(["a", "bc"]));
+    console.log(total(["a", "bad"]));
+  } catch (e) {
+    console.log("total caught", e);
+  }
+}
+// expect: first 2
+// expect: caught bad item: bad
+// expect: after true
+// expect: loop 3
+// expect: loop caught bad item: bad
+// expect: 3
+// expect: total caught bad item: bad
+// case: generator_throws_passed_on
+function* digits(s: string): Generator<i64> throws string {
+  for (const c of s) {
+    if (c === "x") throw `not a digit: ${c}`;
+    yield c.length as i64;
+  }
+}
+
+function main(): void throws string {
+  for (const d of digits("12")) console.log(d);
+  let g = digits("x");
+  g.next();
+}
+// expect: 1
+// expect: 1
+// fails: not a digit: x
+// case: generator_throws_undeclared
+function* g(): Generator<i64> throws string {
+  yield 1;
+  throw "no";
+}
+
+function main() {
+  let it = g();
+  it.next();
+}
+// error: 'main' must declare 'throws string' after its return type since 'next' can throw 'string'
+// case: generator_throws_loop_undeclared
+function* g(): Generator<i64> throws string {
+  throw "no";
+}
+
+function main() {
+  for (const x of g()) console.log(x);
+}
+// error: since this generator can throw 'string'
+// case: generator_throws_not_generator
+function* g(): Generator<i64> throws string {
+  yield 1;
+}
+
+function sum(g: Generator<i64>): i64 {
+  let total = 0;
+  for (const v of g) total += v;
+  return total;
+}
+
+function main() {
+  console.log(sum(g()));
+}
+// error: its 'next' throws 'string', which 'Generator<i64>' doesn't
+// case: generator_throws_helper
 function* g(): Generator<i64> throws string {
   yield 1;
 }
 
 function main() {
-  const it = g();
+  const doubled = g().map((x) => x * 2);
 }
-// error: generators that throw are not supported yet
+// error: throws 'string'
 // case: generator_wrong_element
 function* words(): Generator<string> {
   yield "a";

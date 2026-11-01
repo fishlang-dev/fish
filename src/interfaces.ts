@@ -17,6 +17,9 @@ export type Members = {
   arenas: Arenas;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
   assuming: Set<string>;
+  // Each class whose `implements` claim was refused and the interface, as shown, with why, which an
+  // error at a use of it as that interface repeats.
+  refused: { type: string; trait: string; reason: string }[];
 };
 
 // Why the generic function `f` can't be given where the generic function type `family` is, or
@@ -132,6 +135,10 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   if (t?.kind === "generator") {
     const element = typing.generatorElement(trait, t.async);
     if (element === undefined) return `${t.async ? "an async" : "a"} generator has only 'next', which type '${typing.rec(trait).name}' doesn't describe`;
+    if (t.throws) return `its 'next' throws '${typing.show(t.throws)}', which '${typing.rec(trait).name}' doesn't`;
+    // One taking values may still be advanced without, as `Generator<T>`'s `next()` is.
+    const sends = typing.generatorSends(trait);
+    if (sends !== undefined && (t.sends === undefined || typing.lower(t.sends) !== typing.lower(sends))) return `its 'next' takes ${t.sends === undefined ? "nothing" : `'${typing.show(t.sends)}'`}, not '${typing.show(sends)}'`;
     return typing.lower(t.yields) === typing.lower(element) ? undefined : `it yields '${typing.show(t.yields)}', not '${typing.show(element)}'`;
   }
   const c = t?.kind === "class" ? members.classOf(type as ClassType) : undefined;

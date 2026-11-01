@@ -49,14 +49,14 @@ test("- formats standard input to standard output, and with --check exits 1 on u
   expect(fmt(dir, ["-", "--check"], messy)).toEqual({ code: 1, out: "", err: "" });
   expect(fmt(dir, ["-", "--check"], tidy)).toEqual({ code: 0, out: "", err: "" });
   const bad = fmt(dir, ["-"], "const = 1\n");
-  expect([bad.code, bad.out, bad.err.split("\n")[0]]).toEqual([1, "", "<stdin>:1:7: error: expected an identifier, found '='"]);
+  expect([bad.code, bad.out, bad.err.split("\n")[0]]).toEqual([1, "", "<stdin>:1:7: error[E0001]: expected an identifier, found '='"]);
 });
 
 test("a file that doesn't parse is reported and left as it was, and the others are still formatted", () => {
   const dir = files("broken", { "a.fsh": messy, "bad.fsh": "function (\n", "z.fsh": messy });
   const run = fmt(dir, ["a.fsh", "bad.fsh", "z.fsh"]);
   expect(run.code).toBe(1);
-  expect(run.err).toStartWith("bad.fsh:1:10: error:");
+  expect(run.err).toStartWith("bad.fsh:1:10: error[E0001]:");
   expect(run.err).toContain("\n 1 | function (\n");
   expect([read(dir, "a.fsh"), read(dir, "bad.fsh"), read(dir, "z.fsh")]).toEqual([tidy, "function (\n", tidy]);
 });

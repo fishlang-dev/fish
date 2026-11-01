@@ -9,9 +9,11 @@
     "check.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "classes.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "codegen.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
+    "codes.ts": "'Record<string, { long?: { example: string; fixed: string; text: string }; title: string }>' is a dictionary whose keys are only known at run time, which needs a Map type Fish doesn't have yet; write its keys, like 'Record<\"a\" | \"b\", { long?: { example: string; fixed: string; text: string }; title: string }>'",
     "comments.ts": "cannot find type 'object'",
     "compilation.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "comptime.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
+    "debuginfo.ts": "argument of type 'number' is not assignable to parameter of type 'usize'; convert it with 'as usize'",
     "defaults.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "dependencies.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "deps.ts": "functions returned without a function return type are not supported yet",
@@ -66,7 +68,8 @@
     "typings.ts": "generator methods are not supported yet",
     "unions.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "values.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
-    "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet"
+    "warnings.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
+    "watch.ts": "can't find the package 'bun': no 'node_modules/bun' in 'src' or any directory above it; install it with npm"
   },
-  "count": 67
+  "count": 70
 }

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CompileError, formatError } from "../src/diag.ts";
+import { errorsOf } from "../src/lsp.ts";
 import { buildAsync } from "../src/main.ts";
 import { parse } from "../src/parser.ts";
 import { cachedSession } from "../src/stdcache.ts";
@@ -11,7 +12,9 @@ const session = cachedSession();
 
 // Each program in tests/programs states its expectations in comments:
 //   // expect: <line>   the next line of stdout, in order
-//   // error: <text>    compilation must fail with a message containing <text>
+//   // error: <text>    compilation must fail with a message containing <text>, and with
+//                       exactly one error, so a mistake's follow-on errors fail the test
+//   // errors: <n>      compilation must fail with <n> errors, its `error:` texts in order
 //   // panic: <text>    the program must exit with 101 and stderr containing <text>
 //   // fails: <text>    the program must exit with 1, an error escaping main, and stderr
 //                       containing <text>
@@ -146,7 +149,10 @@ for (const name of programs) {
     if (run.error !== undefined) {
       if (!(run.error instanceof CompileError) || errors.length === 0) throw run.error;
       const message = formatError(run.error, label, src);
-      for (const error of errors) expect(message).toContain(error);
+      const counted = Number(src.match(/\/\/ errors: (\d+)/)?.[1] ?? 1);
+      if (errorsOf(run.error).length !== counted) throw new Error(`expected ${counted} error(s), got ${errorsOf(run.error).length}:\n${message}`);
+      if (counted > 1) expect(message).toMatch(new RegExp(errors.map((e) => e.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^]*")));
+      else for (const error of errors) expect(message).toContain(error);
       return;
     }
     expect(errors).toEqual([]);

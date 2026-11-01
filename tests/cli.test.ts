@@ -10,9 +10,13 @@ const MAIN = join(import.meta.dir, "..", "src", "main.ts");
 const root = realpathSync(mkdtempSync(join(tmpdir(), "fish-cli-")));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
+// The environment without the variables that decide whether output is coloured, so a test sets
+// its own.
+const { FORCE_COLOR: _force, NO_COLOR: _no, ...uncoloured } = process.env;
+
 // Runs `fishc` with `args` in the directory `cwd`.
 function fishc(cwd: string, ...args: string[]) {
-  const run = Bun.spawnSync(["bun", MAIN, ...args], { cwd });
+  const run = Bun.spawnSync(["bun", MAIN, ...args], { cwd, env: uncoloured });
   return { code: run.exitCode, out: run.stdout.toString(), err: run.stderr.toString() };
 }
 
@@ -42,11 +46,11 @@ test("fishc build with no file builds the package around the working directory i
 test("a package's entry and its errors are found through the manifest", () => {
   const p = dir("entry", { "fish.toml": `[package]\nname = "entry"\nversion = "1.0.0"\nentry = "app/start.fsh"\n`, "app/start.fsh": `function main() { const x: i64 = "no"; }\n` });
   const bad = fishc(p, "build");
-  expect([bad.code, bad.err.split("\n")[0]]).toEqual([1, `app/start.fsh:1:34: error: type '"no"' is not assignable to type 'i64'`]);
+  expect([bad.code, bad.err.split("\n")[0]]).toEqual([1, `app/start.fsh:1:34: error[E0101]: type '"no"' is not assignable to type 'i64'`]);
   const gone = dir("gone", { "fish.toml": `[package]\nname = "gone"\nversion = "1.0.0"\nentry = "src/app.fsh"\n` });
-  expect(fishc(gone, "build").err.split("\n")[0]).toBe(`fish.toml:4:9: error: the entry 'src/app.fsh' doesn't exist; create it, or name another with entry = "..."`);
+  expect(fishc(gone, "build").err.split("\n")[0]).toBe(`fish.toml:4:9: error[E0905]: the entry 'src/app.fsh' doesn't exist; create it, or name another with entry = "..."`);
   const typo = dir("typo", { "fish.toml": `[package]\nname = "typo"\nverison = "1.0.0"\n` });
-  expect(fishc(join(typo), "build").err.split("\n")[0]).toBe("fish.toml:3:1: error: [package] has no key 'verison'; it has name, version, entry, lib, edition");
+  expect(fishc(join(typo), "build").err.split("\n")[0]).toBe("fish.toml:3:1: error[E0905]: [package] has no key 'verison'; it has name, version, entry, lib, edition");
 });
 
 test("fishc build with no file and no package says how to make one", () => {
@@ -94,10 +98,10 @@ const manifestOf = (name: string, extra = "") => `[package]\nname = "${name}"\nv
 
 test("a TS-compat package's files are refused by build and test, at each file's first line", () => {
   const pkg = dir("compat-pkg", { "fish.toml": manifestOf("compat-pkg", 'edition = "ts-compat"\n'), "src/main.fsh": 'function main() {\n  console.log("hi");\n}\n' });
-  expect(fishc(pkg, "build")).toEqual({ code: 1, out: "", err: `src/main.fsh:1:1: error: ${COMPAT}\n 1 | function main() {\n   | ^^^^^^^^^^^^^^^^^\n` });
-  const tested = Bun.spawnSync(["bun", MAIN, "test"], { cwd: pkg });
+  expect(fishc(pkg, "build")).toEqual({ code: 1, out: "", err: `src/main.fsh:1:1: error[E0006]: ${COMPAT}\n 1 | function main() {\n   | ^^^^^^^^^^^^^^^^^\n` });
+  const tested = Bun.spawnSync(["bun", MAIN, "test"], { cwd: pkg, env: uncoloured });
   expect(tested.exitCode).toBe(1);
-  expect(tested.stderr.toString()).toBe(`src/main.fsh:1:1: error: ${COMPAT}\n 1 | function main() {\n   | ^^^^^^^^^^^^^^^^^\n`);
+  expect(tested.stderr.toString()).toBe(`src/main.fsh:1:1: error[E0006]: ${COMPAT}\n 1 | function main() {\n   | ^^^^^^^^^^^^^^^^^\n`);
 });
 
 test("a file's directive sets its edition, over its package's, after any shebang", () => {
@@ -113,9 +117,9 @@ test("a file's directive sets its edition, over its package's, after any shebang
     "main.fsh": 'import { two } from "./two.fsh";\nfunction main() {\n  console.log(two());\n}\n',
     "two.fsh": "// @fish-edition ts-compat\nexport function two(): i64 {\n  return 2;\n}\n",
   });
-  expect(fishc(mixed, "build", "main.fsh")).toEqual({ code: 1, out: "", err: `two.fsh:1:1: error: ${COMPAT}\n 1 | // @fish-edition ts-compat\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^\n` });
+  expect(fishc(mixed, "build", "main.fsh")).toEqual({ code: 1, out: "", err: `two.fsh:1:1: error[E0006]: ${COMPAT}\n 1 | // @fish-edition ts-compat\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^\n` });
   const unknown = dir("unknown-edition", { "main.fsh": "#!/usr/bin/env fishc\n// @fish-edition typescript\nfunction main() {}\n" });
-  expect(fishc(unknown, "build", "main.fsh")).toEqual({ code: 1, out: "", err: "main.fsh:2:1: error: an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'\n 2 | // @fish-edition typescript\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n" });
+  expect(fishc(unknown, "build", "main.fsh")).toEqual({ code: 1, out: "", err: "main.fsh:2:1: error[E0005]: an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'\n 2 | // @fish-edition typescript\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n" });
 });
 
 test("a dependency's TS-compat file is refused where the dependency is built", () => {
@@ -123,7 +127,7 @@ test("a dependency's TS-compat file is refused where the dependency is built", (
   const app = dir("compat-dep/app", { "fish.toml": manifestOf("app", "").replace("[dependencies]\n", '[dependencies]\nwords = { path = "../words" }\n'), "src/main.fsh": 'import { word } from "words";\nfunction main() {\n  console.log(word());\n}\n' });
   const { code, err } = fishc(app, "build");
   expect(code).toBe(1);
-  expect(err).toBe(`../../words/src/lib.fsh:1:1: error: ${COMPAT}\n 1 | export function word(): string {\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n`);
+  expect(err).toBe(`../../words/src/lib.fsh:1:1: error[E0006]: ${COMPAT}\n 1 | export function word(): string {\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n`);
 });
 
 test("only a debug build keeps frames for panic backtraces", () => {
@@ -144,7 +148,7 @@ test("fishc check checks a file or package without building, exiting 1 on an err
   const bad = fishc(p, "check", "bad.fsh");
   expect(bad.code).toBe(1);
   expect(bad.err).toBe(fishc(p, "build", "bad.fsh").err);
-  expect(bad.err).toContain("bad.fsh:2:18: error:");
+  expect(bad.err).toContain("bad.fsh:2:18: error[E0101]:");
 });
 
 test("fishc run builds and runs a program with its arguments and exit code", () => {
@@ -157,5 +161,28 @@ test("fishc run builds and runs a program with its arguments and exit code", () 
   const bad = fishc(p, "run", "bad.fsh");
   expect(bad.code).toBe(1);
   expect(bad.out).toBe("");
-  expect(bad.err).toContain("error:");
+  expect(bad.err).toContain("error[E0101]:");
+});
+
+test("fishc explain prints a code's explanation, and refuses a code that isn't one", () => {
+  const explained = fishc(root, "explain", "e0201");
+  expect([explained.code, explained.out.split("\n")[0], explained.err]).toEqual([0, "E0201: use of a moved value", ""]);
+  expect(explained.out).toContain("In TypeScript, both names would refer to the same object");
+  expect(fishc(root, "explain", "E9999")).toEqual({ code: 2, out: "", err: "fishc explain: 'E9999' isn't an error code; a code looks like E0201 or W0001, as an error shows it\n" });
+  expect(fishc(root, "explain").err).toBe("usage: fishc explain <code>\n");
+});
+
+test("fishc check reports every error, with a closing count, painted only when asked for", () => {
+  const p = dir("several", { "main.fsh": `function a(): i64 {\n  return "x";\n}\nfunction b(): void {\n  const s: string = 1;\n}\nfunction main() {\n  b();\n  console.log(a());\n}\n` });
+  const plain = fishc(p, "check", "main.fsh");
+  expect(plain.code).toBe(1);
+  expect(plain.err.split("\n").filter((l) => l.includes("error"))).toEqual([
+    `main.fsh:2:10: error[E0101]: type '"x"' is not assignable to return type 'i64'`,
+    "main.fsh:5:21: error[E0101]: type 'i64' is not assignable to type 'string'",
+    "error: could not compile due to 2 previous errors",
+  ]);
+  const env = (vars: Record<string, string>) => Bun.spawnSync(["bun", MAIN, "check", "main.fsh"], { cwd: p, env: { ...uncoloured, ...vars } }).stderr.toString();
+  expect(env({ FORCE_COLOR: "1" })).toContain("\x1b[1mmain.fsh:2:10:\x1b[0m \x1b[1;31merror[E0101]\x1b[0m");
+  expect(env({ FORCE_COLOR: "0" })).toBe(plain.err);
+  expect(env({ NO_COLOR: "1" })).toBe(plain.err);
 });

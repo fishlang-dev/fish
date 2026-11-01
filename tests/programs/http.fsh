@@ -1026,7 +1026,8 @@ async function main(): Promise<void> throws IoError {
 // expect:     values: [ 'text/plain;charset=UTF-8' ]
 // expect:   },
 // expect:   body: [ 104, 105 ],
-// expect:   url: ''
+// expect:   url: '',
+// expect:   cookies: CookieMap {}
 // expect: }
 // expect: true
 // A response clones and prints as it always has, a streamed body left out of the print.

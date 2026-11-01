@@ -317,11 +317,14 @@ export class TypeSet<K extends Type> {
   }
 }
 
-// `Atomic<T>`, `Lock<T>` and `Cell<T>`: a value changed through a shared reference, so a
-// `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as what
-// they hold, a Lock as its lock word, then what it holds.
-export type InteriorRecord = { kind: "interior"; which: "Atomic" | "Lock" | "Cell"; of: Type; fields: Field[] };
+// `Atomic<T>`, `Lock<T>`, `RwLock<T>` and `Cell<T>`: a value changed through a shared reference,
+// so a `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as
+// what they hold, a Lock and an RwLock as a lock word, then what they hold.
+export type InteriorRecord = { kind: "interior"; which: "Atomic" | "Lock" | "RwLock" | "Cell"; of: Type; fields: Field[] };
 export type InteriorType = TypeId<InteriorRecord>;
+
+// Whether an interior type is laid out as a lock word, then what it holds.
+export const isLock = (r: Ref<InteriorRecord>) => r.which === "Lock" || r.which === "RwLock";
 
 // `shared<T>`: a counted pointer to a block holding the count, a lock word and the value, so
 // every clone is the same value, read and changed from any thread.
@@ -409,11 +412,12 @@ export type RecursiveType = TypeId<RecursiveRecord>;
 // A generator: what it yields, its parameters, which say what it borrows, and the frame its
 // state lives in, filled once the body is checked. It has no properties, so `fields` stays
 // empty. One per generator instance, so `===` is nominal identity. An async one's `next()` gives
-// a future, and its body may await between yields.
-export type GeneratorRecord = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean };
+// a future, and its body may await between yields. `throws` is what advancing it may throw, and
+// `sends` what `next(x)` gives the `yield` it resumes at.
+export type GeneratorRecord = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean; throws?: Type; sends?: Type };
 export type GeneratorType = TypeId<GeneratorRecord>;
 
-export const INTERIORS = new Set(["Atomic", "Lock", "Cell"]);
+export const INTERIORS = new Set(["Atomic", "Lock", "RwLock", "Cell"]);
 
 // A short name for what `description` describes, the same in every program that has it: six
 // base-36 digits of its 64-bit FNV-1a hash over UTF-8. The hash is written here rather than taken
@@ -1158,7 +1162,10 @@ export class Typing {
 
   // A leaf future: what it gives, what it may throw, and whether it was given an AbortSignal, whose
   // count and waiting flag end its frame.
-  leafFuture(this: Mut<this>, method: Leaf, of: Type, throws?: Type, signal = false): FutureType {
+  leafFuture(this: Mut<this>, method: Leaf, of: Type, given?: Type, signal = false): FutureType {
+    // An async generator's `next()` throws what the generator does.
+    const generator = method === "next" ? this.recOf(of) : undefined;
+    const throws = given ?? (generator?.kind === "generator" ? generator.throws : undefined);
     const key = `${method} ${this.keyOf(of)} ${throws ? this.keyOf(throws) : ""} ${signal}`;
     let t = this.leaves.get(key);
     if (!t) {
@@ -1465,16 +1472,20 @@ export class Typing {
 
   private generators = new Map<string, InterfaceType>();
   private elements = new TypeMap<InterfaceType, Type>();
+  private sent = new TypeMap<InterfaceType, Type>();
   private asyncElements = new TypeMap<InterfaceType, Type>();
 
   // `Generator<T>`: anything whose `next()` gives `T`s, as TypeScript's type of a generator is.
-  generatorInterface(this: Mut<this>, t: Type): InterfaceType {
-    let found = this.generators.get(this.keyOf(t));
+  // `Generator<T, void, N>` is one whose `next(x)` takes `N`s too.
+  generatorInterface(this: Mut<this>, t: Type, sends?: Type): InterfaceType {
+    const key = sends === undefined ? this.keyOf(t) : `${this.keyOf(t)} sends ${this.keyOf(sends)}`;
+    let found = this.generators.get(key);
     if (!found) {
-      found = this.interfaceType(`Generator<${this.show(t)}>`);
+      found = this.interfaceType(sends === undefined ? `Generator<${this.show(t)}>` : `Generator<${this.show(t)}, void, ${this.show(sends)}>`);
       this.rec(found).methods.push({ name: "next", params: [], returns: this.nextResult(t) });
-      this.generators.set(this.keyOf(t), found);
+      this.generators.set(key, found);
       this.elements.set(found, t);
+      if (sends !== undefined) this.sent.set(found, sends);
     }
     return found;
   }
@@ -1500,6 +1511,24 @@ export class Typing {
     if (r.kind === "dyn") return async ? this.generatorElement(r.of, true) : undefined;
     if (r.kind === "param") return r.concrete ? this.yieldsOf(r.concrete, async) : r.bound && this.generatorElement(r.bound, async);
     return this.generatorElement(t, async);
+  }
+
+  // What a generator's `next(x)` takes, or a type parameter's standing for one or bounded by
+  // `Generator<T, void, N>`.
+  generatorSends(t: Type): Type | undefined {
+    if (typeof t === "string") return undefined;
+    const r = this.rec(t);
+    if (r.kind === "generator") return r.sends;
+    if (r.kind === "param") return r.concrete ? this.generatorSends(r.concrete) : r.bound && this.generatorSends(r.bound);
+    return r.kind === "interface" ? this.sent.get(t as InterfaceType) : undefined;
+  }
+
+  // What advancing a generator, or a type parameter standing for one, may throw.
+  generatorThrows(t: Type): Type | undefined {
+    if (typeof t === "string") return undefined;
+    const r = this.rec(t);
+    if (r.kind === "generator") return r.throws;
+    return r.kind === "param" && r.concrete ? this.generatorThrows(r.concrete) : undefined;
   }
 
   // What a `Generator<T>`, or with `async` an `AsyncGenerator<T>`, yields, when the interface is one.
@@ -1728,7 +1757,7 @@ export class Typing {
 
   // The signatures of callbacks that run while a lock is held, so their bodies can't await; and
   // of those changing a shared value, whose interior-mutable parts others borrow unlocked.
-  lockCallbacks = new TypeSet<FunctionType>();
+  lockCallbacks = new TypeMap<FunctionType, string>();
   sharedCallbacks = new TypeSet<FunctionType>();
 
   // A type parameter as an instance sees it: standing for `concrete`, which has no type
@@ -2128,7 +2157,7 @@ export class Typing {
     }
     if (r.kind === "fixed") return `FixedArray<${this.show(r.element)}, ${r.size}>`;
     if (r.kind === "map") return r.set ? `Set<${this.show(r.key)}>` : `Map<${this.show(r.key)}, ${this.show(r.value)}>`;
-    if (r.kind === "generator") return `Generator<${this.show(r.yields)}>`;
+    if (r.kind === "generator") return `${r.async ? "Async" : ""}Generator<${this.show(r.yields)}>${r.throws ? ` throws ${this.show(r.throws)}` : ""}`;
     if (r.kind === "future") return `Promise<${this.show(r.gives)}>${r.throws ? ` throws ${this.show(r.throws)}` : ""}${this.describing ? ` ${r.name}(${r.frame.map((f) => this.show(f.type)).join(", ")})` : ""}`;
     if (r.kind === "interior") return `${r.which}<${this.show(r.of)}>`;
     if (r.kind === "shared") return `shared<${this.show(r.of)}>`;
