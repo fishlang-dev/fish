@@ -40,7 +40,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   const laidOut = new Set<ClassInfo>();
   const laying = new Set<ClassInfo>();
   const wrapped = new Set<ClassInfo>();
-  return { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
+  return { register, settle, claims, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
 
   function register(c: ClassInfo) {
     infoOf.set(c.type, c);
@@ -133,15 +133,20 @@ export function registry({ tables, classes, templates, members, resolveType, wit
 
   // `implements` is optional, since satisfying an interface is by shape, but checked when written.
   function implemented(c: ClassInfo) {
+    claims(c);
+    if (c.node.implements.some((node) => node.kind === "ref" && node.name === "From")) wrapsOf(c);
+  }
+
+  // Checks the interfaces and types a class says it implements, `From` aside.
+  function claims(c: ClassInfo) {
     for (const node of c.node.implements) {
-      if (node.kind === "ref" && node.name === "From") {
-        wrapsOf(c);
-        continue;
-      }
+      if (node.kind === "ref" && node.name === "From") continue;
       const trait = withScope(c.scope, () => resolveType(node));
       const reason = typeof trait !== "string" && trait.kind === "interface" ? unsatisfied(c.type, trait, members, node)
         : fits(c.type, trait) ? undefined : `type '${c.type.name}' doesn't fit '${show(trait)}'`;
-      if (reason) throw new CompileError("E0702", `class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
+      if (!reason) continue;
+      if (typeof trait !== "string" && trait.kind === "interface") members.refused.add(`${typing.keyOf(c.type)} ${typing.keyOf(trait)}`);
+      throw new CompileError("E0702", `class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
     }
   }
 

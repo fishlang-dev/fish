@@ -598,8 +598,9 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     },
     typing,
     assuming: new Set(),
+    refused: new Set(),
   };
-  const { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
+  const { register, settle, claims, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf } = registry({
     tables, classes, templates, members, resolveType: (t) => resolveType(t), withScope: (b, f) => withScope(b, f),
     instanceOf: (f) => instanceOf(f), definition: (f) => definition(f), checkBody: (i) => checkBody(i),
     classNames: (at) => reached([...classes.keys(), ...templates.keys()], at),
@@ -779,6 +780,15 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
   for (const e of enums.values()) void e.members;
   // The classes as declared, and generic classes' definitions; any other is an instance a call made.
   const declaredClasses = new Set(unsettled);
+  // A class's `implements` claims are checked before any body uses the class, so a refused one is
+  // reported at the class rather than at each use.
+  for (const c of declaredClasses) {
+    try {
+      claims(c);
+    } catch (e) {
+      recover(e);
+    }
+  }
   funcs.forEach((f) => {
     try {
       checkBody(definition(f));

@@ -116,3 +116,13 @@ function main() {
   console.log(b.v);
   console.log(f1());
 }
+// case: errors_refused_implements_once
+// A class refused for missing a method of the interface it implements is reported there only,
+// not again at each use as that interface.
+// error: errors_refused_implements_once.fsh:5:21: error[E0702]: class 'Sq' incorrectly implements 'Shape': method 'area' is missing
+interface Shape { area(): i64; }
+class Sq implements Shape { constructor() {} aria(): i64 { return 1; } }
+function f(s: Shape): i64 { return s.area(); }
+function a(): i64 { return f(new Sq()); }
+function b(): i64 { return f(new Sq()) + 1; }
+function main() { console.log(a(), b()); }
