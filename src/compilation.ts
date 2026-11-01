@@ -412,14 +412,14 @@ export function newTables({ session, typing, upcasts, ids, regex, files, rust, g
 // time: a stage timed inside another is taken out of the outer one, so borrow checking inside the
 // checker, or the comptime interpreter inside macro expansion, is counted once, under its own name.
 // `inner` is the time the stages running inside the current one have taken so far. `objects` names
-// the cached objects built, and counts those reused.
-export type Timings = { ms: Map<string, number>; notes: Map<string, string>; inner: number; objects: { built: string[]; cached: number } };
+// the cached objects built, and counts those reused. `now` is the clock, which a test replaces.
+export type Timings = { ms: Map<string, number>; notes: Map<string, string>; inner: number; objects: { built: string[]; cached: number }; now: () => number };
 
 export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
 export const NATIVE_STAGES = ["compile", "runtime", "link"];
 
-export function newTimings(): Timings {
-  return { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 } };
+export function newTimings(now: () => number = () => performance.now()): Timings {
+  return { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, now };
 }
 
 // Runs `run`, adding its own time to stage `name` when timing.
@@ -427,11 +427,11 @@ export function timed<T>(timings: Timings | undefined, name: string, run: () => 
   if (timings === undefined) return run();
   const outer = timings.inner;
   timings.inner = 0;
-  const start = performance.now();
+  const start = timings.now();
   try {
     return run();
   } finally {
-    const spent = performance.now() - start;
+    const spent = timings.now() - start;
     timings.ms.set(name, (timings.ms.get(name) ?? 0) + spent - timings.inner);
     timings.inner = outer + spent;
   }
