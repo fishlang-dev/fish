@@ -304,3 +304,174 @@ async function main(): Promise<void> {
   const body = await res.text();
   console.log(res.status, body);
 }
+// case: router_groups_serve
+// expect: GET /health 200 ok|-|app
+// expect: GET /users/7 200 user 7|users|app
+// expect: GET /users/7/posts 200 posts of 7|users posts|app
+// expect: GET /users/7/posts/3 200 post 3 of user 7|users posts|app
+// expect: POST /users/7/posts 201 made for 7|users posts|app
+// expect: HEAD /users/7/posts/3 200 |users posts|app
+// expect: GET /users/7/nothing 404 Not Found|-|app
+// expect: GET /users/7/posts/3/x 404 Not Found|-|app
+// expect: GET /users 404 Not Found|-|app
+// expect: GET /users/7/after 200 after 7|-|app
+// expect: GET /v1 200 v1 root|-|app
+// expect: GET /v1/ping 200 pong|-|app
+// expect: POST /lower 200 lowered|-|app
+// A router mounted under a prefix, and another mounted inside it, serve their routes below the
+// prefixes with the prefix's params, each group's middleware running inside the parent's for its
+// own routes only; a path below a prefix that no route takes is the parent's 404.
+async function ask(port: i64, method: string, path: string): Promise<void> throws IoError | AbortError {
+  const res = await fetch("http://127.0.0.1:" + String(port) + path, { method: method });
+  const body = await res.text();
+  console.log(method, path, res.status, body.trim() + "|" + (res.headers.get("x-groups") ?? "-") + "|" + (res.headers.get("x-app") ?? "-"));
+}
+
+function tag(name: string): (req: Request, next: (req: Request) => Promise<Response>) => Promise<Response> {
+  return async (req, next) => {
+    let res = await next(req);
+    const had = res.headers.get("x-groups");
+    res.headers.set("x-groups", had === null ? name : name + " " + had);
+    return res;
+  };
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  let posts = new Router();
+  posts.use(tag("posts"));
+  posts.get("/", async (req) => new Response("posts of " + req.param("id")));
+  posts.get("/:pid", async (req) => new Response("post " + req.param("pid") + " of user " + req.param("id")));
+  posts.post("/", async (req) => new Response("made for " + req.param("id"), { status: 201 }));
+  let users = new Router();
+  users.get("/", async (req) => new Response("user " + req.param("id")));
+  users.route("/posts", posts);
+  users.use(tag("users"));
+  let v1 = new Router();
+  v1.get("/", async (_req) => new Response("v1 root"));
+  v1.get("ping", async (_req) => new Response("pong"));
+  let app = new Router();
+  app.use(async (req, next) => {
+    let res = await next(req);
+    res.headers.set("x-app", "app");
+    return res;
+  });
+  app.get("/health", async (_req) => new Response("ok"));
+  app.route("/users/:id", users);
+  app.get("/users/:id/after", async (req) => new Response("after " + req.param("id")));
+  app.route("v1/", v1);
+  app.route("post", "/lower", async (_req) => new Response("lowered"));
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, app.handler()));
+  while (found.port.load() === 0) await sleep(1);
+  const port = found.port.load();
+  await ask(port, "GET", "/health");
+  await ask(port, "GET", "/users/7");
+  await ask(port, "GET", "/users/7/posts");
+  await ask(port, "GET", "/users/7/posts/3");
+  await ask(port, "POST", "/users/7/posts");
+  await ask(port, "HEAD", "/users/7/posts/3");
+  await ask(port, "GET", "/users/7/nothing");
+  await ask(port, "GET", "/users/7/posts/3/x");
+  await ask(port, "GET", "/users");
+  await ask(port, "GET", "/users/7/after");
+  await ask(port, "GET", "/v1");
+  await ask(port, "GET", "/v1/ping");
+  await ask(port, "POST", "/lower");
+}
+// case: router_groups_static
+// expect: /api/files/a.txt 200 file|assets
+// expect: /api/files 200 index|assets
+// expect: /api/files/ 200 index|assets
+// expect: /api/files/b 200 b|assets
+// expect: /api/files/missing 200 parent route|-
+// expect: /api/files/.env 200 parent .env|-
+// expect: /api/files/..%2fa.txt 404 Not Found|-
+// expect: /api/files/nothing 404 Not Found|-
+// expect: /api 404 Not Found|-
+// A static route in a router mounted two levels down serves its files under the combined prefix,
+// and a miss or a refusal there falls through to the parent's later routes, ending in the same 404.
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+
+async function show(app: Ref<Router>, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path));
+  const body = await res.text();
+  console.log(path, res.status, body.trim() + "|" + (res.headers.get("x-group") ?? "-"));
+}
+
+async function main(): Promise<void> throws IoError {
+  const dir = mkdtempSync("/tmp/fish-static-");
+  writeFileSync(dir + "/a.txt", "file");
+  writeFileSync(dir + "/index.html", "index");
+  writeFileSync(dir + "/.env", "KEY=1");
+  let assets = new Router();
+  assets.use(async (req, next) => {
+    let res = await next(req);
+    res.headers.set("x-group", "assets");
+    return res;
+  });
+  assets.static("/", dir);
+  assets.get("/b", async (_req) => new Response("b"));
+  let api = new Router();
+  api.route("/files", assets);
+  let app = new Router();
+  app.route("/api", api);
+  app.get("/api/files/missing", async (_req) => new Response("parent route"));
+  app.get("/api/files/.env", async (_req) => new Response("parent .env"));
+  for (const path of ["/api/files/a.txt", "/api/files", "/api/files/", "/api/files/b", "/api/files/missing", "/api/files/.env", "/api/files/..%2fa.txt", "/api/files/nothing", "/api"]) await show(app, path);
+  rmSync(dir, { recursive: true });
+}
+// case: router_groups_rewrite
+// expect: /api/old 401 no token
+// expect: /api/old 200 secret
+// expect: /api/new 200 new
+// A group's middleware that changes the path has the request routed again, through the middleware
+// of the group the new path belongs to.
+async function show(app: Ref<Router>, path: string, token: boolean): Promise<void> {
+  let headers = new Headers();
+  if (token) headers.set("authorization", "Bearer x");
+  const res = await app.handle(new Request("http://h" + path, { headers: headers }));
+  const body = await res.text();
+  console.log(path, res.status, body.trim());
+}
+
+async function main(): Promise<void> {
+  let admin = new Router();
+  admin.use(async (req, next) => {
+    if (!req.headers.has("authorization")) return new Response("no token", { status: 401 });
+    const res = await next(req);
+    return res;
+  });
+  admin.get("/secret", async (_req) => new Response("secret"));
+  let api = new Router();
+  api.use(async (req, next) => {
+    let moved = req;
+    if (moved.path === "/api/old") moved.path = "/admin/secret";
+    const res = await next(moved);
+    return res;
+  });
+  api.get("/old", async (_req) => new Response("old"));
+  api.get("/new", async (_req) => new Response("new"));
+  let app = new Router();
+  app.route("/api", api);
+  app.route("/admin", admin);
+  await show(app, "/api/old", false);
+  await show(app, "/api/old", true);
+  await show(app, "/api/new", false);
+}
+// case: router_groups_moved
+// error: 'api' was moved, so it can't be used here
+// Mounting a router moves it in, so routes can't be added to it afterwards.
+function main() {
+  let api = new Router();
+  let app = new Router();
+  app.route("/api", api);
+  api.get("/x", async (_req) => new Response("x"));
+}
+// case: router_route_arguments
+// error: no overload of 'Router.route' takes ("GET", "/api")
+// A route needs its handler; a router to mount is the only two-argument form.
+function main() {
+  let app = new Router();
+  app.route("GET", "/api");
+}

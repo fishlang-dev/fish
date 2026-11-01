@@ -777,9 +777,9 @@ type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64 };
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
 type __routerMiddleware = (req: Request, next: __routerNext) => Promise<Response>;
-// Each route's method, split path, handler and whether it takes every path below its own, added
-// together under one lock.
-type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[]; prefixes: boolean[] };
+// Each route's method, split path, handler, whether it takes every path below its own, and the
+// middleware of the routers mounted around it, outermost first, added together under one lock.
+type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[]; prefixes: boolean[]; groups: __routerMiddleware[][] };
 // A router's routes and middleware, shared so each middleware's next can hold them.
 type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
@@ -955,13 +955,19 @@ class Router {
   constructor() {
     // Named first: an empty array literal for a field of callables is typed 'never[]'.
     const handlers: ServeHandler[] = [];
-    const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers, prefixes: [] };
+    const groups: __routerMiddleware[][] = [];
+    const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers, prefixes: [], groups: groups };
     const middleware: __routerMiddleware[] = [];
     const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
     const held = table.clone();
     this.table = table;
-    this.inner = async (r: Request) => {
-      const res = await Router.dispatch(held.clone(), r, 0);
+    this.inner = Router.routing(held);
+  }
+
+  // Routes a request from the first route, with no middleware but the routes' own groups'.
+  private static routing(table: shared<__routerTable>): __routerNext {
+    return async (r: Request) => {
+      const res = await Router.dispatch(table.clone(), r, 0);
       return res;
     };
   }
@@ -969,24 +975,74 @@ class Router {
   // Wraps every route and the 404, whenever it is added; the first added runs outermost.
   use(this: Mut<this>, middleware: __routerMiddleware) { this.table.middleware.update((m) => { m.push(middleware); }); }
 
-  get(this: Mut<this>, path: string, handler: ServeHandler) { this.route("GET", path, handler); }
-  post(this: Mut<this>, path: string, handler: ServeHandler) { this.route("POST", path, handler); }
-  put(this: Mut<this>, path: string, handler: ServeHandler) { this.route("PUT", path, handler); }
-  patch(this: Mut<this>, path: string, handler: ServeHandler) { this.route("PATCH", path, handler); }
-  delete(this: Mut<this>, path: string, handler: ServeHandler) { this.route("DELETE", path, handler); }
+  get(this: Mut<this>, path: string, handler: ServeHandler) { this.add("GET", path, handler); }
+  post(this: Mut<this>, path: string, handler: ServeHandler) { this.add("POST", path, handler); }
+  put(this: Mut<this>, path: string, handler: ServeHandler) { this.add("PUT", path, handler); }
+  patch(this: Mut<this>, path: string, handler: ServeHandler) { this.add("PATCH", path, handler); }
+  delete(this: Mut<this>, path: string, handler: ServeHandler) { this.add("DELETE", path, handler); }
   // A route for every method.
-  all(this: Mut<this>, path: string, handler: ServeHandler) { this.route("", path, handler); }
+  all(this: Mut<this>, path: string, handler: ServeHandler) { this.add("", path, handler); }
 
-  // A route for a method, in any case; a path without a leading '/' gets one.
-  route(this: Mut<this>, method: string, path: string, handler: ServeHandler) {
+  // A route for a method, in any case, or a router mounted under a path prefix, as Hono's
+  // app.route does: its routes join this one's in place, under the prefix, its middleware
+  // running inside this one's for its routes alone.
+  route(this: Mut<this>, method: string, path: string, handler: ServeHandler): void;
+  route(this: Mut<this>, prefix: string, router: Router): void;
+  route(this: Mut<this>, a: string, b: string | Router, ...handler: ServeHandler[]): void {
+    if (typeof b !== "string") {
+      this.mount(a, b);
+      return;
+    }
+    for (const h of handler) this.add(a, b, h.clone());
+  }
+
+  // A path without a leading '/' gets one.
+  private add(this: Mut<this>, method: string, path: string, handler: ServeHandler) {
     const upper = method.toUpperCase();
     const split = (path.startsWith("/") ? path : "/" + path).split("/");
+    const none: __routerMiddleware[] = [];
     this.table.routes.update((t) => {
       t.methods.push(upper);
       t.paths.push(split);
       t.handlers.push(handler);
       t.prefixes.push(false);
+      t.groups.push(none);
     });
+  }
+
+  // Adds each of a child's routes at its path below the prefix, the child's '/' being the prefix
+  // itself. A static route's handler sees the path with the prefix taken off, as it would unmounted.
+  private mount(this: Mut<this>, prefix: string, child: Router) {
+    let base = (prefix.startsWith("/") ? prefix : "/" + prefix).split("/");
+    if (base.length > 1 && base[base.length - 1] === "") base.pop();
+    const drop = base.length as i64;
+    const outer = child.table.middleware.update((all) => all.map((m) => m.clone()));
+    const t = child.table.routes.update((t) => ({ methods: t.methods.clone(), paths: t.paths.clone(), handlers: t.handlers.map((h) => h.clone()), prefixes: t.prefixes.clone(), groups: t.groups.map((g) => g.map((m) => m.clone())) }));
+    for (let i = 0; i < t.paths.length; i++) {
+      const own = t.paths[i].clone();
+      const path = own.length === 2 && own[1] === "" && drop > 1 ? base.clone() : base.concat(own.slice(1));
+      let group = outer.map((m) => m.clone());
+      for (const m of t.groups[i]) group.push(m.clone());
+      let handler = t.handlers[i].clone();
+      if (t.prefixes[i]) {
+        const inner = handler;
+        handler = async (r: Request) => {
+          let moved = r;
+          moved.path = "/" + moved.path.split("/").slice(drop).join("/");
+          const res = await inner(moved);
+          return res;
+        };
+      }
+      const method = t.methods[i].clone();
+      const prefixed = t.prefixes[i];
+      this.table.routes.update((mine) => {
+        mine.methods.push(method);
+        mine.paths.push(path);
+        mine.handlers.push(handler);
+        mine.prefixes.push(prefixed);
+        mine.groups.push(group);
+      });
+    }
   }
 
   // Serves the files under root at the paths below prefix, for GET and HEAD. A path that isn't
@@ -995,6 +1051,7 @@ class Router {
     let split = (prefix.startsWith("/") ? prefix : "/" + prefix).split("/");
     if (split.length > 1 && split[split.length - 1] === "") split.pop();
     const skip = split.length;
+    const none: __routerMiddleware[] = [];
     const handler: ServeHandler = async (req: Request) => {
       const res = await __staticResponse(req, skip, root.clone());
       return res;
@@ -1004,6 +1061,7 @@ class Router {
       t.paths.push(split);
       t.handlers.push(handler);
       t.prefixes.push(true);
+      t.groups.push(none);
     });
   }
 
@@ -1020,6 +1078,7 @@ class Router {
     let params: string[] = [];
     let prefix = false;
     let after: usize = 0;
+    let group: __routerMiddleware[] = [];
     if (found !== null) {
       const decoded = Router.decoded(found.params);
       if (decoded === null) return new Response("Bad Request\\n", { status: 400 });
@@ -1027,6 +1086,7 @@ class Router {
       handler = found.handler;
       prefix = found.prefix;
       after = found.next;
+      group = found.group;
     }
     const table = this.table.clone();
     // A middleware that changed the path or method has its request routed again.
@@ -1036,16 +1096,14 @@ class Router {
         const res = await again(r);
         return res;
       }
-      let routed = r;
-      routed.params = params.clone();
       if (!prefix) {
-        const res = await handler(routed);
+        const res = await Router.run(handler.clone(), group.map((m) => m.clone()), params.clone(), again.clone(), r);
         return res;
       }
       // A static route's 404 is a miss, passed on to the routes after it.
-      const res = await handler(routed.clone());
+      const res = await Router.run(handler.clone(), group.map((m) => m.clone()), params.clone(), again.clone(), r.clone());
       if (res.status !== 404) return res;
-      const rest = await Router.dispatch(table.clone(), routed, after);
+      const rest = await Router.dispatch(table.clone(), r, after);
       return rest;
     };
     let chain = this.table.middleware.update((all) => all.map((m) => m.clone()));
@@ -1073,29 +1131,54 @@ class Router {
       if (found === null) return new Response("Not Found\\n", { status: 404 });
       const params = Router.decoded(found.params);
       if (params === null) return new Response("Bad Request\\n", { status: 400 });
+      const again = Router.routing(table.clone());
       if (!found.prefix) {
-        let routed = req;
-        routed.params = params;
-        const res = await found.handler(routed);
+        const res = await Router.run(found.handler, found.group, params, again, req);
         return res;
       }
-      let routed = req.clone();
-      routed.params = params;
-      const res = await found.handler(routed);
+      const res = await Router.run(found.handler, found.group, params, again, req.clone());
       if (res.status !== 404) return res;
       from = found.next;
     }
   }
 
+  // The response of a route's handler inside the middleware of the routers mounted around it,
+  // the first outermost. One of them that changes the path or method has the request routed again.
+  private static async run(handler: ServeHandler, group: __routerMiddleware[], params: string[], again: __routerNext, req: Request): Promise<Response> {
+    const path = req.path.clone();
+    const method = req.method.clone();
+    let next: __routerNext = async (r: Request) => {
+      if (r.path !== path || r.method !== method) {
+        const res = await again(r);
+        return res;
+      }
+      let routed = r;
+      routed.params = params.clone();
+      const res = await handler(routed);
+      return res;
+    };
+    let chain = group;
+    while (chain.length > 0) {
+      const m = chain.pop()!;
+      const inner = next;
+      next = async (r: Request) => {
+        const res = await m(r, inner.clone());
+        return res;
+      };
+    }
+    const res = await next(req);
+    return res;
+  }
+
   // The first route from index start taking a method and path, its handler cloned, with the
   // :params it reads, whether it is a prefix route, and the index after it.
-  private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>, start: usize): { handler: ServeHandler; params: string[]; prefix: boolean; next: usize } | null {
+  private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>, start: usize): { handler: ServeHandler; params: string[]; prefix: boolean; next: usize; group: __routerMiddleware[] } | null {
     const head = method === "HEAD";
     for (let i = start; i < t.paths.length; i++) {
       const want = t.methods[i];
       if (want !== "" && want !== method && !(head && want === "GET")) continue;
       const found = Router.match(t.paths[i], have, t.prefixes[i]);
-      if (found !== null) return { handler: t.handlers[i].clone(), params: found, prefix: t.prefixes[i], next: i + 1 };
+      if (found !== null) return { handler: t.handlers[i].clone(), params: found, prefix: t.prefixes[i], next: i + 1, group: t.groups[i].map((m) => m.clone()) };
     }
     return null;
   }
