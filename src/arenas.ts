@@ -9,6 +9,11 @@ export type BodyId = usize & { readonly __arena?: "body" };
 export type LocalId = usize & { readonly __arena?: "local" };
 export type ClassId = usize & { readonly __arena?: "class" };
 
+// The body an instance checks, from its compilation's arena.
+export function bodyOf(instance: Instance): Body {
+  return instance.tables.arenas.bodyOf(instance.body);
+}
+
 // A compilation's instances, bodies, locals and classes, each kept where it is made and named by
 // its id, which is how the others refer to it.
 export class Arenas {
@@ -23,8 +28,10 @@ export class Arenas {
     return id === undefined ? undefined : this.instances[id - 1];
   }
 
-  bodyOf(id: BodyId): Body {
-    return this.bodies[id - 1]!;
+  bodyOf(id: BodyId): Body;
+  bodyOf(id: BodyId | undefined): Body | undefined;
+  bodyOf(id: BodyId | undefined): Body | undefined {
+    return id === undefined ? undefined : this.bodies[id - 1];
   }
 
   localOf(id: LocalId): Local;
@@ -33,8 +40,10 @@ export class Arenas {
     return id === undefined ? undefined : this.locals[id - 1];
   }
 
-  classOf(id: ClassId): ClassInfo {
-    return this.classes[id - 1]!;
+  classOf(id: ClassId): ClassInfo;
+  classOf(id: ClassId | undefined): ClassInfo | undefined;
+  classOf(id: ClassId | undefined): ClassInfo | undefined {
+    return id === undefined ? undefined : this.classes[id - 1];
   }
 
   addInstance(instance: Omit<Instance, "id">): Instance {

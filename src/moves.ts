@@ -1,3 +1,4 @@
+import { bodyOf } from "./arenas.ts";
 import type { Instance, Local, Origin } from "./check.ts";
 import type { Body } from "./classes.ts";
 import { CompileError } from "./diag.ts";
@@ -546,7 +547,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const fieldCall = h?.kind === "closure" || (h?.kind === "dyn" && callableOf.has(h.of));
           const object = e.callee.kind === "member" ? (fieldCall ? e.callee : e.callee.object) : dyn?.callable;
           const place = object && key(object);
-          const self: { mutable: boolean; owned?: boolean } | undefined = arenas.instanceOf(calls.get(e))?.body.self ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
+          const self: { mutable: boolean; owned?: boolean } | undefined = (calls.has(e) ? bodyOf(arenas.instanceOf(calls.get(e)!)).self : undefined) ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
           // An owning method takes its receiver over, as an argument it is handed.
           if (object && self?.owned) {
             expr(object, (p) => `'${p}' moved here: ${name} takes its object over; call it on '${p}.clone()' to keep a copy`);

@@ -1,4 +1,4 @@
-import type { LocalId } from "./arenas.ts";
+import { bodyOf, type LocalId } from "./arenas.ts";
 import type { Body, Instance } from "./check.ts";
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
@@ -33,13 +33,13 @@ export function warnings({ arenas, declarations, generated, prologues }: Tables,
   // each declare it anew: it is unused only when no declaration of it is used.
   const found = new Map<usize, { warning: CompileError; used: boolean }>();
   for (const i of instances) {
-    if (i.body.start >= STD_BASE || generated.has(i.body)) continue;
+    if (bodyOf(i).start >= STD_BASE || generated.has(bodyOf(i))) continue;
     for (const [node, id] of i.locals) {
       if (!declarations.has(node)) continue;
       const l = arenas.localOf(id);
       // A parameter with a default is bound by the body's first statements, under its name.
       const param = l.param || prologues.has(node as Stmt);
-      if (param && required(i.body)) continue;
+      if (param && required(bodyOf(i))) continue;
       const at = l.param ? (node as Param).pattern : variable(node as Stmt);
       if (!at || at.kind !== "ident" || generated.has(at) || generated.has(node) || !warnable(at.name)) continue;
       const what = param ? "parameter" : "variable";
@@ -50,7 +50,7 @@ export function warnings({ arenas, declarations, generated, prologues }: Tables,
   }
   const unreachable = new Map<usize, CompileError>();
   for (const i of instances) {
-    if (i.body.start < STD_BASE && !generated.has(i.body)) unreachableIn(generated, i.body.body, i, unreachable);
+    if (bodyOf(i).start < STD_BASE && !generated.has(bodyOf(i))) unreachableIn(generated, bodyOf(i).body, i, unreachable);
   }
   const all = [...[...found.values()].filter((e) => !e.used).map((e) => e.warning), ...unreachable.values()];
   return all.sort((a, b) => a.start - b.start);

@@ -21,7 +21,7 @@ import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
 import { holesOf, quoted, type Category } from "./quote.ts";
 import { holdsNull } from "./defaults.ts";
-import type { InstanceId, LocalId } from "./arenas.ts";
+import { bodyOf, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
@@ -69,7 +69,7 @@ export type Context = {
   calls: NodeMap<Expr, InstanceId>;
   setters: NodeMap<Expr, InstanceId>;
   byName: Map<string, Body>;
-  classes: Map<string, ClassInfo>;
+  classes: Map<string, ClassId>;
   enums: Map<string, EnumInfo>;
   // A data-carrying enum made with these type arguments.
   enumInstance(info: EnumInfo, args: Type[], at: Span): EnumInstance;
@@ -347,7 +347,7 @@ export function expressions(ctx: Context) {
   const powers: [Expr, Expr][] = [];
   const unions: Union = {
     kindTests, typing, types, coercions, value: (e) => read(e), excess: (e, to) => excess(e, to),
-    classNamed: (name) => (lookup(name) ? undefined : classes.get(name)?.type),
+    classNamed: (name) => (lookup(name) ? undefined : arenas.classOf(classes.get(name))?.type),
     adapt: (e, to) => adapt(e, to),
   };
   return { value, read, condition, effect, coerce, result, expect, changesLocal, changesThis, adapt, finish, literalOnly, unsafely };
@@ -930,12 +930,13 @@ export function expressions(ctx: Context) {
     if (callee.kind === "super") {
       if (e !== superCall) throw new CompileError("'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
       const base = classOf(rec(self!.type).base!);
+      const constructor = arenas.bodyOf(base.constructor);
       types.set(callee, base.type);
-      if (base.constructor.params.at(-1)?.rest) packRest(e, e.args, base.constructor.params);
+      if (constructor.params.at(-1)?.rest) packRest(e, e.args, constructor.params);
       else refuseSpread(e.args);
-      expectFrom(base.constructor, e.args);
+      expectFrom(constructor, e.args);
       const argTypes = e.args.map(value);
-      const instance = instantiate(base.constructor, [], e.args, argTypes, e);
+      const instance = instantiate(constructor, [], e.args, argTypes, e);
       args(e.args, argTypes, instance, e);
       calls.set(e, instance.id);
       const error = errorOf(instance);
@@ -1109,7 +1110,7 @@ export function expressions(ctx: Context) {
     // A field holding a stored callable, `this.onClick(e)`, when no method has that name.
     if (callee.kind === "member" && receiver !== undefined && (recv?.kind === "class" || recv?.kind === "object")) {
       const stored = field(receiver as ClassType | ObjectType, callee.name);
-      const method = recv.kind === "class" && inherited(classOf(receiver as ClassType), "methods", callee.name);
+      const method = recv.kind === "class" && inherited(arenas, classOf(receiver as ClassType), "methods", callee.name);
       const held = stored && lower(isRefType(stored.type) ? rec(stored.type).to : stored.type);
       if (held && !method && isCallable(held)) return callableCall(e, callee, held as DynType);
     }
@@ -1387,7 +1388,7 @@ export function expressions(ctx: Context) {
     const error = errorOf(instance) ?? (declared && errorOf(instanceOf(declared)));
     if (error && !target.async) raise(e, error, `'${target.name}'`);
     const type = resultOf(declared ? instanceOf(declared) : instance, e);
-    const object = callee.kind === "member" && instance.body.self ? callee.object : undefined;
+    const object = callee.kind === "member" && bodyOf(instance).self ? callee.object : undefined;
     // A returned reference borrows what its lifetime says; a value holding references, what
     // was lent to the call, its receiver included.
     if (holdsRef(type)) borrowsFrom.set(e, sourcesOf(instance, e.args, object, e, lends));
@@ -1592,7 +1593,7 @@ export function expressions(ctx: Context) {
       held = local.type;
       locals.set(callee, local.localId);
     } else if (callee.kind === "member" && pure(callee) && receiver !== undefined && (recOf(receiver)?.kind === "class" || recOf(receiver)?.kind === "object")) {
-      if (rec(receiver as ClassType).kind === "class" && inherited(classOf(receiver as ClassType as ClassType), "methods", callee.name)) return undefined;
+      if (rec(receiver as ClassType).kind === "class" && inherited(arenas, classOf(receiver as ClassType as ClassType), "methods", callee.name)) return undefined;
       held = field(receiver as ObjectType | ClassType as ClassType | ObjectType, callee.name)?.type;
       // A getter on the way runs code the direct call would skip.
       const t = held && lower(isRefType(held) ? rec(held).to : held);
@@ -1615,7 +1616,7 @@ export function expressions(ctx: Context) {
     if (e.kind !== "member") return false;
     const object = types.get(e.object);
     const held = object && lower(isRefType(object) ? rec(object).to : object);
-    const getter = recOf(held)?.kind === "class" && inherited(classOf(held as ClassType), "getters", e.name) !== undefined;
+    const getter = recOf(held)?.kind === "class" && inherited(arenas, classOf(held as ClassType), "getters", e.name) !== undefined;
     return getter || throughGetter(e.object);
   }
 
@@ -1706,7 +1707,7 @@ export function expressions(ctx: Context) {
     }
     if (type.kind === "function" && type.generic) return familyCall(e, type, name);
     if (e.typeArgs.length > 0) throw new CompileError(`${name} takes no type arguments`, e.start, e.end);
-    const written = type.kind === "closure" ? closureBody((boundFunction(held) ?? held) as ClosureType).body.params : undefined;
+    const written = type.kind === "closure" ? bodyOf(closureBody((boundFunction(held) ?? held) as ClosureType)).params : undefined;
     if (written) arity(e.args.length, written, e);
     else if (e.args.length !== type.params.length) {
       throw new CompileError(`expected ${type.params.length} argument${type.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
@@ -2336,7 +2337,7 @@ export function expressions(ctx: Context) {
     const s = read(text);
     if (!stringLike(typing, s)) throw new CompileError(`'JSON.parse' reads a string, not '${show(s)}'`, text.start, text.end);
     if (s !== "string") coerce(text, s, "string", "");
-    raise(e, classes.get("JsonError")!.type, "'JSON.parse'");
+    raise(e, arenas.classOf(classes.get("JsonError")!).type, "'JSON.parse'");
     jsonCalls.set(e, "parse");
     return { type: t, what: "'JSON.parse'" };
   }
@@ -2827,7 +2828,7 @@ export function expressions(ctx: Context) {
     if (e.args.length !== 0) throw new CompileError("'join' takes no arguments", e.start, e.end);
     if (isRefType(types.get(callee.object)!)) throw new CompileError("'join' takes the handle over, so it needs the handle itself, not a borrow of it", callee.object.start, callee.object.end);
     joinCalls.add(e);
-    return { type: joinedType(t, classes.get("TaskPanic")!.type), what: "'join'" };
+    return { type: joinedType(t, arenas.classOf(classes.get("TaskPanic")!).type), what: "'join'" };
   }
 
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
@@ -2929,7 +2930,7 @@ export function expressions(ctx: Context) {
 
   // The std `IoError` class, which failed socket calls throw.
   function ioError(): Type {
-    return classes.get("IoError")!.type;
+    return arenas.classOf(classes.get("IoError")!).type;
   }
 
   // What a socket's wait throws: an IoError, or an AbortError too when it was given a signal.
@@ -2976,7 +2977,7 @@ export function expressions(ctx: Context) {
     const rejecting = recOf(reason);
     const signature = rejecting?.kind === "function" ? rejecting : reason !== undefined && isCallable(reason) ? recOf(callableOf.get(rec(reason as DynType).of)) : undefined;
     if (reason !== undefined && signature?.params.length !== 1) throw new CompileError(`'reject' takes the error it fails with, as in 'reject: (reason: Error) => void', not '${show(reason)}'`, (annotated ?? executor).start, (annotated ?? executor).end);
-    const error = signature?.params[0] ?? ctx.throwsDeclared() ?? classes.get("Error")!.type;
+    const error = signature?.params[0] ?? ctx.throwsDeclared() ?? arenas.classOf(classes.get("Error")!).type;
     const variant = `${rejects ? "" : " resolve"}${gives === "void" ? " void" : ""}`;
     const typeArgs = [...(gives === "void" ? [] : [presetNode(gives, e)]), ...(rejects ? [presetNode(error, e)] : [])];
     const at = { start: e.start, end: e.end };
@@ -3079,7 +3080,7 @@ export function expressions(ctx: Context) {
     if (e.typeArgs.length > 1) throw new CompileError("'Promise.withResolvers' takes one type argument, what its Promise gives", e.start, e.end);
     if (e.typeArgs.length === 0) throw new CompileError("can't tell what this Promise gives; write it, as in 'Promise.withResolvers<i64>()', since Fish has no 'unknown'", e.start, e.end);
     const gives = resolveType(e.typeArgs[0]!);
-    const error = ctx.throwsDeclared() ?? classes.get("Error")!.type;
+    const error = ctx.throwsDeclared() ?? arenas.classOf(classes.get("Error")!).type;
     const at = { start: e.start, end: e.end };
     Object.assign(e, { callee: { id: nextId(ids), kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [presetNode(gives, e)]), presetNode(error, e)] });
     if (gives !== "void") promiseVariants.set(e, { name: "promise with resolvers", typeArgs: e.typeArgs });
@@ -3116,7 +3117,7 @@ export function expressions(ctx: Context) {
 
   // The std `AbortError` class, which aborted work throws.
   function abortError(): Type {
-    return classes.get("AbortError")!.type;
+    return arenas.classOf(classes.get("AbortError")!).type;
   }
 
   // Whether a value passes where a JS shape is wanted: a handle of a shape with its fields, or a
@@ -3304,7 +3305,7 @@ export function expressions(ctx: Context) {
   // The signature of a package's function a call takes: the first, in the order declared, whose
   // parameters the arguments pass for; a generic one is taken on the count of its arguments.
   function jsOverload(e: Call, first: Body): Body {
-    const signatures = [first, ...first.js!.overloads!.map((f) => jsBodies.get(f)!)];
+    const signatures = [first, ...first.js!.overloads!.map((f) => arenas.bodyOf(jsBodies.get(f)!))];
     if (e.args.some((a) => a.kind === "arrow" || a.kind === "spread")) return first;
     const given = e.args.map((a) => value(a));
     // In a generic body's definition an argument may be a placeholder: each instance picks again.
@@ -3330,14 +3331,15 @@ export function expressions(ctx: Context) {
     const spread = e.args.find((a) => a.kind === "spread");
     if (spread) throw new CompileError(`spreading arguments into the overloaded '${impl.name}' isn't supported yet; pass them one by one`, spread.start, spread.end);
     const given = e.args.map((a) => (a.kind === "arrow" ? undefined : tried(a)));
-    const fitting = impl.overloads!.find((f) => {
+    const overloads = impl.overloads!.map((f) => arenas.bodyOf(f));
+    const fitting = overloads.find((f) => {
       const required = f.params.filter((p) => !p.optional && !p.rest).length;
       if (e.args.length < required || (e.args.length > f.params.length && !f.params.at(-1)?.rest)) return false;
       const types = signatureTypes(f);
       return types === undefined || e.args.every((a, i) => passes(a, given[i], types[Math.min(i, types.length - 1)]!, f.params[Math.min(i, f.params.length - 1)]!));
     });
     if (fitting) return fitting;
-    const shown = impl.overloads!.map((f) => {
+    const shown = overloads.map((f) => {
       const types = signatureTypes(f);
       // A destructured parameter, named only to be passed on, shows as its type alone.
       const params = f.params.map((p, i) => {
@@ -3996,7 +3998,7 @@ export function expressions(ctx: Context) {
   // In an instance, a call through a type parameter runs its concrete class's method. An
   // interface it returns is, as for any call, the one concrete type the method returns.
   function concreteMethod(e: Call, callee: Extract<Expr, { kind: "member" }>, c: ClassType, returns: Type): Type {
-    const target = inherited(classOf(c), "methods", callee.name)!;
+    const target = inherited(arenas, classOf(c), "methods", callee.name)!;
     if (target.self!.owned) takesOver(callee.object, callee.name);
     else if (target.self!.mutable) mutates(callee.object, callee.name);
     const instance = instantiate(target, e.typeArgs, e.args, e.args.map((a) => coercions.get(a) ?? types.get(a)!), e);
@@ -4064,16 +4066,16 @@ export function expressions(ctx: Context) {
   // a setter hides its base's getter.
   function staticProperty(e: Expr): Static | undefined {
     if (e.kind !== "member" || e.optional || e.object.kind !== "ident" || lookup(e.object.name)) return undefined;
-    const c = classes.get(e.object.name);
+    const c = arenas.classOf(classes.get(e.object.name));
     return c && staticOf(c, e.name);
   }
 
   function staticOf(c: ClassInfo, name: string): Static | undefined {
-    for (let b: ClassInfo | undefined = c; b; b = b.base) {
+    for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) {
       const field = b.staticFields.get(name);
       if (field) return { field, declaring: b };
-      const getter = b.statics.get(`get ${name}`);
-      const setter = b.statics.get(`set ${name}`);
+      const getter = arenas.bodyOf(b.statics.get(`get ${name}`));
+      const setter = arenas.bodyOf(b.statics.get(`set ${name}`));
       if (getter || setter) return { getter, setter, declaring: b };
     }
     return undefined;
@@ -4093,7 +4095,8 @@ export function expressions(ctx: Context) {
       return { id: nextId(ids), kind: "ident", name: `${rec(found.declaring!.type).name}.${e.name}`, ...at };
     }
     if (!found.getter) {
-      const hidden = found.declaring.base && staticOf(found.declaring.base, e.name)?.getter;
+      const base = arenas.classOf(found.declaring.base);
+      const hidden = base && staticOf(base, e.name)?.getter;
       throw new CompileError(hidden ? `'${rec(found.declaring.type).name}' declares only a setter for '${e.name}', which hides the getter of its base; declare a getter in '${rec(found.declaring.type).name}' too` : `property '${e.name}' has a setter but no getter`, e.start, e.end);
     }
     visible(found.getter.access, found.declaring.type, e.name, e);
@@ -4127,9 +4130,9 @@ export function expressions(ctx: Context) {
   // receiver must be able to change when the method changes it.
   function method(callee: Extract<Expr, { kind: "member" }>, receiver: Type | undefined): Body {
     const { object, name } = callee;
-    const named = object.kind === "ident" && !lookup(object.name) ? (classes.get(object.name) ?? ctx.definedClass(object.name)) : undefined;
+    const named = object.kind === "ident" && !lookup(object.name) ? (arenas.classOf(classes.get(object.name)) ?? ctx.definedClass(object.name)) : undefined;
     if (named) {
-      const found = inherited(named, "statics", name);
+      const found = inherited(arenas, named, "statics", name);
       const property = found ? undefined : staticOf(named, name);
       if (property) throw new CompileError(`'${name}' is a static ${property.field ? "field" : "accessor"} of '${rec(property.declaring.type).name}', not a method; read it as '${rec(named.type).name}.${name}'`, callee.start, callee.end);
       if (!found) throw new CompileError(`property '${name}' does not exist on type 'typeof ${rec(named.type).name}'${didYouMean(name, staticNames(named))}`, callee.start, callee.end);
@@ -4139,7 +4142,7 @@ export function expressions(ctx: Context) {
     if (object.kind === "super") return superMethod(callee);
     const type = receiver!;
     const tr = recOf(type);
-    const found = tr?.kind === "class" ? inherited(classOf(type as ClassType), "methods", name) : undefined;
+    const found = tr?.kind === "class" ? inherited(arenas, classOf(type as ClassType), "methods", name) : undefined;
     if (!found) throw new CompileError(`'${show(type)}' has no method '${name}'${didYouMean(name, memberNames(type))}`, callee.start, callee.end);
     visible(found.access, found.declared ?? found.owner!, name, callee);
     if (found.self!.owned) takesOver(object, name);
@@ -4153,11 +4156,11 @@ export function expressions(ctx: Context) {
     const base = recOf((owner && self && derives(self.type, owner) ? owner : self?.type))?.base;
     if (!base) throw new CompileError("'super' can only be used in a class that extends another", callee.start, callee.end);
     if (!thisReady(callee.object)) throw new CompileError("'super' can't be used until every field is assigned", callee.object.start, callee.object.end);
-    let found = inherited(classOf(base), "methods", callee.name);
+    let found = inherited(arenas, classOf(base), "methods", callee.name);
     if (!found) throw new CompileError(`'${rec(base).name}' has no method '${callee.name}'${didYouMean(callee.name, memberNames(base))}`, callee.start, callee.end);
     if (found.abstract) throw new CompileError(`'${callee.name}' is abstract in '${rec(found.owner!).name}', so 'super.${callee.name}()' has nothing to run`, callee.start, callee.end);
     // A template runs as this class's own copy of it, on this class's `this`.
-    const original = found.copyOf ?? found;
+    const original = arenas.bodyOf(found.copyOf) ?? found;
     const copied = original.template === true && !rec(self!.type).abstract;
     if (copied) found = copyFor(ctx.tables, classOf(self!.type), original);
     visible(found.access, found.declared ?? found.owner!, callee.name, callee);
@@ -4173,7 +4176,7 @@ export function expressions(ctx: Context) {
   // members is typed by the declaration, which each implementation's result is converted to.
   function abstractDeclaration(e: Extract<Expr, { kind: "member" }>, table: "methods" | "getters"): Body | undefined {
     if (e.object.kind !== "this" || !recOf(owner)?.abstract) return undefined;
-    const declared = inherited(classOf(owner!), table, e.name);
+    const declared = inherited(arenas, classOf(owner!), table, e.name);
     return declared?.abstract ? declared : undefined;
   }
 
@@ -4197,7 +4200,7 @@ export function expressions(ctx: Context) {
     if (!access || access === "public" || (owner && sameClass(owner, declaring))) return true;
     if (access === "protected" && owner) for (let b: ClassType | undefined = rec(owner).base; b; b = rec(b).base) if (sameClass(b, declaring)) return true;
     // A base reaches a subclass's implementation of its abstract member.
-    return access === "protected" && owner !== undefined && derives(declaring, owner) && abstractIn(classOf(owner), name);
+    return access === "protected" && owner !== undefined && derives(declaring, owner) && abstractIn(arenas, classOf(owner), name);
   }
 
   // The members of a type this body can reach, for suggesting one: an object's fields; a
@@ -4213,10 +4216,10 @@ export function expressions(ctx: Context) {
     if (r.kind === "object") return r.fields.map((f) => f.name);
     if (r.kind !== "class") return [];
     const names: string[] = [];
-    for (let c: ClassInfo | undefined = classOf(t as ClassType); c; c = c.base) {
+    for (let c: ClassInfo | undefined = classOf(t as ClassType); c; c = arenas.classOf(c.base)) {
       const declaring = c.type;
       names.push(...rec(declaring).fields.filter((f) => accessible(f.access, declaring, f.name)).map((f) => shownName(f.name)));
-      for (const table of [c.methods, c.getters, c.setters]) for (const [name, body] of table) if (accessible(body.access, declaring, name)) names.push(shownName(name));
+      for (const table of [c.methods, c.getters, c.setters]) for (const [name, body] of table) if (accessible(arenas.bodyOf(body).access, declaring, name)) names.push(shownName(name));
     }
     return names;
   }
@@ -4224,8 +4227,8 @@ export function expressions(ctx: Context) {
   // A class's static members, with its bases', for suggesting one.
   function staticNames(c: ClassInfo): string[] {
     const names: string[] = [];
-    for (let b: ClassInfo | undefined = c; b; b = b.base) {
-      for (const [name, body] of b.statics) if (accessible(body.access, b.type, name)) names.push(shownName(name.replace(/^[gs]et /, "")));
+    for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) {
+      for (const [name, body] of b.statics) if (accessible(arenas.bodyOf(body).access, b.type, name)) names.push(shownName(name.replace(/^[gs]et /, "")));
       for (const [name, f] of b.staticFields) if (accessible(f.access, b.type, name)) names.push(shownName(name));
     }
     return names;
@@ -4240,13 +4243,13 @@ export function expressions(ctx: Context) {
   function args(list: Expr[], argTypes: Type[], target: Instance, at: Span) {
     // A package's function takes a callback or a Promise as its signature made it for JS, a
     // stored one JS keeps.
-    if (target.body.js && target.concrete) returnOf(target, at);
-    const signature = target.body.js && target.concrete ? target.signature : undefined;
+    if (bodyOf(target).js && target.concrete) returnOf(target, at);
+    const signature = bodyOf(target).js && target.concrete ? target.signature : undefined;
     const params = signature && signature.length > 0 ? signature : paramTypes(target);
-    arity(list.length, target.body.params, at);
+    arity(list.length, bodyOf(target).params, at);
     list.forEach((a, i) => {
       const [type, expected] = [argTypes[i]!, params[i]!];
-      const shown = defaultedArg(a, type, target.body.params[i]!) ?? expected;
+      const shown = defaultedArg(a, type, bodyOf(target).params[i]!) ?? expected;
       coerce(a, type, expected, `argument of type '${show(type)}' is not assignable to parameter of type '${show(shown)}'`);
     });
   }
@@ -4494,7 +4497,7 @@ export function expressions(ctx: Context) {
         }
         const found = or === undefined || or.kind === "closure" ? undefined : field(object as Exclude<Type, string>, e.name);
         const c = or?.kind === "class" ? classOf(object as ClassType) : undefined;
-        const getter = !found && c ? inherited(c, "getters", e.name) : undefined;
+        const getter = !found && c ? inherited(arenas, c, "getters", e.name) : undefined;
         if (getter) {
           visible(getter.access, getter.declared ?? getter.owner!, e.name, e);
           calls.set(e, instanceOf(getter).id);
@@ -4503,8 +4506,8 @@ export function expressions(ctx: Context) {
           if (holdsRef(returns)) borrowsFrom.set(e, [e.object]);
           return linked(e) ? optional(returns, e) : returns;
         }
-        if (!found && c && inherited(c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
-        if (!found && c && inherited(c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
+        if (!found && c && inherited(arenas, c, "methods", e.name)) throw new CompileError("methods can't be used as values yet; call it", e.start, e.end);
+        if (!found && c && inherited(arenas, c, "setters", e.name)) throw new CompileError(`property '${e.name}' has a setter but no getter`, e.start, e.end);
         if (!found) throw new CompileError(`property '${shownName(e.name)}' does not exist on type '${show(object)}'${didYouMean(e.name, memberNames(object))}`, e.start, e.end);
         if (or?.kind === "class") visible(found.access, declaring(object as ClassType, e.name), e.name, e);
         // Through a type parameter the field has its bound's type, and in an instance the
@@ -4512,7 +4515,7 @@ export function expressions(ctx: Context) {
         const stored = lower(object);
         const sr = recOf(stored);
         if (stored !== object && sr?.kind === "class" && !field(stored as ClassType, e.name)) {
-          const instance = instanceOf(inherited(classOf(stored as ClassType), "getters", e.name)!);
+          const instance = instanceOf(inherited(arenas, classOf(stored as ClassType), "getters", e.name)!);
           returnOf(instance, e);
           calls.set(e, instance.id);
         }
@@ -4677,17 +4680,18 @@ export function expressions(ctx: Context) {
           if (list.length > 0 || e.typeArgs.length > 0) throw new CompileError("'AbortController' takes no arguments", e.start, e.end);
           return blockType("AbortController");
         }
-        const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? classes.get(e.callee.name) : undefined;
+        const named = e.callee.kind === "ident" && !lookup(e.callee.name) ? arenas.classOf(classes.get(e.callee.name)) : undefined;
         if (named?.node.abstract) throw new CompileError(`cannot create an instance of the abstract class '${rec(named.type).name}'`, e.start, e.end);
-        const written = named?.constructor.params ?? (e.callee.kind === "ident" && !lookup(e.callee.name) ? ctx.templateParams(e.callee.name) : undefined);
+        const written = arenas.bodyOf(named?.constructor)?.params ?? (e.callee.kind === "ident" && !lookup(e.callee.name) ? ctx.templateParams(e.callee.name) : undefined);
         if (written?.at(-1)?.rest && e.args) packRest(e, e.args, written);
         else refuseSpread(list);
-        if (named) expectFrom(named.constructor, list);
+        if (named) expectFrom(arenas.bodyOf(named.constructor), list);
         // A generic class's written type arguments type the arrows given for parameters they name,
         // as in `new Box<(n: i64) => i64>((n) => n * 2)`.
         const early = !named && e.typeArgs.length > 0 && e.callee.kind === "ident" && !lookup(e.callee.name) ? construct(e.callee.name, e.typeArgs, [], e) : undefined;
-        early?.constructor.params.forEach((p, i) => {
-          const held = p.type?.kind === "ref" && p.type.args.length === 0 ? (early.constructor.scope ?? early.scope).get(p.type.name) : undefined;
+        const earlyConstructor = arenas.bodyOf(early?.constructor);
+        earlyConstructor?.params.forEach((p, i) => {
+          const held = p.type?.kind === "ref" && p.type.args.length === 0 ? (earlyConstructor.scope ?? early!.scope).get(p.type.name) : undefined;
           if (list[i]?.kind === "arrow" && held) expect(list[i]!, held);
         });
         // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.
@@ -4702,9 +4706,10 @@ export function expressions(ctx: Context) {
         const c = e.callee.kind === "ident" ? construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError(`only a class can be constructed with 'new'${e.callee.kind === "ident" && !lookup(e.callee.name) ? didYouMean(e.callee.name, ctx.classNames(e.callee.start)) : ""}`, e.callee.start, e.callee.end);
         const rust = rustClassOf(typing, c.type);
-        if (rust && !c.constructor.rust) throw new CompileError(`the Rust type '${rust.name}' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function`, e.start, e.end);
-        constructs(c.constructor, list, argTypes);
-        const constructor = instantiate(c.constructor, [], list, argTypes, e);
+        const made = arenas.bodyOf(c.constructor);
+        if (rust && !made.rust) throw new CompileError(`the Rust type '${rust.name}' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function`, e.start, e.end);
+        constructs(made, list, argTypes);
+        const constructor = instantiate(made, [], list, argTypes, e);
         args(list, argTypes, constructor, e);
         calls.set(e, constructor.id);
         const error = errorOf(constructor);
@@ -5081,7 +5086,7 @@ export function expressions(ctx: Context) {
     if (r.kind === "variant") return [...enums.values()].some((e) => e.data?.name === r.enum && e.data.eq);
     const known = equalities.get(t as ClassType);
     if (known) return true;
-    const method = inherited(classOf(t as ClassType), "methods", "equals");
+    const method = inherited(arenas, classOf(t as ClassType), "methods", "equals");
     if (!method) return false;
     const instance = instanceOf(method);
     const [arg, ...more] = paramTypes(instance);
@@ -5771,8 +5776,8 @@ export function expressions(ctx: Context) {
     const or = recOf(object);
     if (or?.kind !== "class" || field(object as ClassType, target.name)) return undefined;
     const c = classOf(object as ClassType);
-    const setter = inherited(c, "setters", target.name);
-    if (!setter && inherited(c, "getters", target.name)) {
+    const setter = inherited(arenas, c, "setters", target.name);
+    if (!setter && inherited(arenas, c, "getters", target.name)) {
       throw new CompileError(`cannot assign to '${target.name}' because it is a read-only property`, target.start, target.end);
     }
     if (setter) visible(setter.access, setter.declared ?? setter.owner!, target.name, target);
@@ -5904,7 +5909,7 @@ export function expressions(ctx: Context) {
     if (!fits(type, fn)) throw new CompileError(message, e.start, e.end);
     const body = closureBody(type as ClosureType);
     // A call through a stored callable passes every argument, with no default to fall back on.
-    if (body.body.params.some((p) => defaulted.has(p))) throw new CompileError("a closure with default parameter values can't be stored as a value yet, since calls through it pass every argument; give the parameters no defaults", e.start, e.end);
+    if (bodyOf(body).params.some((p) => defaulted.has(p))) throw new CompileError("a closure with default parameter values can't be stored as a value yet, since calls through it pass every argument; give the parameters no defaults", e.start, e.end);
     const capture = (name: string) => `'${name}'`;
     const borrowed = c.fields.find((f) => isRefType(f.type));
     if (borrowed) throw new CompileError(`this closure borrows ${capture(borrowed.name)}, but a stored callable owns what it captures; write the closure where it is stored, so it captures by move, or as 'move (...) => ...'`, e.start, e.end);
@@ -5917,7 +5922,7 @@ export function expressions(ctx: Context) {
       const r = recOf(u);
       return (r?.kind === "interior" && r.which !== "Cell") || (r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit")) || r?.kind === "handle";
     };
-    const held = body.body.async ? c.fields.find((f) => holdsPart(f.type, pinned)) : undefined;
+    const held = bodyOf(body).async ? c.fields.find((f) => holdsPart(f.type, pinned)) : undefined;
     if (held) throw new CompileError(`this async function captures ${capture(held.name)}, which holds an Atomic, a Lock, a Semaphore or a JoinHandle; each call works on its own copy of what it captures, which would split that state, so capture a shared value holding it instead, like 'shared({ count: new Atomic(0) })'`, e.start, e.end);
   }
 
@@ -5943,7 +5948,7 @@ export function expressions(ctx: Context) {
       return { methods: [body.id], fields: [], clone: fixed ? undefined : "copy" };
     }
     const methods = rec(rec(to).of).methods.map((m) => {
-      const body = inherited(c!, "methods", m.name)!;
+      const body = inherited(arenas, c!, "methods", m.name)!;
       // A generic method has no one function for the table; calls of it through a Dyn are refused.
       if (m.generic) return undefined;
       if (body.params.some((p) => p.comptime)) throw new CompileError(`'${show(type)}' can't be a '${show(to)}': its method '${m.name}' takes a comptime parameter, so it has a version per value and no one method a Dyn could call`, e.start, e.end);
@@ -5958,8 +5963,8 @@ export function expressions(ctx: Context) {
       futureTable(instance, m.returns, true, e);
       return instance.id;
     });
-    const fields = rec(rec(to).of).fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(c, "getters", f.name)!).id));
-    const own = c?.methods.get("clone");
+    const fields = rec(rec(to).of).fields.map((f) => (typeof type !== "string" && field(type, f.name) ? undefined : c && instanceOf(inherited(arenas, c, "getters", f.name)!).id));
+    const own = arenas.bodyOf(c?.methods.get("clone"));
     return { methods, fields, clone: own ? instanceOf(own).id : fixed ? undefined : "copy" };
   }
 
@@ -5971,7 +5976,7 @@ export function expressions(ctx: Context) {
     const made = lower(target.future ?? returnOf(target, at));
     const fr = recOf(made);
     if (fr?.kind !== "future") throw unsupported("Dyn methods giving a Promise that isn't an async function's future", at);
-    if (fr.throws) throw new CompileError(`'${target.body.name}' can throw '${show(fr.throws)}', and a Promise given through a Dyn or a stored function can't throw yet`, at.start, at.end);
+    if (fr.throws) throw new CompileError(`'${bodyOf(target).name}' can throw '${show(fr.throws)}', and a Promise given through a Dyn or a stored function can't throw yet`, at.start, at.end);
     const boxed = lent ? lentPromise(gives) : storedType(returns);
     dynMembers.set(`${keyOf(made)} ${keyOf(boxed)}`, { methods: [], fields: [], clone: undefined });
   }

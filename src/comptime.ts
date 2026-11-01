@@ -1,5 +1,5 @@
 import type { Instance } from "./check.ts";
-import type { LocalId } from "./arenas.ts";
+import { bodyOf, type LocalId } from "./arenas.ts";
 import { CompileError } from "./diag.ts";
 import { fileAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
@@ -175,10 +175,10 @@ function seeded(instance: Instance): Frame {
 // The comptime parameters an instance can read, by local: its own, and in a closure, those of
 // the functions it is written in, through what it captures.
 function known(instance: Instance): Map<LocalId, Value> {
-  const parent = instance.body.closure?.parent;
+  const parent = bodyOf(instance).closure?.parent;
   const outer = parent ? known(instance.tables.arenas.instanceOf(parent)) : new Map<LocalId, Value>();
   const locals = new Map<LocalId, Value>();
-  for (const p of instance.body.params) if (p.comptime) locals.set(instance.locals.get(p)!, comptimeParameter(instance, p));
+  for (const p of bodyOf(instance).params) if (p.comptime) locals.set(instance.locals.get(p)!, comptimeParameter(instance, p));
   for (const [alias, from] of instance.captures ?? []) if (from !== "this" && outer.has(from)) locals.set(alias, outer.get(from));
   return locals;
 }
@@ -193,7 +193,7 @@ export function comptimeChecks(tables: Tables, check: (instance: Instance) => bo
 export function comptimeBody(instance: Instance): Value {
   const { constants } = instance.tables;
   if (constants.has(instance.id)) return constants.get(instance.id);
-  const v = guarded(instance.tables, instance.body, (run) => run.constant(instance, instance.body));
+  const v = guarded(instance.tables, bodyOf(instance), (run) => run.constant(instance, bodyOf(instance)));
   constants.set(instance.id, v);
   return v;
 }
@@ -216,7 +216,7 @@ function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): V
   }
 }
 
-const constName = (c: Instance) => c.body.name.slice("const ".length);
+const constName = (c: Instance) => bodyOf(c).name.slice("const ".length);
 
 function interpreter(tables: Tables) {
   const { equalities, quotes, restStarts, stringBuilds, timerNames, constants, computing, ensureChecked, quoteScopes: scopes, quoteFrees: frees, quotedSpans, typing, files, asserts, clocks, integerCalls, arenas } = tables;
@@ -249,8 +249,8 @@ function interpreter(tables: Tables) {
   // How consts reading each other in a ring do it, naming their files when they are in several.
   function cycle(ring: Instance[]): string {
     if (ring.length < 2) return "";
-    const ringFiles = new Set(ring.map((c) => fileAt(files, c.body.start)));
-    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${ringFiles.size > 1 ? ` in '${fileAt(files, c.body.start)}'` : ""}`);
+    const ringFiles = new Set(ring.map((c) => fileAt(files, bodyOf(c).start)));
+    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${ringFiles.size > 1 ? ` in '${fileAt(files, bodyOf(c).start)}'` : ""}`);
     return `: ${named[0]} reads ${named.slice(1).join(", which reads ")}`;
   }
 
@@ -293,15 +293,15 @@ function interpreter(tables: Tables) {
   function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
-      if (RANDOM.has(callee.body.name) && fileAt(files, callee.body.start) === "node:crypto") random(`'crypto.${callee.body.name}'`, at);
-      if (callee.body.async) refuse("an async function", at);
-      if (callee.body.generator) unsupported("a generator", at);
-      if (callee.body.foreign) refuse(`the ${callee.body.rust ? "Rust" : "C"} function '${callee.body.name}'`, at);
-      if (callee.body.js) refuse(`'${callee.body.name}' from the package '${callee.body.js.module}'`, at);
-      if (!ensureChecked(callee.id)) throw new Stop(`this comptime code calls '${callee.body.name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
+      if (RANDOM.has(bodyOf(callee).name) && fileAt(files, bodyOf(callee).start) === "node:crypto") random(`'crypto.${bodyOf(callee).name}'`, at);
+      if (bodyOf(callee).async) refuse("an async function", at);
+      if (bodyOf(callee).generator) unsupported("a generator", at);
+      if (bodyOf(callee).foreign) refuse(`the ${bodyOf(callee).rust ? "Rust" : "C"} function '${bodyOf(callee).name}'`, at);
+      if (bodyOf(callee).js) refuse(`'${bodyOf(callee).name}' from the package '${bodyOf(callee).js!.module}'`, at);
+      if (!ensureChecked(callee.id)) throw new Stop(`this comptime code calls '${bodyOf(callee).name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
       const frame: Frame = { instance: callee, locals: new Map(), self };
-      callee.body.params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!, args[i] ?? null));
-      statements(frame, callee.body.body ?? []);
+      bodyOf(callee).params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!, args[i] ?? null));
+      statements(frame, bodyOf(callee).body ?? []);
       return undefined;
     } catch (e) {
       if (e instanceof Return) return e.value;
@@ -530,7 +530,7 @@ function interpreter(tables: Tables) {
         const literal = literalValue(typing, type);
         if (literal !== undefined && !f.instance.locals.has(e)) return literal;
         const read = calledAt(f, e);
-        if (read?.body.comptime === "const") return constant(read, e);
+        if (read && bodyOf(read).comptime === "const") return constant(read, e);
         const local = f.instance.locals.get(e);
         if (!local && e.name === "undefined") return null;
         if (!local || !f.locals.has(local)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
@@ -668,7 +668,7 @@ function interpreter(tables: Tables) {
     }
     const target = calledAt(f, e);
     if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return call(target, args(f, target, e.args), f.self, e);
-    if (target && callee.kind === "member" && target.body.self) {
+    if (target && callee.kind === "member" && bodyOf(target).self) {
       const linked = link(f, callee.object);
       if (isShort(linked)) return SHORT;
       const object = unwrap(linked);

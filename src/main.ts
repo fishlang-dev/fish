@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
+import { bodyOf } from "./arenas.ts";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
 import { newCompilation, newSession, type Compilation, type Session } from "./compilation.ts";
@@ -138,7 +139,7 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
       if (shim && process.platform === "darwin") run(["libtool", "-static", "-o", at(`lib${name}.a`), archive, shim.lib]);
       else if (shim) run(["ar", "-M"], `CREATE ${at(`lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
     }
-    writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => i.body.exported)));
+    writeFileSync(at(`${name}.h`), header(name, checked.instances.filter((i) => bodyOf(i).exported)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -151,13 +152,13 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
 function header(name: string, exports: Instance[]): string {
   const guard = `${/^[A-Za-z]/.test(name) ? "" : "FISH_"}${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
   const lines = exports.map((i) => {
-    const params = i.body.params.map((p) => {
+    const params = bodyOf(i).params.map((p) => {
       const { type, name } = i.tables.arenas.localOf(i.locals.get(p)!);
       const c = cType(i.tables.typing.rec, type);
       const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
       return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;
     });
-    return `${cType(i.tables.typing.rec, i.returns)} ${i.body.name}(${params.length > 0 ? params.join(", ") : "void"});`;
+    return `${cType(i.tables.typing.rec, i.returns)} ${bodyOf(i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
   });
   return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "", ...lines, "", "#ifdef __cplusplus", "}", "#endif", "", `#endif`, ""].join("\n");
 }
@@ -202,8 +203,8 @@ function refuseForeignRust(target: Target) {
 // the cache keeps between builds.
 function parts(ir: string, instances: Instance[], release: boolean, target: Target = HOST_TARGET): { std: Unit[]; program: string } {
   if (release) return { std: [], program: ir };
-  const bodies = instances.filter((i) => !i.body.foreign && !i.body.rust);
-  const named = (std: boolean) => bodies.filter((i) => i.body.start >= STD_BASE === std).map(symbol);
+  const bodies = instances.filter((i) => !bodyOf(i).foreign && !bodyOf(i).rust);
+  const named = (std: boolean) => bodies.filter((i) => bodyOf(i).start >= STD_BASE === std).map(symbol);
   const { std, program } = split(ir, named(true), named(false));
   return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", "-O0", "-funwind-tables"], stdin: std, inputs: [] }], program };
 }

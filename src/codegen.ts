@@ -1,4 +1,4 @@
-import type { LocalId } from "./arenas.ts";
+import { bodyOf, type LocalId } from "./arenas.ts";
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
@@ -55,7 +55,10 @@ const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_
 // test by its name, which may hold quotes, so those are escaped as LLVM spells them.
 const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`);
 // An instance's name in the IR.
-export const symbol = (i: Instance) => (i.body.rust ? `@"${trusted(i.body.rust).symbol}"` : i.body.foreign ? `@"${i.body.name}"` : `@"fsh.${quoted(i.symbol)}"`);
+export const symbol = (i: Instance) => {
+  const b = bodyOf(i);
+  return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(i.symbol)}"`;
+};
 
 // Function definitions and declarations, each with the lines after it, in order of the symbols
 // they name.
@@ -106,7 +109,7 @@ function shimGives(llvm: Llvm, c: Crossing | undefined): { returns: string; out?
 }
 
 // What a Rust function gives, as it crosses: a constructor gives its handle.
-const rustGiven = (i: Instance): Crossing | undefined => (i.body.self?.constructor ? rustCrossing(i.tables.typing, i.body.owner!, true) : i.returns === "void" ? undefined : rustCrossing(i.tables.typing, i.returns, true));
+const rustGiven = (i: Instance): Crossing | undefined => (bodyOf(i).self?.constructor ? rustCrossing(i.tables.typing, bodyOf(i).owner!, true) : i.returns === "void" ? undefined : rustCrossing(i.tables.typing, i.returns, true));
 
 // A library has no C `main`; each export gets a C function under its own name instead.
 // `sources` holds the program's files other than the entry, for panic locations.
@@ -276,34 +279,34 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // Top-level consts and comptime blocks run while compiling, every one of them, so one that
   // fails is reported even when nothing reads it; none is compiled.
   for (const instance of instances) {
-    if (!instance.body.comptime || !instance.concrete) continue;
-    if (instance.body.comptime === "const") bakeable(instance.returns, instance.body, true);
+    if (!bodyOf(instance).comptime || !instance.concrete) continue;
+    if (bodyOf(instance).comptime === "const") bakeable(instance.returns, bodyOf(instance), true);
     comptimeBody(instance);
   }
 
   for (const instance of instances) {
-    if (instance.body.comptime) continue;
+    if (bodyOf(instance).comptime) continue;
     // A C function is declared under its own name, unless the runtime already declares it.
-    if (instance.body.foreign) {
-      foreign.add(instance.body.name);
-      if (instance.body.rust) {
+    if (bodyOf(instance).foreign) {
+      foreign.add(bodyOf(instance).name);
+      if (bodyOf(instance).rust) {
         // A Rust function's shim takes its handle first when it is a method, then its parameters
         // as they cross, the slot for the rest of what it gives, and where it puts a panic's message.
         const rust = symbol(instance);
         if (declaredRust.has(rust)) continue;
         declaredRust.add(rust);
-        const self = instance.body.self && !instance.body.self.constructor ? ["ptr"] : [];
+        const self = bodyOf(instance).self && !bodyOf(instance).self!.constructor ? ["ptr"] : [];
         const gives = shimGives(llvm, rustGiven(instance));
         const params = [...self, ...instance.signature!.flatMap((t) => shimParams(llvm, rustCrossing(typing, t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
         out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
         continue;
       }
-      if (!DECLARED.has(instance.body.name)) out.push(`declare ${crossed(llvm, instance.returns)} ${symbol(instance)}(${instance.signature!.map((t) => crossing(llvm, t)).join(", ")})`, "");
+      if (!DECLARED.has(bodyOf(instance).name)) out.push(`declare ${crossed(llvm, instance.returns)} ${symbol(instance)}(${instance.signature!.map((t) => crossing(llvm, t)).join(", ")})`, "");
       continue;
     }
     current = instance;
     ({ types, locals, calls, setters, coercions, jumps } = instance);
-    const f = instance.body;
+    const f = bodyOf(instance);
     self = f.self?.type;
     allocas = [];
     body = [];
@@ -417,7 +420,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   }
   const main = instances.find((i) => i.symbol === "main")!;
   // Built before the module is put together, since its message adds a global.
-  const start = library ? instances.filter((i) => i.body.exported).flatMap(exported) : entry();
+  const start = library ? instances.filter((i) => bodyOf(i).exported).flatMap(exported) : entry();
   const filled = fillConstants();
 
   // Definitions in order of their names, rather than of when they were made, so a function
@@ -471,8 +474,8 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A frame's name: the function as written, a generic one's instance without its number, a
   // nested function by its name and an arrow by where it starts.
   function frameName(i: Instance): string {
-    const closure = i.body.closure;
-    if (closure) return closure.self ?? `<arrow ${where(i.body).split(":").slice(-2).join(":")}>`;
+    const closure = bodyOf(i).closure;
+    if (closure) return closure.self ?? `<arrow ${where(bodyOf(i)).split(":").slice(-2).join(":")}>`;
     // A generic instance ends in `#<id>`, which no frame shows; a private name is `#name` after a
     // dot or space, renamed `#name@Class` when a base declares one too.
     return i.symbol.replace(/(?<![.\s])#\w+$/, "").replace(/(#\w+)@[^.#\s]+/g, "$1");
@@ -494,7 +497,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   function constantGlobal(c: Instance): string {
     const made = constantGlobals.get(c);
     if (made) return made;
-    const name = `@"fsh.const.${c.body.name.slice("const ".length)}"`;
+    const name = `@"fsh.const.${bodyOf(c).name.slice("const ".length)}"`;
     constantGlobals.set(c, name);
     globals.push(`${name} = internal global ${llvm(c.returns)} zeroinitializer`);
     return name;
@@ -1258,7 +1261,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const found = temp();
       emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
       const target = callOf(callback)!;
-      const gives = invoke(target, env, [`ptr ${part(found, 4)}`].slice(0, target.body.params.length), e, undefined, drop);
+      const gives = invoke(target, env, [`ptr ${part(found, 4)}`].slice(0, bodyOf(target).params.length), e, undefined, drop);
       if (gives !== undefined && needsDrop(rec(closure).returns)) dispose(gives, rec(closure).returns);
       emit(`br label %${done}`);
       startBlock(done);
@@ -1430,7 +1433,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const unwound = () => {
         if (needsDrop(closure)) dispose(unstash(env, closure), closure);
       };
-      const gives = invoke(target, env, passed.slice(0, target.body.params.length), e, undefined, unwound);
+      const gives = invoke(target, env, passed.slice(0, bodyOf(target).params.length), e, undefined, unwound);
       if (gives !== undefined && needsDrop(rec(closure).returns)) dispose(gives, rec(closure).returns);
     });
     if (needsDrop(closure)) dispose(unstash(env, closure), closure);
@@ -1449,7 +1452,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // read back as its declaration says.
   function jsCall(e: Extract<Expr, { kind: "call" }>, name: JsName, target: Instance): string | undefined {
     const fn = jsExport(name, e);
-    const argv = jsArgv(e.args, (i) => target.body.params[i]?.optional === true);
+    const argv = jsArgv(e.args, (i) => bodyOf(target).params[i]?.optional === true);
     const result = temp();
     unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr null, i64 ${e.args.length}, ptr ${argv}, ptr ${panicAt(e)})`, result);
     const gives = types.get(e) ?? (target.returns === "void" ? undefined : target.returns);
@@ -2299,14 +2302,14 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     if (promiseElement(m.returns) !== undefined) return futureThunk(name, type, m, target);
     const returns = m.throws ? throwing(m.returns, m.throws) : m.returns === "void" ? "void" : llvm(m.returns);
     thunk(name, returns, () => {
-      const owner = target.body.owner;
+      const owner = bodyOf(target).owner;
       const r = recOf(type);
       const upcasts = r?.kind === "class" && owner !== undefined && owner !== type;
       const self = upcasts ? upcast("%p", type as ClassType, owner) : "%p";
       // Given up, the block is freed once the method returns or unwinds: its value dropped first,
       // or for a base's owning method, the derived fields it doesn't know of.
       const giveUp = !m.owned ? undefined : () => {
-        if (!target.body.self?.owned) {
+        if (!bodyOf(target).self?.owned) {
           const v = temp();
           emit(`${v} = load ${llvm(type)}, ptr %p`);
           dispose(v, type);
@@ -2325,7 +2328,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         emit("call void @fsh_rt_free(ptr %p)");
       };
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
-      const taken = target.body.closure ? target.body.params.length : m.params.length;
+      const taken = bodyOf(target).closure ? bodyOf(target).params.length : m.params.length;
       m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
       const args = m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`);
       const give = (v: string | undefined) => (m.throws ? succeeded(m, v) : emit(v === undefined ? "ret void" : `ret ${returns} ${v}`));
@@ -2405,11 +2408,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A slot giving a `Promise<T>`: the future the method or async arrow makes, its frame holding
   // the block (a method's object, borrowed) or a copy of the closure, then the arguments, boxed.
   function futureThunk(name: string, type: Type, m: Method, target: Instance): string {
-    const closure = target.body.closure !== undefined;
+    const closure = bodyOf(target).closure !== undefined;
     const to = closure ? (storedType(m.returns) as DynType) : lentPromise(promiseElement(m.returns)!);
     const params = m.params.map((p, i) => `${llvm(p)} %a${i}`);
     thunk(name, DYN, () => {
-      const taken = closure ? target.body.params.length : m.params.length;
+      const taken = closure ? bodyOf(target).params.length : m.params.length;
       m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
       let made: string;
       let future: FutureType;
@@ -2421,7 +2424,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
           emit(`${env} = load ${llvm(target.closure!)}, ptr %p`);
           emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ${llvm(target.closure!)} ${copied(env, target.closure!)}, 1`);
         } else {
-          const owner = target.body.owner;
+          const owner = bodyOf(target).owner;
           const r = recOf(type);
           const self = r?.kind === "class" && owner && owner !== type ? upcast("%p", type as ClassType, owner) : "%p";
           emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${self}, 1`);
@@ -2445,7 +2448,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   function fieldThunk(name: string, type: Type, f: Field, getter: Instance | undefined): string {
     thunk(name, llvm(f.type), () => {
       if (getter) {
-        const owner = getter.body.owner;
+        const owner = bodyOf(getter).owner;
         const r = recOf(type);
         const self = r?.kind === "class" && owner && owner !== type ? upcast("%p", type as ClassType, owner) : "%p";
         emit(`ret ${llvm(f.type)} ${convert(invoke(getter, self, [])!, getter.returns, f.type)}`);
@@ -2576,7 +2579,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const inside = temp();
     emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = callOf(callback)!;
-    const result = invoke(target, env, target.body.params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
+    const result = invoke(target, env, bodyOf(target).params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
     emit(`call void @fsh_rt_unlock(ptr ${at})`);
     if (result && !types.has(e) && needsDrop(target.returns)) pending.push({ v: result, type: target.returns });
     return result;
@@ -3796,7 +3799,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       const [x, y] = [alloca(llvm(type)), alloca(llvm(type))];
       emit(`store ${llvm(type)} ${a}, ptr ${x}`);
       emit(`store ${llvm(type)} ${b}, ptr ${y}`);
-      return invoke(own, upcast(x, type as ClassType, own.body.owner!), [`ptr ${upcast(y, type as ClassType, own.body.owner!)}`])!;
+      return invoke(own, upcast(x, type as ClassType, bodyOf(own).owner!), [`ptr ${upcast(y, type as ClassType, bodyOf(own).owner!)}`])!;
     }
     // An object, an instance or an enum's member: its fields, a base first.
     const parts = r.kind === "class" && r.base ? [[r.base, 0] as const, ...r.fields.map((f, i) => [f.type, i + 1] as const)] : r.fields.map((f, i) => [f.type, i] as const);
@@ -5529,7 +5532,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       }
       if (needsDrop(closure)) dispose(unstash(env, closure), closure);
     };
-    const gives = invoke(target, env, passed.slice(0, target.body.params.length), e, undefined, unwound)!;
+    const gives = invoke(target, env, passed.slice(0, bodyOf(target).params.length), e, undefined, unwound)!;
     if (method === "map") appended(out, rec(closure).returns, gives);
     else if (method === "forEach") {
       // What the callback gives is dropped; JavaScript's forEach ignores it.
@@ -5633,7 +5636,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
           return [`${llvm(given)} ${convert(copied(v, element), element, given)}`];
         };
         const args = [...arg("%a", rec(closure).params[0]), ...arg("%b", rec(closure).params[1])];
-        emit(`ret i32 ${sign(invoke(target, "%p", args.slice(0, target.body.params.length))!, rec(closure).returns)}`);
+        emit(`ret i32 ${sign(invoke(target, "%p", args.slice(0, bodyOf(target).params.length))!, rec(closure).returns)}`);
       }, ["ptr %a", "ptr %b"]);
     } else through = order(element);
     const [lengthAt, dataAt, length, data] = [temp(), temp(), temp(), temp()];
@@ -6872,28 +6875,28 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const before = spills.length;
     // A nested function calling itself runs with the captures it was called with.
-    const pointer = target.body.closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!.env) : receiver(e.callee)) : target.body.self && object ? thisPointer(target, object) : undefined;
+    const pointer = bodyOf(target).closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!.env) : receiver(e.callee)) : bodyOf(target).self && object ? thisPointer(target, object) : undefined;
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
-    const values = argValues(e.args, target, target.body.closure ? target.body.params.length : e.args.length);
+    const values = argValues(e.args, target, bodyOf(target).closure ? bodyOf(target).params.length : e.args.length);
     // Calling a generator or async function makes its frame, holding the arguments, ready to start.
     const machine = target.generator ?? target.future;
     if (machine) {
       let frame = "zeroinitializer";
       // An async arrow's frame starts with its own copy of the closure, and an async method's
       // with its object, then the arguments.
-      const method = target.body.self && !target.body.self.constructor;
-      const first = target.body.closure || method ? 2 : 1;
+      const method = bodyOf(target).self && !bodyOf(target).self!.constructor;
+      const first = bodyOf(target).closure || method ? 2 : 1;
       // The frame takes the call's spilled receiver, which then drops nothing of its own.
       pending = pending.filter((entry) => !mine.some((m) => m.copy === entry));
       if (method) {
-        const owns = target.body.self!.owned;
-        const self = owns ? unstash(pointer!, target.body.self!.type) : pointer!;
+        const owns = bodyOf(target).self!.owned;
+        const self = owns ? unstash(pointer!, bodyOf(target).self!.type) : pointer!;
         const next = temp();
-        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${owns ? llvm(target.body.self!.type) : "ptr"} ${self}, 1`);
+        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${owns ? llvm(bodyOf(target).self!.type) : "ptr"} ${self}, 1`);
         frame = next;
       }
-      if (target.body.closure) {
+      if (bodyOf(target).closure) {
         const [env, next] = [temp(), temp()];
         emit(`${env} = load ${llvm(target.closure!)}, ptr ${pointer}`);
         emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${llvm(target.closure!)} ${copied(env, target.closure!)}, 1`);
@@ -6922,10 +6925,10 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // Arguments past `taken` run for their effects only.
   function argValues(args: Expr[], target: Instance, taken: usize = args.length): string[] {
     // A comptime parameter's argument was computed while compiling, and isn't passed.
-    const passed = (i: usize) => !target.body.params[i]?.comptime;
+    const passed = (i: usize) => !bodyOf(target).params[i]?.comptime;
     const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
-    for (const p of target.body.params.slice(args.length)) {
+    for (const p of bodyOf(target).params.slice(args.length)) {
       const type = localOf(target.locals.get(p)!).type;
       values.push(`${llvm(type)} ${p.rest ? "zeroinitializer" : convert("zeroinitializer", "null", type)}`);
     }
@@ -7074,7 +7077,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     startBlock(fail);
     const [said, saidNot] = [label(), label()];
     emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
-    const name = callOf(e)!.body.name;
+    const name = bodyOf(callOf(e)!).name;
     for (const [at, is] of [[said, "is"], [saidNot, "is not"]] as const) {
       startBlock(at);
       const tag = temp();
@@ -7370,7 +7373,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // that declares the method.
   function thisPointer(target: Instance, object: Expr): string {
     const held = unwraps(object) ? coercions.get(object)! : unfold(referent(types.get(object)!));
-    return upcast(receiver(object, target.body.self?.owned), held as ClassType, target.body.owner!);
+    return upcast(receiver(object, bodyOf(target).self?.owned), held as ClassType, bodyOf(target).owner!);
   }
 
   // Calls a function with its arguments' values, after the instance when it is a method.
@@ -7379,11 +7382,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void, unwound?: () => void): string | undefined {
     const cleanup = after || unwound ? () => (after?.(), unwound?.()) : undefined;
     const type = target.returns;
-    if (target.body.rust) return rustInvoke(target, pointer, args, at!, cleanup, after);
+    if (bodyOf(target).rust) return rustInvoke(target, pointer, args, at!, cleanup, after);
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
-    const passed = target.body.foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(llvm, target.signature![i]!)} `)) : values;
-    const call = `call ${target.body.foreign ? crossed(llvm, type) : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
+    const passed = bodyOf(target).foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(llvm, target.signature![i]!)} `)) : values;
+    const call = `call ${bodyOf(target).foreign ? crossed(llvm, type) : resultType(target)} ${symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
       unwinding(call, undefined, cleanup);
       after?.();
@@ -7433,10 +7436,10 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     };
     const passed: string[] = [];
     const given: (() => void)[] = [];
-    if (pointer && target.body.self && !target.body.self.constructor) {
+    if (pointer && bodyOf(target).self && !bodyOf(target).self!.constructor) {
       passed.push(`ptr ${load("ptr", pointer)}`);
       // A method taking its object over leaves the place it was in empty, as one in Fish does.
-      if (target.body.self.owned) emit(`store ptr null, ptr ${pointer}`);
+      if (bodyOf(target).self!.owned) emit(`store ptr null, ptr ${pointer}`);
     }
     // An owned array is given up once Rust has its elements: Rust has made its own strings and
     // numbers, and taken the Rust values, which leave only the buffer.
@@ -7515,7 +7518,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
     after?.();
     if (err) rustErr(err, target.throws!, at);
     if (!gives) return undefined;
-    const type = target.body.self?.constructor ? target.body.owner! : target.returns;
+    const type = bodyOf(target).self?.constructor ? bodyOf(target).owner! : target.returns;
     if (gives.kind !== "option") return gives.kind === "array" ? load(ARRAY, out!) : result;
     const some = gives.of.kind === "plain" || gives.of.kind === "array" ? result! : temp();
     if (some !== result) emit(`${some} = icmp ne ptr ${result}, null`);
@@ -8521,11 +8524,11 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
   // A C function under an export's name, calling it. A panic can't unwind into C, so one that
   // reaches here aborts, its message already printed.
   function exported(i: Instance): string[] {
-    const params = i.body.params.map((p, n) => [localOf(i.locals.get(p)!).type, `%a${n}`] as const);
+    const params = bodyOf(i).params.map((p, n) => [localOf(i.locals.get(p)!).type, `%a${n}`] as const);
     // A library's panics all unwind, the runtime's default, whichever way the build chose: the
     // abort happens here, before C sees the unwind.
     const call = `${i.returns === "void" ? "" : "%r = "}invoke ${llvm(i.returns)} ${symbol(i)}(${params.map(([t, a]) => `${llvm(t)} ${a}`).join(", ")})`;
-    const head = `define ${crossed(llvm, i.returns)} @"${i.body.name}"(${params.map(([t, a]) => `${crossing(llvm, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
+    const head = `define ${crossed(llvm, i.returns)} @"${bodyOf(i).name}"(${params.map(([t, a]) => `${crossing(llvm, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
     const done = i.returns === "void" ? "  ret void" : `  ret ${llvm(i.returns)} %r`;
     return [head, "entry:", `  ${call} to label %ok unwind label %pad`, "ok:", done, "pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  call void @abort()", "  unreachable", "}", ""];
   }
@@ -8945,7 +8948,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         // A top-level const: a scalar or string baked where it is read, an aggregate read through
         // a pointer to its global.
         const read = callOf(e);
-        if (read?.body.comptime === "const") return isRef(types.get(e)!) ? constantGlobal(read) : bake(comptimeBody(read), types.get(e)!);
+        if (read && bodyOf(read).comptime === "const") return isRef(types.get(e)!) ? constantGlobal(read) : bake(comptimeBody(read), types.get(e)!);
         // A nested function used as a value is its closure, made here.
         const built = current.envs?.get(e);
         if (built) return environment(arenas.instanceOf(built.of), built.env);
@@ -9023,7 +9026,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         if (newed?.kind === "block") return blockNew(e, types.get(e) as BlockType);
         if (newed?.kind === "map") return mapNew(types.get(e) as MapType, e.args?.[0]);
         // A Rust type's constructor gives the handle to the value it boxed.
-        if (callOf(e)!.body.rust) return invoke(callOf(e)!, undefined, argValues(e.args ?? [], callOf(e)!), e)!;
+        if (bodyOf(callOf(e)!).rust) return invoke(callOf(e)!, undefined, argValues(e.args ?? [], callOf(e)!), e)!;
         // The constructor fills in a slot, which then holds the new instance. The slot starts
         // empty, so a field's first assignment has nothing to drop.
         const type = types.get(e) as ClassType;
@@ -9764,7 +9767,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         emit(`call void @fsh_rt_regex_close(ptr ${it})`);
         if (needsDrop(closure!)) dispose(unstash(env, closure!), closure!);
       };
-      const gives = invoke(target, env, passed.slice(0, target.body.params.length), e, undefined, unwound)!;
+      const gives = invoke(target, env, passed.slice(0, bodyOf(target).params.length), e, undefined, unwound)!;
       const text = convert(gives, rec(closure!).returns, "string");
       emit(`call void @fsh_rt_regex_put(ptr ${it}, ptr ${text})`);
       dispose(text, "string");

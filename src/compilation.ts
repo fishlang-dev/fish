@@ -1,6 +1,5 @@
-import { Arenas, type InstanceId, type LocalId } from "./arenas.ts";
+import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Value } from "./comptime.ts";
-import type { Body } from "./classes.ts";
 import type { Names } from "./diag.ts";
 import type { Kind } from "./narrow.ts";
 import { WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
@@ -215,7 +214,7 @@ export type Tables = {
   // The calls into a package, whose arguments cross by copy, so nothing moves into them.
   jsCrossings: WeakNodeSet<Expr>;
   // The function each of a package's signatures is checked as, by its declaration.
-  jsBodies: WeakNodeMap<Stmt, Body>;
+  jsBodies: WeakNodeMap<Stmt, BodyId>;
   // A package's classes, by name: what `new` and their statics are checked against.
   jsClasses: Map<string, Interface>;
   // Where each of a package's functions is first called, noted on a refusal of its declaration.
@@ -246,7 +245,7 @@ export type Tables = {
   dynCalls: WeakNodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>;
 
   // Each generic class's statics, declared with its first instance.
-  genericStatics: WeakNodeMap<ClassNode, Map<string, Body>>;
+  genericStatics: WeakNodeMap<ClassNode, Map<string, BodyId>>;
   // A generic class's placeholders, by its first type parameter, shared by its definition
   // check and its members.
   classScopes: WeakNodeMap<TypeParam, Map<string, Type>>;
@@ -367,7 +366,7 @@ export function newTables({ typing, arenas, upcasts, ids, counts, regex, files, 
     promiseVariants: new WeakNodeMap<Expr, { name: string; typeArgs: TypeNode[] }>(),
     jsUses: [],
     jsCrossings: new WeakNodeSet<Expr>(),
-    jsBodies: new WeakNodeMap<Stmt, Body>(),
+    jsBodies: new WeakNodeMap<Stmt, BodyId>(),
     jsClasses: new Map<string, Interface>(),
     jsCalledAt: new WeakMap<object, Expr>(),
     timerCalls: new WeakNodeMap<Expr, "timerSet" | "timerNext" | "timerClear">(),
@@ -383,7 +382,7 @@ export function newTables({ typing, arenas, upcasts, ids, counts, regex, files, 
     jsOptionalOf: new WeakNodeMap<Expr, boolean[]>(),
     jsAccessors: new WeakNodeSet<Expr>(),
     dynCalls: new WeakNodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>(),
-    genericStatics: new WeakNodeMap<ClassNode, Map<string, Body>>(),
+    genericStatics: new WeakNodeMap<ClassNode, Map<string, BodyId>>(),
     classScopes: new WeakNodeMap<TypeParam, Map<string, Type>>(),
     aliases: new Map<string, TypeAlias>(),
     expanding: new Set<string>(),
