@@ -19,7 +19,7 @@ import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE } from "./native.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjects, mathObjectsAsync, type Unit } from "./mathlib.ts";
-import { dockerfile, dockerfilePath, HOST_TARGET, hostTriple, resolveTarget, staticTarget, type Target } from "./target.ts";
+import { dockerfile, dockerfilePath, HOST_TARGET, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts";
@@ -219,7 +219,9 @@ function cType(t: Type): string {
 // program reports at exit what it never freed, by where it was allocated. `loaded` is given the
 // files the program was read from, or looked for, even when it doesn't build. Gives the warnings.
 export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
-  const { ir, instances, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
+  const made = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
+  const { instances, shim, warnings } = made;
+  const ir = instrumented(made.ir, target);
   const rust = shim();
   if (rust) refuseForeignRust(target);
   linked(session, ir, instances, out, release, links, rust, target, leaks, debug);
@@ -552,6 +554,7 @@ else if (import.meta.main) {
           leaks: { type: "boolean" },
           debug: { type: "boolean", short: "g" },
           timings: { type: "boolean" },
+          sanitize: { type: "string", multiple: true },
         },
       });
     } catch (e) {
@@ -810,7 +813,7 @@ else if (import.meta.main) {
     });
   }
   if (command !== "build" || !target || values.fix || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm]\n       fishc check [<file.fsh>] [--timings]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
@@ -818,6 +821,9 @@ else if (import.meta.main) {
   if (values.leaks && lib !== undefined) fail("fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead");
   if (values.static && lib !== undefined) fail("fishc build: '--static' builds an executable, not a library; leave out '--lib', or '--static'");
   if ((values.static || values.dockerfile) && values["emit-llvm"]) fail("fishc build: '--emit-llvm' prints the IR without linking it, so '--static' and '--dockerfile' don't apply; leave them out");
+  const sanitize = values.sanitize?.flatMap((s) => s.split(","));
+  if (sanitize && lib !== undefined) fail("fishc build: '--sanitize' can't build a library; build the program that uses it with '--sanitize' instead");
+  if (sanitize && values["emit-llvm"]) fail("fishc build: '--emit-llvm' prints the IR before clang instruments it, so '--sanitize' doesn't apply; leave it out");
   if (values.dockerfile && !values.static) fail("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'");
   try {
     if (values["emit-llvm"]) process.stdout.write(timing([...FRONT_END, "codegen"], () => compile(session, readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined, values.leaks, values.debug)));
@@ -825,11 +831,14 @@ else if (import.meta.main) {
       // FISH_SYSROOT is for building for another target, never the host's own plain builds.
       const sysroot = values.sysroot ?? (values.target !== undefined && values.target !== hostTriple() ? process.env.FISH_SYSROOT || undefined : undefined);
       const resolved = resolveTarget(values.target, sysroot);
-      const platform = values.static ? staticTarget(resolved) : resolved;
+      const base = values.static ? staticTarget(resolved) : resolved;
+      const platform = sanitize ? sanitizedTarget(base, sanitize) : base;
+      // A sanitizer's report names .fsh lines only when the program carries line tables.
+      const debug = values.debug || sanitize !== undefined;
       const binary = out ?? basename(target, ".fsh");
       const image = values.dockerfile ? dockerfilePath(binary) : undefined;
       try {
-        const warnings = lib ? buildLibrary(session, target, binary, lib, values.release, panic, values.link ?? [], platform, values.debug) : timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, target, binary, values.release, panic, values.link ?? [], platform, values.leaks, values.debug));
+        const warnings = lib ? buildLibrary(session, target, binary, lib, values.release, panic, values.link ?? [], platform, debug) : timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, target, binary, values.release, panic, values.link ?? [], platform, values.leaks, debug));
         if (image) writeFileSync(image, dockerfile(binary));
         for (const w of warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       } catch (e) {

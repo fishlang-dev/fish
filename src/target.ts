@@ -8,8 +8,9 @@ export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-
 
 // `compile` goes to every clang compile, and `compile` then `link` to the final link. The host's
 // own target has both empty, so its builds and cache keys are what they were before targets.
-// `ar` archives a static library: the host's own can't index another OS's objects.
-export type Target = { triple: string; compile: string[]; link: string[]; ar: string };
+// `ar` archives a static library: the host's own can't index another OS's objects. `sanitize`
+// names the sanitizer a build is instrumented with, if any.
+export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string };
 
 export const HOST_TARGET: Target = { triple: "", compile: [], link: [], ar: "ar" };
 
@@ -94,4 +95,40 @@ export function dockerfilePath(binary: string): string {
   if (basename(binary).toLowerCase() === "dockerfile") throw new Error(`fishc build: '--dockerfile' writes ${at}, which is the binary's own name; choose another name with -o`);
   if (existsSync(at) && readFileSync(at, "utf8") !== text) throw new Error(`fishc build: '--dockerfile' would replace ${at}, which holds something else; move it, or build into another directory with -o`);
   return at;
+}
+
+export const SANITIZERS = ["address", "thread"];
+
+// The directory where clang keeps its runtime libraries for `triple`, sanitizers' among them.
+function clangRuntimeDir(triple: string): string {
+  const done = Bun.spawnSync(["clang", `--target=${triple}`, "-print-runtime-dir"]);
+  if (done.exitCode !== 0) throw new Error(`clang failed:\n${done.stderr.toString()}`);
+  return done.stdout.toString().trim();
+}
+
+// `target` with every compile instrumented by clang's `kind` sanitizer and its runtime linked, so
+// the C runtime and std are checked as well as the program. Frame pointers are kept so reports show
+// whole stacks. Clang ships the runtimes per target, and none for musl, so a target it has none for
+// is refused. Throws an Error whose message is the user-facing reason.
+export function sanitizedTarget(target: Target, kinds: string[], host: string | undefined = hostTriple(), runtimeDir: (triple: string) => string = clangRuntimeDir): Target {
+  const unknown = kinds.find((k) => !SANITIZERS.includes(k));
+  if (unknown !== undefined) throw new Error(`fishc build: unknown sanitizer '${unknown}'; use one of ${SANITIZERS.join(", ")}`);
+  if (kinds.length > 1) throw new Error("fishc build: --sanitize takes one sanitizer at a time; address and thread can't instrument the same build");
+  const kind = kinds[0]!;
+  const triple = target.triple || host;
+  if (target.link.includes("-static")) throw new Error(`fishc build: --sanitize=${kind} links clang's sanitizer runtime, which a --static build can't; leave out one of them`);
+  const [cpu] = triple?.split("-") ?? [];
+  const lib = kind === "address" ? "asan" : "tsan";
+  const names = triple?.includes("-apple-") ? [`libclang_rt.${lib}_osx_dynamic.dylib`] : [`libclang_rt.${lib}.a`, `libclang_rt.${lib}-${cpu}.a`];
+  if (!triple || musl(triple) || !names.some((n) => existsSync(join(runtimeDir(triple), n)))) throw new Error(`fishc build: clang has no ${kind} sanitizer runtime for ${triple ?? "this machine"}; build for a target it has one for, such as the host's own`);
+  const flags = [`-fsanitize=${kind}`, "-fno-omit-frame-pointer"];
+  return { ...target, compile: [...target.compile, ...flags], sanitize: kind };
+}
+
+// Clang's front end marks each function a sanitizer should instrument, and Fish's IR carries no
+// such marks, so each definition in `ir` is given one for `target`'s sanitizer.
+export function instrumented(ir: string, target: Target): string {
+  if (!target.sanitize) return ir;
+  const attribute = target.sanitize === "address" ? "sanitize_address" : "sanitize_thread";
+  return ir.replace(/^(define [^\n]*?)( uwtable| \{$)/gm, `$1 ${attribute}$2`);
 }
