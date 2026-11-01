@@ -99,6 +99,31 @@ function main() {
   class L { m(x: i64): i64; m(x: string): i64; m(x: i64 | string): i64 { return 1; } }
   console.log(new L().m("a"));
 }
+// case: overload_function_beside_others
+// expect: 20 1
+// A signature taking a callback after other parameters is chosen by its arguments, and a
+// callback passed through a rest parameter of the implementation is boxed into its array.
+type Step = (x: i64) => i64;
+class Inner { n: i64 = 1; }
+class Steps {
+  total: i64 = 0;
+  add(this: Mut<this>, name: string, label: string, step: Step): void;
+  add(this: Mut<this>, name: string, inner: Inner): void;
+  add(this: Mut<this>, name: string, b: string | Inner, ...steps: Step[]): void {
+    if (typeof b === "string") {
+      for (const s of steps) this.total += s(2);
+    } else {
+      this.total += b.n;
+    }
+  }
+}
+function main() {
+  let a = new Steps();
+  a.add("a", "b", (x) => x * 10);
+  let b = new Steps();
+  b.add("a", new Inner());
+  console.log(a.total, b.total);
+}
 // case: overload_comptime
 // expect: 8 abab
 // A top-level const calling an overloaded function runs its signature while compiling.

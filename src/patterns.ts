@@ -95,12 +95,12 @@ export function toPattern(c: Cursor, e: Expr): Pattern {
         else if (p.kind === "shorthand") {
           const name: Pattern = { id: nextId(c.ids), kind: "ident", name: p.name, start: p.start, end: p.start + p.name.length };
           props.push({ id: nextId(c.ids), key: p.name, value: p.default ? withDefault(c, name, p.default) : name, ...at });
-        } else throw new CompileError("a method can't be a destructuring target", p.start, p.end);
+        } else throw new CompileError("E0003", "a method can't be a destructuring target", p.start, p.end);
       }
       return { id: nextId(c.ids), kind: "object", props, rest, ...span };
     }
   }
-  throw new CompileError("invalid destructuring target", e.start, e.end);
+  throw new CompileError("E0003", "invalid destructuring target", e.start, e.end);
 }
 
 // A pattern after `case` in a `match`: alternatives separated by `|`.

@@ -823,7 +823,7 @@ function main() {
   console.log(six);
 }
 // case: comptime_assert_message
-// error: comptime_assert_message.fsh:4:3: error: n is positive, not -1
+// error: comptime_assert_message.fsh:4:3: error[E1101]: n is positive, not -1
 // error: while running this comptime code
 function positive(n: i64): i64 {
   assert(n > 0, "n is positive, not " + String(n));
@@ -834,7 +834,7 @@ function main() {
   console.log(n);
 }
 // case: comptime_assert_without_message
-// error: comptime_assert_without_message.fsh:4:5: error: assertion failed: n > 0
+// error: comptime_assert_without_message.fsh:4:5: error[E1101]: assertion failed: n > 0
 function repeat(comptime n: i64, s: string): string {
   comptime {
     assert(n > 0)

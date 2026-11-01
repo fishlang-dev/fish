@@ -7,7 +7,8 @@
 // The program's part is everything else: those, what only they reach, and the entry glue (`main`,
 // the constants' filler, the constructor list). Private constants are copied into
 // each part that uses them, since they can't be referenced across modules. Every other
-// definition loses `internal`, so the other part can reach it through a declaration.
+// definition loses `internal`, so the other part can reach it through a declaration. A `-g` build's
+// debug metadata goes with the program's part, the only one whose functions refer to it.
 
 // `name` as the IR spells it, and `key` without the quotes it may have, so `@"f"` and `@f` meet.
 type Item = { kind: "define" | "declare" | "global"; name: string; key: string; text: string };
@@ -29,6 +30,7 @@ function items(ir: string): Item[] {
       found.push({ kind: "define", name, key: key(name), text: lines.slice(i, end + 1).join("\n") });
       i = end;
     } else if (line.startsWith("declare ")) found.push({ kind: "declare", name, key: key(name), text: line });
+    else if (line.startsWith("!")) continue;
     else if (line.startsWith("@")) found.push({ kind: "global", name, key: key(name), text: line });
     else throw new Error(`can't split the IR at '${line}'`);
   }
@@ -112,5 +114,6 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[]): {
     return `${lines.join("\n")}\n`;
   };
   const isStd = (i: Item) => reached.has(i.key);
-  return { std: part(isStd), program: part((i) => i.kind !== "declare" && !copied(i) && !isStd(i)) };
+  const metadata = ir.split("\n").filter((line) => line.startsWith("!"));
+  return { std: part(isStd), program: part((i) => i.kind !== "declare" && !copied(i) && !isStd(i)) + metadata.map((line) => `${line}\n`).join("") };
 }

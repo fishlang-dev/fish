@@ -15,6 +15,9 @@ export type Members = {
   typing: Typing;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
   assuming: Set<string>;
+  // Each class whose `implements` claim was refused and the interface, as shown, with why, which an
+  // error at a use of it as that interface repeats.
+  refused: { type: string; trait: string; reason: string }[];
 };
 
 // Why the generic function `f` can't be given where the generic function type `family` is, or
@@ -101,7 +104,7 @@ function same(typing: Typing, a: Type, b: Type): boolean {
 
 function check(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
   const { typing } = members;
-  const { fits, show, promiseElement, generatorElement, replaced, lower } = typing;
+  const { fits, show, promiseElement, generatorElement, generatorSends, replaced, lower } = typing;
   // A return type fits an interface method's when it fits, or, for an interface, satisfies it.
   const returns = (actual: Type, expected: Type) =>
     typeof expected !== "string" && expected.kind === "interface" ? unsatisfied(actual, expected, members, at) === undefined : fits(actual, expected);
@@ -121,6 +124,10 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   if (typeof type !== "string" && type.kind === "generator") {
     const element = generatorElement(trait, type.async);
     if (element === undefined) return `${type.async ? "an async" : "a"} generator has only 'next', which type '${trait.name}' doesn't describe`;
+    if (type.throws) return `its 'next' throws '${show(type.throws)}', which '${trait.name}' doesn't`;
+    // One taking values may still be advanced without, as `Generator<T>`'s `next()` is.
+    const sends = generatorSends(trait);
+    if (sends !== undefined && (type.sends === undefined || lower(type.sends) !== lower(sends))) return `its 'next' takes ${type.sends === undefined ? "nothing" : `'${show(type.sends)}'`}, not '${show(sends)}'`;
     return lower(type.yields) === lower(element) ? undefined : `it yields '${show(type.yields)}', not '${show(element)}'`;
   }
   const c = typeof type !== "string" && type.kind === "class" ? members.classOf(type) : undefined;

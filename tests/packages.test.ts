@@ -218,8 +218,8 @@ function main() {
 });
 
 test("a package needing a Node built-in, or with no JS, is refused", () => {
-  expect(run(`import { size } from "needsfs";\nfunction main() { console.log(size); }\n`)).toBe("main.fsh:1:1: error: 'needsfs' needs Node's 'fs' module, which a package's JS can't use in Fish yet");
-  expect(run(`import { gone } from "typesonly";\nfunction main() { console.log(gone); }\n`)).toStartWith("main.fsh:1:1: error: 'typesonly' has no JS Fish could bundle: ");
+  expect(run(`import { size } from "needsfs";\nfunction main() { console.log(size); }\n`)).toBe("main.fsh:1:1: error[E1005]: 'needsfs' needs Node's 'fs' module, which a package's JS can't use in Fish yet");
+  expect(run(`import { gone } from "typesonly";\nfunction main() { console.log(gone); }\n`)).toStartWith("main.fsh:1:1: error[E0901]: 'typesonly' has no JS Fish could bundle: ");
 });
 
 test("a program importing a package it never reaches at run time isn't bundled", () => {
@@ -301,7 +301,7 @@ function main() {
 });
 
 test("a compound assignment to a handle's property waits", () => {
-  expect(run(`import { Box } from "esm";\nfunction main() {\n  const b = new Box(1);\n  b.size += 1;\n}\n`)).toBe("main.fsh:4:3: error: compound assignments to a package's properties are not supported yet");
+  expect(run(`import { Box } from "esm";\nfunction main() {\n  const b = new Box(1);\n  b.size += 1;\n}\n`)).toBe("main.fsh:4:3: error[E0801]: compound assignments to a package's properties are not supported yet");
 });
 
 test("results of every type the checker lets cross are read as declared", () => {
@@ -330,8 +330,8 @@ test("a result no member of its declared union takes panics", () => {
 });
 
 test("a Fish value can't become a handle, and a package can't run while compiling", () => {
-  expect(run(`import { Result } from "esm";\nfunction main() {\n  const r: Result = { count: 1, label: "x" };\n}\n`)).toStartWith("main.fsh:3:21: error: turning a Fish value into a JS value isn't supported yet");
-  expect(run(`import { id } from "esm";\nconst X = id("x");\nfunction main() {}\n`)).toBe("main.fsh:2:7: error: 'id' from the package 'esm' can't run while compiling: comptime code only computes values");
+  expect(run(`import { Result } from "esm";\nfunction main() {\n  const r: Result = { count: 1, label: "x" };\n}\n`)).toStartWith("main.fsh:3:21: error[E1005]: turning a Fish value into a JS value isn't supported yet");
+  expect(run(`import { id } from "esm";\nconst X = id("x");\nfunction main() {}\n`)).toBe("main.fsh:2:7: error[E1101]: 'id' from the package 'esm' can't run while compiling: comptime code only computes values");
 });
 
 test("a union's members of one JS kind are told apart by what they hold", () => {
@@ -374,7 +374,7 @@ function main() {
 });
 
 test("a Fish type holding itself has no JS form yet", () => {
-  expect(run(`import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`)).toBe("node_modules/esm/index.d.ts:26:34: error: 'id' from 'esm' takes a 'Tree', which can't cross between Fish and JS yet: a type holding itself has no JS form yet");
+  expect(run(`import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`)).toBe("node_modules/esm/index.d.ts:26:34: error[E1005]: 'id' from 'esm' takes a 'Tree', which can't cross between Fish and JS yet: a type holding itself has no JS form yet");
 });
 
 test("a package's promises are awaited, a rejection thrown as a JsError, and a later settling wakes its task", () => {
@@ -405,7 +405,7 @@ async function main(): Promise<void> throws JsError {
 });
 
 test("awaiting a package's promise is a throw to catch or declare", () => {
-  expect(run(`import { twice } from "esm";\nasync function main() {\n  const n = await twice(1);\n}\n`)).toStartWith("main.fsh:3:13: error: 'main' must declare 'throws JsError'");
+  expect(run(`import { twice } from "esm";\nasync function main() {\n  const n = await twice(1);\n}\n`)).toStartWith("main.fsh:3:13: error[E0602]: 'main' must declare 'throws JsError'");
 });
 
 test("Fish callbacks are called by JS during a call and kept for later, and freed when JS drops them", () => {
@@ -465,7 +465,7 @@ async function main() {
 });
 
 test("a callback holding what isn't Send is refused, and one JS gives the wrong value panics", () => {
-  expect(run(`import { keep } from "esm";\nfunction main() {\n  const c = new Cell<i64>(0);\n  keep((s) => { c.set(1); return s; });\n}\n`)).toBe("main.fsh:4:8: error: a '(s: string) => string' may cross to another thread, so it can't hold a 'Cell<i64>', which changes without a lock");
+  expect(run(`import { keep } from "esm";\nfunction main() {\n  const c = new Cell<i64>(0);\n  keep((s) => { c.set(1); return s; });\n}\n`)).toBe("main.fsh:4:8: error[E0303]: a '(s: string) => string' may cross to another thread, so it can't hold a 'Cell<i64>', which changes without a lock");
   const misused = run(`import { misuse } from "esm";\nfunction main() {\n  console.log(misuse((n) => n + 1));\n}\n`);
   expect(misused).toMatchObject({ stdout: "", exitCode: 101 });
   expect((misused as { stderr: string }).stderr).toStartWith("panicked at main.fsh:3:22:\na callback was given a string, where its declaration says 'number'\n");
@@ -492,8 +492,8 @@ async function main(): Promise<void> throws JsError {
 });
 
 test("a future is given to JS only inside an async function, and only one that can't throw", () => {
-  expect(run(`import { ignore } from "esm";\nasync function done(): Promise<void> {}\nfunction main() {\n  console.log(ignore(done()));\n}\n`)).toBe("main.fsh:4:22: error: a Promise given to JS starts running as a task when it is given, so it is given only inside an 'async' function");
-  expect(run(`import { plusOne } from "esm";\nclass Bad { message: string = "b"; }\nasync function fails(): Promise<f64> throws Bad {\n  throw new Bad();\n}\nasync function main(): Promise<void> throws JsError {\n  const n = await plusOne(fails());\n}\n`)).toStartWith("main.fsh:7:27: error: a stored 'Promise<number>' can't throw yet");
+  expect(run(`import { ignore } from "esm";\nasync function done(): Promise<void> {}\nfunction main() {\n  console.log(ignore(done()));\n}\n`)).toBe("main.fsh:4:22: error[E1005]: a Promise given to JS starts running as a task when it is given, so it is given only inside an 'async' function");
+  expect(run(`import { plusOne } from "esm";\nclass Bad { message: string = "b"; }\nasync function fails(): Promise<f64> throws Bad {\n  throw new Bad();\n}\nasync function main(): Promise<void> throws JsError {\n  const n = await plusOne(fails());\n}\n`)).toStartWith("main.fsh:7:27: error[E0602]: a stored 'Promise<number>' can't throw yet");
 });
 
 test("callbacks from fields and given to a handle's methods, kept at exit, and an await that never settles, leak nothing", () => {
@@ -542,8 +542,8 @@ async function main(): Promise<void> throws JsError {
 `;
   const dir = project(main);
   expect(sanitized(session, join(dir, "main.fsh"), main)).toEqual({ stdout: "why? later\n", stderr: "", exitCode: 0 });
-  expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = s.handler;\n}\n`)).toBe("main.fsh:4:13: error: reading property 'handler' of 'Slot' isn't supported yet: it holds a function, which Fish can give JS but not read back");
-  expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = (s.handler = (t) => t);\n}\n`)).toBe("main.fsh:4:14: error: a callback or a Promise written to property 'handler' goes to JS, so the assignment has no value to use; write it as a statement of its own");
+  expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = s.handler;\n}\n`)).toBe("main.fsh:4:13: error[E0801]: reading property 'handler' of 'Slot' isn't supported yet: it holds a function, which Fish can give JS but not read back");
+  expect(run(`import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = (s.handler = (t) => t);\n}\n`)).toBe("main.fsh:4:14: error[E1005]: a callback or a Promise written to property 'handler' goes to JS, so the assignment has no value to use; write it as a statement of its own");
 });
 
 test("calling into JS under a Lock panics, and a handle dropped under one is freed later", () => {
@@ -580,7 +580,7 @@ function main() {
 }
 `;
   expect(run(main, ["one", "two"], { NODE_ENV: "production" })).toEqual({ stdout: "b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two production setfalse\n", stderr: "", exitCode: 0 });
-  expect(run(`import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`)).toBe("main.fsh:1:1: error: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet");
+  expect(run(`import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`)).toBe("main.fsh:1:1: error[E1005]: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet");
 });
 
 test("bundled JS's fs/promises reads and writes through Fish's blocking pool, a failure as Node's error", () => {

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import type { Compilation } from "./compilation.ts";
 import { dependencyLib, dependencyOf, packageOf, resolvePackages, type Package as FishPackage } from "./dependencies.ts";
 import { CompileError, type Source } from "./diag.ts";
@@ -57,12 +57,13 @@ export function load(compilation: Compilation, entry: string, src: string = read
   const byPath = new Map<string, Module>();
   const std = (name: string) => visit(`std:${name}`, STD_MODULES[name]!, `node:${name}`);
   const visit = (path: string, text: string, file: string): Module => {
+    if (!path.startsWith("std:")) compilation.looked.push(resolve(path));
     const key = path.startsWith("std:") ? path : realpathSync(path);
     const known = byPath.get(key);
     if (known) return known;
     const base = modules.length * FILE_SPAN;
     if (base > 0) sources.push({ base, src: text, file });
-    if (text.length >= FILE_SPAN) throw new CompileError(`'${file}' is larger than the 16 MiB a source file may be`, base, base);
+    if (text.length >= FILE_SPAN) throw new CompileError("E0909", `'${file}' is larger than the 16 MiB a source file may be`, base, base);
     let statements: Stmt[];
     try {
       // A TS-compat file isn't compiled, whether or not it parses.
@@ -84,7 +85,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
       const specifier = specifierOf(s);
       if (specifier === undefined) continue;
       if (specifier === "fish:engine") {
-        if (!session.engineHook) throw new CompileError("'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
+        if (!session.engineHook) throw new CompileError("E0903", "'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
         module.targets.set(s, visit("std:fish:engine", ENGINE_HOOK, "fish:engine"));
         continue;
       }
@@ -115,14 +116,14 @@ export function load(compilation: Compilation, entry: string, src: string = read
       // whether the path climbs out as written or through a link.
       const owner = fish && !path.startsWith("std:") ? dependencyOf(fish, path) : undefined;
       const outside = (file: string) => owner !== undefined && !file.startsWith(owner.dir + "/");
-      const escape = () => new CompileError(`'${specifier}' leads outside the package '${owner!.manifest.name}'; a package imports its own files by path, and other packages by name`, s.start, s.end);
+      const escape = () => new CompileError("E0903", `'${specifier}' leads outside the package '${owner!.manifest.name}'; a package imports its own files by path, and other packages by name`, s.start, s.end);
       if (outside(join(dirname(realpathSync(path)), specifier))) throw escape();
-      const target = resolveSpecifier(path, specifier, s);
+      const target = resolveSpecifier(path, specifier, s, compilation.looked);
       if (outside(realpathSync(target))) throw escape();
       // Another package's files are reached through its lib, by name, even from a directory
       // that holds it.
       const holder = fish && !path.startsWith("std:") ? packageOf(fish, target) : undefined;
-      if (holder && holder !== packageOf(fish!, path)) throw new CompileError(`'${specifier}' is a file inside the package '${holder.manifest.name}'; import it by name, as '${holder.manifest.name}'`, s.start, s.end);
+      if (holder && holder !== packageOf(fish!, path)) throw new CompileError("E0903", `'${specifier}' is a file inside the package '${holder.manifest.name}'; import it by name, as '${holder.manifest.name}'`, s.start, s.end);
       module.targets.set(s, visit(target, read(target), relative(dirname(entry), target) || target));
     }
     for (const name of globalsIn(statements)) module.globals.set(name, std(name));
@@ -150,7 +151,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
     let index = packages.findIndex((p) => p.specifier === specifier && p.dir === dir);
     if (index < 0) index = packages.push({ specifier, dir, at: s }) - 1;
     const named = s.kind === "import" ? s.named ?? [] : s.kind === "exportNamed" ? s.specifiers : [];
-    if (s.kind === "exportAll") throw new CompileError("re-exporting all of a package isn't supported yet; re-export the names it has by name", s.start, s.end);
+    if (s.kind === "exportAll") throw new CompileError("E0801", "re-exporting all of a package isn't supported yet; re-export the names it has by name", s.start, s.end);
     // A package imported whole, or a default export that is a namespace, is reached through its
     // name: the members the file uses, as `ns.f`, are what it imports.
     const defaulted = s.kind === "import" && s.default !== undefined ? exports.names.get("default") : undefined;
@@ -168,7 +169,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
     const pending: { declared: Declared; name: string }[] = [];
     const add = (declared: Declared, name: string, exported: boolean, at: Span, as: string = name) => {
       if (declaredHere.has(name)) {
-        if (declaredHere.get(name)!.at !== declared.at) throw new CompileError(`'${specifier}' declares '${name}' in two places Fish would bring together; import from its own file instead`, at.start, at.end);
+        if (declaredHere.get(name)!.at !== declared.at) throw new CompileError("E0907", `'${specifier}' declares '${name}' in two places Fish would bring together; import from its own file instead`, at.start, at.end);
         return;
       }
       declaredHere.set(name, declared);
@@ -234,13 +235,13 @@ export function load(compilation: Compilation, entry: string, src: string = read
   const rustModule = (from: string, crate: string, s: Stmt): Module => {
     const pkg = fish && packageOf(fish, from);
     const dependency = pkg?.manifest.rustDependencies?.find((d) => d.name === crate);
-    if (!pkg || !dependency) throw new CompileError(`'${crate}' isn't a Rust dependency of this package; list it under [rust-dependencies] in ${MANIFEST}, as in ${crate} = "1.0"`, s.start, s.end);
+    if (!pkg || !dependency) throw new CompileError("E1004", `'${crate}' isn't a Rust dependency of this package; list it under [rust-dependencies] in ${MANIFEST}, as in ${crate} = "1.0"`, s.start, s.end);
     const key = `rust:${pkg.dir}:${crate}`;
     const known = byPath.get(key);
     if (known) return known;
     const blocks = fishFiles(pkg.dir, () => {}).flatMap(blocksIn).filter((b) => b.name === `rust:${crate}`);
-    if (blocks.length === 0) throw new CompileError(`no file of this package declares the functions of '${crate}'; declare them in one, as in 'declare module "rust:${crate}" { export function f(x: i64): i64; }'`, s.start, s.end);
-    if (blocks.length > 1) throw new CompileError(`'rust:${crate}' is declared twice in this package; declare its functions in one place`, blocks[1]!.start, blocks[1]!.end);
+    if (blocks.length === 0) throw new CompileError("E1004", `no file of this package declares the functions of '${crate}'; declare them in one, as in 'declare module "rust:${crate}" { export function f(x: i64): i64; }'`, s.start, s.end);
+    if (blocks.length > 1) throw new CompileError("E1004", `'rust:${crate}' is declared twice in this package; declare its functions in one place`, blocks[1]!.start, blocks[1]!.end);
     rust.push({ dependency, dir: pkg.dir });
     const module: Module = { path: key, file: `rust:${crate}`, base: modules.length * FILE_SPAN, src: "", statements: (blocks[0]!.body ?? []).map((st) => rustFunction(ids, rustTables, crate, st)), targets: new NodeMap(), globals: new Map() };
     modules.push(module);
@@ -268,9 +269,9 @@ function rustBlock(s: Stmt) {
 function rustFunction(ids: Ids, rust: RustTables, crate: string, s: Stmt): Stmt {
   const f = s.kind === "export" ? s.body : s;
   if (f.kind === "class") return { id: nextId(ids), kind: "export", body: rustClass(ids, rust, crate, f), start: s.start, end: s.end };
-  if (f.kind !== "function") throw new CompileError(`a Rust module declares the crate's functions and types, as in 'export function f(x: i64): i64;' or 'export class Counter { ... }'`, s.start, s.end);
-  if (f.body !== undefined) throw new CompileError("a Rust function is declared without a body; the crate has its body", f.start, f.end);
-  if (!RUST_NAME.test(f.name)) throw new CompileError(`'${f.name}' can't name a Rust function; use letters, digits and '_'`, f.start, f.end);
+  if (f.kind !== "function") throw new CompileError("E1004", `a Rust module declares the crate's functions and types, as in 'export function f(x: i64): i64;' or 'export class Counter { ... }'`, s.start, s.end);
+  if (f.body !== undefined) throw new CompileError("E1004", "a Rust function is declared without a body; the crate has its body", f.start, f.end);
+  if (!RUST_NAME.test(f.name)) throw new CompileError("E1004", `'${f.name}' can't name a Rust function; use letters, digits and '_'`, f.start, f.end);
   const path = rustPath(f.decorators ?? [], f.name, "function");
   const declared: Func = { ...f, id: nextId(ids), decorators: undefined };
   rust.names.set(declared, { crate, path, symbol: rustSymbol(crate, path) });
@@ -280,20 +281,20 @@ function rustFunction(ids: Ids, rust: RustTables, crate: string, s: Stmt): Stmt 
 // A Rust type declared as a class: a handle holding the boxed Rust value, whose constructor,
 // statics and methods are the type's.
 function rustClass(ids: Ids, rust: RustTables, crate: string, c: Extract<Stmt, { kind: "class" }>): Stmt {
-  if (c.name === undefined || !RUST_NAME.test(c.name)) throw new CompileError("a Rust type is a named class, its name letters, digits and '_'", c.start, c.end);
-  if (c.typeParams.length > 0) throw new CompileError("generic Rust types can't cross to Fish yet", c.typeParams[0]!.start, c.typeParams[0]!.end);
-  if (c.extends) throw new CompileError("a Rust type's class can't extend another", c.extends.start, c.extends.end);
-  if (c.implements.length > 0) throw new CompileError("a Rust type's class can't implement an interface yet", c.implements[0]!.start, c.implements[0]!.end);
+  if (c.name === undefined || !RUST_NAME.test(c.name)) throw new CompileError("E1004", "a Rust type is a named class, its name letters, digits and '_'", c.start, c.end);
+  if (c.typeParams.length > 0) throw new CompileError("E1004", "generic Rust types can't cross to Fish yet", c.typeParams[0]!.start, c.typeParams[0]!.end);
+  if (c.extends) throw new CompileError("E1004", "a Rust type's class can't extend another", c.extends.start, c.extends.end);
+  if (c.implements.length > 0) throw new CompileError("E1004", "a Rust type's class can't implement an interface yet", c.implements[0]!.start, c.implements[0]!.end);
   const path = rustPath(c.decorators, c.name, "type");
   const members = c.members.map((m): ClassMember => {
     const named = m.kind === "constructor" ? "new" : m.kind === "method" && typeof m.name === "string" ? m.name : undefined;
     if (named === undefined || (m.kind !== "constructor" && m.kind !== "method") || (m.kind === "method" && (m.optional || m.generator || m.typeParams.length > 0))) {
-      throw new CompileError("a Rust type's class declares a constructor, static functions and methods, without bodies; Rust fields aren't read from Fish", m.start, m.end);
+      throw new CompileError("E1004", "a Rust type's class declares a constructor, static functions and methods, without bodies; Rust fields aren't read from Fish", m.start, m.end);
     }
-    if (m.kind === "method" && m.name === "constructor") throw new CompileError("'constructor' can't be the name of a method", m.start, m.end);
-    if (m.body !== undefined) throw new CompileError("a Rust type's members are declared without bodies; the crate has them", m.start, m.end);
-    if (m.modifiers.some((x) => x !== "static")) throw new CompileError("a Rust type's members take no modifiers but 'static'", m.start, m.end);
-    if (m.kind === "method" && !RUST_NAME.test(named)) throw new CompileError(`'${named}' can't name a Rust function; use letters, digits and '_'`, m.start, m.end);
+    if (m.kind === "method" && m.name === "constructor") throw new CompileError("E0407", "'constructor' can't be the name of a method", m.start, m.end);
+    if (m.body !== undefined) throw new CompileError("E1004", "a Rust type's members are declared without bodies; the crate has them", m.start, m.end);
+    if (m.modifiers.some((x) => x !== "static")) throw new CompileError("E1004", "a Rust type's members take no modifiers but 'static'", m.start, m.end);
+    if (m.kind === "method" && !RUST_NAME.test(named)) throw new CompileError("E1004", `'${named}' can't name a Rust function; use letters, digits and '_'`, m.start, m.end);
     const member = rustPath(m.decorators, named, "member");
     const declared = { ...m, id: nextId(ids), decorators: [], body: [] } as ClassMember;
     rust.names.set(declared, { crate, path: `${path}::${member}`, symbol: rustSymbol(crate, `${path}::${member}`) });
@@ -315,15 +316,15 @@ function rustPath(decorators: Expr[], name: string, what: "function" | "type" | 
   for (const d of decorators) {
     // Fish moves values between threads, so a Rust type that isn't Send has no place yet.
     if (what === "type" && d.kind === "member" && d.object.kind === "ident" && d.object.name === "rust" && d.name === "local") {
-      throw new CompileError("Rust types that aren't Send aren't supported yet: Fish moves values between threads, so a Rust type must be Send", d.start, d.end);
+      throw new CompileError("E1004", "Rust types that aren't Send aren't supported yet: Fish moves values between threads, so a Rust type must be Send", d.start, d.end);
     }
     const only = what === "type" ? "'@rust(\"path::to::Type\")'" : what === "member" ? "'@rust(\"name\")'" : "'@rust(\"path::to::item\")'";
-    if (d.kind !== "call" || d.callee.kind !== "ident" || d.callee.name !== "rust") throw new CompileError(`a Rust ${what} takes only ${only}`, d.start, d.end);
+    if (d.kind !== "call" || d.callee.kind !== "ident" || d.callee.name !== "rust") throw new CompileError("E1004", `a Rust ${what} takes only ${only}`, d.start, d.end);
     const [arg, ...rest] = d.args;
-    if (arg?.kind !== "string" || rest.length > 0) throw new CompileError(`@rust takes the item's path in the crate as a string literal, as in @rust("util::mul")`, d.start, d.end);
+    if (arg?.kind !== "string" || rest.length > 0) throw new CompileError("E1004", `@rust takes the item's path in the crate as a string literal, as in @rust("util::mul")`, d.start, d.end);
     const parts = arg.value.split("::");
     if (!parts.every((part) => RUST_NAME.test(part)) || (what === "member" && parts.length > 1)) {
-      throw new CompileError(what === "member" ? "a member's Rust name is one name, as in \"with_value\"" : "this isn't a Rust path; write one from the crate's root, as in \"util::mul\"", arg.start, arg.end);
+      throw new CompileError("E1004", what === "member" ? "a member's Rust name is one name, as in \"with_value\"" : "this isn't a Rust path; write one from the crate's root, as in \"util::mul\"", arg.start, arg.end);
     }
     path = arg.value;
   }
@@ -357,11 +358,11 @@ function packageExports(ids: Ids, from: string, specifier: string, s: Stmt, entr
   // a bundler takes it.
   const found = specifier.startsWith("node:") ? undefined : findTypings(from, specifier);
   if (found === undefined || ("missing" in found && NODE_MODULES.has(specifier.split("/")[0]!))) {
-    throw new CompileError(`'${specifier}' is a Node module Fish's std doesn't have yet`, s.start, s.end);
+    throw new CompileError("E0908", `'${specifier}' is a Node module Fish's std doesn't have yet`, s.start, s.end);
   }
-  if ("missing" in found) throw new CompileError(found.missing, s.start, s.end);
+  if ("missing" in found) throw new CompileError("E0902", found.missing, s.start, s.end);
   const exports = exportsOf(ids, found.file, specifier);
-  if (typeof exports === "string") throw new CompileError(exports, s.start, s.end);
+  if (typeof exports === "string") throw new CompileError("E0902", exports, s.start, s.end);
   const names = s.kind === "import" ? [...(s.default ? ["default"] : []), ...(s.named ?? []).map((sp) => sp.name)]
     : s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.name) : [];
   const missing = names.find((n) => !exports.names.has(n));
@@ -372,7 +373,7 @@ function packageExports(ids: Ids, from: string, specifier: string, s: Stmt, entr
     // What a re-export couldn't reach may be where the name is.
     const unread = exports.problems.length > 0 ? `; ${exports.problems[0]}` : "";
     const at = (s.kind === "import" ? s.named : s.kind === "exportNamed" ? s.specifiers : undefined)?.find((sp) => sp.name === missing) ?? s;
-    throw new CompileError(`'${specifier}' has no export ${what}; its declarations in '${shown(found.file)}' export ${listed}${unread}`, at.start, at.end);
+    throw new CompileError("E0902", `'${specifier}' has no export ${what}; its declarations in '${shown(found.file)}' export ${listed}${unread}`, at.start, at.end);
   }
   return exports;
 }
@@ -405,18 +406,20 @@ export function specifierOf(s: Stmt): string | undefined {
 }
 
 // The file a relative specifier names, as TypeScript resolves one: the extension may be left out
-// or written as TypeScript's or JavaScript's, and a directory means its `index.fsh`.
-export function resolveSpecifier(from: string, specifier: string, at: Span): string {
+// or written as TypeScript's or JavaScript's, and a directory means its `index.fsh`. When none is
+// found, the files looked for are added to `looked`.
+export function resolveSpecifier(from: string, specifier: string, at: Span, looked: string[] = []): string {
   if (!/^\.\.?(\/|$)/.test(specifier)) {
-    throw new CompileError(`'${specifier}' isn't a path to a file; imports of packages aren't supported yet, so import another file with a relative path like './${specifier}'`, at.start, at.end);
+    throw new CompileError("E0901", `'${specifier}' isn't a path to a file; imports of packages aren't supported yet, so import another file with a relative path like './${specifier}'`, at.start, at.end);
   }
   const path = join(dirname(from), specifier);
   const bare = path.replace(/\.(ts|js|mts|mjs)$/, "");
   const candidates = path.endsWith(".fsh") ? [path] : bare !== path ? [`${bare}.fsh`] : [`${path}.fsh`, join(path, "index.fsh")];
   const found = candidates.find((c) => existsSync(c) && statSync(c).isFile());
   if (found) return found;
-  const looked = candidates.map((c) => `'${relative(dirname(from), c)}'`).join(" and ");
-  throw new CompileError(`can't find the file '${specifier}' imports from; looked for ${looked}`, at.start, at.end);
+  looked.push(...candidates.map((c) => resolve(c)));
+  const tried = candidates.map((c) => `'${relative(dirname(from), c)}'`).join(" and ");
+  throw new CompileError("E0901", `can't find the file '${specifier}' imports from; looked for ${tried}`, at.start, at.end);
 }
 
 // A top-level declaration, under the name it has program-wide. A `fixed` one keeps its name: a C
@@ -465,7 +468,7 @@ export function flatten(compilation: Compilation, { modules }: Loaded, library =
   const all = [...linked.values()];
   for (const l of linked.values()) {
     for (const [alias, { from, name, at }] of l.imports) {
-      if (l.own.has(alias)) throw new CompileError(`'${alias}' is both imported and declared in this file; rename the import, as in 'import { ${name} as other${alias[0]!.toUpperCase()}${alias.slice(1)} }'`, at.start, at.end);
+      if (l.own.has(alias)) throw new CompileError("E0907", `'${alias}' is both imported and declared in this file; rename the import, as in 'import { ${name} as other${alias[0]!.toUpperCase()}${alias.slice(1)} }'`, at.start, at.end);
       if (exported(from, name) || lenient) continue;
       // A std module's own declarations aren't for a program to export.
       const hidden = linked.get(from)!.own.has(name) && !from.path.startsWith("std:") ? `; it declares '${name}' without exporting it, so add 'export' before that declaration` : "";
@@ -475,9 +478,9 @@ export function flatten(compilation: Compilation, { modules }: Loaded, library =
         // Only the package's files this build loaded are known; one its lib never imports isn't.
         const inner = name !== "default" && all.some((m) => m.module !== from && m.module.pkg === owner.dir && m.exports.has(name));
         const missing = name === "default" ? "no default export" : `no export named '${name}'`;
-        throw new CompileError(inner ? `'${name}' is private to the package '${owner.name}'; only what its lib ${owner.lib} exports is public` : `the package '${owner.name}' has ${missing} in its lib ${owner.lib}${hidden}`, at.start, at.end);
+        throw new CompileError(inner ? "E0903" : "E0902", inner ? `'${name}' is private to the package '${owner.name}'; only what its lib ${owner.lib} exports is public` : `the package '${owner.name}' has ${missing} in its lib ${owner.lib}${hidden}`, at.start, at.end);
       }
-      throw new CompileError(name === "default" ? `'${from.file}' has no default export; add 'export default' before what it should give${hidden}` : `'${from.file}' has no export named '${name}'${hidden}`, at.start, at.end);
+      throw new CompileError("E0902", name === "default" ? `'${from.file}' has no default export; add 'export default' before what it should give${hidden}` : `'${from.file}' has no export named '${name}'${hidden}`, at.start, at.end);
     }
   }
   const taken = new Set<string>();
@@ -525,7 +528,7 @@ export function flatten(compilation: Compilation, { modules }: Loaded, library =
       const signature = `${f.params.map((p) => text(p.type)).join(",")}:${text(f.returnType)}`;
       const known = foreign.get(f.name);
       if (!known) foreign.set(f.name, { signature, file: l.module.file || "the entry file" });
-      else if (known.signature !== signature) throw new CompileError(`the C function '${f.name}' is declared in '${known.file}' with other types; declare it in one file and import it from there`, f.start, f.end);
+      else if (known.signature !== signature) throw new CompileError("E1002", `the C function '${f.name}' is declared in '${known.file}' with other types; declare it in one file and import it from there`, f.start, f.end);
       return !known;
     });
   });
@@ -541,7 +544,7 @@ function linkOf(ids: Ids, module: Module, index: number, library: boolean): Link
   const entry = index === 0;
   const l: Linked = { module, index, body: [], own: new Map(), imports: new Map(), exports: new Map(), stars: [], used: new Set() };
   const bind = (alias: string, from: Module, name: string, at: Span) => {
-    if (l.imports.has(alias)) throw new CompileError(`'${alias}' is already imported in this file`, at.start, at.end);
+    if (l.imports.has(alias)) throw new CompileError("E0907", `'${alias}' is already imported in this file`, at.start, at.end);
     l.imports.set(alias, { from, name, at });
   };
   const declare = (s: Stmt) => {
@@ -549,7 +552,7 @@ function linkOf(ids: Ids, module: Module, index: number, library: boolean): Link
     const inner = s.kind === "export" || s.kind === "declare" ? s.body : s;
     const fixed = s.kind === "declare" || (s.kind === "export" && (s.body.kind === "declare" || (entry && library && s.body.kind === "function"))) || (entry && s.kind === "function" && s.name === "main");
     if (!entry && inner.kind === "function" && inner.name === "main") {
-      throw new CompileError(`only the entry file's main() runs, so '${module.file}' can't declare one; rename it, or build '${module.file}' as a program of its own`, inner.start, inner.end);
+      throw new CompileError("E0405", `only the entry file's main() runs, so '${module.file}' can't declare one; rename it, or build '${module.file}' as a program of its own`, inner.start, inner.end);
     }
     for (const name of namesOf(inner.kind === "declare" ? inner.body : inner)) {
       if (!l.own.has(name)) l.own.set(name, { name, unique: name, fixed });
@@ -558,7 +561,7 @@ function linkOf(ids: Ids, module: Module, index: number, library: boolean): Link
   // A library gives C its entry file's exported functions, under their own names.
   const listed: Specifier[] = [];
   const spaces = new Map<string, { from: Module; explicit: boolean }>();
-  const cOnly = (at: Span) => new CompileError("a library's C functions are its entry file's exported functions, each under its own name; write 'export function' on the function itself", at.start, at.end);
+  const cOnly = (at: Span) => new CompileError("E1002", "a library's C functions are its entry file's exported functions, each under its own name; write 'export function' on the function itself", at.start, at.end);
   for (const s of module.statements) {
     const from = module.targets.get(s);
     if (entry && library && (s.kind === "exportAll" || s.kind === "exportDefault" || (s.kind === "exportNamed" && from))) throw cOnly(s);
@@ -566,11 +569,11 @@ function linkOf(ids: Ids, module: Module, index: number, library: boolean): Link
       // A std module imported whole is reached through its name, as `os.hostname()`.
       const whole = s.namespace ?? s.default;
       if (whole !== undefined && (stdModule(s.module) || (from?.whole && (s.namespace !== undefined || s.default !== undefined)))) spaces.set(whole, { from: from!, explicit: true });
-      else if (s.namespace !== undefined) throw new CompileError(`namespace imports aren't supported yet; import the names you use, as in 'import { a, b } from "${s.module}"'`, s.start, s.end);
+      else if (s.namespace !== undefined) throw new CompileError("E0801", `namespace imports aren't supported yet; import the names you use, as in 'import { a, b } from "${s.module}"'`, s.start, s.end);
       else if (s.default !== undefined) bind(s.default, from!, "default", s);
       for (const sp of s.named ?? []) bind(sp.alias ?? sp.name, from!, sp.name, sp);
     } else if (s.kind === "importEquals") {
-      throw new CompileError(`'import ${s.name} = ...' isn't supported yet; import what you use with 'import { a, b } from "./file"'`, s.start, s.end);
+      throw new CompileError("E0801", `'import ${s.name} = ...' isn't supported yet; import what you use with 'import { a, b } from "./file"'`, s.start, s.end);
     } else if (s.kind === "exportAll") {
       if (s.alias !== undefined) throw unsupported("namespace re-exports ('export * as name from')", s);
       l.stars.push(from!);
@@ -665,7 +668,7 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     };
     if (n.kind === "assign" && (n.target as { kind?: string }).kind !== undefined && table((n.target as { object?: unknown }).object)) {
       const t = table((n.target as { object?: unknown }).object)!;
-      throw new CompileError(`setting '${t.owner}.${t.name}' isn't supported yet; it is read-only here`, n.start as number, n.end as number);
+      throw new CompileError("E0908", `setting '${t.owner}.${t.name}' isn't supported yet; it is read-only here`, n.start as number, n.end as number);
     }
     // `env.HOME` and `env[k]` on a table imported by name call it with the key.
     const imported = n.object as { kind?: string; name?: string; start?: number; end?: number } | undefined;
@@ -679,7 +682,7 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     }
     // `argv` imported by name reads as a value, calling it, except where it is called.
     if (n.kind === "ident" && valued.has(n.name as string) && !hidden.has(n.name as string)) {
-      if (valued.get(n.name as string) === "table") throw new CompileError(`'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as number, n.end as number);
+      if (valued.get(n.name as string) === "table") throw new CompileError("E0908", `'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as number, n.end as number);
       const callee = { id: nextId(ids), kind: "ident", name: n.name, start: n.start, end: n.end };
       for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
       Object.assign(n, { kind: "call", callee, typeArgs: [], args: [], optional: false });
@@ -719,12 +722,12 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : []));
     if (!exports.includes(name)) {
       // A package's module holds only the members the file uses, so what else it has isn't listed.
-      if (space.explicit && space.from.whole) throw new CompileError(`'${space.from.file}' has no export '${name}'`, n.start as number, n.end as number);
-      if (space.explicit) throw new CompileError(`'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as number, n.end as number);
+      if (space.explicit && space.from.whole) throw new CompileError("E0902", `'${space.from.file}' has no export '${name}'`, n.start as number, n.end as number);
+      if (space.explicit) throw new CompileError("E0902", `'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as number, n.end as number);
       return false;
     }
     const kind = valuesOf(space.from)[name];
-    if (read && kind === "table") throw new CompileError(`'${owner}.${name}' is read by key, as in '${owner}.${name}.HOME' or '${owner}.${name}[name]'`, n.start as number, n.end as number);
+    if (read && kind === "table") throw new CompileError("E0908", `'${owner}.${name}' is read by key, as in '${owner}.${name}.HOME' or '${owner}.${name}[name]'`, n.start as number, n.end as number);
     const alias = `${owner}:${name}`;
     if (!bound.has(alias)) bind(alias, space.from, name, n as unknown as Span);
     bound.add(alias);
@@ -757,10 +760,10 @@ function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: stri
     const options = typeof role === "number";
     if (options && (given.kind !== "object" || !given.props.some(isEncoding))) return false;
     let encoding = given.kind === "string" && !options ? given.value : given.kind === "object" ? encodingOf(given, options) : undefined;
-    if (encoding === undefined) throw new CompileError(`'${target.name}' takes its encoding as a literal, like ${options ? "" : `"utf8" or `}{ encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
+    if (encoding === undefined) throw new CompileError("E0908", `'${target.name}' takes its encoding as a literal, like ${options ? "" : `"utf8" or `}{ encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
     // Node's "buffer" asks for bytes, what no encoding gives.
     if (options && encoding === "buffer") encoding = null;
-    if (encoding !== null && !/^utf-?8$/i.test(encoding)) throw new CompileError(`'${target.name}' knows the "utf8" encoding so far, not "${encoding}"`, given.start, given.end);
+    if (encoding !== null && !/^utf-?8$/i.test(encoding)) throw new CompileError("E0908", `'${target.name}' knows the "utf8" encoding so far, not "${encoding}"`, given.start, given.end);
     if (options) (given as Extract<Expr, { kind: "object" }>).props = (given as Extract<Expr, { kind: "object" }>).props.filter((p) => !isEncoding(p));
     else args.splice(at, 1);
     if (role === "write" || encoding === null) return false;

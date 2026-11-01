@@ -141,7 +141,7 @@ class A {
   get n(): i64 { return 1 }
 }
 function main() { print(new A().n) }
-// error: jsdoc_throws_getter.fsh:3:16: error: accessors that throw are not supported yet
+// error: jsdoc_throws_getter.fsh:3:16: error[E0801]: accessors that throw are not supported yet
 // case: jsdoc_throws_agrees
 // A written clause and a tag naming the same type agree.
 /** @throws {i64} */
@@ -165,7 +165,7 @@ function main() {}
 /** @throws {Missing} */
 function f(): i64 { return 1 }
 function main() { print(f()) }
-// error: jsdoc_throws_unknown.fsh:2:14: error: cannot find type 'Missing'
+// error: jsdoc_throws_unknown.fsh:2:14: error[E0105]: cannot find type 'Missing'
 // case: jsdoc_throws_order_and_repeats
 class A { message: string = "a"; }
 class B { message: string = "b"; }

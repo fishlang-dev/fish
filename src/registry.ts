@@ -40,18 +40,19 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   const laidOut = new Set<ClassInfo>();
   const laying = new Set<ClassInfo>();
   const wrapped = new Set<ClassInfo>();
-  return { register, settle, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
+  return { register, settle, claims, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
 
   function register(c: ClassInfo) {
     infoOf.set(c.type, c);
     unsettled.push(c);
   }
 
-  // Lays out a class, checks what it claims, and checks each of its members at its definition.
-  function settle(c: ClassInfo) {
+  // Lays out a class, checks what it claims, and checks each of its members at its definition,
+  // each through `each`, which may recover from one member's error to check the next.
+  function settle(c: ClassInfo, each: (run: () => void) => void = (run) => run()) {
     layout(c);
     implemented(c);
-    bodiesOf(c).forEach((f) => checkBody(definition(f)));
+    bodiesOf(c).forEach((f) => each(() => checkBody(definition(f))));
   }
 
   function bodiesOf(c: ClassInfo): Body[] {
@@ -67,11 +68,11 @@ export function registry({ tables, classes, templates, members, resolveType, wit
       linked.add(c);
       return;
     }
-    if (path.has(c)) throw new CompileError(`class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
+    if (path.has(c)) throw new CompileError("E0704", `class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
     const base = baseOf(c, c.baseName);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
     const rust = rustClassOf(base.type);
-    if (rust) throw new CompileError(`a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
+    if (rust) throw new CompileError("E1004", `a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
     link(base, path.add(c));
     const at = c.node.extends!;
     extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: nextId(ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
@@ -84,7 +85,7 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   // as this class's own type parameters stand for them.
   function baseOf(c: ClassInfo, name: string): ClassInfo {
     const at = c.node.extends!;
-    if (!classes.has(name) && !templates.has(name)) throw new CompileError(`cannot find class '${name}'${didYouMean(name, classNames(at.start))}`, at.start, at.end);
+    if (!classes.has(name) && !templates.has(name)) throw new CompileError("E0401", `cannot find class '${name}'${didYouMean(name, classNames(at.start))}`, at.start, at.end);
     const args = at.kind === "instantiation" ? at.typeArgs : [];
     // A declared class is found by name: an abstract one is no type a value can have to resolve.
     const declared = at.kind === "instantiation" ? undefined : classes.get(name);
@@ -132,15 +133,20 @@ export function registry({ tables, classes, templates, members, resolveType, wit
 
   // `implements` is optional, since satisfying an interface is by shape, but checked when written.
   function implemented(c: ClassInfo) {
+    claims(c);
+    if (c.node.implements.some((node) => node.kind === "ref" && node.name === "From")) wrapsOf(c);
+  }
+
+  // Checks the interfaces and types a class says it implements, `From` aside.
+  function claims(c: ClassInfo) {
     for (const node of c.node.implements) {
-      if (node.kind === "ref" && node.name === "From") {
-        wrapsOf(c);
-        continue;
-      }
+      if (node.kind === "ref" && node.name === "From") continue;
       const trait = withScope(c.scope, () => resolveType(node));
       const reason = typeof trait !== "string" && trait.kind === "interface" ? unsatisfied(c.type, trait, members, node)
         : fits(c.type, trait) ? undefined : `type '${c.type.name}' doesn't fit '${show(trait)}'`;
-      if (reason) throw new CompileError(`class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
+      if (!reason) continue;
+      members.refused.push({ type: show(c.type), trait: show(trait), reason });
+      throw new CompileError("E0702", `class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
     }
   }
 
@@ -152,16 +158,16 @@ export function registry({ tables, classes, templates, members, resolveType, wit
     wrapped.add(c);
     for (const node of c.node.implements) {
       if (node.kind !== "ref" || node.name !== "From") continue;
-      if (node.args.length !== 1) throw new CompileError("'From' takes the type it wraps, like 'From<DbError>'", node.start, node.end);
+      if (node.args.length !== 1) throw new CompileError("E0702", "'From' takes the type it wraps, like 'From<DbError>'", node.start, node.end);
       const x = withScope(c.scope, () => resolveType(node.args[0]!));
       const from = c.statics.get("from");
       const name = c.type.name;
       const wanted = `class '${name}' implements 'From<${show(x)}>', so it needs 'static from(e: ${show(x)}): ${name}'`;
-      if (!from || from.params.length !== 1 || !from.params[0]!.type || !from.returnType) throw new CompileError(wanted, node.start, node.end);
+      if (!from || from.params.length !== 1 || !from.params[0]!.type || !from.returnType) throw new CompileError("E0702", wanted, node.start, node.end);
       const [param, returns] = withScope(c.scope, () => [resolveType(from.params[0]!.type!), resolveType(from.returnType!)]);
-      if (!fits(x, param) || returns !== c.type) throw new CompileError(wanted, from.start, from.end);
-      if (from.throws) throw new CompileError(`'${name}.from' wraps an error, so it can't throw one itself`, from.throws.start, from.throws.end);
-      if (from.params[0]!.comptime) throw new CompileError(`'${name}.from' wraps errors as they are raised at run time, so it can't take a comptime parameter`, from.params[0]!.start, from.params[0]!.end);
+      if (!fits(x, param) || returns !== c.type) throw new CompileError("E0702", wanted, from.start, from.end);
+      if (from.throws) throw new CompileError("E0702", `'${name}.from' wraps an error, so it can't throw one itself`, from.throws.start, from.throws.end);
+      if (from.params[0]!.comptime) throw new CompileError("E1102", `'${name}.from' wraps errors as they are raised at run time, so it can't take a comptime parameter`, from.params[0]!.start, from.params[0]!.end);
       c.wraps.push([x, from, param]);
     }
     return c.wraps;

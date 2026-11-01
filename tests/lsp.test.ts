@@ -147,7 +147,7 @@ async function started() {
   return s;
 }
 
-type Diagnostic = { range: { start: { line: number; character: number }; end: { line: number; character: number } }; message: string; severity: number; source: string };
+type Diagnostic = { range: { start: { line: number; character: number }; end: { line: number; character: number } }; message: string; severity: number; code: string; source: string };
 const published = (uri: string) => (m: Reply) => m.method === "textDocument/publishDiagnostics" && (m.params as { uri: string }).uri === uri;
 const diagnostics = (m: Reply) => (m.params as { diagnostics: Diagnostic[] }).diagnostics;
 
@@ -161,11 +161,26 @@ test("a document's error is published at its place, and cleared when fixed or cl
   expect(more).toEqual([]);
   expect(d!.range).toEqual({ start: { line: 1, character: line.indexOf("true") }, end: { line: 1, character: line.indexOf("true") + 4 } });
   expect(d!.severity).toBe(1);
+  expect(d!.code).toBe("E0101");
   expect(d!.source).toBe("fish");
   s.notify("textDocument/didChange", { textDocument: { uri, version: 2 }, contentChanges: [{ text: src.replace("true", "1") }] });
   expect(diagnostics(await s.next(published(uri)))).toEqual([]);
   s.notify("textDocument/didClose", { textDocument: { uri } });
   expect(diagnostics(await s.next(published(uri)))).toEqual([]);
+  s.request("shutdown");
+  s.notify("exit");
+  expect(await s.proc.exited).toBe(0);
+}, 20_000);
+
+test("each function's error in a document is published, in source order", async () => {
+  const src = 'function a(): i64 {\n  return "x";\n}\nfunction main() {\n  const _n: i64 = true;\n  console.log(a());\n}\n';
+  const uri = Bun.pathToFileURL(file("several.fsh", src)).href;
+  const s = await started();
+  s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text: src } });
+  expect(diagnostics(await s.next(published(uri))).map((d) => [d.severity, d.code, d.range.start])).toEqual([
+    [1, "E0101", { line: 1, character: 9 }],
+    [1, "E0101", { line: 4, character: 18 }],
+  ]);
   s.request("shutdown");
   s.notify("exit");
   expect(await s.proc.exited).toBe(0);
@@ -177,9 +192,9 @@ test("a document's warnings are published with warning severity, and an error re
   const s = await started();
   s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text: src } });
   const found = diagnostics(await s.next(published(uri)));
-  expect(found.map((d) => [d.severity, d.message, d.range.start])).toEqual([
-    [2, "unused variable 'unused'; if it's intentional, name it '_unused'", { line: 1, character: 8 }],
-    [2, "unreachable code after 'return'", { line: 3, character: 2 }],
+  expect(found.map((d) => [d.severity, d.code, d.message, d.range.start])).toEqual([
+    [2, "W0001", "unused variable 'unused'; if it's intentional, name it '_unused'", { line: 1, character: 8 }],
+    [2, "W0002", "unreachable code after 'return'", { line: 3, character: 2 }],
   ]);
   s.notify("textDocument/didChange", { textDocument: { uri, version: 2 }, contentChanges: [{ text: src.replace("= 1", "= true + 1") }] });
   expect(diagnostics(await s.next(published(uri))).map((d) => d.severity)).toEqual([1]);

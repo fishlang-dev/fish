@@ -716,6 +716,9 @@ static int64_t fsh_poison_count = 0;
 // How many locks this thread holds, so a call into JS under one, which could wait forever on a
 // callback JS runs that takes the same lock, is refused.
 static _Thread_local int32_t fsh_locks_held = 0;
+// The RwLock words this thread reads under, innermost last.
+static _Thread_local int32_t **fsh_reading = NULL;
+static _Thread_local int64_t fsh_reading_count = 0, fsh_reading_capacity = 0;
 // How many Fish callbacks JS is running on this thread. A panic in one would unwind through the
 // engine's frames, leaving its lock held, so it ends the program instead, as Rust's panics that
 // would cross foreign frames do.
@@ -729,6 +732,11 @@ void fsh_rt_panic(const char *message) {
     fsh_panic_reason(reason, strlen(reason));
   }
   fsh_reason_given = 0;
+  // A reader changed nothing, so its hold is given back rather than poisoning the lock, as in
+  // Rust; the unwind skips the release after its callback.
+  for (int64_t i = fsh_reading_count - 1; i >= 0; i--) __atomic_sub_fetch(fsh_reading[i], 1, __ATOMIC_RELEASE);
+  fsh_locks_held -= (int32_t)fsh_reading_count;
+  fsh_reading_count = 0;
   if (fsh_locks_held > 0 && fsh_token) {
     pthread_mutex_lock(&fsh_poison_lock);
     fsh_poison_tokens = realloc(fsh_poison_tokens, (fsh_poison_count + 1) * sizeof(int32_t));
@@ -3907,6 +3915,8 @@ typedef void (*fsh_drop_fn)(void *frame);
 struct fsh_task {
   int32_t state;
   int32_t outcome;
+  // Polled on the blocking pool rather than by a worker: a spawnBlocking call's task.
+  int32_t blocking;
   int64_t refs;
   fsh_poll_fn poll;
   fsh_drop_fn drop;
@@ -3952,6 +3962,8 @@ static int32_t fsh_panicked = 0;
 static fsh_task *fsh_main_task = NULL;
 // The task running timers' callbacks, once one is set.
 static fsh_task *fsh_timeouts_task = NULL;
+// Blocking tasks not yet done, which the runtime's end can't drop while a pool thread may poll one.
+static int64_t fsh_blocking_live = 0;
 
 static void fsh_push(fsh_queue *q, fsh_task *t) {
   pthread_mutex_lock(&q->lock);
@@ -3981,9 +3993,12 @@ static fsh_task *fsh_pop(fsh_queue *q) {
   return t;
 }
 
+static void fsh_pool_task(fsh_task *t);
+
 // Queues a task: on the waking worker's own queue, or from any other thread on the shared
-// one, then lets a parked worker know.
+// one, then lets a parked worker know. A blocking task goes to the blocking pool instead.
 static void fsh_schedule(fsh_task *t) {
+  if (t->blocking) return fsh_pool_task(t);
   fsh_push(fsh_worker >= 0 ? &fsh_queues[fsh_worker] : &fsh_injected, t);
   pthread_mutex_lock(&fsh_park);
   __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_RELAXED);
@@ -4058,6 +4073,8 @@ static void fsh_run(fsh_task *t) {
   t->joiner = NULL;
   if (t == fsh_main_task || t == fsh_timeouts_task) pthread_cond_broadcast(&fsh_finished);
   pthread_mutex_unlock(&fsh_alive_lock);
+  // Before the joiner wakes, so a main that ends once it is woken sees this one done.
+  if (t->blocking) __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
   if (joiner) {
     fsh_rt_wake(joiner);
     fsh_task_release(joiner);
@@ -4093,9 +4110,9 @@ static void *fsh_work(void *arg) {
   return NULL;
 }
 
-// A new task for a future's frame, which it takes over: alive, queued, and with one more
-// reference for whoever made it.
-fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
+// A new task for a future's frame, which it takes over: alive, and with one more reference for
+// whoever made it. Not yet queued.
+static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
   fsh_task *t = fsh_rt_alloc(sizeof(fsh_task) + frame_size + output_size);
   memcpy(t->memory, frame, frame_size);
   t->frame_size = frame_size;
@@ -4104,6 +4121,7 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
   t->drop = drop;
   t->drop_output = drop_output;
   t->outcome = 0;
+  t->blocking = 0;
   t->refs = 2;
   t->joiner = NULL;
   t->panic = NULL;
@@ -4115,6 +4133,22 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
   if (fsh_alive) fsh_alive->prev = t;
   fsh_alive = t;
   pthread_mutex_unlock(&fsh_alive_lock);
+  return t;
+}
+
+// The same, queued.
+fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+  fsh_schedule(t);
+  return t;
+}
+
+// The same, every poll run on the blocking pool, so it may block or compute for long without
+// holding up a worker.
+fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+  t->blocking = 1;
+  __atomic_add_fetch(&fsh_blocking_live, 1, __ATOMIC_RELAXED);
   fsh_schedule(t);
   return t;
 }
@@ -4122,25 +4156,7 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
 // The same, its first poll run here and now, as a JS callback's first part runs where it is
 // called; the task is queued only if that poll waits.
 fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_rt_alloc(sizeof(fsh_task) + frame_size + output_size);
-  memcpy(t->memory, frame, frame_size);
-  t->frame_size = frame_size;
-  t->output_size = output_size;
-  t->poll = poll;
-  t->drop = drop;
-  t->drop_output = drop_output;
-  t->outcome = 0;
-  t->refs = 2;
-  t->joiner = NULL;
-  t->panic = NULL;
-  t->state = FSH_QUEUED;
-  t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
-  pthread_mutex_lock(&fsh_alive_lock);
-  t->prev = NULL;
-  t->next = fsh_alive;
-  if (fsh_alive) fsh_alive->prev = t;
-  fsh_alive = t;
-  pthread_mutex_unlock(&fsh_alive_lock);
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
   fsh_run(t);
   return t;
 }
@@ -4526,6 +4542,68 @@ int32_t fsh_rt_lock(int32_t *word) {
 void fsh_rt_unlock(int32_t *word) {
   fsh_locks_held--;
   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
+}
+
+// An RwLock's word: 0 free, n > 0 held by n readers, or minus the token of the thread writing.
+// A writer waiting for readers to leave sets FSH_WRITER_WAITING beside their count, and new
+// readers wait behind it, so a stream of overlapping reads can't starve an update. A thread
+// already reading the same lock still enters, so a read nested in a read never waits on a
+// writer that waits on it. The same 1 and 2 as a Lock's: a lock this thread already holds the
+// conflicting side of, and a writer that panicked.
+#define FSH_WRITER_WAITING 0x40000000
+
+static int fsh_reads(int32_t *word) {
+  for (int64_t i = 0; i < fsh_reading_count; i++) if (fsh_reading[i] == word) return 1;
+  return 0;
+}
+
+int32_t fsh_rt_read_lock(int32_t *word) {
+  int32_t me = fsh_me();
+  if (__atomic_load_n(word, __ATOMIC_RELAXED) == -me) return 1;
+  int nested = fsh_reads(word);
+  for (int spins = 0;; spins++) {
+    int32_t seen = __atomic_load_n(word, __ATOMIC_RELAXED);
+    if (seen >= 0 && (nested || !(seen & FSH_WRITER_WAITING))) {
+      if (__atomic_compare_exchange_n(word, &seen, seen + 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) break;
+    } else if (spins >= 64) {
+      if (seen < 0 && fsh_poison_holder(-seen)) return 2;
+      sched_yield();
+    }
+  }
+  if (fsh_reading_count == fsh_reading_capacity) {
+    fsh_reading_capacity = fsh_reading_capacity ? fsh_reading_capacity * 2 : 8;
+    fsh_reading = realloc(fsh_reading, fsh_reading_capacity * sizeof(int32_t *));
+  }
+  fsh_reading[fsh_reading_count++] = word;
+  fsh_locks_held++;
+  return 0;
+}
+
+// Reads end innermost first: a read's callback can't await, so they never interleave.
+void fsh_rt_read_unlock(int32_t *word) {
+  fsh_reading_count--;
+  fsh_locks_held--;
+  __atomic_sub_fetch(word, 1, __ATOMIC_RELEASE);
+}
+
+// Taking the word clears the waiting mark; another waiting writer sets it again on its next try.
+int32_t fsh_rt_write_lock(int32_t *word) {
+  int32_t me = fsh_me();
+  if (__atomic_load_n(word, __ATOMIC_RELAXED) == -me || fsh_reads(word)) return 1;
+  for (int spins = 0;; spins++) {
+    int32_t seen = __atomic_load_n(word, __ATOMIC_RELAXED);
+    if (seen == 0 || seen == FSH_WRITER_WAITING) {
+      if (__atomic_compare_exchange_n(word, &seen, -me, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        fsh_locks_held++;
+        return 0;
+      }
+    } else if (seen > 0 && !(seen & FSH_WRITER_WAITING)) {
+      __atomic_compare_exchange_n(word, &seen, seen | FSH_WRITER_WAITING, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    } else if (spins >= 64) {
+      if (seen < 0 && fsh_poison_holder(-seen)) return 2;
+      sched_yield();
+    }
+  }
 }
 
 // A shared value's block: its count, then a Lock's word and the value. Made with one count.
@@ -5358,10 +5436,13 @@ typedef struct fsh_file_job {
 static pthread_mutex_t fsh_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_pool_ready = PTHREAD_COND_INITIALIZER;
 static fsh_file_job *fsh_pool_head = NULL, *fsh_pool_tail = NULL;
-static int fsh_pool_started = 0;
-
-// ponytail: four threads, however many jobs wait; size it from the load if disks are slow
-#define FSH_POOL_THREADS 4
+// Threads start as jobs arrive and none is free, up to Tokio's default cap, and leave once idle
+// for a while; jobs past the cap wait for a thread.
+#define FSH_POOL_MAX 512
+#define FSH_POOL_IDLE_SECONDS 10
+// ponytail: file reads, writes and lookups queue behind blocking tasks once all 512 are busy, as in
+// Tokio; give them a pool of their own if programs saturate it.
+static int64_t fsh_pool_threads = 0, fsh_pool_idle = 0, fsh_pool_queued = 0;
 
 void fsh_rt_file_job_release(fsh_file_job *job) {
   if (!job || __atomic_sub_fetch(&job->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
@@ -5860,15 +5941,40 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
   return failure ? 5 : 1;
 }
 
+// A blocking task is polled where a worker would poll it; it is the job's only content.
+static void fsh_pool_run(fsh_file_job *job) {
+  fsh_task *task = job->task;
+  fsh_rt_free(job);
+  fsh_run(task);
+}
+
 static void *fsh_pool_work(void *arg) {
   (void)arg;
+  pthread_mutex_lock(&fsh_pool_lock);
   for (;;) {
-    pthread_mutex_lock(&fsh_pool_lock);
-    while (!fsh_pool_head) pthread_cond_wait(&fsh_pool_ready, &fsh_pool_lock);
+    while (!fsh_pool_head) {
+      struct timespec until;
+      clock_gettime(CLOCK_REALTIME, &until);
+      until.tv_sec += FSH_POOL_IDLE_SECONDS;
+      fsh_pool_idle++;
+      int waited = pthread_cond_timedwait(&fsh_pool_ready, &fsh_pool_lock, &until);
+      fsh_pool_idle--;
+      if (waited == ETIMEDOUT && !fsh_pool_head) {
+        fsh_pool_threads--;
+        pthread_mutex_unlock(&fsh_pool_lock);
+        return NULL;
+      }
+    }
     fsh_file_job *job = fsh_pool_head;
     fsh_pool_head = job->next;
     if (!fsh_pool_head) fsh_pool_tail = NULL;
+    fsh_pool_queued--;
     pthread_mutex_unlock(&fsh_pool_lock);
+    if (job->op == 3) {
+      fsh_pool_run(job);
+      pthread_mutex_lock(&fsh_pool_lock);
+      continue;
+    }
 #ifdef FSH_LEAK_SITES
     fsh_frame submitter = { job->site, job->name, NULL };
     fsh_rt_frames = job->name ? &submitter : NULL;
@@ -5888,30 +5994,53 @@ static void *fsh_pool_work(void *arg) {
     fsh_task_release(task);
     fsh_rt_file_job_release(job);
     __atomic_sub_fetch(&fsh_pool_busy, 1, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&fsh_pool_lock);
   }
-  return NULL;
+}
+
+// Queues a job with the pool's lock held, starting a thread when more jobs wait than threads are
+// free. Threads get the workers' 8 MiB stack, since a blocking task runs a program's own calls.
+static void fsh_pool_enqueue(fsh_file_job *job) {
+  job->next = NULL;
+  if (fsh_pool_tail) fsh_pool_tail->next = job;
+  else fsh_pool_head = job;
+  fsh_pool_tail = job;
+  fsh_pool_queued++;
+  if (fsh_pool_queued > fsh_pool_idle && fsh_pool_threads < FSH_POOL_MAX) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 8 << 20);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    if (pthread_create(&thread, &attr, fsh_pool_work, NULL) == 0) fsh_pool_threads++;
+    pthread_attr_destroy(&attr);
+    // With no thread at all, the job would wait forever.
+    if (fsh_pool_threads == 0) {
+      fputs("fish: couldn't start a thread for the blocking pool\n", stderr);
+      abort();
+    }
+  }
+  pthread_cond_signal(&fsh_pool_ready);
 }
 
 static void fsh_pool_submit(fsh_file_job *job) {
   pthread_mutex_lock(&fsh_pool_lock);
-  if (!fsh_pool_started) {
-    fsh_pool_started = 1;
-    for (int i = 0; i < FSH_POOL_THREADS; i++) {
-      pthread_t thread;
-      pthread_create(&thread, NULL, fsh_pool_work, NULL);
-      pthread_detach(thread);
-    }
-  }
-  job->next = NULL;
 #ifdef FSH_LEAK_SITES
   job->site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
   job->name = fsh_rt_frames ? fsh_rt_frames->name : NULL;
 #endif
   __atomic_add_fetch(&fsh_pool_busy, 1, __ATOMIC_RELAXED);
-  if (fsh_pool_tail) fsh_pool_tail->next = job;
-  else fsh_pool_head = job;
-  fsh_pool_tail = job;
-  pthread_cond_signal(&fsh_pool_ready);
+  fsh_pool_enqueue(job);
+  pthread_mutex_unlock(&fsh_pool_lock);
+}
+
+static void fsh_pool_task(fsh_task *t) {
+  fsh_file_job *job = fsh_rt_alloc(sizeof(fsh_file_job));
+  memset(job, 0, sizeof *job);
+  job->op = 3;
+  job->task = t;
+  pthread_mutex_lock(&fsh_pool_lock);
+  fsh_pool_enqueue(job);
   pthread_mutex_unlock(&fsh_pool_lock);
 }
 
@@ -6288,7 +6417,8 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   until.tv_sec += until.tv_nsec / 1000000000;
   until.tv_nsec %= 1000000000;
   while (fsh_stopped < fsh_workers && pthread_cond_timedwait(&fsh_left, &fsh_park, &until) == 0) {}
-  int stuck = fsh_stopped < fsh_workers;
+  // A blocking task still on the pool can't be dropped while its thread may be polling it.
+  int stuck = fsh_stopped < fsh_workers || __atomic_load_n(&fsh_blocking_live, __ATOMIC_ACQUIRE) != 0;
   pthread_mutex_unlock(&fsh_park);
   if (stuck) {
     fsh_abandoned = 1;

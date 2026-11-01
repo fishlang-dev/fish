@@ -29,7 +29,7 @@ export function resolvePackages(entry: string, locking: Locking): Package[] | un
   const visit = (pkg: Package, path: Package[]) => {
     for (const dep of pkg.manifest.dependencies) {
       const where = join(pkg.dir, MANIFEST);
-      const fail = (message: string) => inManifest(new CompileError(message, dep.start, dep.end), where);
+      const fail = (message: string) => inManifest(new CompileError("E0906", message, dep.start, dep.end), where);
       // What a commit pins can't reach past it to files on this machine.
       if (pkg.git && "path" in dep) throw fail(`'${pkg.manifest.name}' comes from git, so its dependencies must too; a path dependency would bring in files its commit doesn't pin`);
       if ("version" in dep) {
@@ -73,7 +73,7 @@ export function resolvePackages(entry: string, locking: Locking): Package[] | un
     const file = join(p.dir, MANIFEST);
     const src = readFileSync(file, "utf8");
     const table = parseToml(src).get("rust-dependencies") as Table;
-    throw inManifest(new CompileError(`the dependency '${p.manifest.name}' lists Rust crates under [rust-dependencies]; only the package being built may list them for now`, table.start, table.end), file, src);
+    throw inManifest(new CompileError("E0906", `the dependency '${p.manifest.name}' lists Rust crates under [rust-dependencies]; only the package being built may list them for now`, table.start, table.end), file, src);
   }
   lock(locking, packages);
   return packages;
@@ -101,7 +101,7 @@ function lock(locking: Locking, packages: Package[]) {
     // The same source at the same version should be the same files; a new version is just new.
     const same = before?.keys.get("source")?.value.value === source && before?.keys.get("version")?.value.value === p.registry?.version;
     if (checksum && same && was !== checksum) {
-      throw inManifest(new CompileError(`the files of '${p.manifest.name}' at ${p.dir} no longer match its checksum in ${LOCKFILE}; delete that directory to fetch it again`, before!.start, before!.end), file, had);
+      throw inManifest(new CompileError("E0906", `the files of '${p.manifest.name}' at ${p.dir} no longer match its checksum in ${LOCKFILE}; delete that directory to fetch it again`, before!.start, before!.end), file, had);
     }
     // The package manager flags a dependency that uses unsafe when it first enters the lock.
     if (p.registry?.unsafe && before?.keys.get("unsafe")?.value.value !== true) console.error(`note: '${p.manifest.name}' ${p.registry.version} from the registry uses unsafe`);
@@ -110,7 +110,7 @@ function lock(locking: Locking, packages: Package[]) {
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const text = ["# Written by fishc build; it records exactly which packages a build used.", "version = 1", ...entries.map((e) => `\n[[package]]\nname = "${e.name}"${e.version ? `\nversion = "${e.version}"` : ""}\nsource = ${JSON.stringify(e.source)}${e.checksum ? `\nchecksum = "${e.checksum}"` : ""}${e.unsafe ? "\nunsafe = true" : ""}`)].join("\n") + "\n";
   if (text === had) return;
-  if (locking.locked) throw inManifest(new CompileError(`${LOCKFILE} is out of date with ${MANIFEST}, and --locked keeps it as it is; build without --locked to update it, then commit it`, 0, 1), had === undefined ? join(root!.dir, MANIFEST) : file, had);
+  if (locking.locked) throw inManifest(new CompileError("E0906", `${LOCKFILE} is out of date with ${MANIFEST}, and --locked keeps it as it is; build without --locked to update it, then commit it`, 0, 1), had === undefined ? join(root!.dir, MANIFEST) : file, had);
   // Written beside it and moved over it, so a build reading it never sees half a lock.
   const next = `${file}.${process.pid}.tmp`;
   writeFileSync(next, text);
@@ -353,7 +353,7 @@ function locked(file: string, src: string): Map<string, Table> {
   try {
     const toml = parseToml(src);
     const version = (toml.get("") as Table).keys.get("version");
-    if (version?.value.value !== 1) throw new CompileError(`this ${LOCKFILE} isn't one this fishc writes, version 1; a newer fishc may have written it`, version?.value.start ?? 0, version?.value.end ?? 1);
+    if (version?.value.value !== 1) throw new CompileError("E0906", `this ${LOCKFILE} isn't one this fishc writes, version 1; a newer fishc may have written it`, version?.value.start ?? 0, version?.value.end ?? 1);
     const found = toml.get("package") ?? [];
     return new Map((Array.isArray(found) ? found : [found]).map((t) => [String(t.keys.get("name")?.value.value), t]));
   } catch (e) {
@@ -477,6 +477,6 @@ export function dependencyLib(packages: Package[], from: string, specifier: stri
   const dep = owner.deps.get(name);
   if (!dep) return undefined;
   // A package's lib is its public face: its other files' exports are for its own files alone.
-  if (name !== specifier) throw new CompileError(`'${specifier}' is a file inside the package '${name}', and a package's files are private to it; import from '${name}', which gives what its lib ${dep.manifest.lib} exports`, at.start, at.end);
+  if (name !== specifier) throw new CompileError("E0903", `'${specifier}' is a file inside the package '${name}', and a package's files are private to it; import from '${name}', which gives what its lib ${dep.manifest.lib} exports`, at.start, at.end);
   return join(dep.dir, dep.manifest.lib);
 }

@@ -29,9 +29,10 @@ import type { DynTable } from "./values.ts";
 // `fileNames`: for a linked program, each file's top-level names by its base offset: the name each
 // declaration it reaches takes in the program, to the name the file writes for it.
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
+// `looked`: every source file loading read or looked for, as an absolute path, missing ones included.
 export type Compilation = {
   session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: number; file: string; src: string }[]; rust: RustTables;
-  enumInits: [number, number, string][]; fileNames: WeakMap<Stmt[], Map<number, Map<string, string>>>; generated: WeakNodeSet<Id>;
+  enumInits: [number, number, string][]; fileNames: WeakMap<Stmt[], Map<number, Map<string, string>>>; generated: WeakNodeSet<Id>; looked: string[];
 };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
@@ -65,7 +66,7 @@ export function newSession(): Session {
 }
 
 export function newCompilation(session: Session): Compilation {
-  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet() };
+  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet(), looked: [] };
 }
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
@@ -158,6 +159,8 @@ export type Tables = {
   inspectCalls: WeakNodeSet<Expr>;
   // The `isDeepStrictEqual` calls checked as the `===` they were turned into.
   deepEqualities: WeakNodeSet<Expr>;
+  // The calls `spawnBlocking` makes of a function it was given other than as an arrow.
+  blockingRuns: WeakNodeSet<Expr>;
   // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
   parsedArgs: WeakNodeSet<Expr>;
   // The values printed as Node's util.inspect prints them, whose types as written say how their
@@ -338,6 +341,7 @@ export function newTables({ typing, upcasts, ids, regex, files, rust, generated 
     awaitedNow: new WeakNodeSet<Expr>(),
     inspectCalls: new WeakNodeSet<Expr>(),
     deepEqualities: new WeakNodeSet<Expr>(),
+    blockingRuns: new WeakNodeSet<Expr>(),
     parsedArgs: new WeakNodeSet<Expr>(),
     printed: new WeakNodeSet<Expr>(),
     clocks: new WeakNodeMap<Expr, "Date.now" | "performance.now" | "Math.random">(),
