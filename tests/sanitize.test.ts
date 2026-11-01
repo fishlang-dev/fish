@@ -85,6 +85,10 @@ test("--sanitize refused where it can't apply", () => {
   writeFileSync(join(root, "lib.fsh"), "export function f(): i64 {\n  return 1;\n}\n");
   expect(fishc("lib.fsh", "--sanitize", "address", "--lib", "-o", "libf.a")).toEqual([2, "fishc build: '--sanitize' can't build a library; build the program that uses it with '--sanitize' instead\n"]);
   expect(fishc("lib.fsh", "--sanitize", "address", "--emit-llvm")).toEqual([2, "fishc build: '--emit-llvm' prints the IR before clang instruments it, so '--sanitize' doesn't apply; leave it out\n"]);
+  for (const command of ["run", "check", "watch"]) {
+    const done = Bun.spawnSync(["bun", MAIN, command, "lib.fsh", "--sanitize", "address"], { cwd: root });
+    expect([done.exitCode, done.stderr.toString()]).toEqual([2, `fishc ${command}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes\n`]);
+  }
   expect(fishc("lib.fsh", "--sanitize=address,thread")).toEqual([1, "fishc build: --sanitize takes one sanitizer at a time; address and thread can't instrument the same build\n"]);
   expect(fishc("lib.fsh", "--sanitize", "address", "--sanitize", "thread")).toEqual([1, "fishc build: --sanitize takes one sanitizer at a time; address and thread can't instrument the same build\n"]);
 });

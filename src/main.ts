@@ -740,6 +740,7 @@ else if (import.meta.main) {
     return result;
   };
   session.locking.locked = values.locked === true;
+  if (values.sanitize && command !== "build") fail(`fishc ${command}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes`);
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
