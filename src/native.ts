@@ -3962,6 +3962,8 @@ static int32_t fsh_panicked = 0;
 static fsh_task *fsh_main_task = NULL;
 // The task running timers' callbacks, once one is set.
 static fsh_task *fsh_timeouts_task = NULL;
+// Blocking tasks not yet done, which the runtime's end can't drop while a pool thread may poll one.
+static int64_t fsh_blocking_live = 0;
 
 static void fsh_push(fsh_queue *q, fsh_task *t) {
   pthread_mutex_lock(&q->lock);
@@ -4071,6 +4073,8 @@ static void fsh_run(fsh_task *t) {
   t->joiner = NULL;
   if (t == fsh_main_task || t == fsh_timeouts_task) pthread_cond_broadcast(&fsh_finished);
   pthread_mutex_unlock(&fsh_alive_lock);
+  // Before the joiner wakes, so a main that ends once it is woken sees this one done.
+  if (t->blocking) __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
   if (joiner) {
     fsh_rt_wake(joiner);
     fsh_task_release(joiner);
@@ -4144,6 +4148,7 @@ fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_outp
 fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
   fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
   t->blocking = 1;
+  __atomic_add_fetch(&fsh_blocking_live, 1, __ATOMIC_RELAXED);
   fsh_schedule(t);
   return t;
 }
@@ -5435,9 +5440,9 @@ static fsh_file_job *fsh_pool_head = NULL, *fsh_pool_tail = NULL;
 // for a while; jobs past the cap wait for a thread.
 #define FSH_POOL_MAX 512
 #define FSH_POOL_IDLE_SECONDS 10
+// ponytail: file reads, writes and lookups queue behind blocking tasks once all 512 are busy, as in
+// Tokio; give them a pool of their own if programs saturate it.
 static int64_t fsh_pool_threads = 0, fsh_pool_idle = 0, fsh_pool_queued = 0;
-// Blocking tasks queued on the pool or being polled there, which the runtime's end can't drop.
-static int64_t fsh_blocking_live = 0;
 
 void fsh_rt_file_job_release(fsh_file_job *job) {
   if (!job || __atomic_sub_fetch(&job->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
@@ -5941,7 +5946,6 @@ static void fsh_pool_run(fsh_file_job *job) {
   fsh_task *task = job->task;
   fsh_rt_free(job);
   fsh_run(task);
-  __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
 }
 
 static void *fsh_pool_work(void *arg) {
@@ -6035,7 +6039,6 @@ static void fsh_pool_task(fsh_task *t) {
   memset(job, 0, sizeof *job);
   job->op = 3;
   job->task = t;
-  __atomic_add_fetch(&fsh_blocking_live, 1, __ATOMIC_RELAXED);
   pthread_mutex_lock(&fsh_pool_lock);
   fsh_pool_enqueue(job);
   pthread_mutex_unlock(&fsh_pool_lock);
