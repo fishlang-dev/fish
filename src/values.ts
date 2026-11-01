@@ -1121,8 +1121,22 @@ export function expressions(ctx: Context) {
     // `spawn(p)`: the future runs as a task of its own, on any thread, and its handle awaits it.
     // The std library's code calls the built-ins, whatever a program names its own functions.
     const inStd = e.start >= STD_BASE;
-    // std's `timer spawn` is `spawn` with the task's first poll run at once.
-    if (callee.kind === "ident" && ((callee.name === "spawn" && (!byName.has("spawn") || inStd)) || (callee.name === "timer spawn" && inStd))) {
+    // `spawnBlocking(f)` is `spawn(async () => f())` with the task polled on the blocking pool, so
+    // f may block or compute for long without holding up the async workers.
+    if (callee.kind === "ident" && callee.name === "spawnBlocking" && (!byName.has("spawnBlocking") || inStd)) {
+      if (!ctx.async) throw new CompileError("E0301", "'spawnBlocking' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
+      const f = e.args[0];
+      if (e.args.length !== 1 || !f) throw new CompileError("E0305", "'spawnBlocking' takes the function to run, like 'spawnBlocking(() => hash(data))'", e.start, e.end);
+      if (f.kind === "arrow" && f.async) throw new CompileError("E0305", "'spawnBlocking' runs a synchronous function on a thread of its own; run async work with 'spawn' instead", f.start, f.end);
+      const run: Expr = { id: nextId(ids), kind: "call", callee: f, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
+      e.callee = { id: nextId(ids), kind: "ident", name: "blocking spawn", start: callee.start, end: callee.end };
+      e.args[0] = { id: nextId(ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: run, start: f.start, end: f.end };
+      return call(e);
+    }
+    // std's `timer spawn` is `spawn` with the task's first poll run at once; `blocking spawn` is
+    // what `spawnBlocking` becomes.
+    const spawning = callee.kind === "ident" && callee.name === "blocking spawn" ? "spawnBlocking" : "spawn";
+    if (callee.kind === "ident" && ((callee.name === "spawn" && (!byName.has("spawn") || inStd)) || (callee.name === "timer spawn" && inStd) || callee.name === "blocking spawn")) {
       if (!ctx.async) throw new CompileError("E0301", "'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("E0305", "'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
@@ -1134,7 +1148,7 @@ export function expressions(ctx: Context) {
       if (typeof t === "string" || t.kind !== "future" || t === YIELD_NOW || t === SLEEP || leafOf.has(t)) throw new CompileError("E0305", `'spawn' needs a Promise from an async function's call, not '${show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       const blocker = unsent(t);
       if (blocker) {
-        throw new CompileError("E0303", `'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
+        throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${show(blocker)}', which ${typeof blocker !== "string" && blocker.kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && blocker.kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
       }
       return { type: handleType(t.gives, t.throws), what: "'spawn'" };
     }

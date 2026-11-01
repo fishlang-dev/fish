@@ -3138,7 +3138,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
       case "return":
         if (jumps.has(s)) {
           given(s, jumps.get(s)!);
-        } else if (s.value && current.returns === "void") {
+        } else if (s.value && (current.future ? current.future.gives : current.returns) === "void") {
           // An arrow's expression body may be a call returning nothing.
           effect(s.value);
           settle();
@@ -6711,12 +6711,12 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
         return n;
       }
       // `spawn(p)`: the future's frame moves into a new task, whose handle this gives.
-      if (e.callee.kind === "ident" && (e.callee.name === "spawn" || e.callee.name === "timer spawn")) {
+      if (e.callee.kind === "ident" && (e.callee.name === "spawn" || e.callee.name === "timer spawn" || e.callee.name === "blocking spawn")) {
         const future = valueType(e.args[0]!) as FutureType;
         const [poll, drop, dropOutput] = taskGlue(future);
         const [frame, task] = [alloca(llvm(future)), temp()];
         emit(`store ${llvm(future)} ${owned(e.args[0]!)}, ptr ${frame}`);
-        const spawning = e.callee.name === "spawn" ? "fsh_rt_spawn" : "fsh_rt_spawn_now";
+        const spawning = { spawn: "fsh_rt_spawn", "timer spawn": "fsh_rt_spawn_now", "blocking spawn": "fsh_rt_spawn_blocking" }[e.callee.name];
         unwinding(`call ptr @${spawning}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(pollType(future))})`, task);
         if (!types.has(e)) pending.push({ v: task, type: handleType(future.gives, future.throws) });
         return task;
