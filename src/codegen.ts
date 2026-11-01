@@ -50,9 +50,10 @@ const UNWINDS = "uwtable personality ptr @__gcc_personality_v0";
 const FARG = "{ i32, i64, double, ptr, ptr }";
 const FARG_KINDS = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, parts: 6, digits: 7, bigint: 8 };
 
-// Whether a socket future's address is a path, as a Unix socket's is, rather than a host and port.
+// Whether a socket future's address is a path rather than a host and port: a Unix socket's, or
+// std's own TCP-typed socket on a path, whose leaf gives the socket type where TCP's gives void.
 function onPath(of: Type): boolean {
-  return typeof of !== "string" && of.kind === "block" && (of.which === "UnixListener" || of.which === "UnixStream");
+  return typeof of !== "string" && of.kind === "block" && of.which !== "UdpSocket";
 }
 
 // A float constant as LLVM writes one exactly: the bits of the double holding it, which for
@@ -8356,7 +8357,7 @@ export function codegen({ instances, tables: noted }: Checked, { src, file, rele
           emit(`${host} = load ptr, ptr ${hostAt}`);
           emit(`${port} = load i64, ptr ${portAt}`);
           if (leaf.method === "bind" && leaf.of !== "void" && !onPath(leaf.of)) emit(`${outcome} = call i32 @fsh_rt_udp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
-          else if (leaf.method === "bind" && leaf.of !== "void") emit(`${outcome} = call i32 @fsh_rt_unix_bind(ptr ${host}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.method === "bind" && onPath(leaf.of)) emit(`${outcome} = call i32 @fsh_rt_unix_bind(ptr ${host}, ptr ${made}, ptr ${reason})`);
           else if (leaf.method === "bind") emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
           else if (leaf.of !== "void") emit(`${outcome} = call i32 @fsh_rt_unix_connect(ptr ${slot}, ptr ${host}, ptr %cx, ptr ${made}, ptr ${reason})`);
           else emit(`${outcome} = call i32 @fsh_rt_tcp_connect(ptr ${slot}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${made}, ptr ${reason})`);
