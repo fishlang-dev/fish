@@ -7510,6 +7510,8 @@ const syncFileSignatures = (typing: Typing): Record<string, [Type[], Type, boole
   // From, to and the COPYFILE_ flags.
   fileCopy: [["string", "string", "i64"], "void", true],
   pathUnlink: [["string"], "void", true],
+  // A path and the R_OK, W_OK and X_OK bits.
+  pathAccess: [["string", "i64"], "void", true],
   // A command, its arguments, the working directory ("" for this one's) and stdin, giving the
   // pid, exit status (-1 for a signal), signal number, stdout and stderr.
   processSpawn: [["string", typing.arrayType("string"), "string", typing.arrayType("u8")], typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), true],

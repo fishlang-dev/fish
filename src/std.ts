@@ -4647,6 +4647,12 @@ export async function writeFile(path: string, data: string | u8[]): Promise<void
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
   await fileWrite(path, bytes);
 }
+
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+
+export async function access(path: string, mode: i64 = 0): Promise<void> throws IoError {
+  await spawnBlocking(() => pathAccess(path, mode));
+}
 `,
   fs: String.raw`
 export function readFileSync(path: string): u8[] throws IoError {
@@ -4726,7 +4732,7 @@ export function renameSync(oldPath: string, newPath: string): void throws IoErro
   pathRename(oldPath, newPath);
 }
 
-export const constants = { COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
 
 export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
   fileCopy(src, dest, mode);
@@ -4734,6 +4740,10 @@ export function copyFileSync(src: string, dest: string, mode: i64 = 0): void thr
 
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
+}
+
+export function accessSync(path: string, mode: i64 = 0): void throws IoError {
+  pathAccess(path, mode);
 }
 `,
   child_process: String.raw`

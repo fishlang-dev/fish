@@ -7008,6 +7008,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       case "pathUnlink":
         emit(`${status} = call i32 @fsh_rt_fs_unlink(ptr ${path}, ptr ${parts})`);
         break;
+      case "pathAccess":
+        emit(`${status} = call i32 @fsh_rt_fs_access(ptr ${path}, i64 ${value(e.args[1]!)}, ptr ${parts})`);
+        break;
       case "dirMake": {
         const [recursive, out] = [temp(), alloca("ptr")];
         emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);

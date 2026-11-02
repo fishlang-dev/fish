@@ -6254,6 +6254,16 @@ int32_t fsh_rt_fs_unlink(fsh_str *path, fsh_str **error) {
   return result;
 }
 
+// accessSync, its mode the bits of R_OK, W_OK and X_OK, checked first as Node checks it.
+int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
+  if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "access", "");
+  int32_t result = access(c, (int)mode) == 0 ? 1 : fsh_fs_failed(error, errno, "access", c);
+  fsh_rt_free(c);
+  return result;
+}
+
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;

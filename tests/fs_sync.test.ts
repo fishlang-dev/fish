@@ -17,12 +17,14 @@ function compare(name: string, imports: string, body: string, setup: (dir: strin
   setup(fishDir);
   setup(nodeDir);
   const program = join(tmp, `${name}.fsh`);
-  writeFileSync(program, `${imports}\nfunction main(): void throws IoError {${body}\n}\n`);
+  // A body that awaits runs in an async main, as node's runs in an async arrow.
+  const async = body.includes("await ");
+  writeFileSync(program, `${imports}\n${async ? "async " : ""}function main(): ${async ? "Promise<void>" : "void"} throws IoError {${body}\n}\n`);
   const out = join(tmp, name);
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: fishDir, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants } = fs; (() => {${nodeBody}\n})();`;
+  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, constants } = fs; const fsp = require("node:fs/promises"); const { access } = fsp; (${async ? "async " : ""}() => {${nodeBody}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: nodeDir });
   expect(fish.stderr.toString()).toBe("");
   expect(node.stderr.toString()).toBe("");
@@ -157,5 +159,27 @@ test("renameSync, copyFileSync and unlinkSync give what node's give", () => {
     symlinkSync("f", join(dir, "lf"));
     symlinkSync("nowhere", join(dir, "ln"));
     symlinkSync("made", join(dir, "dl"));
+  });
+});
+
+test("accessSync and access give what node's give", () => {
+  const imports = `import { accessSync, constants } from "node:fs";\nimport * as fsp from "node:fs/promises";\nimport { access } from "fs/promises";`;
+  compare("access", imports, `
+  console.log(constants.F_OK, constants.R_OK, constants.W_OK, constants.X_OK, fsp.constants.W_OK);
+  accessSync("f");
+  accessSync("d", constants.R_OK | constants.W_OK | constants.X_OK);
+  const cases: [string, i64][] = [["ro", constants.W_OK], ["ro", constants.R_OK | constants.X_OK], ["missing", constants.F_OK], ["f/x", 0], ["", 0], ["f", 8], ["f", -1]];
+  for (const [p, mode] of cases) {
+    // A mode out of range is node's RangeError, with no system call; Fish's IoError gives "".
+    try { accessSync(p, mode); console.log("ok", p); } catch (e) { console.log(e.message, e.code, e.code === "ERR_OUT_OF_RANGE" ? "-" : e.syscall, e.path ?? "none"); }
+  }
+  await access("ro", constants.R_OK);
+  await fsp.access("d");
+  for (const [p, mode] of cases) {
+    try { await access(p, mode); console.log("ok", p); } catch (e) { console.log(e.message, e.code, e.code === "ERR_OUT_OF_RANGE" ? "-" : e.syscall, e.path ?? "none"); }
+  }`, (dir) => {
+    mkdirSync(join(dir, "d"));
+    writeFileSync(join(dir, "f"), "hi");
+    writeFileSync(join(dir, "ro"), "hi", { mode: 0o444 });
   });
 });
