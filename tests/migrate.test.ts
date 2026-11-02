@@ -32,7 +32,8 @@ test("R5 finds the arguments object, but not a binding of that name", () => {
 });
 
 test("R6 finds Symbol, but not a name the file declares", () => {
-  expect(hits("const s = Symbol(\"s\");\nclass C {\n  *[Symbol.iterator]() {}\n}\nlet t: Symbol;\n")).toEqual([["R6", "Symbol"], ["R6", "Symbol"], ["R6", "Symbol"]]);
+  expect(hits("const s = Symbol(\"s\");\nclass C {\n  *[Symbol.asyncIterator]() {}\n}\nlet t: Symbol;\n")).toEqual([["R6", "Symbol"], ["R6", "Symbol"], ["R6", "Symbol"]]);
+  expect(hits("class C {\n  *[Symbol.iterator]() {}\n}\ninterface I {\n  [Symbol.iterator](): Iterator<i64>;\n}\nconst it = c[Symbol.iterator]();\nconst o = { [Symbol.iterator]: 1 };\n")).toEqual([["R6", "Symbol"]]);
   expect(hits("import { Symbol } from \"./symbols\";\nconst s = Symbol(1);\n")).toEqual([]);
   expect(hits("class Symbol {}\nconst s = new Symbol();\nconst t: symbol = u;\n")).toEqual([]);
 });

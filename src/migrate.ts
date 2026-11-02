@@ -46,7 +46,7 @@ export const REJECTS: Record<string, string> = {
   R2: "prototype edits and Object.defineProperty change a type after it is declared, and Fish types have fixed layouts; declare the field or method on the class, or wrap the value",
   R3: "delete removes a field, and Fish objects have fixed layouts; make the field an Option and set it to null, or keep the entries in a dictionary, '{ [k: string]: T }', or a Map",
   R5: "the arguments object isn't in Fish; take the arguments as a rest parameter, as in '...args: T[]'",
-  R6: "Symbol is runtime reflection, which Fish doesn't have; use a string or an enum for a key, and an interface for a protocol",
+  R6: "Symbol is runtime reflection, which Fish doesn't have beyond a '[Symbol.iterator]' method; use a string or an enum for a key, and an interface for a protocol",
   R7: "declaration merging and module augmentation reopen a type after it is declared, and Fish types are closed; give everything in one declaration, or a new name",
 };
 
@@ -133,6 +133,9 @@ export function rejects(program: unknown[], nodes: Node[] = everyNode(program), 
   const ownPrototype = new Set(nodes.flatMap((n) => (n.kind === "class" && typeof n.name === "string" && (n.members as Node[]).some((m) => OWN_MEMBERS.has(m.kind) && m.name === "prototype") ? [n.name] : [])));
   const hits: Hit[] = [];
   const hit = (rule: string, start: usize, end: usize) => hits.push({ rule, action: "reject", start, end });
+  // `Symbol.iterator` as a method's key, or read as `x[Symbol.iterator]`, names an iterable's method.
+  const iterator = (k: unknown) => (isNode(k) && k.kind === "member" && k.name === "iterator" && isNode(k.object) && named(k.object, "Symbol") ? [k.object] : []);
+  const iterating = new Set<unknown>(nodes.flatMap((n) => (n.kind === "method" ? iterator(n.name) : n.kind === "index" ? iterator(n.index) : [])));
   for (const n of nodes) {
     const callee = n.callee as Node | undefined;
     if (n.kind === "call" && (named(callee, "eval") || named(callee, "Function"))) hit("R1", callee!.start, callee!.end);
@@ -144,7 +147,7 @@ export function rejects(program: unknown[], nodes: Node[] = everyNode(program), 
     if (n.kind === "unary" && n.op === "delete" && !(isNode(n.operand) && (n.operand.kind === "index" || n.operand.kind === "member") && dictionary(n.operand.object))) hit("R3", n.start, n.end);
     const use = n.kind === "ident" || n.kind === "shorthand" || n.kind === "ref" ? (n.name as string) : undefined;
     if (use === "arguments" && n.kind !== "ref" && !declared.has(use)) hit("R5", n.start, n.end);
-    if (use === "Symbol" && !declared.has(use)) hit("R6", n.start, n.end);
+    if (use === "Symbol" && !declared.has(use) && !iterating.has(n)) hit("R6", n.start, n.end);
     if (n.kind === "namespace" && (n.quoted === true || n.global === true)) hit("R7", n.start, n.end);
   }
   for (const list of [program, ...nodes.flatMap((n) => Object.values(n).filter(Array.isArray))]) merged(list, hit);
