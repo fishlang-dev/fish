@@ -118,7 +118,7 @@ export class NodeMap<K extends Id, V> {
     return this.table.has(idOf(node, this.table.get(node.id)?.node));
   }
 
-  set(node: K, value: V): this {
+  set(this: Mut<this>, node: K, value: V): Mut<this> {
     this.table.set(idOf(node, this.table.get(node.id)?.node), { node, value });
     return this;
   }
@@ -168,7 +168,7 @@ export class NodeSet<K extends Id> {
     return this.table.has(idOf(node, this.table.get(node.id)));
   }
 
-  add(node: K): this {
+  add(this: Mut<this>, node: K): Mut<this> {
     this.table.set(idOf(node, this.table.get(node.id)), node);
     return this;
   }
@@ -210,7 +210,7 @@ export class WeakNodeMap<K extends Id, V> {
     return this.table.has(idOf(node, this.table.get(node.id)?.node.deref()));
   }
 
-  set(node: K, value: V): this {
+  set(this: Mut<this>, node: K, value: V): Mut<this> {
     const held = this.table.get(node.id);
     if (!held) this.gone.register(node, node.id);
     this.table.set(idOf(node, held?.node.deref()), { node: new WeakRef(node), value });
@@ -231,7 +231,7 @@ export class WeakNodeSet<K extends Id> {
     return this.table.has(idOf(node, this.table.get(node.id)?.deref()));
   }
 
-  add(node: K): this {
+  add(this: Mut<this>, node: K): Mut<this> {
     const held = this.table.get(node.id);
     if (!held) this.gone.register(node, node.id);
     this.table.set(idOf(node, held?.deref()), new WeakRef(node));
