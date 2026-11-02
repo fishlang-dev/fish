@@ -28,9 +28,6 @@ import { hoistLocals } from "./locals.ts";
 import { localKeys, lowerKeys, numberKey, topKeys } from "./keys.ts";
 import { lowerOverloads } from "./overloads.ts";
 import { checkMoves } from "./moves.ts";
-import { NATIVE } from "./native.ts";
-import { MATH_RUNTIME } from "./mathlib.ts";
-import { RUNTIME } from "./runtime.ts";
 import { Expressions, ExpressionsState, stringLike, type Context, type DynTable } from "./values.ts";
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 
@@ -338,19 +335,8 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
 // A function body is checked when first needed, so return types can be inferred in any order.
 // Names an export can't take in C: its and C++'s keywords and the standard type names a header
-// uses, and the C functions the runtime and its IR call, which an export would replace.
+// uses. The C functions the runtime and its IR call come in as `check`'s `library`.
 export const C_KEYWORDS = new Set(["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool", "true", "false", "size_t", "ptrdiff_t", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "class", "namespace", "template", "this", "new", "delete", "public", "private", "protected", "virtual", "operator", "friend", "using", "try", "catch", "throw", "typename", "explicit", "mutable", "nullptr", "decltype", "constexpr", "noexcept", "export", "and", "or", "not", "xor"]);
-// The runtime's own calls are read from its code without its comments and strings, then the
-// math and unwinding functions the IR, or LLVM lowering it, calls, which no text names, then
-// the runtime's `Math` functions and the C ones they call.
-const NATIVE_CODE = NATIVE.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, " ");
-const LOWERED = ["fma", "feclearexcept", "feraiseexcept", "pow", "powf", "fmod", "fmodf", "sqrt", "sqrtf", "floor", "floorf", "ceil", "ceilf", "trunc", "truncf", "round", "roundf", "fabs", "fabsf", "exp", "expf", "log", "logf", "sin", "sinf", "cos", "cosf", "memset", "memmove", "memcpy", "memcmp", "bzero", "abort", "exit", "fflush", "dprintf", "printf", "malloc", "calloc", "realloc", "free", "write", "qsort"];
-const RUNTIME_NAMES = new Set([
-  ...[...NATIVE_CODE.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)].map((m) => m[1]!).filter((n) => !C_KEYWORDS.has(n)),
-  ...RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []),
-  ...LOWERED,
-  ...MATH_RUNTIME.map((f) => `fsh_math_${f}`),
-]);
 
 // A program setting timers runs on the async runtime, as Node's does, so a sync `main` runs as
 // an async one, its timers firing once it returns.
@@ -418,7 +404,6 @@ function typedBy(arrow: Extract<Expr, { kind: "arrow" }>, fn: TypeNode | undefin
   return { ...arrow, params, returnType: arrow.returnType ?? fn.returns, throws: arrow.throws ?? fn.throws };
 }
 
-// A library is checked with `library` set: it needs no `main`, and its exports cross to C.
 const MEMBERS = new Set(["field", "method", "constructor", "get", "set", "index", "staticBlock"]);
 
 // A macro takes the declaration it is applied to, and no type parameters.
@@ -433,10 +418,12 @@ function macroShape(f: Func) {
   if (!f.returnType) throw new CompileError("E1103", `a macro gives the declarations it makes, so it says so, ${shape}`, f.start, f.end);
 }
 
+// A library is checked with `library` holding the names C and the Fish runtime already use, which
+// its exports can't take: it needs no `main`, and its exports cross to C.
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 // With `module`, it may be a file another imports, checked on its own, so `main` is optional.
 // An error it throws names local declarations as they were written.
-export function check(compilation: Compilation, written: Stmt[], library = false, macros = false, module = false): Checked {
+export function check(compilation: Compilation, written: Stmt[], library: ReadonlySet<string> | false = false, macros = false, module = false): Checked {
   try {
     const checked = checkAll(compilation, written, library, macros, module);
     for (const w of checked.warnings) named(w, compilation.names);
@@ -446,7 +433,7 @@ export function check(compilation: Compilation, written: Stmt[], library = false
   }
 }
 
-function checkAll(compilation: Compilation, written: Stmt[], library: boolean, macros: boolean, module: boolean): Checked {
+function checkAll(compilation: Compilation, written: Stmt[], library: ReadonlySet<string> | false, macros: boolean, module: boolean): Checked {
   return new Checker(compilation, written, library, macros, module).run();
 }
 
@@ -454,6 +441,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   compilation: Compilation;
   written: Stmt[];
   library: boolean;
+  // The C names a library's exports can't take.
+  takenInC: ReadonlySet<string>;
   macros: boolean;
   module: boolean;
   arenas: Compilation["arenas"];
@@ -547,10 +536,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // The error each failed body's check gave, which a call of it gives again rather than another.
   failed = new Map<BodyId, CompileError>();
 
-  constructor(compilation: Compilation, written: Stmt[], library: boolean, macros: boolean, module: boolean) {
+  constructor(compilation: Compilation, written: Stmt[], library: ReadonlySet<string> | false, macros: boolean, module: boolean) {
     this.compilation = compilation;
     this.written = written;
-    this.library = library;
+    this.library = library !== false;
+    this.takenInC = library || new Set();
     this.macros = macros;
     this.module = module;
     this.arenas = this.compilation.arenas;
@@ -1412,7 +1402,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     // C reserves names starting with an underscore and a capital, or two underscores, for itself
     // and its runtime: the unwinder's `_Unwind_Resume` among them.
-    if (f.name === "main" || f.name.startsWith("fsh_") || /^_[A-Z_]/.test(f.name) || RUNTIME_NAMES.has(f.name)) {
+    if (f.name === "main" || f.name.startsWith("fsh_") || /^_[A-Z_]/.test(f.name) || this.takenInC.has(f.name)) {
       throw new CompileError("E1003", `a library can't export '${f.name}' to C, since C's library or the Fish runtime already uses that name`, f.start, f.end);
     }
     f.params.forEach((p) => {

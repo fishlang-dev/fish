@@ -3,12 +3,13 @@ import { check } from "../src/check.ts";
 import { newCompilation } from "../src/compilation.ts";
 import { cachedSession } from "../src/stdcache.ts";
 import { parse } from "../src/parser.ts";
+import { RUNTIME_NAMES } from "../src/main.ts";
 
 const session = cachedSession();
 // `src` checked as a program of its own, its nodes numbered by its compilation.
 const checkSource = (src: string, library = false) => {
   const compilation = newCompilation(session);
-  return check(compilation, parse(src, compilation.ids), library);
+  return check(compilation, parse(src, compilation.ids), library && RUNTIME_NAMES);
 };
 
 // Each type form that parses but has no meaning yet, and the rejection it gets.

@@ -174,3 +174,18 @@ test("no module that calls back into its host keeps state of its own", () => {
   }
   expect(offenders).toEqual([]);
 });
+
+// Fish checks a file with everything it imports, so a checker file reaching the CLI, the package
+// manager or codegen fails on their imports before its own code.
+test("the checker's files import no CLI, package, cargo-shim or codegen module", () => {
+  const reached = new Set<string>();
+  const visit = (file: string) => {
+    if (reached.has(file)) return;
+    reached.add(file);
+    const text = readFileSync(join(import.meta.dir, "..", "src", file), "utf8");
+    for (const m of text.matchAll(/^(?:import|export)[^;]*?from "\.\/([^"]+)"/gms)) visit(m[1]!);
+  };
+  CHECKER.forEach((name) => visit(`${name}.ts`));
+  const outside = ["main.ts", "modules.ts", "dependencies.ts", "manifest.ts", "mathlib.ts", "rustshim.ts", "codegen.ts", "layout.ts", "runtime.ts", "native.ts", "arithmetic.ts"];
+  expect(outside.filter((f) => reached.has(f))).toEqual([]);
+});

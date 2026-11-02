@@ -2,6 +2,7 @@ import type { Builder } from "./arithmetic.ts";
 import { category, ofKind, typeofTest, type Verdict } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
+import { byteSize, words } from "./sizes.ts";
 import type { Tables } from "./compilation.ts";
 import { isLock, isNumeric, type LiteralType, INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
@@ -34,46 +35,10 @@ export function layoutOf(typing: Typing): (t: Type) => string {
   };
 }
 
-function words(typing: Typing, t: UnionType): usize {
-  return Math.ceil(Math.max(...typing.rec(t).members.map((m) => size(typing, m)[0])) / 8);
-}
-
-// A type's size and alignment in bytes, as LLVM lays out its IR type on the 64-bit targets
-// Fish supports.
 // An array is its elements' buffer, its length and its capacity, in elements.
 export const ARRAY = "{ ptr, i64, i64 }";
 // A Dyn is a pointer to its value's block, then to its vtable.
 export const DYN = "{ ptr, ptr }";
-
-// A type's size in bytes as it is laid out.
-export const byteSize = (typing: Typing, t: Type): usize => size(typing, t)[0];
-
-function size(typing: Typing, t: Type): [usize, usize] {
-  const r = typeof t === "string" ? undefined : typing.rec(t);
-  if (r?.kind === "brand") return size(typing, r.base);
-  if (r?.kind === "array") return [24, 8];
-  if (r?.kind === "fixed") {
-    const [bytes, align] = size(typing, r.element);
-    return [Math.ceil(bytes / align) * align * r.size, align];
-  }
-  if (r?.kind === "dyn") return [16, 8];
-  if (isInteger(t)) return [INTEGERS[t].bits / 8, INTEGERS[t].bits / 8];
-  if (t === "f32") return [4, 4];
-  if (t === "f64") return [8, 8];
-  if (t === "boolean") return [1, 1];
-  if (t === "null" || t === "never") return [0, 1];
-  if (t === "string" || t === "bigint") return [8, 8];
-  if (r === undefined) return [0, 1];
-  if (r.kind === "ref" || r.kind === "pointer" || r.kind === "handle" || r.kind === "shared" || r.kind === "block" || r.kind === "map" || r.kind === "regex" || r.kind === "recursive") return [8, 8];
-  // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
-  if (r.kind === "union") return [8 + 8 * words(typing, t as UnionType), 8];
-  if (r.kind === "interior" && !isLock(r)) return size(typing, r.of);
-  const parts = r.kind === "interior" ? [[4, 4] as [usize, usize], size(typing, r.of)] : [...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.kind === "param" ? (r.bound ? typing.rec(r.bound).fields : []) : r.fields).map((f) => f.type)].map((p) => size(typing, p));
-  const align = Math.max(1, ...parts.map(([, a]) => a));
-  let bytes = 0;
-  for (const [n, a] of parts) bytes = Math.ceil(bytes / a) * a + n;
-  return [Math.ceil(bytes / align) * align, align];
-}
 
 // What converting needs besides emitting: a slot in the function's entry block.
 // `text` gives a pointer to a literal's string block, which lives for the whole program.

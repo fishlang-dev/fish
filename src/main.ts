@@ -20,7 +20,8 @@ import { parse, parseWithComments, type Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE, TLS_NATIVE, tlsStub } from "./native.ts";
-import { cachedObject, cachedObjectAsync, files, mathObjects, mathObjectsAsync } from "./mathlib.ts";
+import { cachedObject, cachedObjectAsync, files, MATH_RUNTIME, mathObjects, mathObjectsAsync } from "./mathlib.ts";
+import { RUNTIME } from "./runtime.ts";
 import type { Unit } from "./program.ts";
 import { dockerfile, dockerfilePath, findOpenSsl, HOST_TARGET, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
@@ -124,7 +125,7 @@ function expanded(compilation: Compilation, loaded: Loaded, library: boolean): S
 
 // `check` of a whole program, timed as the check stage.
 function checkedProgram(compilation: Compilation, program: Stmt[], library: boolean): Checked {
-  return timed(compilation.session.timings, "check", () => check(compilation, program, library));
+  return timed(compilation.session.timings, "check", () => check(compilation, program, library && RUNTIME_NAMES));
 }
 
 // Runs `run`, giving a compile error it throws the program's other files to render against, and
@@ -138,13 +139,26 @@ function withSources<T>({ names }: Compilation, sources: Source[], run: () => T)
   }
 }
 
+// The C names a library's exports can't take besides C's keywords, since an export would replace
+// them: the runtime's own calls, read from its code without its comments and strings, then the
+// math and unwinding functions the IR, or LLVM lowering it, calls, which no text names, then the
+// runtime's `Math` functions and the C ones they call.
+const NATIVE_CODE = NATIVE.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, " ");
+const LOWERED = ["fma", "feclearexcept", "feraiseexcept", "pow", "powf", "fmod", "fmodf", "sqrt", "sqrtf", "floor", "floorf", "ceil", "ceilf", "trunc", "truncf", "round", "roundf", "fabs", "fabsf", "exp", "expf", "log", "logf", "sin", "sinf", "cos", "cosf", "memset", "memmove", "memcpy", "memcmp", "bzero", "abort", "exit", "fflush", "dprintf", "printf", "malloc", "calloc", "realloc", "free", "write", "qsort"];
+export const RUNTIME_NAMES = new Set([
+  ...[...NATIVE_CODE.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)].map((m) => m[1]!).filter((n) => !C_KEYWORDS.has(n)),
+  ...RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []),
+  ...LOWERED,
+  ...MATH_RUNTIME.map((f) => `fsh_math_${f}`),
+]);
+
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
 export function buildLibrary(session: Session, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, debug = false): CompileError[] {
   const src = readFileSync(file, "utf8");
   const compilation = newCompilation(session);
   const loaded = load(compilation, file, src);
-  const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), true));
+  const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), RUNTIME_NAMES));
   const made = withSources(compilation, loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources, debug }), loaded));
   const ir = debug ? withDebugInfo(made, src, file, loaded.sources, release) : made;
   const shim = rustShim(loaded.rust, checked);
