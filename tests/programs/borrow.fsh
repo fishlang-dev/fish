@@ -860,3 +860,71 @@ function main() {
 // expect: cd 2 ab
 function pick(a: Ref<string[]>): Ref<string[]> { return a; }
 function main() { let xs = ["a" + "b", "c" + "d"]; pick(xs).forEach((x) => console.log(x, xs.length, xs[0]!)); }
+// case: borrow_loop_replaces_field_origin
+// error: borrow_loop_replaces_field_origin.fsh:6:36: error[E0203]: cannot change 'b' while a 'for...of' loop borrows 'b' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function main() {
+  let b = new Box();
+  for (const x of pick(b).items) { b = new Box(); console.log(x); }
+}
+// case: borrow_loop_replaces_returned_origin
+// error: borrow_loop_replaces_returned_origin.fsh:5:31: error[E0203]: cannot change 'xs' while a 'for...of' loop borrows 'xs' and is used later
+function pick(b: Ref<string[]>): Ref<string[]> { return b; }
+function main() {
+  let xs = ["a" + "b", "c" + "d"];
+  for (const x of pick(xs)) { xs = ["q" + "r"]; console.log(x); }
+}
+// case: borrow_loop_replaces_method_origin
+// error: borrow_loop_replaces_method_origin.fsh:6:36: error[E0203]: cannot change 'c' while a 'for...of' loop borrows 'c' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class C { b: Box = new Box(); get(): Ref<Box> { return this.b; } }
+function main() {
+  let c = new C();
+  for (const x of c.get().items) { c = new C(); console.log(x); }
+}
+// case: borrow_match_callback_replaces_origin
+// error: borrow_match_callback_replaces_origin.fsh:8:48: error[E0203]: cannot mutably lend 'h' while 'v' borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pick(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let h = new H();
+  match (pick(h).o) {
+    case Some(v) => { v.items.forEach((x) => { h = new H(); console.log(x); }); },
+    case None => {},
+  };
+}
+// case: borrow_match_replaces_origin
+// error: borrow_match_replaces_origin.fsh:8:23: error[E0203]: cannot change 'h' while 'v' borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pick(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let h = new H();
+  match (pick(h).o) {
+    case Some(v) => { h = new H(); console.log(v.items[0]!); },
+    case None => {},
+  };
+}
+// case: borrow_loop_reads_returned_origin
+// expect: ab 2 ab
+// expect: cd 2 ab
+// expect: ab 1
+// expect: 3
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function look(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let b = new Box();
+  for (const x of pick(b).items) console.log(x, b.items.length, b.items[0]!);
+  let h = new H();
+  match (look(h).o) {
+    case Some(v) => { console.log(v.items[0]!, h.o === null ? 0 : 1); },
+    case None => {},
+  };
+  b = new Box();
+  b.items.push("e" + "f");
+  console.log(b.items.length);
+}

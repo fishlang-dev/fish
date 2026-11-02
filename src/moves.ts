@@ -317,6 +317,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           last.set(loop.localId, s.end);
           inherit(loop, s.right);
           if (typing.holdsRef(each.type)) inherit(each, s.right);
+        } else if (state && !text && borrowsFrom.has(projected(s.right))) {
+          // Over a reference a call gave, or a field or element of one, the loop keeps what that
+          // reference borrows lent until it ends.
+          const loop = arenas.localOf(loopHolders.get(s)) ?? arenas.addLocal({ name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 });
+          loopHolders.set(s, loop.localId);
+          last.set(loop.localId, s.end);
+          hold(loop, projected(s.right));
+          if (typing.holdsRef(each.type)) hold(each, projected(s.right));
         }
         // Each pass may end the loop, like a condition that may be false.
         loop(s, () => ({ id: nextId(ids), kind: "bool", value: false, start: s.start, end: s.start }), () => {
@@ -693,8 +701,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const borrowing = bound.filter((l) => isRef(l.type));
           for (const holder of borrowing) {
             if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holder.localId]) });
-            // Through a reference, the binding holds what that reference borrows.
+            // Through a reference, the binding holds what that reference borrows, a reference a
+            // call gave included.
             inherit(holder, subject);
+            if (place === undefined && borrowsFrom.has(projected(subject))) hold(holder, projected(subject));
           }
           if (arm.guard) {
             const at = -arm.guard.start - 1;
