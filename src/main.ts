@@ -31,7 +31,7 @@ import { compare, formatComparison, formatReport, readReport, sources, survey } 
 import { explain } from "./codes.ts";
 import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type, type Typing } from "./typing.ts";
-import { rustShim, type Shim } from "./rust.ts";
+import { rustShim, type Shim } from "./rustshim.ts";
 import { split } from "./split.ts";
 import { withDebugInfo } from "./debuginfo.ts";
 import { watchProgram } from "./watch.ts";
