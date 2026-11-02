@@ -914,6 +914,7 @@ static uint64_t fsh_map_seed = 0;
 __attribute__((constructor)) static void fsh_map_seeding(void) {
   if (fsh_map_seed != 0) return;
   if (getentropy(&fsh_map_seed, sizeof fsh_map_seed) != 0) fsh_map_seed = (uint64_t)(intptr_t)&fsh_map_seed;
+  fsh_map_seed |= 1;
 }
 
 // ponytail: a seeded multiplicative hash, not SipHash; use SipHash-1-3 if hash flooding matters
