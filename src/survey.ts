@@ -43,7 +43,7 @@ const RULES: Rule[] = [
   { id: "G3", action: "guided", title: "a number used as a count or an index: make it i64, or usize for an index" },
   { id: "G4", action: "guided", title: "class extends with the base used as a type: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
   { id: "G5", action: "guided", title: "instanceof a class others extend: match on an interface or an enum instead" },
-  { id: "G6", action: "guided", title: "indexing an object with a string key: use a Map" },
+  { id: "G6", action: "guided", title: "indexing an object with a string key, or testing a key known only at run time with 'in': use a Map" },
   { id: "G7", action: "guided", title: "top-level code with side effects: move it into main() or a Lazy<T>" },
   { id: "G8", action: "guided", title: "isNaN after parsing: Fish's parsing gives an Option to check" },
   { id: "G9", action: "guided", title: ".call, .apply and .bind: pass the receiver explicitly or use a closure" },
