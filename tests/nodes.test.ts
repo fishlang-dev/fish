@@ -333,7 +333,7 @@ const OBJECT_KEYED = [
   "compilation.ts: WeakMap<Stmt[]", "compilation.ts: WeakMap<object", "codegen.ts: WeakSet<object", "typing.ts: WeakSet<CompileError",
 ];
 
-// Fish's Map and Set key on strings and integers, so every table the checker keeps does: by a
+// Fish's Map and Set key on strings and numbers, so every table the checker keeps does: by a
 // string, an integer, an arena id, a string-literal union, or through NodeMap, TypeMap and their
 // kin, which key by id. Type parameters, `K` and `T`, are a generic table's own.
 test("no Map, WeakMap, Set or WeakSet in the checker is keyed by anything but strings or integers", () => {

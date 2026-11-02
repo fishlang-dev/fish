@@ -117,10 +117,51 @@ function main() {
   console.log(v === null ? "" : v.join());
 }
 // case: map_key_float
-// error: a 'Set' holds strings or integers, or unions of their literals, not 'number'
-function main() { const s = new Set<number>(); }
+// expect: 3 c y y true false
+// expect: Map(3) { 1.5 => 'a', NaN => 'c', 0 => 'y' }
+// expect: NaN c
+// expect: 0 y
+// expect: 1.5,NaN,0
+// expect: true 2 3 y
+// expect: 4 true true Set(4) { 1, 2, NaN, 0 }
+// expect: 1 Map(1) { 0 => 2 }
+// expect: 1.25 2
+// expect: Infinity 3
+// Float keys compare as JavaScript's SameValueZero does: every NaN is one key, and -0 is 0.
+function main() {
+  const nan: number = 0.0 / 0.0;
+  const inf: number = 1.0 / 0.0;
+  let m = new Map<number, string>();
+  m.set(1.5, "a");
+  m.set(nan, "b");
+  m.set(-nan, "c");
+  m.set(-0.0, "z");
+  m.set(0, "y");
+  console.log(m.size, m.get(nan), m.get(0), m.get(-0.0), m.has(1.5), m.has(2.5));
+  console.log(m);
+  for (const [k, v] of m) if (k !== 1.5) console.log(k, v);
+  console.log(m.keys().join());
+  const c = m.clone();
+  console.log(m.delete(-0.0), m.size, c.size, c.get(0));
+  let s = new Set<number>([1, 2, 1, nan, nan, -0.0, 0]);
+  console.log(s.size, s.has(nan), s.has(0), s);
+  let f = new Map<f32, i64>();
+  f.set(-0.0, 1);
+  f.set(0, 2);
+  console.log(f.size, f);
+  let n = new Map<number, i64>([[1.25, 1], [1.25, 2], [inf, 3]]);
+  n.forEach((v, k) => console.log(k, v));
+}
+// case: map_key_float_generic
+// expect: Map(2) { 0.5 => 2, 0 => 2 }
+function count<K>(xs: K[]): Map<K, i64> {
+  let m = new Map<K, i64>();
+  for (const x of xs) m.set(x.clone(), (m.get(x.clone()) ?? 0) + 1);
+  return m;
+}
+function main() { console.log(count<number>([0.5, -0.0, 0.0, 0.5])); }
 // case: map_key_object
-// error: a 'Map' is keyed by strings or integers, or unions of their literals, not 'P'; objects as keys aren't supported yet
+// error: a 'Map' is keyed by strings or numbers, or unions of their literals, not 'P'; objects as keys aren't supported yet
 class P {} function main() { const m = new Map<P, i64>(); }
 // case: map_keys
 // expect: 3 2 false true n,s

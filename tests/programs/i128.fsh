@@ -105,7 +105,7 @@ function main(): void {
 function main(): void {
   const m = new Map<i128, string>();
 }
-// error: a 'Map' is keyed by strings or integers, or unions of their literals, not 'i128'
+// error: a 'Map' is keyed by strings or numbers, or unions of their literals, not 'i128'
 // case: i128_atomic
 function main(): void {
   const a = new Atomic<u128>(0);

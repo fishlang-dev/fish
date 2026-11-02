@@ -792,13 +792,15 @@ class Interpreter {
   private put(table: Table, k: Value, v: Value) {
     const name = this.keyName(k);
     const was = table.entries.get(name);
-    table.entries.set(name, [was ? was[0] : k, v]);
+    // As at run time, a float key of -0 is kept as 0.
+    table.entries.set(name, [was ? was[0] : unwrap(k) === 0 ? 0 : k, v]);
   }
 
-  // The string a key is compared by: the checker keys a Map by strings or integers.
+  // The string a key is compared by, which for a float is SameValueZero's: `String` names every
+  // NaN alike and -0 as 0.
   private keyName(k: Value): string {
     const v = unwrap(k);
-    return typeof v === "string" ? `s${v}` : `i${v as bigint}`;
+    return typeof v === "string" ? `s${v}` : `i${v as bigint | f64}`;
   }
 
   // A Map's entry as the pair of its key and value.
