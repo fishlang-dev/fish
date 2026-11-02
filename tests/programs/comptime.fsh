@@ -866,3 +866,36 @@ function up(comptime n: i64): i64 { return n + 1; }
 function main() {
   console.log(up(K[0]));
 }
+// case: comptime_maps
+// expect: 2 3 false true 10 -1 a=10 c=3 3 1 2 a c d 3 a:10 c:3
+// expect: 3 true 1 2 b a c
+// A Map, a Set and a dictionary built and read by code run while compiling.
+function counts(): string {
+  let m = new Map<string, i64>([["a", 1], ["b", 2]]);
+  m.set("c", 3);
+  m.set("a", 10);
+  m.delete("b");
+  let s = new Set<i64>([3, 1, 3]);
+  s.add(2);
+  let out = `${m.size} ${s.size} ${m.has("b")} ${s.has(1)} ${m.get("a") ?? -1} ${m.get("z") ?? -1}`;
+  for (const [k, v] of m) out += ` ${k}=${v}`;
+  for (const x of s) out += ` ${x}`;
+  const ks = [...m.keys(), "d"];
+  for (const k of ks) out += ` ${k}`;
+  out += ` ${[...s].length}`;
+  for (const [k, v] of m.entries()) out += ` ${k}:${v}`;
+  return out;
+}
+function dict(): string {
+  let d: Record<string, i64> = { b: 1, "2": 2, a: 3, "1": 4 };
+  d["c"] = 5;
+  let out = `${d["a"] ?? 0} ${"b" in d}`;
+  for (const k of Object.keys(d)) out += ` ${k}`;
+  return out;
+}
+const C = comptime counts();
+const D = comptime dict();
+function main() {
+  console.log(C);
+  console.log(D);
+}
