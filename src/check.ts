@@ -2369,7 +2369,14 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) loopPattern(s, d, d.target);
           if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
           if (d.type) throw new CompileError("E0004", "a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
-          const through = value(s.right);
+          let through = value(s.right);
+          // std's ServerWebSocket gives the messages its client sends.
+          if (s.await && webSocket(isRef(through) ? through.to : through)) {
+            const at = { start: s.right.start, end: s.right.end };
+            const callee: Expr = { id: nextId(ids), kind: "member", object: s.right, name: "__wsMessages", optional: false, ...at };
+            Object.assign(s, { right: { id: nextId(ids), kind: "call", callee, typeArgs: [], args: [], optional: false, ...at } });
+            through = value(s.right);
+          }
           const object = isRef(through) ? through.to : through;
           if (s.await) {
             awaitLoop(s, d.target.name, left.keyword === "let", through, object);
@@ -2579,6 +2586,11 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
           return;
         }
       }
+    }
+
+    // Whether a type is std's ServerWebSocket, which `for await` reads the messages of.
+    function webSocket(t: Type): boolean {
+      return typeof t !== "string" && t.kind === "class" && t.name === "ServerWebSocket" && classOf(t).constructor.start >= STD_BASE;
     }
 
     // `for await`: an async generator gives each value it yields, as a generator's loop does, and

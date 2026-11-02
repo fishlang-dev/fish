@@ -2,10 +2,11 @@ import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
 import { appendFileSync, chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildAsync, compile, ENGINE, runtimeUnits } from "../src/main.ts";
+import { buildAsync, compile, ENGINE, runtimeLinks, runtimeUnits } from "../src/main.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjectsAsync } from "../src/mathlib.ts";
 import { STD_SOURCE, stdKey } from "../src/std.ts";
 import { newSession } from "../src/compilation.ts";
+import { HOST_TARGET } from "../src/target.ts";
 
 const session = newSession();
 
@@ -324,7 +325,7 @@ async function bothWays(file: string, src: string) {
   await buildAsync(session, file, split);
   const ir = compile(session, src, file);
   const objects = (await Promise.all([...runtimeUnits(ir, false).map((u) => cachedObjectAsync(session, u)), mathObjectsAsync(session)])).flat();
-  const clang = Bun.spawn(["clang", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm"], { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
+  const clang = Bun.spawn(["clang", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm", ...runtimeLinks(ir, HOST_TARGET)], { stdin: new TextEncoder().encode(ir), stderr: "pipe" });
   expect(await clang.exited).toBe(0);
   const run = async (out: string) => {
     const done = Bun.spawn([out], { env: { ...process.env, FISH_LEAKS: "1" }, stdout: "pipe", stderr: "pipe", timeout: 10_000 });

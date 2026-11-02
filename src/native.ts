@@ -7786,8 +7786,9 @@ fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
   return fsh_tls_said("");
 }
 
-// Into out, 32 bytes, or 16 for MD5: SHA-256 of data (0), HMAC-SHA-256 of data keyed by key (1),
-// PBKDF2-HMAC-SHA-256 of the password key salted with data over rounds (2), or MD5 of data (3).
+// Into out, 32 bytes, 16 for MD5 and 20 for SHA-1: SHA-256 of data (0), HMAC-SHA-256 of data keyed by key (1),
+// PBKDF2-HMAC-SHA-256 of the password key salted with data over rounds (2), MD5 of data (3), or
+// SHA-1 of data (4).
 // 1 when OpenSSL did it; each call's own success value is checked, as they differ.
 int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, int64_t rounds, uint8_t *out) {
   unsigned int n = 0;
@@ -7797,6 +7798,7 @@ int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_leng
     case 1: ok = HMAC(EVP_sha256(), key, (int)key_length, data, (size_t)length, out, &n) != NULL && n == 32; break;
     case 2: ok = rounds > 0 && rounds <= INT_MAX && PKCS5_PBKDF2_HMAC((const char *)key, (int)key_length, data, (int)length, (int)rounds, EVP_sha256(), 32, out) == 1; break;
     case 3: ok = EVP_Digest(data, (size_t)length, out, &n, EVP_md5(), NULL) == 1 && n == 16; break;
+    case 4: ok = EVP_Digest(data, (size_t)length, out, &n, EVP_sha1(), NULL) == 1 && n == 20; break;
   }
   ERR_clear_error();
   return ok;

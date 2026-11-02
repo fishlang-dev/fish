@@ -316,8 +316,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         }
         // Each pass may end the loop, like a condition that may be false.
         loop(s, () => ({ id: nextId(ids), kind: "bool", value: false, start: s.start, end: s.start }), () => {
-          // Each pass gives a string's variable a new string, which it owns.
-          if (text) revive(String(each.id));
+          // Each pass gives a string's variable a new string, and a Channel's the value it
+          // received, which it owns.
+          if (text || s.await) revive(String(each.id));
           statements(s.body);
         });
         state?.loans.delete(s.right.start);

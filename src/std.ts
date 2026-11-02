@@ -617,6 +617,8 @@ class Response {
   #stream: Lock<Dyn<AsyncGenerator<string>>[]>;
   // 1 once text() has read a streamed body, which no copy can then have.
   #read: Atomic<i64> = new Atomic(0);
+  // What takes the connection over once a 101 is sent: a WebSocket route's session, at most one.
+  #upgrade: Lock<__wsUpgrade[]>;
   // The URL fetch got it from, or "" for one the program built.
   url: string = "";
   // The cookies it sets and deletes, each sent as a Set-Cookie header of its own.
@@ -651,6 +653,8 @@ class Response {
     this.headers = headers;
     this.body = bytes;
     this.#stream = new Lock(stream);
+    const upgrade: __wsUpgrade[] = [];
+    this.#upgrade = new Lock(upgrade);
   }
 
   // A response whose body is the value as JSON, typed 'application/json' unless the headers
@@ -690,6 +694,16 @@ class Response {
   // The streamed body, taken out for whoever sends or reads it, or null when there is none.
   __stream(): Dyn<AsyncGenerator<string>> | null {
     return this.#stream.update((s) => s.pop());
+  }
+
+  // The session a WebSocket route's 101 hands the connection to, taken out, or null.
+  __upgrade(): __wsUpgrade | null {
+    return this.#upgrade.update((u) => u.pop());
+  }
+
+  __upgradeWith(this: Mut<this>, session: __wsUpgrade) {
+    const one: __wsUpgrade[] = [session];
+    this.#upgrade = new Lock(one);
   }
 
   // The body as UTF-8 text, each malformed sequence as U+FFFD. A streamed one is read to its
@@ -908,6 +922,23 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
         await Http1.send(conn, new Response("", { status: 500 }), false, true, version);
         return;
       }
+      // A WebSocket route's 101 hands the connection to its session, which keeps it to the end.
+      // Bytes the client sent past the request go to the session, though it shouldn't send any
+      // before the 101.
+      const upgrade = res.__upgrade();
+      if (upgrade !== null && res.status === 101 && Http1.fieldsSendable(res)) {
+        done.abort();
+        const early = await watching;
+        // RFC 6455 upgrades HTTP/1.1 and later only.
+        if (version !== "HTTP/1.1") {
+          await Http1.refuse(conn, 400);
+          return;
+        }
+        for (const b of early) buffer.push(b);
+        const sent = await Http1.put(conn, Http1.headText(res, "connection: Upgrade\\r\\n", false, "HTTP/1.1"), stop);
+        if (sent) await upgrade(conn.clone(), buffer, stop.clone());
+        return;
+      }
       const said = res.headers.get("connection");
       const close = !keep || stop.aborted || (said !== null && Http1.hasToken(said, "close"));
       // A streamed body is taken out of the response; one that won't be sent is dropped unstarted.
@@ -1057,6 +1088,26 @@ class Router {
       t.prefixes.push(true);
       t.groups.push(none);
     });
+  }
+
+  // A WebSocket route at a path, for GET: a request asking to upgrade gets a 101, and the handler
+  // then has the connection's messages and sends on it until it returns, which closes it with
+  // 1000 unless it was closed already. The route runs inside middleware as any route does, so
+  // middleware can refuse a request with an ordinary response before anything is upgraded.
+  ws(this: Mut<this>, path: string, handler: (ws: ServerWebSocket, req: Request) => Promise<void>, options?: WebSocketOptions) {
+    const limits = __wsLimitsOf(options);
+    const route: ServeHandler = async (req: Request) => {
+      let res = __wsHandshake(req);
+      if (res.status !== 101) return res;
+      const run = handler.clone();
+      const kept = limits.clone();
+      const session: __wsUpgrade = async (conn: TcpStream, start: u8[], stop: AbortSignal) => {
+        await __wsSession(conn, start, stop, kept.clone(), run.clone(), req.clone());
+      };
+      res.__upgradeWith(session);
+      return res;
+    };
+    this.add("GET", path, route);
   }
 
   // The response the middleware give around the routes. Each next is built from the one inside
@@ -1335,6 +1386,493 @@ function __staticType(path: string): string {
   if (ext === "mp3") return "audio/mpeg";
   if (ext === "wav") return "audio/wav";
   return "application/octet-stream";
+}
+
+// WebSockets over HTTP/1.1, as RFC 6455 has a server speak them: text and binary messages, each
+// whole however the client fragmented it, pings answered with pongs, and the close handshake.
+// Extensions such as permessage-deflate and subprotocols are never agreed to.
+
+// A WebSocket route's limits. maxMessageSize is the most bytes one message may take, past which
+// the connection is closed with 1009; maxBuffered the most bytes sends and pongs may queue for a client
+// that reads slowly, past which it is closed with 1013; idleTimeout how long the client may send
+// nothing before it is pinged, and as long again before it is dropped, in milliseconds, 0 for
+// never. The defaults are Bun's: 16 MiB, 16 MiB and two minutes.
+type WebSocketOptions = { maxMessageSize?: i64; maxBuffered?: i64; idleTimeout?: i64 };
+type __wsLimits = { maxMessageSize: i64; maxBuffered: i64; idleTimeout: i64 };
+type __wsWhy = { code: i64; reason: string; heard: boolean };
+type __wsUpgrade = (conn: TcpStream, start: u8[], stop: AbortSignal) => Promise<void>;
+type __wsHandler = (ws: ServerWebSocket, req: Request) => Promise<void>;
+// Frames waiting to be written, whether a close frame has been queued or the connection has
+// broken, after which nothing more is sent, the bell a send aborts to wake the writer, and the
+// code of a close the client sent, or 0.
+type __wsOut = { bytes: u8[]; closing: boolean; bell: AbortController; heard: i64 };
+// What every handle on one connection shares. The stream is held in an array of at most one, so
+// the session can take it out as it ends, and no sender kept elsewhere holds the socket open.
+// The writer and the reader end once ending aborts; returned aborts as the handler returns.
+type __wsState = { conn: Lock<TcpStream[]>; out: Lock<__wsOut>; writing: Semaphore; ending: AbortController; returned: AbortController; maxBuffered: i64 };
+
+function __wsLimitsOf(options: WebSocketOptions | null): __wsLimits {
+  let limits: __wsLimits = { maxMessageSize: 16777216, maxBuffered: 16777216, idleTimeout: 120000 };
+  if (options === null) return limits;
+  const size = options.maxMessageSize;
+  if (size !== null) limits.maxMessageSize = size;
+  const buffered = options.maxBuffered;
+  if (buffered !== null) limits.maxBuffered = buffered;
+  const idle = options.idleTimeout;
+  if (idle !== null) limits.idleTimeout = idle;
+  assert(limits.maxMessageSize >= 0 && limits.maxBuffered >= 0 && limits.idleTimeout >= 0, "a WebSocket route's maxMessageSize, maxBuffered and idleTimeout can't be negative");
+  // A frame's end, its length past a 14-byte head, then stays far from the i64 maximum.
+  if (limits.maxMessageSize > 281474976710656) limits.maxMessageSize = 281474976710656;
+  return limits;
+}
+
+// A connection a WebSocket route's handler has: the messages the client sends, read with
+// 'for await (const m of ws)', each a string for a text message and bytes for a binary one, and
+// sends and a close back. The loop ends once the connection closes, from either side.
+class ServerWebSocket {
+  #socket: WebSocketSender;
+  #incoming: Channel<string | u8[]>;
+
+  constructor(socket: WebSocketSender, incoming: Channel<string | u8[]>) {
+    this.#socket = socket;
+    this.#incoming = incoming;
+  }
+
+  // Queues a message, text for a string and binary for bytes; one sent after the connection
+  // closed is dropped.
+  send(data: string | u8[]) {
+    this.#socket.send(data);
+  }
+
+  // Starts the close handshake with a code, 1000 or one of 3000 to 4999, and a reason of at most
+  // 123 bytes. Messages that arrive before the client answers are still read.
+  close(code?: i64, reason?: string) {
+    this.#socket.close(code, reason);
+  }
+
+  // Waits until everything queued so far is written, so a handler sending a lot can keep pace
+  // with a client that reads slowly.
+  async flush(): Promise<void> {
+    await this.#socket.flush();
+  }
+
+  // A handle other tasks can send on and close with, kept as long as they like; once the
+  // connection closes, what they send is dropped.
+  sender(): WebSocketSender {
+    return this.#socket.clone();
+  }
+
+  // What 'for await' over the socket reads: the messages, until the connection closes.
+  __wsMessages(): Channel<string | u8[]> {
+    return this.#incoming.clone();
+  }
+}
+
+// Sends on a WebSocket from any task. A message sent after the connection closed is dropped.
+class WebSocketSender {
+  #state: shared<__wsState>;
+
+  constructor(state: shared<__wsState>) {
+    this.#state = state;
+  }
+
+  send(data: string | u8[]) {
+    const text = typeof data === "string";
+    __wsQueue(this.#state.clone(), text ? 1 : 2, __httpBody(data));
+  }
+
+  close(code?: i64, reason?: string) {
+    const c = code ?? 1000;
+    const r = reason ?? "";
+    assert(c === 1000 || (c >= 3000 && c <= 4999), "a WebSocket close code is 1000 or one of 3000 to 4999, not " + String(c));
+    assert(new TextEncoder().encode(r).length <= 123, "a WebSocket close reason takes at most 123 bytes of UTF-8");
+    __wsQueue(this.#state.clone(), 8, __wsClosing(c, r));
+  }
+
+  async flush(): Promise<void> {
+    await __wsFlush(this.#state.clone());
+  }
+
+  // A close the client or the server's own rules call for, with a code a program can't send.
+  __wsEnd(code: i64, reason: string) {
+    __wsQueue(this.#state.clone(), 8, __wsClosing(code, reason));
+  }
+
+  // The session's close as the handler returns: the client's own code when it closed first.
+  __wsFinish(code: i64) {
+    this.#state.returned.abort();
+    const heard = this.#state.out.update((o) => o.heard);
+    this.__wsEnd(heard !== 0 ? heard : code, "");
+  }
+
+  __wsHeard(code: i64) {
+    this.#state.out.update((o) => {
+      o.heard = code;
+    });
+  }
+
+  __wsReturned(): AbortSignal {
+    return this.#state.returned.signal;
+  }
+
+  __wsPong(payload: u8[]) {
+    __wsQueue(this.#state.clone(), 10, payload);
+  }
+
+  __wsPing() {
+    __wsQueue(this.#state.clone(), 9, []);
+  }
+
+  // Nothing more is sent, as when the client has gone.
+  __wsStop() {
+    this.#state.out.update((o) => {
+      o.closing = true;
+    });
+  }
+
+  __wsState(): shared<__wsState> {
+    return this.#state.clone();
+  }
+
+  // The stream given up, so senders kept after the connection ends don't hold it open.
+  __wsRelease() {
+    this.#state.conn.update((c) => {
+      c.pop();
+    });
+  }
+}
+
+// The handshake's answer: a 101 accepting the key, a 405 to a HEAD request, which reaches GET
+// routes, a 426 to a request that isn't an upgrade to WebSocket version 13, or a 400 for a key
+// that isn't 16 bytes in base64.
+function __wsHandshake(req: Ref<Request>): Response {
+  if (req.method !== "GET") {
+    let allow = new Headers();
+    allow.set("allow", "GET");
+    return new Response("Method Not Allowed\\n", { status: 405, headers: allow });
+  }
+  const upgrade = req.headers.get("upgrade");
+  const connection = req.headers.get("connection");
+  let headers = new Headers();
+  if (upgrade === null || connection === null || !Http1.hasToken(upgrade, "websocket") || !Http1.hasToken(connection, "upgrade")) {
+    headers.set("upgrade", "websocket");
+    return new Response("Upgrade Required\\n", { status: 426, headers: headers });
+  }
+  if (req.headers.get("sec-websocket-version") !== "13") {
+    headers.set("sec-websocket-version", "13");
+    return new Response("Upgrade Required\\n", { status: 426, headers: headers });
+  }
+  const key = req.headers.get("sec-websocket-key");
+  if (key === null || !__wsKey(key)) return new Response("Bad Request\\n", { status: 400 });
+  const accept = __wsAccept(key);
+  if (accept === null) return new Response("Internal Server Error\\n", { status: 500 });
+  headers.set("upgrade", "websocket");
+  headers.set("sec-websocket-accept", accept);
+  return new Response(null, { status: 101, headers: headers });
+}
+
+// Whether a Sec-WebSocket-Key is 16 bytes in base64: 22 characters of the alphabet and '=='.
+function __wsKey(key: string): boolean {
+  if (key.length !== 24 || !key.endsWith("==")) return false;
+  for (let i = 0; i < 22; i++) {
+    const c = key.charCodeAt(i) as i64;
+    const ok = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 43 || c === 47;
+    if (!ok) return false;
+  }
+  return true;
+}
+
+declare function fsh_rt_crypto_digest(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, rounds: i64, out: MutPtr<u8>): i64;
+
+// Sec-WebSocket-Accept for a key: the SHA-1 of the key and the protocol's GUID, in base64, or
+// null when OpenSSL, which hashes it, wasn't there to link.
+function __wsAccept(key: string): string | null {
+  const data = new TextEncoder().encode(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+  const none: u8[] = [0 as u8];
+  let out: u8[] = new Array(32).fill(0 as u8);
+  const ok = unsafe { fsh_rt_crypto_digest(4, ptrOf(none[0]), 0, ptrOf(data[0]), data.length as i64, 0, mutPtrOf(out[0])) };
+  if (ok !== 1) return null;
+  return __arrayBase64Text(out.slice(0, 20), false, true);
+}
+
+// A frame from the server, which is never masked: final, with the opcode and payload.
+function __wsFrame(opcode: i64, payload: Ref<u8[]>): u8[] {
+  const n = payload.length as i64;
+  let out: u8[] = [];
+  out.reserve(n + 10);
+  out.push((128 | opcode) as u8);
+  if (n < 126) out.push(n as u8);
+  else if (n < 65536) {
+    out.push(126 as u8);
+    out.push((n >> 8) as u8);
+    out.push((n & 255) as u8);
+  } else {
+    out.push(127 as u8);
+    for (let shift = 56; shift >= 0; shift -= 8) out.push(((n >> shift) & 255) as u8);
+  }
+  for (const b of payload) out.push(b);
+  return out;
+}
+
+// A close frame's payload: the code in two bytes, then the reason.
+function __wsClosing(code: i64, reason: string): u8[] {
+  let out: u8[] = [(code >> 8) as u8, (code & 255) as u8];
+  for (const b of new TextEncoder().encode(reason)) out.push(b);
+  return out;
+}
+
+// Queues a frame and wakes the writer. Nothing is queued once a close has been, and any other
+// frame that would take the queue past its limit, pongs to a client that pings and never reads
+// included, closes the connection with 1013 instead.
+function __wsQueue(state: shared<__wsState>, opcode: i64, payload: u8[]) {
+  const frame = __wsFrame(opcode, payload);
+  const limit = state.maxBuffered;
+  state.out.update((o) => {
+    if (o.closing) return;
+    if (opcode !== 8 && (o.bytes.length + frame.length) as i64 > limit) {
+      o.closing = true;
+      for (const b of __wsFrame(8, __wsClosing(1013, "send buffer full"))) o.bytes.push(b);
+    } else {
+      if (opcode === 8) o.closing = true;
+      for (const b of frame) o.bytes.push(b);
+    }
+    o.bell.abort();
+  });
+}
+
+// Writes what sends queue, from when the connection opens until the session ends.
+async function __wsWriter(state: shared<__wsState>): Promise<void> {
+  const ending = state.ending.signal;
+  while (!ending.aborted) {
+    // The bell is replaced under the queue's lock, so a send can't ring the old one unheard.
+    const bell = state.out.update((o): AbortSignal | null => {
+      if (o.bytes.length > 0) return null;
+      o.bell = new AbortController();
+      return o.bell.signal;
+    });
+    if (bell !== null) {
+      const either = AbortSignal.any([bell, ending.clone()]);
+      await Http1.abortOf(either);
+    } else await __wsFlush(state.clone());
+  }
+}
+
+// Writes what is queued, by the writer or a handler's flush, one at a time so frames never
+// interleave. A write that fails or
+// takes over 30 seconds ends the connection.
+async function __wsFlush(state: shared<__wsState>): Promise<void> {
+  const _turn = await state.writing.acquire();
+  while (true) {
+    const conn = state.conn.update((c) => c.length > 0 ? c[0].clone() : null);
+    if (conn === null) return;
+    const bytes = state.out.update((o) => o.bytes.splice(0));
+    if (bytes.length === 0) return;
+    try {
+      await conn.write(bytes, AbortSignal.timeout(30000));
+    } catch (e) {
+      state.out.update((o) => {
+        o.closing = true;
+        o.bytes = [];
+      });
+      state.ending.abort();
+      return;
+    }
+  }
+}
+
+// Runs a WebSocket route's handler on an upgraded connection, while a reader takes the client's
+// frames, and closes the connection once the handler returns: with 1000, 1011 when it panicked,
+// or 1001 when the server stops and it hasn't returned a second later. The client's own close
+// is waited for 5 seconds, then the connection ends.
+async function __wsSession(conn: TcpStream, start: u8[], stop: AbortSignal, limits: __wsLimits, handler: __wsHandler, req: Request): Promise<void> {
+  const incoming = new Channel<string | u8[]>(16);
+  const ending = new AbortController();
+  const streams: TcpStream[] = [conn.clone()];
+  const socket = new WebSocketSender(shared<__wsState>({ conn: new Lock(streams), out: new Lock<__wsOut>({ bytes: [], closing: false, bell: new AbortController(), heard: 0 }), writing: new Semaphore(1), ending: ending.clone(), returned: new AbortController(), maxBuffered: limits.maxBuffered }));
+  spawn(__wsWriter(socket.__wsState()));
+  const reader = spawn(__wsRead(conn, start, socket.clone(), incoming.clone(), stop.clone(), ending.signal, limits));
+  const ws = new ServerWebSocket(socket.clone(), incoming);
+  const code = await Promise.race([__wsRun(handler, ws, req), __wsGraced(stop)]);
+  socket.__wsFinish(code);
+  await socket.flush();
+  await Promise.race([__wsJoined(reader), Http1.late(5000)]);
+  ending.abort();
+  socket.__wsRelease();
+}
+
+// 1000 once the handler returns, or 1011 when it panicked: it runs as a task of its own, so a
+// panic ends only it.
+async function __wsRun(handler: __wsHandler, ws: ServerWebSocket, req: Request): Promise<i64> {
+  try {
+    await spawn(__wsCall(handler, ws, req)).join();
+    return 1000;
+  } catch (e) {
+    return 1011;
+  }
+}
+
+async function __wsCall(handler: __wsHandler, ws: ServerWebSocket, req: Request): Promise<void> {
+  await handler(ws, req);
+}
+
+// 1001, a second after the server stops.
+async function __wsGraced(stop: Ref<AbortSignal>): Promise<i64> {
+  await Http1.graced(stop);
+  return 1001;
+}
+
+async function __wsJoined(reader: JoinHandle<void>): Promise<boolean> {
+  try {
+    await reader.join();
+  } catch (e) {}
+  return true;
+}
+
+// Reads the client's frames until the connection closes: whole messages go to the handler, pings
+// are answered, and a frame breaking the protocol closes the connection with the code RFC 6455
+// gives for it. Ends with the messages closed, so the handler's loop ends too.
+async function __wsRead(conn: TcpStream, start: u8[], socket: WebSocketSender, incoming: Channel<string | u8[]>, stop: AbortSignal, ending: AbortSignal, limits: __wsLimits): Promise<void> {
+  const signal = AbortSignal.any([stop.clone(), ending]);
+  let buffer = start;
+  try {
+    const why = await __wsFrames(conn, buffer, socket, incoming, signal, limits);
+    incoming.close();
+    if (why === null) {
+      if (stop.aborted) socket.__wsEnd(1001, "");
+      else socket.__wsStop();
+    } else if (why.heard) {
+      // The client's close is answered once the handler returns, so its replies to what came
+      // before go out first, or after a second when it doesn't.
+      socket.__wsHeard(why.code);
+      const either = AbortSignal.any([socket.__wsReturned(), AbortSignal.timeout(1000)]);
+      await Http1.abortOf(either);
+      socket.__wsEnd(why.code, "");
+    } else socket.__wsEnd(why.code, why.reason);
+  } catch (e) {
+    incoming.close();
+    socket.__wsStop();
+  }
+}
+
+// The frames' loop: null once the client went, or the code and reason to close with, which the
+// client gave when it was heard closing.
+async function __wsFrames(conn: Ref<TcpStream>, buffer: Mut<u8[]>, socket: Ref<WebSocketSender>, incoming: Ref<Channel<string | u8[]>>, signal: Ref<AbortSignal>, limits: __wsLimits): Promise<__wsWhy | null> throws IoError | AbortError {
+  let message: u8[] = [];
+  // The opcode of the message whose frames are arriving, or 0 between messages.
+  let kind: i64 = 0;
+  while (true) {
+    const started = await __wsFill(conn, buffer, 2, socket, signal, limits.idleTimeout);
+    if (!started) return null;
+    const first = buffer[0] as i64;
+    const second = buffer[1] as i64;
+    const fin = (first & 128) !== 0;
+    const opcode = first & 15;
+    if ((first & 112) !== 0) return { code: 1002, reason: "reserved bits are set", heard: false };
+    if ((second & 128) === 0) return { code: 1002, reason: "a client's frames must be masked", heard: false };
+    if (opcode > 10 || (opcode > 2 && opcode < 8)) return { code: 1002, reason: "unknown opcode", heard: false };
+    let length = second & 127;
+    let head: i64 = 2;
+    if (length >= 126) {
+      head = length === 126 ? 4 : 10;
+      const sized = await __wsFill(conn, buffer, head, socket, signal, limits.idleTimeout);
+      if (!sized) return null;
+      // The 8-byte form's top bit must be clear, so the length fits an i64.
+      if (head === 10 && ((buffer[2] as i64) & 128) !== 0) return { code: 1009, reason: "message too big", heard: false };
+      length = 0;
+      for (let i = 2; i < head; i++) length = (length << 8) | (buffer[i as usize] as i64);
+    }
+    if (opcode >= 8 && (!fin || length > 125)) return { code: 1002, reason: "control frames are whole and at most 125 bytes", heard: false };
+    // Compared without adding, since a client's length can be near the i64 maximum.
+    if (opcode < 8 && length > limits.maxMessageSize - (message.length as i64)) return { code: 1009, reason: "message too big", heard: false };
+    const end = head + 4 + length;
+    const whole = await __wsFill(conn, buffer, end, socket, signal, limits.idleTimeout);
+    if (!whole) return null;
+    let payload: u8[] = [];
+    payload.reserve(length);
+    for (let i = 0; i < length; i++) payload.push(buffer[(head + 4 + i) as usize] ^ buffer[(head + (i & 3)) as usize]);
+    const rest = buffer.splice(end);
+    buffer.splice(0);
+    for (const b of rest) buffer.push(b);
+    if (opcode === 9) socket.__wsPong(payload);
+    else if (opcode === 8) {
+      if (length === 1) return { code: 1002, reason: "a close frame's code takes two bytes", heard: false };
+      if (length === 0) return { code: 1000, reason: "", heard: true };
+      const code = ((payload[0] as i64) << 8) | (payload[1] as i64);
+      const allowed = (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999);
+      if (!allowed) return { code: 1002, reason: "a close code the protocol doesn't allow", heard: false };
+      if (!__wsUtf8(payload.slice(2))) return { code: 1007, reason: "a close reason must be UTF-8", heard: false };
+      return { code: code, reason: "", heard: true };
+    } else if (opcode !== 10) {
+      if (opcode === 0 && kind === 0) return { code: 1002, reason: "a continuation frame with no message to continue", heard: false };
+      if (opcode !== 0 && kind !== 0) return { code: 1002, reason: "a new message began before the last one ended", heard: false };
+      if (opcode !== 0) kind = opcode;
+      for (const b of payload) message.push(b);
+      if (fin) {
+        const done = message.splice(0);
+        const text = kind === 1;
+        kind = 0;
+        if (text && !__wsUtf8(done)) return { code: 1007, reason: "a text message must be UTF-8", heard: false };
+        if (text) await incoming.send(new TextDecoder().decode(done), signal.clone());
+        else await incoming.send(done, signal.clone());
+      }
+    }
+  }
+}
+
+// Whether the buffer holds need bytes, reading more until it does: false once the connection
+// ends, or the client sent nothing for two idle timeouts, a ping going out after the first.
+async function __wsFill(conn: Ref<TcpStream>, buffer: Mut<u8[]>, need: i64, socket: Ref<WebSocketSender>, signal: Ref<AbortSignal>, idle: i64): Promise<boolean> throws IoError {
+  let pinged = false;
+  while ((buffer.length as i64) < need) {
+    const got = await Http1.readBy(conn, signal, Http1.after(idle));
+    if (got === null) {
+      if (pinged) return false;
+      socket.__wsPing();
+      pinged = true;
+      continue;
+    }
+    if (got.length === 0) return false;
+    pinged = false;
+    for (const b of got) buffer.push(b);
+  }
+  return true;
+}
+
+// Whether bytes are well-formed UTF-8: no overlong forms, surrogates, or code points past U+10FFFF.
+function __wsUtf8(bytes: Ref<u8[]>): boolean {
+  let i: usize = 0;
+  while (i < bytes.length) {
+    const c = bytes[i] as i64;
+    if (c < 128) {
+      i++;
+      continue;
+    }
+    let more: usize = 0;
+    let point: i64 = 0;
+    let least: i64 = 0;
+    if (c >= 194 && c <= 223) {
+      more = 1;
+      point = c & 31;
+      least = 128;
+    } else if (c >= 224 && c <= 239) {
+      more = 2;
+      point = c & 15;
+      least = 2048;
+    } else if (c >= 240 && c <= 244) {
+      more = 3;
+      point = c & 7;
+      least = 65536;
+    } else return false;
+    if (i + more >= bytes.length) return false;
+    for (let k: usize = 1; k <= more; k++) {
+      const d = bytes[i + k] as i64;
+      if ((d & 192) !== 128) return false;
+      point = (point << 6) | (d & 63);
+    }
+    if (point < least || point > 1114111 || (point >= 55296 && point <= 57343)) return false;
+    i += more + 1;
+  }
+  return true;
 }
 
 // The wire format of HTTP/1.x.
@@ -1686,7 +2224,12 @@ class Http1 {
   // Whether a response can go out as it stands: a status the Fetch API allows, and a status
   // text and headers that can't break into lines of their own.
   static sendable(res: Ref<Response>): boolean {
-    if (res.status < 200 || res.status > 599 || Http1.hasBreak(res.statusText)) return false;
+    return res.status >= 200 && res.status <= 599 && Http1.fieldsSendable(res);
+  }
+
+  // Whether a response's status text, headers and cookies can't break into lines of their own.
+  static fieldsSendable(res: Ref<Response>): boolean {
+    if (Http1.hasBreak(res.statusText)) return false;
     let fine = true;
     res.headers.forEach((value: string, name: string) => {
       if (!Http1.isToken(name) || Http1.hasBreak(value)) fine = false;
@@ -1807,6 +2350,7 @@ class Http1 {
 
   static reasonPhrase(status: i64): string {
     return match (status) {
+      case 101 => "Switching Protocols",
       case 200 => "OK",
       case 201 => "Created",
       case 202 => "Accepted",
@@ -1821,6 +2365,7 @@ class Http1 {
       case 405 => "Method Not Allowed",
       case 408 => "Request Timeout",
       case 413 => "Content Too Large",
+      case 426 => "Upgrade Required",
       case 431 => "Request Header Fields Too Large",
       case 500 => "Internal Server Error",
       case 501 => "Not Implemented",
@@ -3086,7 +3631,7 @@ const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;
@@ -4931,7 +5476,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const linked = parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []));
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa and atob call them too.
-  const encoding = linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
+  const encoding = httpUsed || linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
   const dated = httpUsed || uses(written, dates, ["Date"]);
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
   return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(secure ? tls : [])];

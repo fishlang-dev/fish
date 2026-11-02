@@ -156,3 +156,17 @@ async function main() {
   await sleep(30);
   console.log("main done");
 }
+// case: channel_loop_moves_values
+// expect: 3 bytes
+// expect: 1 bytes
+// Each pass of a 'for await' over a Channel owns the value it received, so it can hand it over.
+function size(bytes: u8[]): string {
+  return String(bytes.length) + " bytes";
+}
+async function main() {
+  const ch = new Channel<u8[]>(2);
+  await ch.send([1 as u8, 2 as u8, 3 as u8]);
+  await ch.send([4 as u8]);
+  ch.close();
+  for await (const b of ch) console.log(size(b));
+}
