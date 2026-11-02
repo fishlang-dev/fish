@@ -5750,7 +5750,10 @@ export class Expressions implements Union {
       const inner = this.rewrites.current((e as Extract<Expr, { kind: "as" | "satisfies" }>).expr);
       this.coercions.delete(e);
       this.coercions.delete(inner);
-      this.coerce(inner, this.types.get(inner)!, to, message);
+      // What is lent is the operand, so a message naming the wrapper's type names the operand's.
+      const named = `type '${this.typing.show(type)}'`;
+      const said = message.startsWith(named) ? `type '${this.typing.show(this.types.get(inner)!)}'${message.slice(named.length)}` : message;
+      this.coerce(inner, this.types.get(inner)!, to, said);
       this.types.set(e, this.coercions.get(inner) ?? this.types.get(inner)!);
       return;
     }

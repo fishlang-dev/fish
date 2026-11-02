@@ -6321,6 +6321,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // Whether an expression makes a value of its own, rather than reading one that lives somewhere.
   // A conditional or `??` makes one from whichever side it gives.
   function fresh(e: Expr): boolean {
+    while (wraps(e)) e = e.expr;
     if (!needsDrop(types.get(e))) return false;
     switch (e.kind) {
       case "call":
@@ -6354,12 +6355,22 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     }
   }
 
+  // What a wrapper with no conversion of its own hands on, so it owns what its operand owns.
+  function handedOn(e: Expr): Expr {
+    while (wraps(e) && !coercions.has(e)) e = e.expr;
+    return e;
+  }
+
+  // A wrapper whose value is its operand's, made for the statement exactly when the operand's is.
+  function wraps(e: Expr): e is Extract<Expr, { kind: "as" | "satisfies" | "unsafe" }> {
+    return e.kind === "satisfies" || e.kind === "unsafe" || (e.kind === "as" && widens(e));
+  }
+
   // An expression's value for a place to own: one it made, the value of a place it moves out
   // of, which is left empty, or else a copy holding another reference to what it owns. A
   // conversion that leaves part of a value behind copies the part it keeps.
   function owned(e: Expr): string {
-    // A widening 'as' or a 'satisfies' hands on what its operand owns.
-    if ((e.kind === "satisfies" || (e.kind === "as" && widens(e))) && !coercions.has(e)) return owned(e.expr);
+    if (handedOn(e) !== e) return owned(handedOn(e));
     const to = coercions.get(e);
     // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
     // else a copy of it. One boxed into a union's Dyn then goes into the union.
@@ -9027,12 +9038,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         return bigConstant(e.value);
       case "regex":
         return regex(types.get(e) as RegexType);
+      // The operand's value, which whoever asked for the wrapper's drops when it is fresh.
       case "satisfies":
-        return value(e.expr);
+        return value(e.expr, true);
       case "as": {
         const [from, to] = [coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)!];
         // A widening 'as' is its operand, converted by the coercion the checker gave it.
-        if (widens(e)) return value(e.expr);
+        if (widens(e)) return value(e.expr, true);
         if (from === "bigint") return bigTo(value(e.expr), to);
         const pointer = (t: Type) => recOf(t)?.kind === "pointer";
         if (!pointer(from) && !pointer(to)) return cast(value(e.expr), from, to as Numeric);
@@ -9272,7 +9284,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       case "match":
         return lowerMatch(e, true)!;
       case "unsafe":
-        return value(e.expr);
+        return value(e.expr, true);
       case "pipe":
         return lowerPipe(e, true)!;
       case "update":

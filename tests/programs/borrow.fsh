@@ -1188,3 +1188,13 @@ function main() {
   bump((c ? h.b : h.k) as Box);
   console.log(h.b.n, h.k.n);
 }
+// case: borrow_mut_through_as_conditional_names_side
+// error: borrow_mut_through_as_conditional_names_side.fsh:7:26: error[E0101]: type 'Box' is not assignable to type 'Mut<{ items: string[] }>': only a place holding exactly '{ items: string[] }' can be lent mutably
+class Box { items: string[] = ["a" + "b", "c" + "d"]; n: i64 = 1; }
+class H { b: Box = new Box(); k: Box = new Box(); }
+type I = { items: string[] };
+function main() {
+  let h = new H(); const c = h.b.n > 0;
+  const r: Mut<I> = (c ? h.b : h.k) as I;
+  r.items.push("z");
+}
