@@ -1,4 +1,4 @@
-import { checkOverrides, copySelfTyped, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrideModifiers, checkOverrides, copySelfTyped, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
 import type { Tables } from "./compilation.ts";
 import { nextId } from "./nodes.ts";
 import type { Arenas, ClassId } from "./arenas.ts";
@@ -79,6 +79,7 @@ export class Registry {
   link(this: Mut<this>, c: ClassInfo, path: TypeSet<ClassType>) {
     if (this.host.registryState.linked.has(c.type)) return;
     if (c.baseName === undefined) {
+      checkOverrideModifiers(this.arenas, this.typing, c);
       implementAbstracts(this.host.tables, c);
       this.host.registryState.linked.add(c.type);
       return;
@@ -94,6 +95,7 @@ export class Registry {
     implementAbstracts(this.host.tables, c);
     copySelfTyped(this.host.tables, c);
     checkOverrides(this.arenas, this.typing, c);
+    checkOverrideModifiers(this.arenas, this.typing, c);
     this.host.registryState.linked.add(c.type);
   }
 

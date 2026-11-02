@@ -79,6 +79,9 @@ export const isLifetime = (p: TypeParam) => p.constraint?.kind === "ref" && p.co
 // written `T | undefined`.
 export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined; access: Access; readonly: boolean; written?: TypeNode; undefinedSpelled?: true };
 
+// A member written `override`, by its name and whether it is static.
+export type Overridden = Span & { name: string; static: boolean };
+
 // A member an abstract class declares without a body, for each concrete class to implement.
 export type AbstractMember = Span & { name: string; table: "methods" | "getters" | "setters"; access: Access };
 
@@ -104,6 +107,8 @@ export type ClassInfo = {
   // A getter borrows `this` and returns a value; a setter takes `Mut<this>` and the value.
   getters: Map<string, BodyId>;
   setters: Map<string, BodyId>;
+  // The members written `override`, each checked to replace one its bases have.
+  overrides: Overridden[];
   // The class this one embeds and delegates to, named by `extends`.
   baseName: string | undefined;
   base?: ClassId;
@@ -230,9 +235,13 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     ...(ctor?.throws && { throws: ctor.throws }),
   }).bodyId;
   const required = new Set(fields.map((f) => f.name));
+  const overrides = [
+    ...node.members.flatMap((m): Overridden[] => ("name" in m && m.modifiers.includes("override") && typeof m.name === "string" ? [{ name: m.name, static: m.modifiers.includes("static"), start: m.start, end: m.end }] : [])),
+    ...(ctor?.params ?? []).flatMap((p): Overridden[] => (p.modifiers.includes("override") && p.pattern.kind === "ident" ? [{ name: p.pattern.name, static: false, start: p.start, end: p.end }] : [])),
+  ];
   const named = node.extends?.kind === "instantiation" ? node.extends.expr : node.extends;
   const baseName = named?.kind === "ident" ? named.name : undefined;
-  return arenas.addClass({ type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] });
+  return arenas.addClass({ type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, overrides, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] });
 
   // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
   function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
@@ -550,6 +559,27 @@ export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
   }
 }
 
+// TypeScript's rule: a member written `override` must replace one of its bases'.
+export function checkOverrideModifiers(arenas: Arenas, typing: Typing, c: ClassInfo) {
+  const name = typing.rec(c.type).name;
+  for (const o of c.overrides) {
+    if (c.baseName === undefined) throw new CompileError("E0704", `'${o.name}' can't be marked 'override': class '${name}' doesn't extend another class`, o.start, o.end);
+    if (!hasMember(arenas, arenas.classOf(c.base), o)) {
+      throw new CompileError("E0704", `'${o.name}' can't be marked 'override': '${c.baseName}' has no ${o.static ? "static " : ""}member '${o.name}' for it to replace`, o.start, o.end);
+    }
+  }
+}
+
+function hasMember(arenas: Arenas, base: ClassInfo | undefined, o: Overridden): boolean {
+  for (let b = base; b; b = arenas.classOf(b.base)) {
+    const found = o.static
+      ? b.statics.has(o.name) || b.statics.has(`get ${o.name}`) || b.statics.has(`set ${o.name}`) || b.staticFields.has(o.name)
+      : b.methods.has(o.name) || b.getters.has(o.name) || b.setters.has(o.name) || b.fields.some((f) => f.name === o.name);
+    if (found) return true;
+  }
+  return false;
+}
+
 const TABLES = ["methods", "getters", "setters"] as const;
 const MEMBER_KINDS = { methods: "method", getters: "getter", setters: "setter" };
 
@@ -730,9 +760,9 @@ function assignField(ids: Ids, name: string, value: Expr, at: Span): Stmt {
 
 // A member's access, from its modifiers or a `#` name. `readonly` is read by the caller.
 function modifiers(list: string[], at: Span, name: string): Access {
-  const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly");
+  const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly" && m !== "override");
   if (other) throw unsupported(`'${other}' modifiers`, at);
-  list = list.filter((m) => m !== "readonly");
+  list = list.filter((m) => m !== "readonly" && m !== "override");
   if (list.length > 1) throw new CompileError("E0709", "a member can have only one accessibility modifier", at.start, at.end);
   if (name.startsWith("#") && list.length > 0) {
     throw new CompileError("E0709", "an accessibility modifier can't be used with a private identifier", at.start, at.end);
