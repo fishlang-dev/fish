@@ -437,6 +437,10 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (t.name === "FixedArray") return this.fixedArray(t);
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return this.reference(t);
+    if (t.name === "Brand") {
+      if (t.args.length !== 2) throw new CompileError("E0116", "'Brand' takes the type it brands and a tag naming it, like 'Brand<usize, \"UserId\">'", t.start, t.end);
+      return this.brand(this.resolveType(t.args[0]!), this.resolveType(t.args[1]!), t.args[0]!, t.args[1]!);
+    }
     if (t.name === "never" && t.args.length === 0) return "never";
     if (t.name === "null" || t.name === "undefined") {
       if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
@@ -560,6 +564,16 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       return t.name === "Iterable" ? this.typing.iterableInterface(args[0]!) : this.typing.generatorInterface(args[0]!);
     }
     throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...ITERATORS, ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
+  }
+
+  // A brand's base is a primitive, and its tag is known where it is written, since nothing infers
+  // a tag from a value.
+  private brand(this: Mut<this>, base: Type, tag: Type, baseNode: Span, tagNode: Span, how: Parameters<Typing["brandType"]>[2] = {}): Type {
+    if (typeof base !== "string" || base === "void" || base === "null" || base === "never") {
+      throw new CompileError("E0116", `a brand's base is a number, boolean, string or bigint type, not '${this.typing.show(base)}'`, baseNode.start, baseNode.end);
+    }
+    if (this.typing.holdsPart(tag, (u) => this.recOf(u)?.kind === "param")) throw unsupported("brand tags holding type parameters", tagNode);
+    return this.typing.brandType(base, tag, how);
   }
 
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
@@ -1060,7 +1074,7 @@ function merged(typing: Typing, a: ObjectType, b: ObjectType, from: Span, to: Sp
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { pattern: "template literal types", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", map: "maps and sets", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values", regex: "regexes", recursive: "types that hold themselves" };
+const SIDE_FORMS = { pattern: "template literal types", brand: "brands", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", map: "maps and sets", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values", regex: "regexes", recursive: "types that hold themselves" };
 
 const I64_MAX = (1n << 63n) - 1n;
 
@@ -1205,7 +1219,7 @@ export function collection(typing: Typing, key: Type, value: Type, set: boolean,
 
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Brand", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

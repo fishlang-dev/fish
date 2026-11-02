@@ -5314,6 +5314,17 @@ export class Expressions implements Union {
           }
           return to;
         }
+        // A brand is made and taken apart with 'as', between its base and what converts to it.
+        const [fb, tb] = [this.typing.unbranded(from), this.typing.unbranded(to)];
+        if (fb !== from || tb !== to) {
+          if (tb !== to && this.adapt(e.expr, tb)) return to;
+          if (isNumeric(fb) && isNumeric(tb)) return to;
+          if (fb === tb || this.typing.fits(fb, tb)) {
+            if (from !== tb) this.coerce(e.expr, from, tb, "");
+            return to;
+          }
+          throw new CompileError("E0111", `'${this.typing.show(from)}' can't be converted to '${this.typing.show(to)}' with 'as'`, e.start, e.end);
+        }
         // A bigint becomes a number with 'as', truncated to an integer type's bits as
         // 'BigInt.asIntN' does; a number becomes a bigint only through 'BigInt(x)'.
         if (to === "bigint" && from !== "bigint") throw new CompileError("E0111", `'${this.typing.show(from)}' converts to a bigint with 'BigInt(x)', not 'as'`, e.start, e.end);
@@ -5841,8 +5852,9 @@ export class Expressions implements Union {
   }
 
   // A value written into a string: text, or a number or boolean written as JavaScript would.
-  private joined(this: Mut<this>, e: Expr, type: Type, into: string) {
+  private joined(this: Mut<this>, e: Expr, type: Type, into: string): void {
     e = this.rewrites.current(e);
+    if (this.typing.unbranded(type) !== type) return this.joined(e, this.typing.unbranded(type), into);
     if (stringLike(this.typing, type) || enumText(this.typing, type)) {
       if (type !== "string") this.coerce(e, type, "string", "");
       return;
@@ -5860,8 +5872,10 @@ export class Expressions implements Union {
       return ["string", "string"];
     }
     if (left === right) return [left, right];
-    if (this.adapt(b, left)) return [left, left];
-    if (this.adapt(a, right)) return [right, right];
+    // A literal meeting a brand takes its base, which is what operators on a brand work in.
+    const [lb, rb] = [this.typing.unbranded(left), this.typing.unbranded(right)];
+    if (this.adapt(b, lb)) return [left, lb];
+    if (this.adapt(a, rb)) return [rb, right];
     return [left, right];
   }
 
@@ -5951,6 +5965,8 @@ export class Expressions implements Union {
       return;
     }
     if (isNumeric(type) && isNumeric(to)) throw new CompileError("E0101", `${message}; convert it with 'as ${this.typing.show(to)}'`, e.start, e.end);
+    // A brand is made from its base only by saying so.
+    if (tr?.kind === "brand" && message !== "" && (type === tr.base || (isNumeric(type) && isNumeric(tr.base)))) throw new CompileError("E0101", `${message}; make one with 'as ${this.typing.show(to)}'`, e.start, e.end);
     if (tr?.kind === "ref" && (typeof type === "string" || this.typing.rec(type).kind !== "ref")) {
       this.borrow(e, type, to as RefType, message);
       return;
@@ -6967,7 +6983,7 @@ export class Expressions implements Union {
 const isText = (typing: Typing, t: Type) => {
   if (typeof t === "string") return t === "string";
   const r = typing.rec(t);
-  return r.kind === "pattern" || (r.kind === "literal" && typeof r.value === "string" && !r.owner);
+  return r.kind === "pattern" || (r.kind === "literal" && typeof r.value === "string" && !r.owner) || (r.kind === "brand" && r.base === "string");
 };
 
 // A string enum's member, or a union of them, which joins into a string as its value.

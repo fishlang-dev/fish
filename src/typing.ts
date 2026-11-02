@@ -146,6 +146,15 @@ export type PatternRecord = { kind: "pattern"; quasis: string[]; holes: Hole[]; 
 export type PatternType = TypeId<PatternRecord>;
 export type Hole = "string" | Numeric;
 
+// A brand: the values of a primitive `base` under a `tag`, as `Brand<usize, "UserId">` writes
+// it, laid out as its base, which `lower` makes it. A brand fits its base and a family brand
+// whose tag its tag fits; its base fits it only through `as`, unless it is `loose`, as
+// TypeScript's `B & { readonly f?: "X" }` is. `field` is that idiom's property, kept for display.
+// A unit is a numeric brand whose `unit` maps each base unit to its power, which `*` and `/`
+// combine.
+export type BrandRecord = { kind: "brand"; base: Type; tag: Type; loose?: true; field?: string; unit?: Record<string, number>; fields: Field[] };
+export type BrandType = TypeId<BrandRecord>;
+
 // The texts a template's holes take in `s`, as TypeScript matches: each hole but the last takes
 // text up to the next piece's first occurrence (one character before another hole), the last
 // takes what is left before the final piece.
@@ -200,14 +209,14 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | BrandType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
 
 // A type that isn't a primitive: its record's index in its program's arena, from 21 up, since
 // 1 to 20 are the primitives' ids. `R` is the record's kind, for tsc only.
 export type TypeId<R> = usize & { readonly __record?: R };
 
 // What a type's record holds.
-export type TypeRecord = ObjectRecord | ClassRecord | InterfaceRecord | ParamRecord | LiteralRecord | PatternRecord | UnionRecord | RefRecord | ClosureRecord | FunctionRecord | ArrayRecord | FixedRecord | MapRecord | VariantRecord | GeneratorRecord | PointerRecord | FutureRecord | HandleRecord | InteriorRecord | SharedRecord | BlockRecord | DynRecord | RegexRecord | RecursiveRecord;
+export type TypeRecord = ObjectRecord | ClassRecord | InterfaceRecord | ParamRecord | LiteralRecord | PatternRecord | BrandRecord | UnionRecord | RefRecord | ClosureRecord | FunctionRecord | ArrayRecord | FixedRecord | MapRecord | VariantRecord | GeneratorRecord | PointerRecord | FutureRecord | HandleRecord | InteriorRecord | SharedRecord | BlockRecord | DynRecord | RegexRecord | RecursiveRecord;
 
 // The record a type of `T` has.
 export type RecordOf<T> = T extends { readonly __record?: infer R } ? Exclude<R, undefined> : never;
@@ -529,6 +538,8 @@ export class Typing {
     const part = (u: Type) => this.unequal(u, eq, seen);
     const r = this.rec(t);
     switch (r.kind) {
+      case "brand":
+        return undefined;
       case "literal":
       case "pattern":
       case "pointer":
@@ -572,6 +583,8 @@ export class Typing {
     const first = (parts: Type[]) => parts.map(part).find((p) => p !== undefined);
     const r = this.rec(t);
     switch (r.kind) {
+      case "brand":
+        return undefined;
       case "literal":
       case "pattern":
         return undefined;
@@ -647,7 +660,7 @@ export class Typing {
   isCopy(t: Type): boolean {
     if (typeof t === "string") return true;
     const r = this.rec(t);
-    if (r.kind === "literal" || r.kind === "pattern" || r.kind === "ref" || r.kind === "pointer" || r.kind === "regex") return true;
+    if (r.kind === "literal" || r.kind === "pattern" || r.kind === "brand" || r.kind === "ref" || r.kind === "pointer" || r.kind === "regex") return true;
     // A closure copies when what it captures does, and it changes nothing through it.
     if (r.kind === "closure") return r.fields.every((f) => this.isCopy(f.type) && !this.holdsMut(f.type));
     // A parameter of a generic function type holds a generic function value, which captures nothing.
@@ -772,6 +785,7 @@ export class Typing {
       case "block":
       case "dyn": return [r.of];
       case "recursive": return [...r.args, r.of];
+      case "brand": return [r.base, r.tag];
       case "pattern":
       case "regex": return [];
     }
@@ -823,20 +837,47 @@ export class Typing {
     return t;
   }
 
+  // A brand's base, or the type itself.
+  unbranded(t: Type): Type {
+    const r = this.recOf(t);
+    return r?.kind === "brand" ? r.base : t;
+  }
+
+  private brands = new Map<string, BrandType>();
+  brandType(this: Mut<this>, base: Type, tag: Type, how: { loose?: true; field?: string; unit?: Record<string, number> } = {}): BrandType {
+    const key = `brand ${this.keyOf(base)} ${this.keyOf(tag)} ${how.loose ? "?" : ""}${how.field ?? ""} ${how.unit ? JSON.stringify(how.unit) : ""}`;
+    let t = this.brands.get(key);
+    if (!t) {
+      t = this.made<BrandType>({ kind: "brand", base, tag, ...how, fields: [] }, key);
+      this.brands.set(key, t);
+    }
+    return t;
+  }
+
   // Whether a pattern is anywhere in `t`, where lowering it to `string` would lose what it asks.
   holdsPattern(this: Mut<this>, t: Type): boolean {
+    return this.holdsKind(t, "pattern", this.patterned);
+  }
+
+  // Whether a brand is anywhere in `t`, which lowering would make its base.
+  holdsBrand(this: Mut<this>, t: Type): boolean {
+    return this.holdsKind(t, "brand", this.branded);
+  }
+  private branded = new TypeMap<Exclude<Type, string>, boolean>();
+
+  private holdsKind(this: Mut<this>, t: Type, kind: "pattern" | "brand", cache: TypeMap<Exclude<Type, string>, boolean>): boolean {
     if (typeof t === "string") return false;
-    let found = this.patterned.get(t);
+    let found = cache.get(t);
     if (found === undefined) {
-      this.patterned.set(t, false);
+      cache.set(t, false);
       const r = this.rec(t);
       const parts = r.kind === "union" ? r.members : r.kind === "array" || r.kind === "fixed" ? [r.element] : r.kind === "map" ? [r.key, r.value] : r.kind === "ref" || r.kind === "pointer" ? [r.to]
         : r.kind === "object" ? r.fields.map((f) => f.type) : r.kind === "class" ? (r.generic?.args ?? []) : r.kind === "param" && r.concrete ? [r.concrete]
         : r.kind === "interior" || r.kind === "shared" || r.kind === "block" ? [r.of] : r.kind === "handle" ? [r.gives, ...(r.throws ? [r.throws] : [])]
         : r.kind === "variant" ? [...r.args, ...r.fields.map((f) => f.type)] : r.kind === "function" || r.kind === "closure" ? [...r.params, r.returns]
         : r.kind === "future" ? [r.gives] : r.kind === "generator" ? [r.yields] : r.kind === "dyn" ? this.rec(r.of).methods.flatMap((m) => [...m.params, m.returns]) : [];
-      found = r.kind === "pattern" || parts.some((t) => this.holdsPattern(t));
-      this.patterned.set(t, found);
+      found = r.kind === kind || parts.some((t) => this.holdsKind(t, kind, cache));
+      cache.set(t, found);
     }
     return found;
   }
@@ -845,7 +886,8 @@ export class Typing {
   // Whether two types are one once lowered, except where `to` holds a pattern that lowering
   // would make a plain string: then fitting decides, part by part.
   sameLowered(this: Mut<this>, from: Type, to: Type): boolean {
-    return this.lower(from) === this.lower(to) && (!this.holdsPattern(to) || this.holdsPattern(from) && this.shapeKey(from) === this.shapeKey(to));
+    const kept = (t: Type) => this.holdsPattern(t) || this.holdsBrand(t);
+    return this.lower(from) === this.lower(to) && (!kept(to) || kept(from) && this.shapeKey(from) === this.shapeKey(to));
   }
 
   private interiors = new Map<string, InteriorType>();
@@ -910,6 +952,8 @@ export class Typing {
     const kept = (u: Type) => this.recOf(u)?.kind === "dyn" && this.keptByJs(u as DynType);
     const r = this.rec(t);
     switch (r.kind) {
+      case "brand":
+        return uncrossable(r.base);
       case "literal":
         return undefined;
       case "param":
@@ -1391,6 +1435,8 @@ export class Typing {
     const first = (parts: Type[]) => parts.map(part).find((p) => p !== undefined);
     const r = this.rec(t);
     switch (r.kind) {
+      case "brand":
+        return part(r.base);
       case "literal":
       case "pattern":
         return undefined;
@@ -1850,6 +1896,7 @@ export class Typing {
     if (r.kind === "literal" || r.kind === "interface" || r.kind === "closure" || r.kind === "function" || r.kind === "generator" || r.kind === "future" || r.kind === "dyn" || r.kind === "regex") return t;
     if (r.kind === "param") return r.concrete ? this.lower(r.concrete) : t;
     if (r.kind === "pattern") return "string";
+    if (r.kind === "brand") return r.base;
     if (r.kind === "pointer") return this.pointerType(this.lower(r.to), r.mutable);
     if (r.kind === "handle") return r.joined ? this.joinedType(this.lower(r.joined.base) as HandleType, r.joined.panic) : this.handleType(this.lower(r.gives), r.throws && this.lower(r.throws));
     if (r.kind === "interior") return this.interiorType(r.which, this.lower(r.of));
@@ -2115,12 +2162,19 @@ export class Typing {
         this.assumed.delete(pair);
       }
     }
+    // A brand fits one of the same kind whose tag its tag fits, as `Brand<usize, "A">` fits
+    // `Brand<usize, string>`; its base fits only a loose one.
+    if (tr?.kind === "brand") {
+      if (fr?.kind === "brand") return fr.base === tr.base && !fr.unit === !tr.unit && fr.field === tr.field && this.fits(fr.tag, tr.tag);
+      return tr.loose === true && (from === tr.base || (fr?.kind === "literal" && !fr.owner && this.baseOf(from as LiteralType) === tr.base));
+    }
     if (tr?.kind === "union") {
       if (fr?.kind === "union") return fr.members.every((m) => this.fits(m, to));
       return tr.members.some((m) => this.fits(from, m));
     }
     // A union fits where every member it may hold does, as an enum fits an i64.
     if (fr?.kind === "union") return fr.members.every((m) => this.fits(m, to));
+    if (fr?.kind === "brand") return this.fits(fr.base, to);
     if (fr?.kind === "pattern") return to === "string";
     if (fr?.kind === "literal") return this.baseOf(from as LiteralType) === to;
     // A closure fits a function type taking the same parameters, or the first of them, and
@@ -2210,6 +2264,7 @@ export class Typing {
       return `\`${r.quasis.map((q, i) => (i === 0 ? text(q) : `\${${this.show(r.holes[i - 1]!)}}${text(q)}`)).join("")}\``;
     }
     if (r.kind === "union") return r.name ?? r.members.map((t) => this.show(t)).join(" | ");
+    if (r.kind === "brand") return r.field !== undefined ? `${this.show(r.base)} & { readonly ${r.field}${r.loose ? "?" : ""}: ${this.show(r.tag)} }` : `${r.unit ? "Unit" : "Brand"}<${this.show(r.base)}, ${this.show(r.tag)}>`;
     if (r.kind === "ref") return `${r.mutable ? "Mut" : "Ref"}<${this.show(r.to)}>`;
     if (r.kind === "pointer") return `${r.mutable ? "MutPtr" : "Ptr"}<${this.show(r.to)}>`;
     if (r.kind === "regex") return "RegExp";

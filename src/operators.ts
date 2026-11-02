@@ -21,6 +21,8 @@ export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
 
 // The result of a binary operator, or an error when its operands don't suit it.
 export function binaryType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type {
+  const branded = brandedType(typing, op, left, right, at);
+  if (branded !== undefined) return branded;
   // Value equality comes through Eq, which objects don't have yet. A literal's value is known.
   const comparable = (t: Type) => typeof t === "string" || ["literal", "pattern", "pointer"].includes(typing.rec(t).kind);
   if ((op === "===" || op === "!==") && (!comparable(left) || !comparable(right))) {
@@ -72,3 +74,14 @@ export function binaryType(typing: Typing, op: BinaryOp, left: Type, right: Type
 
 // The operators only integers have.
 const BITWISE = new Set<BinaryOp>(["&", "|", "^", "<<", ">>", ">>>"]);
+
+// A brand compares with itself and with its base, and arithmetic on it gives its base, as
+// TypeScript's does; two different brands don't mix.
+function brandedType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type | undefined {
+  const [l, r] = [typing.recOf(left), typing.recOf(right)];
+  if (l?.kind !== "brand" && r?.kind !== "brand") return undefined;
+  if (l?.kind === "brand" && r?.kind === "brand" && left !== right) {
+    throw new CompileError("E0111", `operator '${op}' can't mix '${typing.show(left)}' and '${typing.show(right)}'; convert one side with 'as'`, at.start, at.end);
+  }
+  return binaryType(typing, op, typing.unbranded(left), typing.unbranded(right), at);
+}
