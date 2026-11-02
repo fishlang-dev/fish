@@ -899,3 +899,57 @@ function main() {
   console.log(C);
   console.log(D);
 }
+// case: comptime_map_consts
+// expect: 9 5
+// expect: 0 0
+// expect: 1 1
+// expect: 2 4
+// expect: 3 9
+// expect: 4 16
+// expect: minus 1
+// expect: 2 0
+// expect: 1 two null
+// expect: true false
+// expect: 2,10,number,bigint i128
+// expect: 3
+// expect: 6 5
+// expect: Map(2) {
+// expect:   'add' => { arity: 2, name: 'plus' },
+// expect:   'neg' => { arity: 1, name: 'minus' }
+// expect: }
+// Top-level const Maps, Sets and dictionaries, built at start-up from what comptime made.
+enum Color { Red, Green, Blue }
+type Op = { name: string; arity: i64 };
+function squares(n: i64): Map<i64, i64> {
+  let m = new Map<i64, i64>();
+  for (let i = 0; i < n; i++) m.set(i, i * i);
+  return m;
+}
+const SQUARES = squares(5);
+const OPS = new Map<string, Op>([["add", { name: "plus", arity: 2 }], ["neg", { name: "minus", arity: 1 }]]);
+const TAGS = new Map<string, string[]>([["a", ["x", "y"]], ["b", []]]);
+const MAYBE = new Map<string, i64 | string | null>([["n", 1], ["s", "two"], ["z", null]]);
+const COLORS = new Set<Color>([Color.Red, Color.Blue]);
+const LOWERED: Record<string, string> = { number: "f64", "10": "ten", bigint: "i128", "2": "two" };
+function main() {
+  console.log(SQUARES.get(3) ?? -1, SQUARES.size);
+  for (const [k, v] of SQUARES) console.log(k, v);
+  const op = OPS.get("neg");
+  if (op !== null) console.log(op.name, op.arity);
+  console.log(TAGS.get("a")?.length ?? 0, TAGS.get("b")?.length ?? 9);
+  console.log(MAYBE.get("n"), MAYBE.get("s"), MAYBE.get("z"));
+  console.log(COLORS.has(Color.Blue), COLORS.has(Color.Green));
+  console.log(Object.keys(LOWERED).join(","), LOWERED["bigint"] ?? "?");
+  const local = comptime squares(3);
+  console.log(local.size);
+  let copy = SQUARES.clone();
+  copy.set(9, 81);
+  console.log(copy.size, SQUARES.size);
+  console.log(OPS);
+}
+// case: comptime_map_const_is_constant
+// error: 'set' changes its Map, so call it on a variable or a field
+const M = new Map<string, i64>([["a", 1]]);
+function main() {
+  M.set("b", 2);
+}
