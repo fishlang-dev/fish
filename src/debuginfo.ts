@@ -8,7 +8,7 @@ import { resolve, basename, dirname } from "node:path";
 
 // One of the program's files other than the entry, as `diag.ts` has it, written out so this file
 // checks with Fish while `diag.ts` doesn't yet.
-type Source = { base: number; src: string; file: string };
+type Source = { base: usize; src: string; file: string };
 
 const FN = /^ {2};fsh\.fn (\d+)$/;
 const AT = /^ {2};fsh\.at (\d+)$/;
@@ -20,10 +20,10 @@ function quoted(text: string): string {
 
 // Where each line of `text` starts, then a start past its end, so every offset has a next one: a
 // table, since a function's every expression is looked up.
-function lineStarts(text: string): number[] {
-  let starts: number[] = [0];
-  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) starts.push((i + 1) as number);
-  starts.push((text.length + 1) as number);
+function lineStarts(text: string): usize[] {
+  let starts: usize[] = [0];
+  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) starts.push((i + 1) as usize);
+  starts.push((text.length + 1) as usize);
   return starts;
 }
 
@@ -32,12 +32,12 @@ export function withDebugInfo(ir: string, src: string, file: string, sources: So
   // The entry's source, then each other file's in order of where its offsets start.
   const regions = [{ base: 0, file, starts: lineStarts(src) }, ...sources.map((s) => ({ base: s.base, file: s.file, starts: lineStarts(s.src) }))];
   // `file`, `line` and `col` of an offset into the program.
-  const place = (offset: number): { file: string; line: number; col: number } => {
+  const place = (offset: usize): { file: string; line: usize; col: usize } => {
     const after = regions.findIndex((r) => r.base > offset);
     const region = after < 0 ? regions.at(-1)! : regions.at(after - 1)!;
     const at = offset - region.base;
     const next = region.starts.findIndex((start) => start > at);
-    return { file: region.file, line: next as number, col: at - region.starts.at(next - 1)! + 1 };
+    return { file: region.file, line: next as usize, col: at - region.starts.at(next - 1)! + 1 };
   };
   const fileText = (path: string): string => `!DIFile(filename: ${quoted(basename(path))}, directory: ${quoted(dirname(path))})`;
   // The unit, its module flags, the one signature every subprogram has, and the entry's file.
@@ -66,7 +66,7 @@ export function withDebugInfo(ir: string, src: string, file: string, sources: So
   // location its next instruction gets.
   let [header, label, subprogram, home, here] = ["", "", "", "", ""];
   let locations = new Map<string, string>();
-  const at = (line: number, col: number, scope: string): string => {
+  const at = (line: usize, col: usize, scope: string): string => {
     const key = `${scope}:${line}:${col}`;
     if (!locations.has(key)) locations.set(key, node(`!DILocation(line: ${line}, column: ${col}, scope: ${scope})`));
     return locations.get(key)!;

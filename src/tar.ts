@@ -7,17 +7,17 @@ export type TarFile = { path: string; data: Uint8Array };
 // More entries than any package needs, so a flood of tiny files is refused.
 export const MAX_ENTRIES = 10_000;
 
-export function untar(bytes: Uint8Array, limit: number): TarFile[] {
+export function untar(bytes: Uint8Array, limit: usize): TarFile[] {
   const files: TarFile[] = [];
   const decode = (b: Uint8Array) => new TextDecoder().decode(b);
-  const text = (at: number, length: number) => decode(bytes.subarray(at, at + length)).replace(/\0.*$/s, "");
-  const octal = (at: number, length: number) => {
+  const text = (at: usize, length: usize) => decode(bytes.subarray(at, at + length)).replace(/\0.*$/s, "");
+  const octal = (at: usize, length: usize) => {
     const field = text(at, length).trim();
     if (!/^[0-7]*$/.test(field)) throw new Error("its archive has an entry of no readable size");
     return field === "" ? 0 : parseInt(field, 8);
   };
   let at = 0;
-  let next: { path?: string; size?: number } = {};
+  let next: { path?: string; size?: usize } = {};
   let total = 0;
   let entries = 0;
   while (at + 512 <= bytes.length) {
@@ -55,8 +55,8 @@ export function untar(bytes: Uint8Array, limit: number): TarFile[] {
 
 // A pax header's `path` and `size`, from its records, each `<length> <key>=<value>\n`, the
 // length counting bytes.
-function paxRecords(records: Uint8Array): { path?: string; size?: number } {
-  const found: { path?: string; size?: number } = {};
+function paxRecords(records: Uint8Array): { path?: string; size?: usize } {
+  const found: { path?: string; size?: usize } = {};
   let at = 0;
   while (at < records.length) {
     const space = records.indexOf(0x20, at);
@@ -80,12 +80,12 @@ function paxRecords(records: Uint8Array): { path?: string; size?: number } {
 export function tar(files: { path: string; data: Uint8Array; executable: boolean }[]): Uint8Array {
   const blocks: Uint8Array[] = [];
   const encoder = new TextEncoder();
-  const header = (name: string, size: number, mode: number, type: string): Uint8Array => {
+  const header = (name: string, size: usize, mode: u32, type: string): Uint8Array => {
     const h = new Uint8Array(512);
-    const put = (at: number, value: string) => h.set(encoder.encode(value), at);
-    const octal = (at: number, length: number, n: number) => put(at, n.toString(8).padStart(length - 1, "0") + "\0");
+    const put = (at: usize, value: string) => h.set(encoder.encode(value), at);
+    const octal = (at: usize, length: usize, n: usize) => put(at, n.toString(8).padStart(length - 1, "0") + "\0");
     put(0, name);
-    octal(100, 8, mode);
+    octal(100, 8, mode as usize);
     octal(108, 8, 0);
     octal(116, 8, 0);
     octal(124, 12, size);
@@ -105,7 +105,7 @@ export function tar(files: { path: string; data: Uint8Array; executable: boolean
   };
   for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
     if (encoder.encode(f.path).length > 100) {
-      const body = (n: number) => `${n} path=${f.path}\n`;
+      const body = (n: usize) => `${n} path=${f.path}\n`;
       let length = encoder.encode(body(0)).length;
       while (encoder.encode(body(length)).length !== length) length = encoder.encode(body(length)).length;
       const record = encoder.encode(body(length));

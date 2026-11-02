@@ -38,7 +38,7 @@ export function changed(before: Map<string, string | undefined>): string | undef
 }
 
 // Stops `child` with SIGTERM, killing it if it hasn't exited within `grace` milliseconds.
-export async function stop(child: Subprocess, grace: number = GRACE_MS): Promise<void> {
+export async function stop(child: Subprocess, grace: i64 = GRACE_MS): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
   const timer = setTimeout(() => child.kill("SIGKILL"), grace);
@@ -116,7 +116,7 @@ export function watchProgram(w: Watching): Promise<never> {
   };
   // A program already sent SIGTERM is killed, as is every program on a second signal, so none
   // outlives the watcher.
-  const quit = (code: number) => async () => {
+  const quit = (code: i32) => async () => {
     const child = state.child;
     for (const c of state.quitting ? [...state.stopping, ...(child ? [child] : [])] : state.stopping) c.kill("SIGKILL");
     if (state.quitting) return;

@@ -6,14 +6,16 @@ import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
 import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
-import { parse, shiftSpans, type ClassMember, type Expr, type Func, type Span, type Specifier, type Stmt } from "./parser.ts";
+import { parse, type ClassMember, type Expr, type Func, type Param, type Pattern, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { fishFiles } from "./fmt.ts";
 import { MANIFEST, type RustDependency } from "./manifest.ts";
 import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.ts";
 import { ENGINE_HOOK, STD, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
-import { nextId, NodeMap, type Ids } from "./nodes.ts";
+import type { Id } from "./ids.ts";
+import { forEachChild, nextId, NodeMap, Rewrites, shiftSpans, walk, type AnyNode, type Ids } from "./nodes.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
 // offset range, so a position anywhere in the program says which file it is in.
@@ -27,7 +29,7 @@ export const FILE_SPAN = 2 ** 24;
 // `whole`: a package's module an import names whole, as a namespace, reached through its name.
 // `owner`: on a Fish package's lib, the package, whose other files' exports are private to it.
 // `pkg`: the directory of the Fish package a file belongs to, when the program has a fish.toml.
-export type Module = { path: string; file: string; base: number; src: string; statements: Stmt[]; targets: NodeMap<Stmt, Module>; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
+export type Module = { path: string; file: string; base: usize; src: string; statements: Stmt[]; targets: NodeMap<Stmt, Module>; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
 // `packages`: each package specifier the program imports, by the directory its import resolves
 // from, its index naming it in the bundle.
 export type Package = { specifier: string; dir: string; at: Span };
@@ -37,13 +39,13 @@ export type RustCrate = { dependency: RustDependency; dir: string };
 
 // The file a source offset is in, among a compilation's `files`, as written relative to the
 // entry's directory.
-export function fileAt(files: Compilation["files"], offset: number): string {
+export function fileAt(files: Compilation["files"], offset: usize): string {
   return files.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
 // The name std's module holding a source offset is shown by, as "node:fs", or nothing when the
 // offset is in a file of the program's own, whatever that file is named.
-export function stdModuleAt(files: Compilation["files"], offset: number): string | undefined {
+export function stdModuleAt(files: Compilation["files"], offset: usize): string | undefined {
   const f = files.findLast((f) => offset >= f.base);
   return f?.std ? f.file : undefined;
 }
@@ -78,10 +80,10 @@ export function load(compilation: Compilation, entry: string, src: string = read
       statements = parse(text, ids);
     } catch (e) {
       // A parse or edition error's position is in its own file's text.
-      if (e instanceof CompileError) shiftSpans(e, base);
+      if (e instanceof CompileError) shiftError(e, base);
       throw e;
     }
-    if (base > 0) shiftSpans(statements, base);
+    if (base > 0) shiftSpans("stmt", statements, base);
     // A Rust crate's declarations are reached by importing `rust:<crate>`, not as this file's own.
     if (!path.startsWith("std:")) rustBlocks.set(key, statements.flatMap((s) => rustBlock(s) ?? []));
     statements = statements.filter((s) => !rustBlock(s));
@@ -138,7 +140,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
   };
   // A declaration file a package's declarations come from: given its own place in the program's
   // offsets, so a message about a declaration shows its line.
-  const declarationFile = (file: string, text: string = readFileSync(file, "utf8")): number => {
+  const declarationFile = (file: string, text: string = readFileSync(file, "utf8")): usize => {
     const key = `dts:${file}`;
     const known = byPath.get(key);
     if (known) return known.base;
@@ -182,16 +184,17 @@ export function load(compilation: Compilation, entry: string, src: string = read
       declaredHere.set(name, declared);
       let made: Stmt;
       try {
-        made = jsDeclaration(ids, declared, name, specifier, index, at, as);
+        made = jsDeclaration(ids, declared, name, specifier, index as usize, at, as);
       } catch (e) {
         // A declaration only referred to that Fish can't take is left out, refused where named.
         if (exported || !(e instanceof CompileError)) throw e;
         return;
       }
-      const overloads = jsOverloads(ids, declared, made, name, specifier, index);
+      const overloads = jsOverloads(ids, declared, made, name, specifier, index as usize);
+      if (overloads.length > 0 && made.kind === "function") made = { ...made, js: { ...made.js!, overloads } };
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
-      for (const s of [made, ...overloads]) shiftSpans(s, base);
+      for (const s of [made, ...overloads]) shiftSpans("stmt", s, base);
       statements.push(exported ? ({ id: nextId(ids), kind: "export", body: made, start: made.start, end: made.end } as Stmt) : made, ...overloads);
       for (const n of refers) {
         const found = declared.resolve(n);
@@ -229,10 +232,10 @@ export function load(compilation: Compilation, entry: string, src: string = read
     try {
       statements = parse(text, ids);
     } catch (e) {
-      if (e instanceof CompileError) shiftSpans(e, base);
+      if (e instanceof CompileError) shiftError(e, base);
       throw e;
     }
-    shiftSpans(statements, base);
+    shiftSpans("stmt", statements, base);
     const blocks = statements.flatMap((s) => rustBlock(s) ?? []);
     rustBlocks.set(key, blocks);
     return blocks;
@@ -344,16 +347,11 @@ function unwrapped(s: Stmt): Stmt {
 }
 
 // The members of a name a file reaches, as `ns.f`, each where it is first reached.
-function membersUsed(statements: Stmt[], name: string): { name: string; start: number; end: number }[] {
-  const found = new Map<string, { name: string; start: number; end: number }>();
-  const walk = (v: unknown) => {
-    if (Array.isArray(v)) return v.forEach(walk);
-    if (typeof v !== "object" || v === null) return;
-    const n = v as { kind?: string; object?: { kind?: string; name?: string }; name?: string; start?: number; end?: number };
-    if (n.kind === "member" && n.object?.kind === "ident" && n.object.name === name && !found.has(n.name!)) found.set(n.name!, { name: n.name!, start: n.start!, end: n.end! });
-    Object.values(v).forEach(walk);
-  };
-  walk(statements);
+function membersUsed(statements: Stmt[], name: string): { name: string; start: usize; end: usize }[] {
+  const found = new Map<string, { name: string; start: usize; end: usize }>();
+  walk("stmt", statements, ({ of, node: n }) => {
+    if (of === "expr" && n.kind === "member" && n.object.kind === "ident" && n.object.name === name && !found.has(n.name)) found.set(n.name, { name: n.name, start: n.start, end: n.end });
+  });
   return [...found.values()];
 }
 
@@ -393,15 +391,9 @@ function globalsIn(statements: Stmt[]): string[] {
     return namesOf(s.kind === "export" ? s.body : s);
   }));
   const found = new Set<string>();
-  const walk = (v: unknown) => {
-    if (Array.isArray(v)) return v.forEach(walk);
-    if (typeof v !== "object" || v === null) return;
-    const n = v as Record<string, unknown>;
-    const object = n.object as { kind?: string; name?: string } | undefined;
-    if (n.kind === "member" && object?.kind === "ident" && Object.hasOwn(STD_MODULES, object.name!) && !bound.has(object.name!)) found.add(object.name!);
-    Object.values(n).forEach(walk);
-  };
-  walk(statements);
+  walk("stmt", statements, ({ of, node: n }) => {
+    if (of === "expr" && n.kind === "member" && n.object.kind === "ident" && Object.hasOwn(STD_MODULES, n.object.name) && !bound.has(n.object.name)) found.add(n.object.name);
+  });
   return [...found];
 }
 
@@ -434,7 +426,7 @@ export function resolveSpecifier(from: string, specifier: string, at: Span, look
 type Decl = { name: string; unique: string; fixed: boolean };
 type Linked = {
   module: Module;
-  index: number;
+  index: usize;
   // The file's declarations with exports unwrapped, imports and re-exports left out.
   body: Stmt[];
   own: Map<string, Decl>;
@@ -547,7 +539,7 @@ export function flatten(compilation: Compilation, { modules }: Loaded, library =
 // suffix out.
 const apart = (name: string, l: Linked) => `${name}-fsh${l.index}`;
 
-function linkOf(ids: Ids, module: Module, index: number, library: boolean): Linked {
+function linkOf(ids: Ids, module: Module, index: usize, library: boolean): Linked {
   const entry = index === 0;
   const l: Linked = { module, index, body: [], own: new Map(), imports: new Map(), exports: new Map(), stars: [], used: new Set() };
   const bind = (alias: string, from: Module, name: string, at: Span) => {
@@ -627,33 +619,32 @@ function linkOf(ids: Ids, module: Module, index: number, library: boolean): Link
 // the places it means something else alone: a block's declarations, a function's parameters, a
 // loop head's bindings and a catch clause's name in its handler. `visit` returns true when it
 // has handled a node and its children; only names `matters` cares about are tracked.
-function scoped(matters: (name: string) => boolean, visit: (n: Record<string, unknown>, hidden: Set<string>, walk: (v: unknown, hidden: Set<string>) => void) => boolean) {
-  const walk = (v: unknown, hidden: Set<string>): void => {
-    if (Array.isArray(v)) {
-      const declared = v.flatMap((s) => {
-        const d = s as Stmt | null;
-        if (!d || typeof d !== "object") return [];
+function scoped(matters: (name: string) => boolean, visit: (n: Record<string, unknown>, hidden: Set<string>, walk: (n: AnyNode, hidden: Set<string>) => void) => boolean) {
+  const walk = (n: AnyNode, hidden: Set<string>): void => {
+    if (n.of === "stmts") {
+      const declared = n.node.flatMap((d) => {
         if (d.kind === "let") return d.declarations.flatMap((x) => bindings(x.target));
         return d.kind === "function" || d.kind === "class" ? namesOf(d) : [];
       });
       const inner = declared.some(matters) ? new Set([...hidden, ...declared]) : hidden;
-      return v.forEach((x) => walk(x, inner));
+      return n.node.forEach((s) => walk({ of: "stmt", node: s }, inner));
     }
-    if (typeof v !== "object" || v === null) return;
-    const n = v as Record<string, unknown>;
     // A catch clause's name reaches only its handler, so the try's own blocks are walked first.
-    if (n.kind === "try" && n.param) {
-      const caught = bindings(n.param);
-      walk(n.block, hidden);
-      walk(n.handler, caught.some(matters) ? new Set([...hidden, ...caught]) : hidden);
-      if (n.finalizer) walk(n.finalizer, hidden);
+    if (n.of === "stmt" && n.node.kind === "try" && n.node.param) {
+      const caught = bindings(n.node.param);
+      walk({ of: "stmts", node: n.node.block }, hidden);
+      if (n.node.handler) walk({ of: "stmts", node: n.node.handler }, caught.some(matters) ? new Set([...hidden, ...caught]) : hidden);
+      if (n.node.finalizer) walk({ of: "stmts", node: n.node.finalizer }, hidden);
       return;
     }
-    const head = n.kind === "forOf" || n.kind === "forIn" ? n.left : n.kind === "for" ? n.init : undefined;
-    const declared = head && (head as { kind?: string }).kind === "let" ? (head as Extract<Stmt, { kind: "let" }>).declarations.flatMap((d) => bindings(d.target)) : [];
-    const own = [...(Array.isArray(n.params) ? (n.params as { pattern?: unknown }[]).flatMap((p) => bindings(p.pattern)) : []), ...declared];
+    const s = n.of === "stmt" ? n.node : undefined;
+    const head = s?.kind === "forOf" || s?.kind === "forIn" ? s.left : s?.kind === "for" ? s.init : undefined;
+    const declared = head?.kind === "let" ? head.declarations.flatMap((d) => bindings(d.target)) : [];
+    // Whatever has parameters: functions, arrows, methods and function types.
+    const params = (n.node as { params?: unknown }).params;
+    const own = [...(Array.isArray(params) ? (params as Param[]).flatMap((p) => bindings(p.pattern)) : []), ...declared];
     if (own.some(matters)) hidden = new Set([...hidden, ...own]);
-    if (!visit(n, hidden, walk)) Object.values(n).forEach((x) => walk(x, hidden));
+    if (!visit(n.node as Record<string, unknown>, hidden, walk)) forEachChild(n, (c) => walk(c, hidden));
   };
   return walk;
 }
@@ -664,6 +655,7 @@ function scoped(matters: (name: string) => boolean, visit: (n: Record<string, un
 // block's declaration or a catch clause takes the name, it means that instead.
 function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Module; explicit: boolean }>, bind: (alias: string, from: Module, name: string, at: Span) => void, valued: Map<string, "value" | "table"> = new Map()) {
   const bound = new Set<string>();
+  const rewrites = new Rewrites();
   const named = (d: string) => spaces.has(d) || valued.has(d);
   const walk = scoped(named, (n, hidden, walk) => {
     const object = n.object as { kind?: string; name?: string } | undefined;
@@ -675,24 +667,22 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     };
     if (n.kind === "assign" && (n.target as { kind?: string }).kind !== undefined && table((n.target as { object?: unknown }).object)) {
       const t = table((n.target as { object?: unknown }).object)!;
-      throw new CompileError("E0908", `setting '${t.owner}.${t.name}' isn't supported yet; it is read-only here`, n.start as number, n.end as number);
+      throw new CompileError("E0908", `setting '${t.owner}.${t.name}' isn't supported yet; it is read-only here`, n.start as usize, n.end as usize);
     }
     // `env.HOME` and `env[k]` on a table imported by name call it with the key.
-    const imported = n.object as { kind?: string; name?: string; start?: number; end?: number } | undefined;
+    const imported = n.object as { kind?: string; name?: string; start?: usize; end?: usize } | undefined;
     if ((n.kind === "member" || n.kind === "index") && !n.optional && imported?.kind === "ident" && valued.get(imported.name!) === "table" && !hidden.has(imported.name!)) {
       const key = n.kind === "member" ? { id: nextId(ids), kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
-      walk(key, hidden);
-      const callee = { id: nextId(ids), kind: "ident", name: imported.name, start: imported.start, end: imported.end };
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
-      Object.assign(n, { kind: "call", callee, typeArgs: [], args: [key], optional: false });
+      walk({ of: "expr", node: key as Expr }, hidden);
+      const callee: Expr = { id: nextId(ids), kind: "ident", name: imported.name!, start: imported.start!, end: imported.end! };
+      rewrites.replace(n as Id, { id: 0, kind: "call", callee, typeArgs: [], args: [key as Expr], optional: false, start: n.start as usize, end: n.end as usize });
       return true;
     }
     // `argv` imported by name reads as a value, calling it, except where it is called.
     if (n.kind === "ident" && valued.has(n.name as string) && !hidden.has(n.name as string)) {
-      if (valued.get(n.name as string) === "table") throw new CompileError("E0908", `'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as number, n.end as number);
-      const callee = { id: nextId(ids), kind: "ident", name: n.name, start: n.start, end: n.end };
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
-      Object.assign(n, { kind: "call", callee, typeArgs: [], args: [], optional: false });
+      if (valued.get(n.name as string) === "table") throw new CompileError("E0908", `'${n.name}' is read by key, as in '${n.name}.HOME' or '${n.name}[name]'`, n.start as usize, n.end as usize);
+      const callee: Expr = { id: nextId(ids), kind: "ident", name: n.name as string, start: n.start as usize, end: n.end as usize };
+      rewrites.replace(n as Id, { id: 0, kind: "call", callee, typeArgs: [], args: [], optional: false, start: n.start as usize, end: n.end as usize });
       return true;
     }
     const keyed = (n.kind === "member" || n.kind === "index") && !n.optional ? table(n.object) : undefined;
@@ -701,22 +691,22 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
       if (!bound.has(alias)) bind(alias, keyed.space.from, keyed.name, n as unknown as Span);
       bound.add(alias);
       const key = n.kind === "member" ? { id: nextId(ids), kind: "string", value: n.name, start: n.start, end: n.end } : n.index;
-      walk(key, hidden);
-      for (const k of Object.keys(n)) if (k !== "start" && k !== "end" && k !== "id") delete n[k];
-      Object.assign(n, { kind: "call", callee: { id: nextId(ids), kind: "ident", name: alias, start: n.start, end: n.end }, typeArgs: [], args: [key], optional: false });
+      walk({ of: "expr", node: key as Expr }, hidden);
+      const at = { start: n.start as usize, end: n.end as usize };
+      rewrites.replace(n as Id, { id: 0, kind: "call", callee: { id: nextId(ids), kind: "ident", name: alias, ...at }, typeArgs: [], args: [key as Expr], optional: false, ...at });
       return true;
     }
     // A call's callee is the function itself; a value member elsewhere reads through its function.
     if (n.kind === "call") {
       const callee = n.callee as Record<string, unknown>;
       if (callee.kind === "ident" && valued.has(callee.name as string)) {
-        (n.args as unknown[]).forEach((x) => walk(x, hidden));
+        (n.args as Expr[]).forEach((x) => walk({ of: "expr", node: x }, hidden));
         return true;
       }
       const owner = callee.object as { kind?: string; name?: string } | undefined;
       if (callee.kind === "member" && owner?.kind === "ident" && spaces.has(owner.name!) && !hidden.has(owner.name!)) {
         rewrite(callee, spaces.get(owner.name!)!, owner.name!, false);
-        (n.args as unknown[]).forEach((x) => walk(x, hidden));
+        (n.args as Expr[]).forEach((x) => walk({ of: "expr", node: x }, hidden));
         return true;
       }
     }
@@ -729,21 +719,22 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
     const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : []));
     if (!exports.includes(name)) {
       // A package's module holds only the members the file uses, so what else it has isn't listed.
-      if (space.explicit && space.from.whole) throw new CompileError("E0902", `'${space.from.file}' has no export '${name}'`, n.start as number, n.end as number);
-      if (space.explicit) throw new CompileError("E0902", `'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as number, n.end as number);
+      if (space.explicit && space.from.whole) throw new CompileError("E0902", `'${space.from.file}' has no export '${name}'`, n.start as usize, n.end as usize);
+      if (space.explicit) throw new CompileError("E0902", `'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as usize, n.end as usize);
       return false;
     }
     const kind = valuesOf(space.from)[name];
-    if (read && kind === "table") throw new CompileError("E0908", `'${owner}.${name}' is read by key, as in '${owner}.${name}.HOME' or '${owner}.${name}[name]'`, n.start as number, n.end as number);
+    if (read && kind === "table") throw new CompileError("E0908", `'${owner}.${name}' is read by key, as in '${owner}.${name}.HOME' or '${owner}.${name}[name]'`, n.start as usize, n.end as usize);
     const alias = `${owner}:${name}`;
     if (!bound.has(alias)) bind(alias, space.from, name, n as unknown as Span);
     bound.add(alias);
-    for (const key of Object.keys(n)) if (key !== "start" && key !== "end" && key !== "id") delete n[key];
-    const ident = { id: nextId(ids), kind: "ident", name: alias, start: n.start, end: n.end };
-    Object.assign(n, read && kind === "value" ? { kind: "call", callee: ident, typeArgs: [], args: [], optional: false } : { ...ident, id: n.id });
+    const at = { start: n.start as usize, end: n.end as usize };
+    const ident: Expr = { id: nextId(ids), kind: "ident", name: alias, ...at };
+    rewrites.replace(n as Id, read && kind === "value" ? { id: 0, kind: "call", callee: ident, typeArgs: [], args: [], optional: false, ...at } : { ...ident });
     return true;
   };
-  walk(body, new Set());
+  walk({ of: "stmts", node: body }, new Set());
+  rebuiltStmts(body, rewrites);
 }
 
 // `readFile(path, "utf8")` and `readFile(path, { encoding: "utf8" })` give a string, which
@@ -779,18 +770,18 @@ function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: stri
     callee!.name = alias;
     return false;
   });
-  walk(body, new Set());
+  walk({ of: "stmts", node: body }, new Set());
 }
 
 // The std calls typed by their encoding, by module: which read, which write, and which take it
 // among other options, at the argument given.
-const ENCODED: Record<string, Record<string, "read" | "write" | number>> = {
+const ENCODED: Record<string, Record<string, "read" | "write" | usize>> = {
   "std:fs/promises": { readFile: "read", writeFile: "write" },
   "std:fs": { readFileSync: "read", writeFileSync: "write" },
   "std:child_process": { spawnSync: 2, execFileSync: 2, execSync: 1 },
 };
 
-const isEncoding = (p: Extract<Expr, { kind: "object" }>["props"][number]) => (p.kind === "property" && p.key === "encoding") || (p.kind === "shorthand" && p.name === "encoding");
+const isEncoding = (p: Extract<Expr, { kind: "object" }>["props"][usize]) => (p.kind === "property" && p.key === "encoding") || (p.kind === "shorthand" && p.name === "encoding");
 
 // The encoding an options object names: its text, null for `encoding: null`, or undefined when
 // it isn't a literal, or the object holds anything else and `others` doesn't allow it.
@@ -807,12 +798,19 @@ function encodingOf(o: Extract<Expr, { kind: "object" }>, others = false): strin
 const valuesOf = (m: Module) => STD_VALUES[m.path.replace(/^std:/, "")] ?? {};
 
 // The names a binding pattern binds.
-function bindings(pattern: unknown): string[] {
-  if (Array.isArray(pattern)) return pattern.flatMap(bindings);
-  if (typeof pattern !== "object" || pattern === null) return [];
-  const p = pattern as Record<string, unknown>;
-  if (p.kind === "ident") return [p.name as string];
-  return Object.entries(p).flatMap(([k, x]) => (k === "default" || k === "key" ? [] : bindings(x)));
+// An identifier inside a default value counts, but not inside a key or a shorthand's default.
+function bindings(pattern: Pattern): string[] {
+  const found: string[] = [];
+  const visit = (n: AnyNode): void => {
+    if ((n.of === "pattern" || n.of === "expr") && n.node.kind === "ident") {
+      found.push(n.node.name);
+      return;
+    }
+    const skipped = n.node as { key?: unknown; default?: unknown };
+    forEachChild(n, (c) => c.node !== skipped.key && c.node !== skipped.default && visit(c));
+  };
+  visit({ of: "pattern", node: pattern });
+  return found;
 }
 
 // The top-level names a declaration introduces.
@@ -835,23 +833,26 @@ const NAMED = new Set(["ident", "ref", "variant", "function", "class", "enum", "
 // Renames every binding and use of a name, at any depth, to what `to` gives for it; a name it
 // gives nothing for stays. Renaming a name everywhere in a file keeps its scoping, so a local
 // shadowing a top-level name still does. A qualified name renames its first part.
-export function renameIn(ids: Ids, v: unknown, to: (name: string) => string | undefined, seen: Set<unknown> = new Set<unknown>()) {
-  if (typeof v !== "object" || v === null || seen.has(v)) return;
-  seen.add(v);
-  if (Array.isArray(v)) return v.forEach((x) => renameIn(ids, x, to, seen));
-  const node = v as Record<string, unknown>;
+export function renameIn(ids: Ids, statements: Stmt[], to: (name: string) => string | undefined) {
   const renamed = (name: string) => {
     const [head, ...rest] = name.split(".");
     const as = to(head!);
     return as === undefined ? name : [as, ...rest].join(".");
   };
-  if (node.kind === "shorthand") {
-    const as = to(node.name as string);
-    // `{ x }` keeps its key while its value takes the new name.
-    if (as !== undefined) Object.assign(node, { kind: "property", key: node.name, value: { id: nextId(ids), kind: "ident", name: as, start: node.start, end: node.end } });
-  } else if (typeof node.name === "string" && NAMED.has(node.kind as string)) node.name = renamed(node.name);
-  if (Array.isArray(node.typeParams)) for (const p of node.typeParams as { name: string }[]) p.name = renamed(p.name);
-  Object.values(node).forEach((x) => renameIn(ids, x, to, seen));
+  const seen = new Set<unknown>();
+  const rewrites = new Rewrites();
+  walk("stmt", statements, ({ of, node: n }) => {
+    if (seen.has(n)) return false;
+    seen.add(n);
+    const node = n as Record<string, unknown>;
+    if (of === "objectProp" && n.kind === "shorthand") {
+      const as = to(n.name);
+      // `{ x }` keeps its key while its value takes the new name.
+      if (as !== undefined) rewrites.replace(n, { id: 0, kind: "property", key: n.name, value: { id: nextId(ids), kind: "ident", name: as, start: n.start, end: n.end }, start: n.start, end: n.end });
+    } else if (typeof node.name === "string" && NAMED.has(node.kind as string)) node.name = renamed(node.name);
+    if (Array.isArray(node.typeParams)) for (const p of node.typeParams as { name: string }[]) p.name = renamed(p.name);
+  });
+  rebuiltStmts(statements, rewrites);
 }
 
 // A syntax tree as text, its keys in order and without its spans.
@@ -859,4 +860,14 @@ function shapeOf(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(shapeOf).join(",")}]`;
   if (v && typeof v === "object") return `{${Object.keys(v).filter((k) => k !== "start" && k !== "end" && k !== "id").sort().map((k) => `${k}:${shapeOf((v as Record<string, unknown>)[k])}`).join(",")}}`;
   return typeof v === "bigint" ? `${v}n` : JSON.stringify(v) ?? "";
+}
+
+// Moves an error raised while parsing a file to where the file sits in the program.
+function shiftError(e: CompileError, by: usize) {
+  e.start += by;
+  e.end += by;
+  if (e.note) {
+    e.note.start += by;
+    e.note.end += by;
+  }
 }

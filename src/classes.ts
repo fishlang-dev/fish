@@ -2,15 +2,18 @@ import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { RustName, RustTables } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import type { Access, ClassType, FunctionType, Type } from "./typing.ts";
+import { rebuiltParam } from "./rebuild.ts";
+import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
-import type { Instance } from "./check.ts";
-import { nextId, NodeSet, type Ids } from "./nodes.ts";
+import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
+import { nextId, NodeSet, type Ids, childrenOf, walk, type AnyNode, type NodeOf, type RootKind } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
 // and a method declared with `this: Mut<this>` may change it.
 export type Body = Span & Id & {
+  // Its place in the compilation's arena, apart from its node id.
+  bodyId: BodyId;
   name: string;
   params: Param[];
   body: Stmt[];
@@ -41,7 +44,7 @@ export type Body = Span & Id & {
   // `owned`: a method declared `this: Own<this>` takes its object over.
   self?: { type: ClassType; constructor: boolean; mutable: boolean; owned?: boolean };
   // An overloaded function's signatures, in the order a call tries them.
-  overloads?: Body[];
+  overloads?: BodyId[];
   // A signature of an overloaded function, whose body calls the implementation.
   signature?: true;
   // For a class's constructor and methods: the class, and who may call the method.
@@ -54,7 +57,7 @@ export type Body = Span & Id & {
   // class but never compiled itself, and copied into each concrete class that embeds it.
   template?: true;
   // Such a copy: the member it copies, and the class it was written in, whose access rules it keeps.
-  copyOf?: Body;
+  copyOf?: BodyId;
   declared?: ClassType;
   // An arrow function's body, checked inside the instance it is written in. An expression body
   // is a `return` of it, `value`.
@@ -62,7 +65,7 @@ export type Body = Span & Id & {
   // `move`: it captures everything by value.
   // A nested function's closure knows its own name, which its body calls itself by.
   // `made`: the checker wrote it around a function given as a value or a timer's callback.
-  closure?: { value?: Expr; parent: Instance; expected?: FunctionType; move: boolean; unsafe?: boolean; self?: string; made?: true };
+  closure?: { value?: Expr; parent: InstanceId; expected?: FunctionType; move: boolean; unsafe?: boolean; self?: string; made?: true };
 };
 
 // A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather
@@ -79,33 +82,34 @@ export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init:
 export type AbstractMember = Span & { name: string; table: "methods" | "getters" | "setters"; access: Access };
 
 export type ClassInfo = {
+  classId: ClassId;
   type: ClassType;
   abstracts: AbstractMember[];
   // For a concrete class, its copy of each template it runs, by the template.
-  copies: Map<Body, Body>;
+  copies: Map<BodyId, BodyId>;
   fields: FieldDecl[];
   // Its body starts by assigning the field initializers, then the parameter properties.
-  constructor: Body;
+  constructor: BodyId;
   // Every field, each unset until a constructor statement assigns it; until then `this` may
   // only appear as the target of such an assignment.
   required: Set<string>;
   // The prelude's field initializers, which can't see the constructor's parameters.
   initializers: NodeSet<Stmt>;
-  methods: Map<string, Body>;
+  methods: Map<string, BodyId>;
   // Static methods by name, and static accessors as `get x` and `set x`, none with a `this`.
-  statics: Map<string, Body>;
+  statics: Map<string, BodyId>;
   // Each `static readonly` field, a top-level const named `C.x` computed while compiling.
   staticFields: Map<string, FieldDecl>;
   // A getter borrows `this` and returns a value; a setter takes `Mut<this>` and the value.
-  getters: Map<string, Body>;
-  setters: Map<string, Body>;
+  getters: Map<string, BodyId>;
+  setters: Map<string, BodyId>;
   // The class this one embeds and delegates to, named by `extends`.
   baseName: string | undefined;
-  base?: ClassInfo;
+  base?: ClassId;
   // The initializers and parameter properties a derived constructor runs after `super(...)`.
   prelude: Stmt[];
   // For each `From<X>` it implements, X, the static `from` that wraps one, and its parameter's type.
-  wraps: [Type, Body, Type][];
+  wraps: [Type, BodyId, Type][];
   node: ClassNode;
   // For an instance of a generic class: what its type parameters stand for.
   scope: Map<string, Type>;
@@ -115,7 +119,7 @@ export type ClassInfo = {
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
 export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
-  const { genericStatics, ids, rust, typing: { classType } } = tables;
+  const { arenas, genericStatics, ids, rust, typing } = tables;
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   // A template is copied into each concrete class by the abstract class's one declaration, which a
   // generic class doesn't have.
@@ -130,17 +134,17 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   if (constructors.length > 1) throw new CompileError("E0703", "a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
   if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
 
-  const type = classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
-  if (node.abstract) type.abstract = true;
+  const type = typing.classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
+  if (node.abstract) typing.rec(type).abstract = true;
   const abstracts: AbstractMember[] = [];
-  const methods = new Map<string, Body>();
+  const methods = new Map<string, BodyId>();
   // A generic class's statics can't use its type parameters, so every instance shares one set.
   const shared = node.typeParams.length > 0 ? genericStatics.get(node) : undefined;
-  const statics = shared ?? new Map<string, Body>();
+  const statics = shared ?? new Map<string, BodyId>();
   if (node.typeParams.length > 0 && !shared) genericStatics.set(node, statics);
   const staticFields = new Map<string, FieldDecl>();
-  const getters = new Map<string, Body>();
-  const setters = new Map<string, Body>();
+  const getters = new Map<string, BodyId>();
+  const setters = new Map<string, BodyId>();
   for (const m of node.members) {
     if (m.kind === "constructor") continue;
     if ("modifiers" in m && m.modifiers.includes("abstract")) {
@@ -185,7 +189,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   for (const name of statics.keys()) {
     const accessor = /^[gs]et (.*)$/.exec(name)?.[1];
     if (accessor !== undefined && statics.has(accessor)) {
-      const m = statics.get(accessor)!;
+      const m = arenas.bodyOf(statics.get(accessor)!);
       throw new CompileError("E0402", `duplicate property '${accessor}'`, m.start, m.end);
     }
   }
@@ -193,13 +197,13 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     const clash = fields.find((f) => f.name === name);
     if (clash) throw new CompileError("E0402", `duplicate property '${name}'`, clash.start, clash.end);
     if (methods.has(name) && (getters.has(name) || setters.has(name))) {
-      const m = methods.get(name)!;
+      const m = arenas.bodyOf(methods.get(name)!);
       throw new CompileError("E0402", `duplicate property '${name}'`, m.start, m.end);
     }
   }
   // An abstract accessor's pair must be abstract too, as in TypeScript.
   for (const a of abstracts) {
-    const pair = a.table === "getters" ? setters.get(a.name) : a.table === "setters" ? getters.get(a.name) : undefined;
+    const pair = arenas.bodyOf(a.table === "getters" ? setters.get(a.name) : a.table === "setters" ? getters.get(a.name) : undefined);
     if (pair && !pair.abstract) throw new CompileError("E0701", `a getter and a setter for '${a.name}' must both be abstract or neither`, a.start, a.end);
   }
   // As in TypeScript, parameter properties are assigned before field initializers run.
@@ -208,7 +212,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     ...properties.map((f) => assignField(ids, f.name, { id: nextId(ids), kind: "ident", name: f.name, start: f.start, end: f.end }, f)),
     ...initializers,
   ];
-  const constructor: Body = {
+  const constructor = arenas.addBody({
     id: nextId(ids),
     name: `${name}.constructor`,
     scope,
@@ -221,11 +225,11 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     end: (ctor ?? node).end,
     ...(ctor && rustOf(rust, ctor)),
     ...(ctor?.throws && { throws: ctor.throws }),
-  };
+  }).bodyId;
   const required = new Set(fields.map((f) => f.name));
   const named = node.extends?.kind === "instantiation" ? node.extends.expr : node.extends;
   const baseName = named?.kind === "ident" ? named.name : undefined;
-  return { type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] };
+  return arenas.addClass({ type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] });
 
   // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
   function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
@@ -257,7 +261,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     const signature = { ...m, modifiers: m.modifiers.filter((x) => x !== "abstract"), body: [] };
     if (signature.kind === "method") method(signature);
     else accessor(signature);
-    ({ methods, getters, setters })[table].get(m.name)!.abstract = true;
+    arenas.bodyOf(({ methods, getters, setters })[table].get(m.name)!).abstract = true;
     abstracts.push({ name: m.name, table, access, start: m.start, end: m.end });
   }
 
@@ -276,7 +280,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     if (m.kind === "set" && m.params.length !== 1) throw new CompileError("E0705", "a setter takes exactly one parameter", m.start, m.end);
     if (m.kind === "set" && m.returnType) throw new CompileError("E0705", "a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
     if (isStatic && m.params[0]?.pattern.kind === "ident" && m.params[0].pattern.name === "this") throw new CompileError("E0706", "a static accessor has no 'this'", m.params[0].start, m.params[0].end);
-    table.set(key, {
+    table.set(key, arenas.addBody({
       id: nextId(ids),
       name: `${name}.${isStatic ? "static " : ""}${m.kind} ${m.name}`,
       scope,
@@ -289,7 +293,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
       access,
       start: m.start,
       end: m.end,
-    });
+    }).bodyId);
   }
 
   function method(m: Extract<ClassMember, { kind: "method" }>) {
@@ -306,9 +310,9 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     const [first, ...rest] = m.params;
     const receiver = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
     if (receiver && isStatic) throw new CompileError("E0706", "a static method has no 'this'", receiver.start, receiver.end);
-    if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) namesClass(p.type);
+    if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) rebuiltParam(namesClass(p), tables.rewrites);
     if (isStatic) classParamIn(m);
-    table.set(m.name, {
+    table.set(m.name, arenas.addBody({
       id: nextId(ids),
       // A static method has its own symbol, since an instance method may share its name.
       name: `${isStatic ? node.name : name}.${isStatic ? "static " : ""}${m.name}`,
@@ -327,38 +331,38 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
       end: m.end,
       ...rustOf(rust, m),
       ...((m as { signature?: true }).signature && { signature: true as const }),
-    });
+    }).bodyId);
     // The implementation comes right after its signatures.
     const overloads = (m as { overloads?: ClassMember[] }).overloads;
-    if (overloads) table.get(m.name)!.overloads = overloads.map((w) => table.get((w as typeof m).name as string)!);
+    if (overloads) arenas.bodyOf(table.get(m.name)!).overloads = overloads.map((w) => table.get((w as typeof m).name as string)!);
   }
 
   // As in TypeScript, a static member can't name the class's type parameters, only its own.
   function classParamIn(m: Extract<ClassMember, { kind: "method" }>) {
     const outer = new Set(node.typeParams.map((p) => p.name));
     // A function inside declaring its own type parameter of that name hides the class's.
-    const find = (t: unknown, hidden: Set<string>): Span | undefined => {
-      if (!t || typeof t !== "object") return undefined;
-      if (Array.isArray(t)) return t.map((x) => find(x, hidden)).find((x) => x);
-      const n = t as { kind?: string; name?: string; args?: unknown[]; typeParams?: TypeParam[] } & Span;
-      if (n.kind === "ref" && n.args?.length === 0 && outer.has(n.name!) && !hidden.has(n.name!)) return n;
-      const inner = n.typeParams?.length ? new Set([...hidden, ...n.typeParams.map((p) => p.name)]) : hidden;
-      return Object.values(n).map((x) => find(x, inner)).find((x) => x);
+    const find = (n: AnyNode, hidden: Set<string>): (Span & { name: string }) | undefined => {
+      if (n.of === "typeNode" && n.node.kind === "ref" && n.node.args.length === 0 && outer.has(n.node.name) && !hidden.has(n.node.name)) return n.node;
+      const typeParams = (n.node as { typeParams?: TypeParam[] }).typeParams;
+      const inner = typeParams?.length ? new Set([...hidden, ...typeParams.map((p) => p.name)]) : hidden;
+      for (const c of childrenOf(n)) {
+        const found = find(c, inner);
+        if (found) return found;
+      }
+      return undefined;
     };
-    const used = find(m, new Set()) as (Span & { name: string }) | undefined;
+    const used = find({ of: "classMember", node: m }, new Set());
     if (used) throw new CompileError("E0706", `a static method can't use the class's type parameter '${used.name}'; give the method its own, as in 'static ${m.name as string}<${used.name}>(...)'`, used.start, used.end);
   }
 
   // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
-  function namesClass(t: unknown) {
-    if (!t || typeof t !== "object") return;
-    if (Array.isArray(t)) return t.forEach(namesClass);
-    const n = t as { kind?: string; name?: string; args?: unknown[] };
-    if (n.kind === "ref" && n.name === "this" && n.args?.length === 0) {
-      Object.assign(n, { name: node.name, args: node.typeParams.map((p) => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
-      return;
-    }
-    Object.values(n).forEach(namesClass);
+  function namesClass(p: Param): Param {
+    walk("typeNode", p.type, ({ of, node: n }) => {
+      if (of !== "typeNode" || n.kind !== "ref" || n.name !== "this" || n.args.length !== 0) return;
+      tables.rewrites.replace(n, { ...n, name: node.name, args: node.typeParams.map((p): TypeNode => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
+      return false;
+    });
+    return p;
   }
 
   function add(f: FieldDecl): FieldDecl {
@@ -389,12 +393,12 @@ export function separatePrivateNames(nodes: (ClassNode & { name: string })[]) {
   }
 }
 
-function renamePrivate(node: unknown, from: string, to: string) {
-  if (typeof node !== "object" || node === null) return;
-  if (Array.isArray(node)) return node.forEach((n) => renamePrivate(n, from, to));
-  const n = node as { name?: unknown };
-  if (n.name === from) n.name = to;
-  Object.values(node).forEach((v) => renamePrivate(v, from, to));
+// Any name spelled `from` is the private member's: a member's, or one reached through `.`.
+function renamePrivate(members: ClassMember[], from: string, to: string) {
+  walk("classMember", members, ({ node }) => {
+    const n = node as { name?: unknown };
+    if (n.name === from) n.name = to;
+  });
 }
 
 // A private name as written, without the class a subclass's own copy of it is renamed for.
@@ -410,37 +414,39 @@ function rustOf(rust: RustTables, m: ClassMember): { foreign?: true; rust?: Rust
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
 // a constructor of its own it passes its arguments on to the base's.
 export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (name: string) => Type) {
-  const { defaulted, prologues, ids } = tables;
-  c.base = base;
-  c.type.base = base.type;
-  for (let b: ClassInfo | undefined = base; b; b = b.base) {
+  const { arenas, defaulted, prologues, ids, typing } = tables;
+  c.base = base.classId;
+  typing.rec(c.type).base = base.type;
+  const constructor = arenas.bodyOf(c.constructor);
+  const baseConstructor = arenas.bodyOf(base.constructor);
+  for (let b: ClassInfo | undefined = base; b; b = arenas.classOf(b.base)) {
     const redeclared = c.fields.find((f) => b.fields.some((g) => g.name === f.name));
     if (redeclared) {
-      throw new CompileError("E0704", `'${redeclared.name}' is already a field of '${b.type.name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${redeclared.name} = ...'`, redeclared.start, redeclared.end);
+      throw new CompileError("E0704", `'${redeclared.name}' is already a field of '${typing.rec(b.type).name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${redeclared.name} = ...'`, redeclared.start, redeclared.end);
     }
   }
   const explicit = c.node.members.find((m) => m.kind === "constructor");
-  const at = { start: c.constructor.start, end: c.constructor.end };
+  const at = { start: constructor.start, end: constructor.end };
   if (explicit) {
     // Its parameters' defaults are bound first, since `super(...)` may read them.
-    const written = c.constructor.body.slice(c.prelude.length);
+    const written = constructor.body.slice(c.prelude.length);
     const defaults = written.filter((s) => prologues.has(s));
     const [first, ...rest] = written.slice(defaults.length);
     if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
       throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", at.start, at.end);
     }
-    c.constructor.body = [...defaults, first, ...c.prelude, ...rest];
+    constructor.body = [...defaults, first, ...c.prelude, ...rest];
     return;
   }
   // The base's parameters are typed in its scope, where a name may mean something other than it
   // does here: one of its own type parameters, or a type this class's type parameter hides. Each
   // such name is renamed apart into this constructor's own scope, standing for what it means there.
-  const outer = base.constructor.scope ?? new Map<string, Type>();
-  const names = new Map([...new Set(base.constructor.params.flatMap((p) => refNames(p.type)))]
-    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, `${n} of ${base.type.name}`]));
-  if (names.size > 0) c.constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
+  const outer = baseConstructor.scope ?? new Map<string, Type>();
+  const names = new Map([...new Set(baseConstructor.params.flatMap((p) => refNames(p.type)))]
+    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, `${n} of ${typing.rec(base.type).name}`]));
+  if (names.size > 0) constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
   // Copies, so each constructor has its own parameters, and none of them is a property here.
-  const params = base.constructor.params.map((p) => {
+  const params = baseConstructor.params.map((p) => {
     const copy = { ...p, id: nextId(ids), modifiers: [], ...(p.type && names.size > 0 && { type: renamed(p.type, names) }) };
     const declared = defaulted.get(p);
     if (declared) defaulted.set(copy, declared);
@@ -452,16 +458,17 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
     return p.rest ? { id: nextId(ids), kind: "spread", value: name, start: p.start, end: p.end } : name;
   });
   const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
-  c.constructor.params = params;
-  c.constructor.body = [{ id: nextId(ids), kind: "expr", expr: call, ...at }, ...c.prelude];
+  constructor.params = params;
+  constructor.body = [{ id: nextId(ids), kind: "expr", expr: call, ...at }, ...c.prelude];
 }
 
 // The names a type refers to without type arguments.
-function refNames(t: unknown): string[] {
-  if (Array.isArray(t)) return t.flatMap(refNames);
-  if (!t || typeof t !== "object") return [];
-  const n = t as { kind?: string; name?: string; args?: unknown[] };
-  return [...(n.kind === "ref" && n.args?.length === 0 ? [n.name!] : []), ...Object.values(t).flatMap(refNames)];
+function refNames(t: TypeNode | undefined): string[] {
+  const found: string[] = [];
+  walk("typeNode", t, ({ of, node }) => {
+    if (of === "typeNode" && node.kind === "ref" && node.args.length === 0) found.push(node.name);
+  });
+  return found;
 }
 
 // A copy of a type with the type parameters `names` maps renamed.
@@ -474,10 +481,10 @@ function renamed<T>(t: T, names: Map<string, string>): T {
 }
 
 // A member of a class or of the bases it embeds, nearest first.
-export function inherited(c: ClassInfo, table: "methods" | "statics" | "getters" | "setters", name: string): Body | undefined {
-  for (let b: ClassInfo | undefined = c; b; b = b.base) {
+export function inherited(arenas: Arenas, c: ClassInfo, table: "methods" | "statics" | "getters" | "setters", name: string): Body | undefined {
+  for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) {
     const found = b[table].get(name);
-    if (found) return found;
+    if (found !== undefined) return arenas.bodyOf(found);
   }
   return undefined;
 }
@@ -485,14 +492,15 @@ export function inherited(c: ClassInfo, table: "methods" | "statics" | "getters"
 // With embedding, a base's own use of `this.m` keeps reaching the base's `m`, where
 // TypeScript would reach an override. Overriding such a member is an error rather than a
 // silent change in meaning; overriding one the base never reaches through `this` is fine.
-export function checkOverrides(c: ClassInfo) {
+export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
   // A copied template is this class's only because a base declared it; the user wrote none of it.
-  const own = [...c.methods, ...c.getters, ...c.setters].filter(([, m]) => !m.copyOf);
+  const own = [...c.methods, ...c.getters, ...c.setters].map(([name, m]): [string, Body] => [name, arenas.bodyOf(m)]).filter(([, m]) => m.copyOf === undefined);
   const templates: [string, Body][] = [];
-  for (let b = c.base; b; b = b.base) for (const table of TABLES) for (const [name, f] of b[table]) if (f.template) templates.push([name, f]);
-  for (let b = c.base; b; b = b.base) {
+  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) for (const table of TABLES) for (const [name, f] of b[table]) if (arenas.bodyOf(f).template) templates.push([name, arenas.bodyOf(f)]);
+  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
+    const base = typing.rec(b.type).name;
     for (const [name, m] of own) {
-      if (b.fields.some((f) => f.name === name)) throw new CompileError("E0704", `'${name}' is already a field of '${b.type.name}'`, m.start, m.end);
+      if (b.fields.some((f) => f.name === name)) throw new CompileError("E0704", `'${name}' is already a field of '${base}'`, m.start, m.end);
       if (!b.methods.has(name) && !b.getters.has(name) && !b.setters.has(name)) continue;
       // A template reaches the override, through the copy this class gets. A base's own code
       // calling one reaches its own copy, and through it the base's member.
@@ -500,22 +508,22 @@ export function checkOverrides(c: ClassInfo) {
       for (let grew = true; grew;) {
         grew = false;
         for (const [t, f] of templates) {
-          if (through.has(t) || ![...through].some((n) => usesOnThis(f.body, n))) continue;
+          if (through.has(t) || ![...through].some((n) => usesOnThis("stmt", f.body, n))) continue;
           through.add(t);
           grew = true;
         }
       }
-      const bodies = new Set([...b.methods.values(), ...b.getters.values(), ...b.setters.values()].filter((f) => f.template).map((f) => f.body));
+      const bodies = new Set([...b.methods.values(), ...b.getters.values(), ...b.setters.values()].map((f) => arenas.bodyOf(f)).filter((f) => f.template).map((f) => f.body));
       const members = b.node.members.filter((m) => !("body" in m && m.body && bodies.has(m.body)));
-      const via = [...through].find((n) => usesOnThis(members, n));
+      const via = [...through].find((n) => usesOnThis("classMember", members, n));
       if (via === name) {
         throw new CompileError(
-          "E0704", `overriding '${name}' is an error here: '${b.type.name}' reaches it through 'this', and with 'extends' as embedding that would still run '${b.type.name}.${name}'; extract an interface instead`,
+          "E0704", `overriding '${name}' is an error here: '${base}' reaches it through 'this', and with 'extends' as embedding that would still run '${base}.${name}'; extract an interface instead`,
           m.start, m.end);
       }
       if (via !== undefined) {
         throw new CompileError(
-          "E0704", `overriding '${name}' is an error here: '${b.type.name}' calls 'this.${via}', which reaches '${name}', and with 'extends' as embedding the copy of '${via}' in '${b.type.name}' would still run '${b.type.name}.${name}'; extract an interface instead`,
+          "E0704", `overriding '${name}' is an error here: '${base}' calls 'this.${via}', which reaches '${name}', and with 'extends' as embedding the copy of '${via}' in '${base}' would still run '${base}.${name}'; extract an interface instead`,
           m.start, m.end);
       }
     }
@@ -529,28 +537,29 @@ const MEMBER_KINDS = { methods: "method", getters: "getter", setters: "setter" }
 // through another such member, become templates. A concrete class must implement every abstract
 // member, and gets its own copy of each template, which sees `this` as the concrete class, so
 // `this.area()` there runs the concrete class's `area`.
-export function implementAbstracts(ids: Ids, c: ClassInfo) {
+export function implementAbstracts(tables: Tables, c: ClassInfo) {
+  const { arenas, typing } = tables;
   const bases: ClassInfo[] = [];
-  for (let b = c.base; b; b = b.base) bases.push(b);
-  for (const b of [c, ...bases].filter((b) => b.node.abstract).reverse()) markTemplates(b);
+  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) bases.push(b);
+  for (const b of [c, ...bases].filter((b) => b.node.abstract).reverse()) markTemplates(arenas, tables.typing, b);
   if (c.node.abstract) return;
   const abstracts = bases.flatMap((b) => b.abstracts.map((a) => ({ ...a, owner: b })));
-  const missing = abstracts.filter((a) => inherited(c, a.table, a.name)!.abstract && !(a.table !== "methods" && [c, ...bases].some((b) => b.fields.some((f) => f.name === a.name))));
+  const missing = abstracts.filter((a) => inherited(arenas, c, a.table, a.name)!.abstract && !(a.table !== "methods" && [c, ...bases].some((b) => b.fields.some((f) => f.name === a.name))));
   if (missing.length > 0) {
-    const named = [...new Set(missing.map((a) => `${MEMBER_KINDS[a.table]} '${a.name}' of '${a.owner.type.name}'`))];
-    throw new CompileError("E0701", `class '${c.type.name}' must implement the abstract ${named.join(", ")}`, c.node.start, c.node.end);
+    const named = [...new Set(missing.map((a) => `${MEMBER_KINDS[a.table]} '${a.name}' of '${typing.rec(a.owner.type).name}'`))];
+    throw new CompileError("E0701", `class '${typing.rec(c.type).name}' must implement the abstract ${named.join(", ")}`, c.node.start, c.node.end);
   }
   for (const a of abstracts) {
-    const f = inherited(c, a.table, a.name)!;
+    const f = inherited(arenas, c, a.table, a.name)!;
     if (!f.abstract && (f.access === "private" || (f.access === "protected" && a.access === "public"))) {
-      throw new CompileError("E0701", `'${a.name}' implements a ${a.access} abstract member of '${a.owner.type.name}', so it must be ${a.access === "public" ? "public" : "public or protected"}`, f.start, f.end);
+      throw new CompileError("E0701", `'${a.name}' implements a ${a.access} abstract member of '${typing.rec(a.owner.type).name}', so it must be ${a.access === "public" ? "public" : "public or protected"}`, f.start, f.end);
     }
   }
   for (const b of bases.filter((b) => b.node.abstract)) {
     for (const table of TABLES) {
       for (const [name, f] of b[table]) {
-        const nearest = inherited(c, table, name)!;
-        if (f.template && (nearest.copyOf ?? nearest) === f) c[table].set(name, copyFor(ids, c, f));
+        const nearest = inherited(arenas, c, table, name)!;
+        if (arenas.bodyOf(f).template && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c, arenas.bodyOf(f)).bodyId);
       }
     }
   }
@@ -558,27 +567,30 @@ export function implementAbstracts(ids: Ids, c: ClassInfo) {
 
 // A concrete class's copy of a template, made once: its own member when nothing overrides it,
 // and what `super.name()` runs in the class either way.
-export function copyFor(ids: Ids, c: ClassInfo, f: Body): Body {
-  let copy = c.copies.get(f);
-  if (!copy) c.copies.set(f, copy = { ...f, id: nextId(ids), name: `${c.type.name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, scope: c.scope, template: undefined, copyOf: f, declared: f.owner! });
+export function copyFor({ arenas, ids, typing }: Tables, c: ClassInfo, f: Body): Body {
+  const made = c.copies.get(f.bodyId);
+  if (made !== undefined) return arenas.bodyOf(made);
+  const copy = arenas.addBody({ ...f, id: nextId(ids), name: `${typing.rec(c.type).name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, scope: c.scope, template: undefined, copyOf: f.bodyId, declared: f.owner! });
+  c.copies.set(f.bodyId, copy.bodyId);
   return copy;
 }
 
 // Marks an abstract class's templates, once its bases' are marked.
-function markTemplates(c: ClassInfo) {
+function markTemplates(arenas: Arenas, typing: Typing, c: ClassInfo) {
   const names = new Set<string>();
-  for (let b: ClassInfo | undefined = c; b; b = b.base) {
+  for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) {
     b.abstracts.forEach((a) => names.add(a.name));
-    for (const table of TABLES) for (const [name, f] of b[table]) if (f.template) names.add(name);
+    for (const table of TABLES) for (const [name, f] of b[table]) if (arenas.bodyOf(f).template) names.add(name);
   }
   for (let grew = true; grew;) {
     grew = false;
     for (const table of TABLES) {
-      for (const [name, f] of c[table]) {
+      for (const [name, id] of c[table]) {
+        const f = arenas.bodyOf(id);
         // `this` handed on as a value has the abstract class's type, which only a template's own
         // check may ever give a value: every instance made for an abstract class comes from
         // checking a template or a signature, and none is compiled.
-        if (f.template || !([...names].some((n) => usesOnThis(f.body, n, true)) || thisEscapes(f.body))) continue;
+        if (f.template || !([...names].some((n) => usesOnThis("stmt", f.body, n, true)) || thisEscapes(f.body))) continue;
         f.template = true;
         names.add(name);
         grew = true;
@@ -587,40 +599,47 @@ function markTemplates(c: ClassInfo) {
   }
   // While the base is built, the subclass that implements its abstract members isn't yet. A
   // constructor has no copies, so `this` there would be the abstract class's own value.
-  const early = [...names].find((n) => usesOnThis(c.constructor.body, n, true));
+  const constructor = arenas.bodyOf(c.constructor);
+  const early = [...names].find((n) => usesOnThis("stmt", constructor.body, n, true));
   if (early !== undefined) {
-    throw new CompileError("E0701", `'${c.type.name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, c.constructor.start, c.constructor.end);
+    throw new CompileError("E0701", `'${typing.rec(c.type).name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, constructor.start, constructor.end);
   }
-  if (thisEscapes(c.constructor.body)) {
-    throw new CompileError("E0701", `'${c.type.name}' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet`, c.constructor.start, c.constructor.end);
+  if (thisEscapes(constructor.body)) {
+    throw new CompileError("E0701", `'${typing.rec(c.type).name}' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet`, constructor.start, constructor.end);
   }
 }
 
 // Whether a class embeds an abstract class declaring `name` abstract, or is one.
-export function abstractIn(c: ClassInfo, name: string): boolean {
-  for (let b: ClassInfo | undefined = c; b; b = b.base) if (b.abstracts.some((a) => a.name === name)) return true;
+export function abstractIn(arenas: Arenas, c: ClassInfo, name: string): boolean {
+  for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) if (b.abstracts.some((a) => a.name === name)) return true;
   return false;
 }
 
 // Whether `this` appears as a value rather than only as the object of `this.member`.
-function thisEscapes(node: unknown): boolean {
-  if (typeof node !== "object" || node === null) return false;
-  if (Array.isArray(node)) return node.some(thisEscapes);
-  const n = node as { kind?: string; object?: { kind?: string } };
-  if (n.kind === "this") return true;
-  return Object.entries(node).some(([key, v]) => !(key === "object" && n.kind === "member" && n.object?.kind === "this") && thisEscapes(v));
+function thisEscapes(body: Stmt[] | undefined): boolean {
+  let escapes = false;
+  walk("stmt", body, ({ of, node }) => {
+    if (escapes || (of === "expr" && node.kind === "member" && node.object.kind === "this")) return false;
+    if (of === "expr" && node.kind === "this") escapes = true;
+  });
+  return escapes;
 }
 
 // Whether any node under `node` is `this.name`, or with `viaSuper`, `super.name` too.
-function usesOnThis(node: unknown, name: string, viaSuper = false): boolean {
-  if (typeof node !== "object" || node === null) return false;
-  if (Array.isArray(node)) return node.some((n) => usesOnThis(n, name, viaSuper));
-  const n = node as { kind?: string; object?: { kind?: string }; name?: unknown; implementation?: true; args?: unknown };
-  // An overload signature's call of its own class's implementation is the signature's, which an
-  // override replaces along with it.
-  if (n.implementation) return usesOnThis(n.args, name, viaSuper);
-  if (n.kind === "member" && (n.object?.kind === "this" || (viaSuper && n.object?.kind === "super")) && n.name === name) return true;
-  return Object.values(node).some((v) => usesOnThis(v, name, viaSuper));
+function usesOnThis<K extends RootKind>(of: K, roots: NodeOf<K>[] | undefined, name: string, viaSuper = false): boolean {
+  let used = false;
+  walk(of, roots, ({ of, node }) => {
+    if (used) return false;
+    if (of !== "expr") return;
+    // An overload signature's call of its own class's implementation is the signature's, which an
+    // override replaces along with it.
+    if (node.kind === "call" && (node as { implementation?: true }).implementation) {
+      used = usesOnThis("expr", node.args, name, viaSuper);
+      return false;
+    }
+    if (node.kind === "member" && (node.object.kind === "this" || (viaSuper && node.object.kind === "super")) && node.name === name) used = true;
+  });
+  return used;
 }
 
 // `this: Mut<this>` mutates the instance; `this: Ref<this>` only reads it, as the default does.

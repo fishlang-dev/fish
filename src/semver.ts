@@ -1,6 +1,6 @@
 // Semantic versions and npm's ranges, meaning exactly what they mean in package.json.
 
-export type Version = { major: number; minor: number; patch: number; pre: (string | number)[] };
+export type Version = { major: u64; minor: u64; patch: u64; pre: (string | u64)[] };
 
 const VERSION = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
@@ -12,7 +12,7 @@ export function parseVersion(text: string): Version | undefined {
 }
 
 // A pre-release's identifiers, numbers as numbers; a number with a leading zero isn't one.
-function identifiers(text: string | undefined): (string | number)[] | undefined {
+function identifiers(text: string | undefined): (string | u64)[] | undefined {
   if (text === undefined) return [];
   const parts = text.split(".");
   if (parts.some((p) => /^0\d/.test(p) || (/^\d+$/.test(p) && !Number.isSafeInteger(Number(p))))) return undefined;
@@ -23,9 +23,9 @@ export const formatVersion = (v: Version) => `${v.major}.${v.minor}.${v.patch}${
 
 // Precedence as semver 2.0 orders it: a pre-release before its release, numeric identifiers
 // below alphanumeric ones, a shorter list of identifiers first when the rest are equal.
-export function compare(a: Version, b: Version): number {
+export function compare(a: Version, b: Version): i64 {
   for (const k of ["major", "minor", "patch"] as const) if (a[k] !== b[k]) return a[k] < b[k] ? -1 : 1;
-  if (a.pre.length === 0 || b.pre.length === 0) return b.pre.length - a.pre.length;
+  if (a.pre.length === 0 || b.pre.length === 0) return (b.pre.length as i64) - (a.pre.length as i64);
   for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
     const [x, y] = [a.pre[i], b.pre[i]];
     if (x === undefined) return -1;
@@ -43,10 +43,10 @@ type Comparator = { op: Op; version: Version; bound?: true };
 // A range is any of its sets, each set every one of its comparators.
 export type Range = Comparator[][];
 
-const at = (major: number, minor = 0, patch = 0, pre: (string | number)[] = []): Version => ({ major, minor, patch, pre });
+const at = (major: u64, minor: u64 = 0, patch: u64 = 0, pre: (string | u64)[] = []): Version => ({ major, minor, patch, pre });
 
 // A partial version, as `1`, `1.2`, `1.x` or `*` write one: the parts given, undefined past them.
-type Partial = { major?: number; minor?: number; patch?: number; pre: (string | number)[] };
+type Partial = { major?: u64; minor?: u64; patch?: u64; pre: (string | u64)[] };
 const PARTIAL = /^v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-.]+)?$/;
 
 function partial(text: string): Partial | undefined {

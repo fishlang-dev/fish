@@ -321,12 +321,12 @@ function main() {
 }
 // error: can't call 'next' through '!', which would change a copy
 // case: option_unwrap_not_option
-// '!' needs an Option.
+// A '!' on a value that can't be empty is that value.
 function main() {
   const n = 5
   print(n!)
 }
-// error: '!' takes the value out of an Option, and this is a 'i64', which is never empty
+// expect: 5
 // case: option_unwrap_out_of_borrow
 // '!' can't move a value out of an Option a reference borrows.
 class P { x: i64; constructor(x: i64) { this.x = x } }
@@ -360,3 +360,13 @@ function main() {
 // expect: 1
 // expect: 1
 // expect: 1
+
+// case: option_object_literal_fields
+type Note = { message: string; start: usize; end: usize };
+function endOf(n: Note | undefined): usize { return n === undefined ? 0 : n.end; }
+function main() {
+  console.log(endOf({ message: "x", start: 6, end: 7 }));
+  console.log(endOf(undefined));
+}
+// expect: 7
+// expect: 0

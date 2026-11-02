@@ -60,3 +60,18 @@ function main() {
   x = true
 }
 // error: operator '+' cannot be applied to types 'boolean | i64' and 'i64'
+// case: narrowing_kind_among_literals
+// A member whose discriminant is one of several literals is left out by a test for another.
+type T = { kind: "ref"; name: string } | { kind: "union" | "intersection"; n: i64 };
+function show(t: T): string {
+  switch (t.kind) {
+    case "ref": return t.name;
+    case "union": return `union ${t.n}`;
+  }
+  if (t.kind === "intersection") return `intersection ${t.n}`;
+  return "none";
+}
+function main() {
+  print(show({ kind: "ref", name: "a" }), show({ kind: "union", n: 1 }), show({ kind: "intersection", n: 2 }))
+}
+// expect: a union 1 intersection 2

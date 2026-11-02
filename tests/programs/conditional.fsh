@@ -31,3 +31,21 @@ function main() {
 }
 // expect: 1 false
 // expect: one
+// case: conditional_literal_union
+// Each side of a `?:` meets a union of literals on its own, as a literal alone does.
+type Loop = "forIn" | "forOf"
+function loop(word: string): Loop {
+  return word === "in" ? "forIn" : "forOf"
+}
+function main() {
+  const k: Loop = loop("of") === "forOf" ? "forIn" : "forOf"
+  print(loop("in"), k)
+}
+// expect: forIn forIn
+// case: conditional_literal_union_unfit
+// error: type 'string' is not assignable to type '"a" | "b"'
+function main() {
+  const n = 1
+  const k: "a" | "b" = n === 1 ? "a" : "c"
+  print(k)
+}

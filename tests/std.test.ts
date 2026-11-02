@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 import { parse } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // The classes and functions std gives a program, by name: a program's own name for one of std's
 // leaves std's under a name no program can write, or leaves out the library it would clash with.

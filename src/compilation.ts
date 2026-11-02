@@ -1,21 +1,21 @@
-import type { Instance, Local } from "./check.ts";
+import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Value } from "./comptime.ts";
-import type { Body } from "./classes.ts";
 import type { Names } from "./diag.ts";
 import type { Kind } from "./narrow.ts";
-import { WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
+import { Rewrites, WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
 import type { RustTables } from "./rust.ts";
 import type { Locking } from "./dependencies.ts";
 import type { Unit } from "./mathlib.ts";
-import { newTyping, type ClassType, type DynType, type LiteralType, type Type, type Typing } from "./typing.ts";
+import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
 // One compilation of a program. Its front end, which keeps no state of its own, is handed the
 // counter node ids come from, the names its messages show as written, and the tables regexes are
-// compiled with; every check of the program shares its types, interned in `typing`, and `counts`.
+// compiled with; every check of the program shares its types, interned in `typing`, its instances,
+// bodies, locals and classes, kept in `arenas`, and `counts`.
 // Whatever starts a compilation makes one, so nothing one program makes reaches another; what
 // outlives it, the caches of a CLI run or a language server, is its `session`.
 // `upcasts` are the spans of the `equals` methods `@derive(Eq)` wrote over a base class. Their
@@ -30,17 +30,18 @@ import type { DynTable } from "./values.ts";
 // `fileNames`: for a linked program, each file's top-level names by its base offset: the name each
 // declaration it reaches takes in the program, to the name the file writes for it.
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
+// `rewrites`: the nodes lowering replaced, by id, until each body's rebuild puts them in place.
 // `looked`: every source file loading read or looked for, as an absolute path, missing ones included.
 export type Compilation = {
-  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: number; file: string; src: string; std: boolean }[]; rust: RustTables;
-  enumInits: [number, number, string][]; fileNames: WeakMap<Stmt[], Map<number, Map<string, string>>>; generated: WeakNodeSet<Id>; looked: string[];
+  session: Session; ids: Ids; rewrites: Rewrites; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string; std: boolean }[]; rust: RustTables;
+  enumInits: [usize, usize, string][]; fileNames: WeakMap<Stmt[], Map<usize, Map<string, string>>>; generated: WeakNodeSet<Id>; looked: string[];
 };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
 // whatever was compiled before it: its enums, which tells enums of one name apart, the generic
 // functions lifted out of bodies, destructuring assignments, macro expansions, and the constants
 // macros give values.
-export type Counts = { enums: number; lifts: number; destructures: number; expansions: number; constants: number };
+export type Counts = { enums: usize; lifts: usize; destructures: usize; expansions: usize; constants: usize };
 
 // What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
 // the caches that spare later compilations the work earlier ones did.
@@ -50,8 +51,8 @@ export type Counts = { enums: number; lifts: number; destructures: number; expan
 // `digests`: each source a cached object depends on, hashed, by path, size and modification time.
 // `compiling`: the objects being compiled without blocking, so each is compiled once.
 // `mathUnits`: the Math runtime's objects to compile.
-// `std`: std's parsed tree, serialized, by the path it is cached at; the key naming it, null when
-// no compiler source can be read; and how many times std was parsed rather than loaded.
+// `std`: what gives std's statements, each call a fresh copy, without which each compilation parses
+// std's source; and how many times std was parsed rather than loaded.
 // `timings`: each build stage's time, kept only when `--timings` asks.
 export type Session = {
   locking: Locking;
@@ -60,7 +61,7 @@ export type Session = {
   digests: Map<string, string>;
   compiling: Map<string, Promise<string>>;
   mathUnits?: Unit[];
-  std: { key?: string | null; tree?: { path: string | null; bytes: Uint8Array }; parses: number };
+  std: { load?: () => Stmt[]; parses: usize };
   timings?: Timings;
 };
 
@@ -69,18 +70,22 @@ export function newSession(): Session {
 }
 
 export function newCompilation(session: Session): Compilation {
-  return { session, ids: { last: 0 }, names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: newTyping(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet(), looked: [] };
+  return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: new Typing(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new WeakNodeMap(), classNodes: new WeakNodeMap() }, enumInits: [], fileNames: new WeakMap(), generated: new WeakNodeSet(), looked: [] };
 }
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
 // and for the passes after it: moves, comptime and codegen. `check` makes a fresh set, and every
 // instance it makes holds it, so nothing one program records reaches another.
 export type Tables = {
-  // What every check of the program shares: its types, the upcasts its macros wrote, the counter
-  // for the nodes checking makes, its regex tables, files and Rust names, and the session's timings.
+  // What every check of the program shares: its types, its instances, bodies, locals and classes,
+  // the upcasts its macros wrote, the counter for the nodes checking makes, its counts, its regex
+  // tables, files and Rust names, the nodes lowering replaced, and the session's timings.
   typing: Typing;
+  arenas: Arenas;
   upcasts: Set<string>;
   ids: Ids;
+  rewrites: Rewrites;
+  counts: Counts;
   regex: RegexTables;
   files: Compilation["files"];
   rust: RustTables;
@@ -96,7 +101,7 @@ export type Tables = {
   // per call.
   nestedFunctions: WeakNodeMap<Expr, string>;
   // The bindings nested function declarations make, and closures' captures of them.
-  nestedBindings: WeakSet<Local>;
+  nestedBindings: Set<LocalId>;
   // The generic functions written inside bodies, each lifted to a function of its own, by the
   // statement that declared it, or the generic arrow written as a value.
   liftedFunctions: WeakNodeMap<Stmt | Expr, { name: string; fn: Declared & { body: Stmt[] } }>;
@@ -196,14 +201,14 @@ export type Tables = {
   // The calls a tagged template became, the only calls yet that fill a rest parameter.
   tagCalls: WeakNodeSet<Expr>;
   // The `equals` each class's `===` calls.
-  equalities: WeakMap<ClassType, Instance>;
+  equalities: TypeMap<ClassType, InstanceId>;
   // Each quote, by the Ast types it was checked with, for comptime to build its value from.
   quotes: WeakNodeMap<Expr, Record<Category, Type>>;
   // The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
   // body's next instance checks again as tuples.
   tupleLiterals: WeakNodeSet<Expr>;
   // A rest tuple's array, read as its field `...`, and how many fixed elements come before it.
-  restStarts: WeakNodeMap<Expr, number>;
+  restStarts: WeakNodeMap<Expr, usize>;
   // Member reads the runtime computes, like `c.signal` and `signal.aborted`, and fields read
   // through a Dyn: values, not places.
   computed: WeakNodeSet<Expr>;
@@ -221,7 +226,7 @@ export type Tables = {
   // The calls into a package, whose arguments cross by copy, so nothing moves into them.
   jsCrossings: WeakNodeSet<Expr>;
   // The function each of a package's signatures is checked as, by its declaration.
-  jsBodies: WeakNodeMap<Stmt, Body>;
+  jsBodies: WeakNodeMap<Stmt, BodyId>;
   // A package's classes, by name: what `new` and their statics are checked against.
   jsClasses: Map<string, Interface>;
   // Where each of a package's functions is first called, noted on a refusal of its declaration.
@@ -249,13 +254,13 @@ export type Tables = {
   jsOptionalOf: WeakNodeMap<Expr, boolean[]>;
   // The `get`, `at` and `has` calls on a JsValue.
   jsAccessors: WeakNodeSet<Expr>;
-  dynCalls: WeakNodeMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>;
+  dynCalls: WeakNodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>;
 
   // Each generic class's statics, declared with its first instance.
-  genericStatics: WeakNodeMap<ClassNode, Map<string, Body>>;
-  // A generic class's placeholders, by its type parameters, shared by its definition check and
-  // its members.
-  classScopes: WeakMap<TypeParam[], Map<string, Type>>;
+  genericStatics: WeakNodeMap<ClassNode, Map<string, BodyId>>;
+  // A generic class's placeholders, by its first type parameter, shared by its definition
+  // check and its members.
+  classScopes: WeakNodeMap<TypeParam, Map<string, Type>>;
   // The program's type aliases, which inference looks through, and those being looked through,
   // so one that holds itself is looked into once.
   aliases: Map<string, TypeAlias>;
@@ -295,22 +300,25 @@ export type Tables = {
   quotedSpans: WeakMap<object, Set<string>>;
   // A comptime string array's binding: a literal type standing for exactly that array, so equal
   // arrays share an instance, with the array it stands for.
-  stringArrays: Map<LiteralType, string[]>;
+  stringArrays: TypeMap<LiteralType, string[]>;
   // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
   // function the checker hasn't reached yet.
-  ensureChecked: (instance: Instance) => boolean;
+  ensureChecked: (instance: InstanceId) => boolean;
   // Each top-level const's value, once computed, and those being computed, which a const reading
   // itself would meet.
-  constants: WeakMap<Instance, Value>;
-  computing: Set<Instance>;
+  constants: Map<InstanceId, Value>;
+  computing: Set<InstanceId>;
 };
 
-export function newTables({ session, typing, upcasts, ids, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ session, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
     timings: session.timings,
     typing,
+    arenas,
     upcasts,
     ids,
+    rewrites,
+    counts,
     regex,
     files,
     rust,
@@ -318,7 +326,7 @@ export function newTables({ session, typing, upcasts, ids, regex, files, rust, g
     declarations: new WeakNodeSet<Expr | Stmt | Param | ObjectProp>(),
     loopParts: new WeakNodeSet<Declarator>(),
     nestedFunctions: new WeakNodeMap<Expr, string>(),
-    nestedBindings: new WeakSet<Local>(),
+    nestedBindings: new Set<LocalId>(),
     liftedFunctions: new WeakNodeMap<Stmt | Expr, { name: string; fn: Declared & { body: Stmt[] } }>(),
     getterNames: new Set<string>(),
     destructuredParts: new WeakNodeMap<Stmt, Expr>(),
@@ -364,17 +372,17 @@ export function newTables({ session, typing, upcasts, ids, regex, files, rust, g
     maths: new WeakNodeSet<Expr>(),
     integerCalls: new WeakNodeSet<Expr>(),
     tagCalls: new WeakNodeSet<Expr>(),
-    equalities: new WeakMap<ClassType, Instance>(),
+    equalities: new TypeMap<ClassType, InstanceId>(),
     quotes: new WeakNodeMap<Expr, Record<Category, Type>>(),
     tupleLiterals: new WeakNodeSet<Expr>(),
-    restStarts: new WeakNodeMap<Expr, number>(),
+    restStarts: new WeakNodeMap<Expr, usize>(),
     computed: new WeakNodeSet<Expr>(),
     dynMembers: new Map<string, DynTable>(),
     boxedMembers: new WeakNodeMap<Expr, DynType>(),
     promiseVariants: new WeakNodeMap<Expr, { name: string; typeArgs: TypeNode[] }>(),
     jsUses: [],
     jsCrossings: new WeakNodeSet<Expr>(),
-    jsBodies: new WeakNodeMap<Stmt, Body>(),
+    jsBodies: new WeakNodeMap<Stmt, BodyId>(),
     jsClasses: new Map<string, Interface>(),
     jsCalledAt: new WeakMap<object, Expr>(),
     timerCalls: new WeakNodeMap<Expr, "timerSet" | "timerNext" | "timerClear">(),
@@ -389,9 +397,9 @@ export function newTables({ session, typing, upcasts, ids, regex, files, rust, g
     jsStatics: new WeakNodeMap<Expr, JsName>(),
     jsOptionalOf: new WeakNodeMap<Expr, boolean[]>(),
     jsAccessors: new WeakNodeSet<Expr>(),
-    dynCalls: new WeakNodeMap<Expr, { index: number; mutable: boolean; owned: boolean; callable?: Expr }>(),
-    genericStatics: new WeakNodeMap<ClassNode, Map<string, Body>>(),
-    classScopes: new WeakMap<TypeParam[], Map<string, Type>>(),
+    dynCalls: new WeakNodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>(),
+    genericStatics: new WeakNodeMap<ClassNode, Map<string, BodyId>>(),
+    classScopes: new WeakNodeMap<TypeParam, Map<string, Type>>(),
     aliases: new Map<string, TypeAlias>(),
     expanding: new Set<string>(),
     kindTests: new WeakNodeMap<Expr, Kind>(),
@@ -406,10 +414,10 @@ export function newTables({ session, typing, upcasts, ids, regex, files, rust, g
     quoteScopes: new WeakMap<object, Map<string, string>>(),
     quoteFrees: new WeakMap<object, Free>(),
     quotedSpans: new WeakMap<object, Set<string>>(),
-    stringArrays: new Map<LiteralType, string[]>(),
+    stringArrays: new TypeMap<LiteralType, string[]>(),
     ensureChecked: () => true,
-    constants: new WeakMap<Instance, Value>(),
-    computing: new Set<Instance>(),
+    constants: new Map<InstanceId, Value>(),
+    computing: new Set<InstanceId>(),
   };
 }
 
@@ -418,12 +426,12 @@ export function newTables({ session, typing, upcasts, ids, regex, files, rust, g
 // checker, or the comptime interpreter inside macro expansion, is counted once, under its own name.
 // `inner` is the time the stages running inside the current one have taken so far. `objects` names
 // the cached objects built, and counts those reused. `now` is the clock, which a test replaces.
-export type Timings = { ms: Map<string, number>; notes: Map<string, string>; inner: number; objects: { built: string[]; cached: number }; now: () => number };
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; now: () => f64 };
 
 export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
 export const NATIVE_STAGES = ["compile", "runtime", "link"];
 
-export function newTimings(now: () => number = () => performance.now()): Timings {
+export function newTimings(now: () => f64 = () => performance.now()): Timings {
   return { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, now };
 }
 
@@ -443,8 +451,8 @@ export function timed<T>(timings: Timings | undefined, name: string, run: () => 
 }
 
 // One line per stage of `stages`, in that order, a stage that never ran as 0.0, then the total.
-export function formatTimings(timings: Timings, stages: string[], total: number): string {
-  const line = (name: string, ms: number, note?: string) => `${name.padEnd(9)}${ms.toFixed(1).padStart(9)} ms${note !== undefined ? ` (${note})` : ""}\n`;
+export function formatTimings(timings: Timings, stages: string[], total: f64): string {
+  const line = (name: string, ms: f64, note?: string) => `${name.padEnd(9)}${ms.toFixed(1).padStart(9)} ms${note !== undefined ? ` (${note})` : ""}\n`;
   return stages.map((s) => line(s, timings.ms.get(s) ?? 0, timings.notes.get(s))).join("") + line("total", total);
 }
 

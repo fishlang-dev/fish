@@ -5,7 +5,7 @@ import { parseRange } from "./semver.ts";
 
 // A package another depends on, from a local path, a git repository pinned to a commit, or the
 // registry by a version range, and where its entry is in the depending package's `fish.toml`.
-export type Dependency = { name: string; start: number; end: number } & ({ path: string } | { git: string; rev: string } | { version: string });
+export type Dependency = { name: string; start: usize; end: usize } & ({ path: string } | { git: string; rev: string } | { version: string });
 
 // A package as its `fish.toml` describes it, `dir` being where that file was found; `lib` is
 // what a package depending on it imports, `entry` the program it builds.
@@ -15,7 +15,7 @@ export type Dependency = { name: string; start: number; end: number } & ({ path:
 export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; dependencies: Dependency[]; rustDependencies?: RustDependency[]; registry?: string; dir: string };
 // A Rust crate the package's `declare module "rust:<crate>"` declarations call, in Cargo's terms.
 export type RustDependency = {
-  name: string; start: number; end: number; version?: string; features?: string[]; defaultFeatures?: boolean; path?: string; git?: string; rev?: string; tag?: string; branch?: string;
+  name: string; start: usize; end: usize; version?: string; features?: string[]; defaultFeatures?: boolean; path?: string; git?: string; rev?: string; tag?: string; branch?: string;
 };
 export type Edition = "native" | "ts-compat";
 
@@ -25,10 +25,10 @@ export const MANIFEST = "fish.toml";
 export const NAME_RULE = "a package name is lowercase letters, digits and '-', starting with a letter, at most 64 characters";
 export const validName = (name: string) => /^[a-z][a-z0-9-]{0,63}$/.test(name);
 
-export type Spanned<T> = { value: T; start: number; end: number };
+export type Spanned<T> = { value: T; start: usize; end: usize };
 export type Entries = Map<string, { key: Spanned<string>; value: Spanned<TomlValue> }>;
-export type TomlValue = string | number | boolean | Entries | Spanned<TomlValue>[];
-export type Table = { start: number; end: number; keys: Entries };
+export type TomlValue = string | i64 | boolean | Entries | Spanned<TomlValue>[];
+export type Table = { start: usize; end: usize; keys: Entries };
 
 // The TOML a manifest and a lockfile use: comments, `[table]` and `[[array of tables]]` headers,
 // bare and quoted keys, basic and literal strings, integers, booleans and inline tables. Anything
@@ -38,7 +38,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
   let current: Table = { start: 0, end: 0, keys: new Map() };
   tables.set("", current);
   let at = 0;
-  const unread = (start: number, what: string) => new CompileError("E0904", `${what} is TOML Fish doesn't read in a manifest yet`, start, start + 1);
+  const unread = (start: usize, what: string) => new CompileError("E0904", `${what} is TOML Fish doesn't read in a manifest yet`, start, start + 1);
   const space = () => {
     while (at < src.length && (src[at] === " " || src[at] === "\t")) at++;
   };

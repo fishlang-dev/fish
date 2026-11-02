@@ -2,54 +2,111 @@
 // Node ids, and the tables keyed by them. Fish's `Map` and `Set` key on strings and integers,
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
-// Every node's own number, unique in its compilation, which the compiler's per-node tables key on.
-export type Id = { id: number };
+import type { Id } from "./ids.ts";
+import type { ClassMember, Declarator, Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
+import { childrenOfClassMember, childrenOfClassNode, childrenOfDeclarator, childrenOfEnumMember, childrenOfExpr, childrenOfFunc, childrenOfInterface, childrenOfJsName, childrenOfMatchArm, childrenOfObjectProp, childrenOfParam, childrenOfPattern, childrenOfPatternProp, childrenOfSpecifier, childrenOfStmt, childrenOfStmts, childrenOfSwitchCase, childrenOfTupleElement, childrenOfTypeAlias, childrenOfTypeMember, childrenOfTypeNode, childrenOfTypeParam, type Visitor } from "./walk.ts";
 
-// The counter ids come from, the last one given. Each compilation holds its own, which serves
-// every tree it parses or makes, at any time, so none share an id; a tree parsed on its own, as
-// the formatter's, has a counter of its own.
-export type Ids = { last: number };
+export { nextId, type Id, type Ids } from "./ids.ts";
 
-// A fresh id from `ids`.
-export function nextId(ids: Ids): number {
-  return ++ids.last;
+// A node of any of the parser's types, tagged with which it is, since kinds repeat across them,
+// or a list of statements, `stmts`, which is a scope.
+export type AnyNode = { [K in keyof Visitor]: { of: K; node: Parameters<Visitor[K]>[0] } }[keyof Visitor];
+export type NodeOf<K extends keyof Visitor> = Parameters<Visitor[K]>[0];
+// The node types a walk can start from: nodes, or arrays of them.
+export type RootKind = Exclude<keyof Visitor, "stmts">;
+
+const CHILDREN: { [K in keyof Visitor]: (n: NodeOf<K>, v: Visitor) => void } = {
+  typeNode: childrenOfTypeNode, expr: childrenOfExpr, stmt: childrenOfStmt, tupleElement: childrenOfTupleElement,
+  typeMember: childrenOfTypeMember, objectProp: childrenOfObjectProp, classNode: childrenOfClassNode,
+  classMember: childrenOfClassMember, param: childrenOfParam, pattern: childrenOfPattern, matchArm: childrenOfMatchArm,
+  patternProp: childrenOfPatternProp, specifier: childrenOfSpecifier, enumMember: childrenOfEnumMember,
+  switchCase: childrenOfSwitchCase, declarator: childrenOfDeclarator, typeParam: childrenOfTypeParam,
+  typeAlias: childrenOfTypeAlias, interface: childrenOfInterface, jsName: childrenOfJsName, func: childrenOfFunc, stmts: childrenOfStmts,
+};
+const KINDS = Object.keys(CHILDREN) as (keyof Visitor)[];
+
+// A visitor handing every node it is given to `each`, tagged.
+function tagging(each: (n: AnyNode) => void): Visitor {
+  const v: Partial<Record<keyof Visitor, (node: never) => void>> = {};
+  for (const of of KINDS) v[of] = (node: never) => each({ of, node } as AnyNode);
+  return v as Visitor;
+}
+
+// Calls `visit` on each node `n` holds, in the order its type lists the fields, with a list of
+// statements given whole.
+export function forEachChild(n: AnyNode, visit: (child: AnyNode) => void) {
+  (CHILDREN[n.of] as (n: unknown, v: Visitor) => void)(n.node, tagging(visit));
+}
+
+// The nodes `n` holds, in the order its type lists the fields.
+export function childrenOf(n: AnyNode): AnyNode[] {
+  const found: AnyNode[] = [];
+  forEachChild(n, (c) => found.push(c));
+  return found;
+}
+
+// Calls `each` on `roots`, nodes of type `of`, and every node under them, each node before those
+// it holds; `each` returning false skips those. Lists of statements are walked through, not given.
+export function walk<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K>[] | undefined, each: (n: AnyNode) => boolean | void) {
+  const v = tagging((n) => {
+    if (n.of === "stmts" || each(n) !== false) (CHILDREN[n.of] as (n: unknown, v: Visitor) => void)(n.node, v);
+  });
+  const list: unknown[] = roots === undefined ? [] : Array.isArray(roots) ? roots : [roots];
+  for (const node of list) (v[of] as (n: unknown) => void)(node);
+}
+
+// Whether `found` picks out a node under `roots`, nodes of type `of`, themselves included.
+export function someNode<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K>[] | undefined, found: (n: AnyNode) => boolean): boolean {
+  let hit = false;
+  walk(of, roots, (n) => !hit && !(hit = found(n)));
+  return hit;
 }
 
 // Gives every node in `tree` a fresh id: a copy made by `structuredClone` or deserializing shares
 // its original's ids, or another process's. A node reached twice, as a shared object, keeps the
 // first one it got. `next` gives the ids.
-export function renumber<T>(tree: T, next: () => number): T {
+export function renumber<K extends RootKind, T extends NodeOf<K> | NodeOf<K>[]>(of: K, tree: T, next: () => usize): T {
   const seen = new Set<unknown>();
-  const walk = (v: unknown): void => {
-    if (typeof v !== "object" || v === null || seen.has(v)) return;
-    seen.add(v);
-    if (Array.isArray(v)) return v.forEach(walk);
-    const node = v as Record<string, unknown>;
-    if (typeof node.id === "number") node.id = next();
-    Object.values(node).forEach(walk);
-  };
-  walk(tree);
+  walk(of, tree, ({ node }) => {
+    if (seen.has(node)) return false;
+    seen.add(node);
+    if (typeof (node as Partial<Id>).id === "number") (node as Id).id = next();
+  });
   return tree;
 }
 
+// Moves every span in a parsed tree, nodes of type `of`, by `by`, for a source placed past others
+// in one program.
+export function shiftSpans<K extends RootKind>(of: K, tree: NodeOf<K> | NodeOf<K>[], by: usize) {
+  const seen = new Set<unknown>();
+  walk(of, tree, ({ node }) => {
+    if (seen.has(node)) return false;
+    seen.add(node);
+    const n = node as Partial<Span>;
+    if (typeof n.start === "number") n.start += by;
+    if (typeof n.end === "number") n.end += by;
+  });
+}
+
 // The node behind each id is kept, so a different object arriving with an id already in use, a
-// copy that kept its original's id, fails loudly instead of reading or replacing its entry.
-function idOf(node: Id, known: Id | undefined): number {
+// copy that kept its original's id, fails loudly instead of reading or replacing its entry; a
+// node lowering replaced and its replacement are one node to a table, which gives the latest.
+function idOf(node: Id, known: Id | undefined): usize {
   const id = node.id;
   if (typeof id !== "number") throw new Error(`internal error: a ${(node as { kind?: string }).kind ?? "node"} node has no id`);
-  if (known !== undefined && known !== node) throw new Error(`internal error: two nodes share id ${id}`);
+  if (known !== undefined && known !== node && latest(known) !== latest(node)) throw new Error(`internal error: two nodes share id ${id}`);
   return id;
 }
 
 // A `Map` from nodes, keyed by their ids, holding each node as a `Map` holds its keys.
 export class NodeMap<K extends Id, V> {
-  private table = new Map<number, { node: K; value: V }>();
+  private table = new Map<usize, { node: K; value: V }>();
 
   constructor(entries?: Iterable<readonly [K, V]>) {
     if (entries) for (const [node, value] of entries) this.set(node, value);
   }
 
-  get size(): number {
+  get size(): usize {
     return this.table.size;
   }
 
@@ -75,7 +132,7 @@ export class NodeMap<K extends Id, V> {
   }
 
   *keys(): IterableIterator<K> {
-    for (const e of this.table.values()) yield e.node;
+    for (const e of this.table.values()) yield latest(e.node);
   }
 
   *values(): IterableIterator<V> {
@@ -83,7 +140,7 @@ export class NodeMap<K extends Id, V> {
   }
 
   *entries(): IterableIterator<[K, V]> {
-    for (const e of this.table.values()) yield [e.node, e.value];
+    for (const e of this.table.values()) yield [latest(e.node), e.value];
   }
 
   [Symbol.iterator](): IterableIterator<[K, V]> {
@@ -91,19 +148,19 @@ export class NodeMap<K extends Id, V> {
   }
 
   forEach(each: (value: V, node: K) => void): void {
-    for (const e of this.table.values()) each(e.value, e.node);
+    for (const e of this.table.values()) each(e.value, latest(e.node));
   }
 }
 
 // A `Set` of nodes, keyed by their ids, holding each node as a `Set` holds its members.
 export class NodeSet<K extends Id> {
-  private table = new Map<number, K>();
+  private table = new Map<usize, K>();
 
   constructor(nodes?: Iterable<K>) {
     if (nodes) for (const n of nodes) this.add(n);
   }
 
-  get size(): number {
+  get size(): usize {
     return this.table.size;
   }
 
@@ -124,16 +181,16 @@ export class NodeSet<K extends Id> {
     this.table.clear();
   }
 
-  values(): IterableIterator<K> {
-    return this.table.values();
+  *values(): IterableIterator<K> {
+    for (const node of this.table.values()) yield latest(node);
   }
 
   [Symbol.iterator](): IterableIterator<K> {
-    return this.table.values();
+    return this.values();
   }
 
   forEach(each: (node: K) => void): void {
-    for (const node of this.table.values()) each(node);
+    for (const node of this.table.values()) each(latest(node));
   }
 }
 
@@ -142,8 +199,8 @@ export class NodeSet<K extends Id> {
 // its node is collected; like a `WeakMap`, it can't be iterated. Unlike one, it holds each value
 // strongly, so a value that reaches its own node keeps that node alive.
 export class WeakNodeMap<K extends Id, V> {
-  private table = new Map<number, { node: WeakRef<K>; value: V }>();
-  private gone = new FinalizationRegistry<number>((id) => this.table.delete(id));
+  private table = new Map<usize, { node: WeakRef<K>; value: V }>();
+  private gone = new FinalizationRegistry<usize>((id) => this.table.delete(id));
 
   get(node: K): V | undefined {
     return this.table.get(idOf(node, this.table.get(node.id)?.node.deref()))?.value;
@@ -167,8 +224,8 @@ export class WeakNodeMap<K extends Id, V> {
 
 // A `WeakSet` of nodes, keyed by their ids, holding each only weakly as `WeakNodeMap` does.
 export class WeakNodeSet<K extends Id> {
-  private table = new Map<number, WeakRef<K>>();
-  private gone = new FinalizationRegistry<number>((id) => this.table.delete(id));
+  private table = new Map<usize, WeakRef<K>>();
+  private gone = new FinalizationRegistry<usize>((id) => this.table.delete(id));
 
   has(node: K): boolean {
     return this.table.has(idOf(node, this.table.get(node.id)?.deref()));
@@ -184,4 +241,43 @@ export class WeakNodeSet<K extends Id> {
   delete(node: K): boolean {
     return this.table.delete(idOf(node, this.table.get(node.id)?.deref()));
   }
+}
+
+// The kinds of node lowering replaces.
+type Replacement = Expr | Stmt | Declarator | Param | Pattern | TypeNode | ObjectProp | ClassMember;
+
+// The nodes lowering replaced, each under the id of the node it replaced, which the replacement
+// takes, so every table keyed by node reads the same entry for either. A tree reads a replacement
+// through `current` until a rebuild puts it in place: after a body's check, or at the end of a
+// pass that lowers the tree before checking.
+export class Rewrites {
+  private table = new Map<usize, Id>();
+
+  // Records `by`, a node made for the purpose, as `node`'s replacement, and gives it.
+  replace<T extends Replacement>(node: Ref<Id>, by: T): T {
+    const was = this.current(node);
+    if (was === by) return by;
+    // Seen only by the node tables' check that two nodes don't share an id, kept off the tree.
+    Object.defineProperty(was, REPLACED_BY, { value: by, configurable: true });
+    // A weak node table registers the first node stored under an id and drops the entry when
+    // that node is collected, so the replacement keeps what it replaced alive.
+    Object.defineProperty(by, REPLACES, { value: was, configurable: true });
+    by.id = node.id;
+    this.table.set(node.id, by);
+    return by;
+  }
+
+  current<T extends Id>(node: T): T {
+    return (this.table.get(node.id) as T | undefined) ?? node;
+  }
+}
+
+const REPLACED_BY = "replaced by";
+const REPLACES = "replaces";
+
+// What `node` is now: the last of its replacements, or itself.
+export function latest<T extends Id>(node: T): T {
+  let n = node as Id & { [REPLACED_BY]?: Id };
+  while (n[REPLACED_BY] !== undefined) n = n[REPLACED_BY] as typeof n;
+  return n as T;
 }

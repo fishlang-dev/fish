@@ -1,4 +1,4 @@
-import { nextId, type Ids } from "./nodes.ts";
+import { nextId, walk, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import { parseExpression, type Expr, type ObjectProp, type Span } from "./parser.ts";
 
@@ -101,22 +101,20 @@ function keyOf(p: ObjectProp, within: string): string {
 }
 
 // Generated nodes take the call's span, so a message about one points at the call.
-function respan(v: unknown, at: Span, seen: Set<unknown> = new Set<unknown>()) {
-  if (typeof v !== "object" || v === null || seen.has(v)) return;
-  seen.add(v);
-  const node = v as Record<string, unknown>;
-  if (typeof node.start === "number" && typeof node.end === "number") {
-    node.start = at.start;
-    node.end = at.end;
-  }
-  for (const child of Object.values(node)) respan(child, at, seen);
+function respan(e: Expr, at: Span) {
+  const seen = new Set<unknown>();
+  walk("expr", e, ({ node }) => {
+    if (seen.has(node)) return false;
+    seen.add(node);
+    Object.assign(node, { start: at.start, end: at.end });
+  });
 }
 
-function renamed(v: unknown, from: string, to: string) {
-  if (typeof v !== "object" || v === null) return;
-  const node = v as Record<string, unknown>;
-  if (node.kind === "ident" && node.name === from) node.name = to;
-  for (const child of Object.values(node)) renamed(child, from, to);
+// A parameter's name and its uses alike.
+function renamed(e: Expr, from: string, to: string) {
+  walk("expr", e, ({ of, node }) => {
+    if ((of === "expr" || of === "pattern") && node.kind === "ident" && node.name === from) node.name = to;
+  });
 }
 
 // The written defaults in place of their placeholders.

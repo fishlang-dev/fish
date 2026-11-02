@@ -520,7 +520,7 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Response compression", "Terminal detection and styled text"], ["HTTP client", "Jest-style test API", "The rest of console"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Response compression", "Terminal detection and styled text"], ["Jest-style test API", "The rest of console", "node:http server shim"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
   // The global URL and URLSearchParams are std's, but Fish refuses importing them from url, and
@@ -529,10 +529,10 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     "a.ts": "const u = new URL(\"http://h/?a=1\");\nconst p = new URLSearchParams(u.search);\n",
     "b.ts": "import { URL } from \"node:url\";\nimport qs from \"querystring\";\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["URL and query strings"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["import.meta.url and file URLs", "node:querystring"]]);
     expect(survey(dir).builtins).toEqual([
-      { module: "querystring", files: 1, equivalent: { name: "URL and query strings", planned: true } },
-      { module: "url", files: 1, equivalent: { name: "URL and query strings", planned: true } },
+      { module: "querystring", files: 1, equivalent: { name: "node:querystring", planned: true } },
+      { module: "url", files: 1, equivalent: { name: "import.meta.url and file URLs", planned: true } },
     ]);
   });
 });
@@ -558,14 +558,14 @@ test("the report lists each Node built-in with its files and what replaces it", 
       { module: "tty", files: 2, equivalent: { name: "Terminal detection and styled text", planned: true } },
       { module: "crypto", files: 1, equivalent: { name: "Hashing", planned: true } },
       { module: "dgram", files: 1, equivalent: { name: "UdpSocket", planned: false } },
-      { module: "http", files: 1, equivalent: { name: "HTTP client", planned: true } },
+      { module: "http", files: 1, equivalent: { name: "node:http server shim", planned: true } },
       { module: "net", files: 1, equivalent: { name: "TcpListener, TcpStream, UnixListener and UnixStream", planned: false } },
       { module: "vm", files: 1 },
     ]);
     const text = formatReport(r);
     expect(text).toContain("  tty                 2 files  planned: Terminal detection and styled text");
     expect(text).toContain("  dgram               1 file   in std: UdpSocket");
-    expect(text).toContain("  http                1 file   planned: HTTP client");
+    expect(text).toContain("  http                1 file   planned: node:http server shim");
     expect(text).toContain("  vm                  1 file   nothing planned");
     expect(text).toContain("  net                 1 file   in std: TcpListener, TcpStream, UnixListener and UnixStream");
     expect(JSON.parse(fishc("survey", dir, "--json").stdout.toString()).builtins).toHaveLength(6);

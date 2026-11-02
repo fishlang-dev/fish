@@ -3,7 +3,7 @@ import { relative } from "node:path";
 import type { Compilation } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
-import { nextId, type Ids } from "./nodes.ts";
+import { nextId, walk, type Ids } from "./nodes.ts";
 import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
 
 // Top-level `test("name", () => { ... })` blocks: left out of a build, lifted into functions of
@@ -11,7 +11,7 @@ import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
 
 type Body = Extract<Expr, { kind: "arrow" | "function" }>;
 // `index` is the test's place in the harness's numbering; `module` is the file declaring it.
-export type Test = { name: string; module: Module; index: number; async: boolean };
+export type Test = { name: string; module: Module; index: usize; async: boolean };
 
 const SHAPE = `a test is written as 'test("name", () => { ... })' at the top level of a file, its name a string literal`;
 
@@ -61,11 +61,8 @@ function lifted(ids: Ids, name: string, body: Body, at: Span): Func {
 }
 
 // Gives every node of a made tree the span `at`, where its parts are written.
-function placed(v: unknown, at: Span) {
-  if (Array.isArray(v)) return v.forEach((x) => placed(x, at));
-  if (typeof v !== "object" || v === null) return;
-  Object.assign(v, { start: at.start, end: at.end });
-  Object.values(v).forEach((x) => placed(x, at));
+function placed(made: Func, at: Span) {
+  walk("func", made, ({ node }) => void Object.assign(node, { start: at.start, end: at.end }));
 }
 
 // The harness's text before its tests are known: an import of each of the package's files, so
@@ -92,14 +89,9 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 `;
   const made = parse(text, ids);
   const named = new Map(tests.map((t) => [call(t), `test ${JSON.stringify(t.name)}-fsh${modules.indexOf(t.module)}`]));
-  const rename = (v: unknown) => {
-    if (Array.isArray(v)) return v.forEach(rename);
-    if (typeof v !== "object" || v === null) return;
-    const node = v as { kind?: string; name?: string };
-    if (node.kind === "ident" && named.has(node.name!)) node.name = named.get(node.name!);
-    Object.values(node).forEach(rename);
-  };
-  rename(made);
+  walk("stmt", made, ({ of, node }) => {
+    if ((of === "expr" || of === "pattern") && node.kind === "ident" && named.has(node.name)) node.name = named.get(node.name)!;
+  });
   return made;
 }
 
@@ -116,11 +108,11 @@ type Outcome = { passed: boolean; output: string };
 
 // Ends every test running now, along with anything it started: `running` holds the process
 // groups of a run's tests while they run.
-export function stopTests(running: Set<number>) {
+export function stopTests(running: Set<i32>) {
   for (const group of running) ended(running, group);
 }
 
-function ended(running: Set<number>, group: number) {
+function ended(running: Set<i32>, group: i32) {
   running.delete(group);
   try {
     process.kill(-group, "SIGKILL");
@@ -132,7 +124,7 @@ function ended(running: Set<number>, group: number) {
 // Runs `test` in a process group of its own, failing it when it exits with anything but 0 or runs
 // past the limit. Once it exits, the rest of its group is killed: a child it left behind would
 // otherwise hold its output open, and the verdict is the test's own.
-async function run(running: Set<number>, binary: string, test: Test, cwd: string): Promise<Outcome> {
+async function run(running: Set<i32>, binary: string, test: Test, cwd: string): Promise<Outcome> {
   const child = Bun.spawn([binary, String(test.index)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
   running.add(child.pid);
   const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
@@ -156,7 +148,7 @@ async function run(running: Set<number>, binary: string, test: Test, cwd: string
 // reports them in order: `ok` or `FAIL`, the file and the name, a failed test's output, then the
 // counts, noting each test's process group in `running` while it runs. Gives the exit code, 1 when
 // any failed.
-export async function runTests(running: Set<number>, binary: string, tests: Test[], cwd: string): Promise<number> {
+export async function runTests(running: Set<i32>, binary: string, tests: Test[], cwd: string): Promise<i64> {
   const outcomes = tests.map(() => Promise.withResolvers<Outcome>());
   let next = 0;
   const worker = async () => {

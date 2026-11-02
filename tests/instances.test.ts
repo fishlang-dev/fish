@@ -1,14 +1,15 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { Arenas, type InstanceId } from "../src/arenas.ts";
 import { compile } from "../src/main.ts";
-import { newSession } from "../src/compilation.ts";
-import { unreached, type Instance } from "../src/check.ts";
+import { cachedSession } from "../src/stdcache.ts";
+import { unreached, type Body, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
 import { NodeMap } from "../src/nodes.ts";
-import { newTyping, type ClassType, type Type } from "../src/typing.ts";
+import { Typing, TypeMap, type ClassType, type Type, digest } from "../src/typing.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 // Monomorphization compiles each generic function once per distinct set of type arguments,
 // however many calls share it, and never compiles a definition check.
@@ -41,17 +42,35 @@ test("abstract classes compile no call to what isn't compiled", () => {
 // to compare, so the net under them is tested directly: a comparison reaching an `equals`
 // that isn't compiled, through an object holding the class, is refused at its span.
 test("a comparison can't reach an equals that isn't compiled", () => {
-  const { classType, objectType } = newTyping();
-  const shape = classType("Shape");
-  shape.abstract = true;
-  const equals = { body: { name: "Shape.equals", owner: shape }, bindings: new Map() } as unknown as Instance;
-  const equalities = new WeakMap<ClassType, Instance>([[shape, equals]]);
+  const typing = new Typing();
+  const shape = typing.classType("Shape");
+  typing.rec(shape).abstract = true;
+  const arenas = new Arenas();
+  const body = (b: object) => arenas.addBody(b as Body).bodyId;
+  const equals = arenas.addInstance({ body: body({ name: "Shape.equals", owner: shape }), bindings: new Map(), tables: { arenas } } as unknown as Omit<Instance, "id">);
+  const equalities = new TypeMap<ClassType, InstanceId>([[shape, equals.id]]);
   const at = { start: 10, end: 20 };
   const [left, right] = [{ id: 1, kind: "ident", name: "a", ...at }, { id: 2, kind: "ident", name: "b", ...at }] as Expr[];
   const compare = { id: 3, kind: "binary", op: "===", left, right, ...at } as Expr;
-  const held = objectType([{ name: "s", type: shape }]);
+  const held = typing.objectType([{ name: "s", type: shape }]);
   const types = new NodeMap<Expr, Type>([[left!, held], [right!, held], [compare, "boolean"]]);
-  const caller = { body: { name: "check" }, bindings: new Map(), calls: new NodeMap(), setters: new NodeMap(), types } as unknown as Instance;
-  expect(() => unreached(equalities, [caller], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));
-  expect(() => unreached(equalities, [caller], () => false)).not.toThrow();
+  const caller = arenas.addInstance({ body: body({ name: "check" }), bindings: new Map(), calls: new NodeMap(), setters: new NodeMap(), types, tables: { arenas } } as unknown as Omit<Instance, "id">);
+  expect(() => unreached(typing, equalities, arenas, [caller.id], (i) => i === equals)).toThrow(expect.objectContaining({ message: expect.stringContaining("abstract class 'Shape' can't reach 'Shape.equals' to compare them"), start: 10, end: 20 }));
+  expect(() => unreached(typing, equalities, arenas, [caller.id], () => false)).not.toThrow();
+});
+
+// An instance's symbol is its name and the FNV-1a digest of its type arguments, so it is the same
+// in every process and every program, and differs when the arguments do.
+test("instance symbols are stable and tell type arguments apart", () => {
+  expect(digest("")).toBe((0xcbf29ce484222325n).toString(36).slice(-6));
+  expect(digest("a")).toBe((0xaf63dc4c8601ec8cn).toString(36).slice(-6));
+  const file = join(import.meta.dir, "programs", "generics.fsh");
+  const symbols = (ir: string) => [...ir.matchAll(/^define .*@"(fsh\.identity#[0-9a-z.]+)"/gm)].map((m) => m[1]!).sort();
+  const here = symbols(compile(session, readFileSync(file, "utf8"), file));
+  const src = (name: string) => JSON.stringify(join(import.meta.dir, "..", "src", name));
+  const script = `import { compile } from ${src("main.ts")}; import { cachedSession } from ${src("stdcache.ts")}; import { readFileSync } from "node:fs"; console.log(compile(cachedSession(), readFileSync(${JSON.stringify(file)}, "utf8"), ${JSON.stringify(file)}));`;
+  const other = Bun.spawnSync(["bun", "-e", script]);
+  expect(symbols(other.stdout.toString())).toEqual(here);
+  expect(new Set(here).size).toBe(4);
+  expect(here.filter((s) => /#\w+\.\d+$/.test(s))).toEqual([]);
 });

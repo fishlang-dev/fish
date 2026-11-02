@@ -107,3 +107,11 @@ function main() {
   const g = () => vt`g`;
   g();
 }
+
+// case: tagged_comptime_argument
+// expect: a!
+function up(comptime s: string): string { return s + "!"; }
+function t(comptime strings: TemplateStringsArray, ...v: string[]): string { return strings[0]; }
+function main() {
+  console.log(up(t`a`));
+}

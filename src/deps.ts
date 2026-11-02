@@ -10,7 +10,7 @@ export type Dependency = {
   name: string; version: string; dev: boolean; group: Group; kind: "native" | "pure" | "unknown";
   equivalent?: { name: string; planned: boolean };
 };
-export type Dependencies = { counts: Record<Group, number>; list: Dependency[]; problem?: string };
+export type Dependencies = { counts: Record<Group, usize>; list: Dependency[]; problem?: string };
 
 // What replaces a package: Fish's std, or a planned feature named by its title.
 const IN_STD = (name: string) => ({ name, planned: false });
@@ -33,7 +33,7 @@ const EQUIVALENTS = new Map<string, { name: string; planned: boolean }>(Object.e
   ...Object.fromEntries(["ioredis", "redis"].map((p) => [p, PLANNED("Redis client")])),
   ...Object.fromEntries(["glob", "fast-glob", "globby"].map((p) => [p, PLANNED("Glob")])),
   "fs-extra": PLANNED("Directory operations"), chokidar: PLANNED("File watching"), tmp: PLANNED("Temporary files and directories"),
-  ...Object.fromEntries(["execa", "cross-spawn"].map((p) => [p, PLANNED("Process spawning")])),
+  ...Object.fromEntries(["execa", "cross-spawn"].map((p) => [p, PLANNED("Streaming child processes")])),
   ...Object.fromEntries(["node-cron", "cron"].map((p) => [p, PLANNED("Scheduled jobs")])),
   cors: PLANNED("CORS middleware"), compression: PLANNED("Response compression"), "express-rate-limit": PLANNED("Rate-limiting middleware"),
   ...Object.fromEntries(["cookie", "cookie-parser"].map((p) => [p, IN_STD("req.cookies and res.cookies")])),
@@ -58,7 +58,7 @@ const PLATFORMS = /(^|[-/@])(darwin|linux|win32|freebsd|android)-(x64|arm64|ia32
 export function dependencies(dir: string): Dependencies | undefined {
   const path = join(dir, "package.json");
   if (!existsSync(path)) return undefined;
-  const counts: Record<Group, number> = { std: 0, planned: 0, native: 0, pure: 0, unknown: 0 };
+  const counts: Record<Group, usize> = { std: 0, planned: 0, native: 0, pure: 0, unknown: 0 };
   let manifest: Record<string, unknown>;
   try {
     manifest = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
@@ -113,7 +113,7 @@ function kindOf(dir: string): "native" | "pure" | "unknown" {
 }
 
 // Whether a compiled `.node` file sits in a directory or the levels below it.
-function hasAddon(dir: string, depth: number): boolean {
+function hasAddon(dir: string, depth: usize): boolean {
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });

@@ -1,6 +1,7 @@
 import { checkOverrides, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
 import type { Tables } from "./compilation.ts";
 import { nextId } from "./nodes.ts";
+import type { Arenas, ClassId } from "./arenas.ts";
 import { unsupported } from "./unsupported.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Instance } from "./check.ts";
@@ -9,166 +10,185 @@ import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { widenEnum, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
 
 // What the registry needs from the checker, which in turn needs it, so each reaches the
 // other lazily.
-type Checker = {
+export interface RegistryHost {
   tables: Tables;
-  classes: Map<string, ClassInfo>;
+  classes: Map<string, ClassId>;
   templates: Map<string, ClassNode>;
-  members: Members;
+  members(this: Mut<this>): Members;
+  registryState: RegistryState;
   resolveType(t: TypeNode): Type;
   withScope<T>(bindings: Map<string, Type>, f: () => T): T;
   instanceOf(f: Body): Instance;
   definition(f: Body): Instance;
   checkBody(i: Instance): void;
   // The names of the classes a use at `at` reaches, for suggesting one.
-  classNames(at: number): string[];
-};
+  classNames(at: usize): string[];
+}
 
-export function registry({ tables, classes, templates, members, resolveType, withScope, instanceOf, definition, checkBody, classNames }: Checker) {
-  const { typing, ids } = tables;
-  const { optionalField, holdsPattern, fits, show, blockFor } = typing;
+// The classes the registry has seen and how far each has got, kept by its host between uses.
+export class RegistryState {
   // Every class by its type, and those not yet laid out and checked.
-  const infoOf = new Map<ClassType, ClassInfo>();
-  const unsettled: ClassInfo[] = [];
-  const linked = new Set<ClassInfo>();
-  const laidOut = new Set<ClassInfo>();
-  const laying = new Set<ClassInfo>();
-  const wrapped = new Set<ClassInfo>();
-  return { register, settle, claims, link, layout, laying, classOf, bodiesOf, infoOf, unsettled, wrapsOf };
+  infoOf = new TypeMap<ClassType, ClassId>();
+  unsettled: ClassId[] = [];
+  // Each class's progress, keyed by its type.
+  linked = new TypeSet<ClassType>();
+  laidOut = new TypeSet<ClassType>();
+  laying = new TypeMap<ClassType, ClassId>();
+  wrapped = new TypeSet<ClassType>();
+}
 
-  function register(c: ClassInfo) {
-    infoOf.set(c.type, c);
-    unsettled.push(c);
+export class Registry {
+  host: RegistryHost;
+
+  constructor(host: RegistryHost) {
+    this.host = host;
+    this.typing = this.host.tables.typing;
+    this.ids = this.host.tables.ids;
+    this.arenas = this.host.tables.arenas;
+  }
+  private typing: Typing;
+  private ids: Tables["ids"];
+  private arenas: Arenas;
+
+  register(this: Mut<this>, c: ClassInfo) {
+    this.host.registryState.infoOf.set(c.type, c.classId);
+    this.host.registryState.unsettled.push(c.classId);
   }
 
   // Lays out a class, checks what it claims, and checks each of its members at its definition,
   // each through `each`, which may recover from one member's error to check the next.
-  function settle(c: ClassInfo, each: (run: () => void) => void = (run) => run()) {
-    layout(c);
-    implemented(c);
-    bodiesOf(c).forEach((f) => each(() => checkBody(definition(f))));
+  settle(this: Mut<this>, c: ClassInfo, each: (run: () => void) => void = (run) => run()) {
+    this.layout(c);
+    this.implemented(c);
+    this.bodiesOf(c).forEach((f) => each(() => this.host.checkBody(this.host.definition(f))));
   }
 
-  function bodiesOf(c: ClassInfo): Body[] {
-    return [...new Set([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])];
+  bodiesOf(c: ClassInfo): Body[] {
+    return [...new Set([c.constructor, ...c.methods.values(), ...c.statics.values(), ...c.getters.values(), ...c.setters.values(), ...c.copies.values()])].map((b) => this.arenas.bodyOf(b));
   }
 
   // Bases are linked first, since a derived constructor may take its base's parameters. An abstract
   // class's templates are marked, and a concrete class's copies made, before overrides are checked.
-  function link(c: ClassInfo, path: Set<ClassInfo>) {
-    if (linked.has(c)) return;
+  link(this: Mut<this>, c: ClassInfo, path: TypeSet<ClassType>) {
+    if (this.host.registryState.linked.has(c.type)) return;
     if (c.baseName === undefined) {
-      implementAbstracts(ids, c);
-      linked.add(c);
+      implementAbstracts(this.host.tables, c);
+      this.host.registryState.linked.add(c.type);
       return;
     }
-    if (path.has(c)) throw new CompileError("E0704", `class '${c.type.name}' embeds itself through 'extends'`, c.node.start, c.node.end);
-    const base = baseOf(c, c.baseName);
+    if (path.has(c.type)) throw new CompileError("E0704", `class '${this.typing.rec(c.type).name}' embeds itself through 'extends'`, c.node.start, c.node.end);
+    const base = this.baseOf(c, c.baseName);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
-    const rust = rustClassOf(base.type);
+    const rust = rustClassOf(this.typing, base.type);
     if (rust) throw new CompileError("E1004", `a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
-    link(base, path.add(c));
+    this.link(base, path.add(c.type));
     const at = c.node.extends!;
-    extend(tables, c, base, (name) => withScope(new Map(), () => resolveType({ id: nextId(ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
-    implementAbstracts(ids, c);
-    checkOverrides(c);
-    linked.add(c);
+    extend(this.host.tables, c, base, (name) => this.host.withScope(new Map(), () => this.host.resolveType({ id: nextId(this.ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
+    implementAbstracts(this.host.tables, c);
+    checkOverrides(this.arenas, this.typing, c);
+    this.host.registryState.linked.add(c.type);
   }
 
   // The class `extends` names, a generic one made from the type arguments it is written with,
   // as this class's own type parameters stand for them.
-  function baseOf(c: ClassInfo, name: string): ClassInfo {
+  private baseOf(c: ClassInfo, name: string): ClassInfo {
     const at = c.node.extends!;
-    if (!classes.has(name) && !templates.has(name)) throw new CompileError("E0401", `cannot find class '${name}'${didYouMean(name, classNames(at.start))}`, at.start, at.end);
+    if (!this.host.classes.has(name) && !this.host.templates.has(name)) throw new CompileError("E0401", `cannot find class '${name}'${didYouMean(name, this.host.classNames(at.start))}`, at.start, at.end);
     const args = at.kind === "instantiation" ? at.typeArgs : [];
     // A declared class is found by name: an abstract one is no type a value can have to resolve.
-    const declared = at.kind === "instantiation" ? undefined : classes.get(name);
+    const declared = at.kind === "instantiation" ? undefined : this.arenas.classOf(this.host.classes.get(name));
     if (declared) return declared;
-    const type = withScope(c.scope, () => resolveType({ id: nextId(ids), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
-    return infoOf.get(type)!;
+    const type = this.host.withScope(c.scope, () => this.host.resolveType({ id: nextId(this.ids), kind: "ref", name, args, start: at.start, end: at.end })) as ClassType;
+    return this.arenas.classOf(this.host.registryState.infoOf.get(type)!);
   }
 
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
   // is checked as the body of a function that returns it, so it may use other classes.
   // Whether its fields are known, which they aren't yet while its own fields are being resolved.
-  function layout(c: ClassInfo): boolean {
-    if (laidOut.has(c)) return !laying.has(c) && (!c.base || layout(c.base));
+  layout(this: Mut<this>, c: ClassInfo): boolean {
+    const base = this.arenas.classOf(c.base);
+    if (this.host.registryState.laidOut.has(c.type)) return !this.host.registryState.laying.has(c.type) && (!base || this.layout(base));
     // A generic class's instance is made after the declared classes are linked.
-    link(c, new Set());
-    laidOut.add(c);
-    laying.add(c);
-    if (c.base) layout(c.base);
-    c.type.fields = c.fields.map((f) => {
+    this.link(c, new TypeSet());
+    this.host.registryState.laidOut.add(c.type);
+    this.host.registryState.laying.set(c.type, c.classId);
+    if (c.base !== undefined) this.layout(this.arenas.classOf(c.base));
+    this.typing.rec(c.type).fields = c.fields.map((f) => {
       const readonly = f.readonly ? { readonly: true } : {};
       if (f.type) {
-        const type = storable(typing, withScope(c.scope, () => resolveType(f.type!)), f);
-        const optional = f.written ? optionalField(f.name, withScope(c.scope, () => resolveType(f.written!))).optional : f.undefinedSpelled && ("undefined" as const);
+        const type = storable(this.typing, this.host.withScope(c.scope, () => this.host.resolveType(f.type!)), f);
+        const optional = f.written ? this.typing.optionalField(f.name, this.host.withScope(c.scope, () => this.host.resolveType(f.written!))).optional : f.undefinedSpelled && ("undefined" as const);
         return { name: f.name, type, access: f.access, ...readonly, ...(optional && { optional }) };
       }
       if (f.init!.kind === "arrow") throw unsupported("functions stored in fields", f);
-      const name = `${c.type.name}.${f.name} initializer`;
-      const initializer: Body = {
-        id: nextId(ids), name, params: [], body: [{ id: nextId(ids), kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
+      const name = `${this.typing.rec(c.type).name}.${f.name} initializer`;
+      const initializer = this.host.tables.arenas.addBody({
+        id: nextId(this.ids), name, params: [], body: [{ id: nextId(this.ids), kind: "return", value: f.init!, start: f.start, end: f.end }], returnType: undefined,
         owner: c.type, scope: c.scope, start: f.start, end: f.end,
-      };
-      const instance = instanceOf(initializer);
-      checkBody(instance);
-      return { name: f.name, type: widenEnum(instance.returns), access: f.access, ...readonly };
+      });
+      const instance = this.host.instanceOf(initializer);
+      this.host.checkBody(instance);
+      return { name: f.name, type: this.typing.widenEnum(instance.returns), access: f.access, ...readonly };
     });
     // A class is laid out as written, so a pattern in a field would reach the binary; one coming
     // from a generic class's type argument goes when the class is made from the lowered argument.
-    const patterned = c.type.fields.findIndex((f) => holdsPattern(f.type));
-    if (patterned >= 0 && !c.type.generic?.args.some(holdsPattern)) throw unsupported("template literal pattern types in class fields", c.fields[patterned]!);
-    laying.delete(c);
+    const laid = this.typing.rec(c.type);
+    const patterned = laid.fields.findIndex((f) => this.typing.holdsPattern(f.type));
+    if (patterned >= 0 && !laid.generic?.args.some((t) => this.typing.holdsPattern(t))) throw unsupported("template literal pattern types in class fields", c.fields[patterned]!);
+    this.host.registryState.laying.delete(c.type);
     // Before any body reads its fields, a class that contains itself holds itself in a block.
-    if (contains(c.type, c.type, new Set())) holdItself(c.type);
+    if (this.contains(c.type, c.type, new TypeSet())) this.holdItself(c.type);
     return true;
   }
 
   // `implements` is optional, since satisfying an interface is by shape, but checked when written.
-  function implemented(c: ClassInfo) {
-    claims(c);
-    if (c.node.implements.some((node) => node.kind === "ref" && node.name === "From")) wrapsOf(c);
+  private implemented(this: Mut<this>, c: ClassInfo) {
+    this.claims(c);
+    if (c.node.implements.some((node) => node.kind === "ref" && node.name === "From")) this.wrapsOf(c);
   }
 
   // Checks the interfaces and types a class says it implements, `From` aside.
-  function claims(c: ClassInfo) {
+  claims(this: Mut<this>, c: ClassInfo) {
     for (const node of c.node.implements) {
       if (node.kind === "ref" && node.name === "From") continue;
-      const trait = withScope(c.scope, () => resolveType(node));
-      const reason = typeof trait !== "string" && trait.kind === "interface" ? unsatisfied(c.type, trait, members, node)
-        : fits(c.type, trait) ? undefined : `type '${c.type.name}' doesn't fit '${show(trait)}'`;
+      const trait = this.host.withScope(c.scope, () => this.host.resolveType(node));
+      const named = typeof trait === "string" ? undefined : this.typing.rec(trait);
+      const name = this.typing.rec(c.type).name;
+      const members = this.host.members();
+      const reason = named?.kind === "interface" ? unsatisfied(c.type, trait as InterfaceType, members, node)
+        : this.typing.fits(c.type, trait) ? undefined : `type '${name}' doesn't fit '${this.typing.show(trait)}'`;
       if (!reason) continue;
-      members.refused.push({ type: show(c.type), trait: show(trait), reason });
-      throw new CompileError("E0702", `class '${c.type.name}' incorrectly implements '${show(trait)}': ${reason}`, node.start, node.end);
+      members.refused.push({ type: this.typing.show(c.type), trait: this.typing.show(trait), reason });
+      throw new CompileError("E0702", `class '${name}' incorrectly implements '${this.typing.show(trait)}': ${reason}`, node.start, node.end);
     }
   }
 
   // `implements From<X>` makes the class's static `from` wrap an X as one, wherever an X is
   // raised where the class is thrown. Worked out when first asked, since a function raising
   // one may be checked before the class is settled.
-  function wrapsOf(c: ClassInfo): ClassInfo["wraps"] {
-    if (wrapped.has(c)) return c.wraps;
-    wrapped.add(c);
+  wrapsOf(this: Mut<this>, c: ClassInfo): ClassInfo["wraps"] {
+    if (this.host.registryState.wrapped.has(c.type)) return c.wraps;
+    this.host.registryState.wrapped.add(c.type);
     for (const node of c.node.implements) {
       if (node.kind !== "ref" || node.name !== "From") continue;
       if (node.args.length !== 1) throw new CompileError("E0702", "'From' takes the type it wraps, like 'From<DbError>'", node.start, node.end);
-      const x = withScope(c.scope, () => resolveType(node.args[0]!));
-      const from = c.statics.get("from");
-      const name = c.type.name;
-      const wanted = `class '${name}' implements 'From<${show(x)}>', so it needs 'static from(e: ${show(x)}): ${name}'`;
+      const x = this.host.withScope(c.scope, () => this.host.resolveType(node.args[0]!));
+      const from = this.arenas.bodyOf(c.statics.get("from"));
+      const name = this.typing.rec(c.type).name;
+      const wanted = `class '${name}' implements 'From<${this.typing.show(x)}>', so it needs 'static from(e: ${this.typing.show(x)}): ${name}'`;
       if (!from || from.params.length !== 1 || !from.params[0]!.type || !from.returnType) throw new CompileError("E0702", wanted, node.start, node.end);
-      const [param, returns] = withScope(c.scope, () => [resolveType(from.params[0]!.type!), resolveType(from.returnType!)]);
-      if (!fits(x, param) || returns !== c.type) throw new CompileError("E0702", wanted, from.start, from.end);
+      const [param, returns] = this.host.withScope(c.scope, () => [this.host.resolveType(from.params[0]!.type!), this.host.resolveType(from.returnType!)]);
+      if (!this.typing.fits(x, param) || returns !== c.type) throw new CompileError("E0702", wanted, from.start, from.end);
       if (from.throws) throw new CompileError("E0702", `'${name}.from' wraps an error, so it can't throw one itself`, from.throws.start, from.throws.end);
       if (from.params[0]!.comptime) throw new CompileError("E1102", `'${name}.from' wraps errors as they are raised at run time, so it can't take a comptime parameter`, from.params[0]!.start, from.params[0]!.end);
-      c.wraps.push([x, from, param]);
+      c.wraps.push([x, from.bodyId, param]);
     }
     return c.wraps;
   }
@@ -176,43 +196,45 @@ export function registry({ tables, classes, templates, members, resolveType, wit
   // A class that contains itself, directly or through other classes, holds itself behind a
   // pointer wherever it appears inside the classes it contains, as an alias that holds itself
   // does.
-  function holdItself(c: ClassType) {
-    const back = blockFor(c, c.generic?.args ?? []);
-    const holders = new Set<ClassType | VariantType>();
+  private holdItself(c: ClassType) {
+    const back = this.typing.blockFor(c, this.typing.rec(c).generic?.args ?? []);
+    const holders = new TypeSet<ClassType | VariantType>();
     const reach = (t: Type) => {
       if (typeof t === "string") return;
-      if (t.kind === "class" || t.kind === "variant") {
-        if (holders.has(t)) return;
-        holders.add(t);
-        t.fields.forEach((f) => reach(f.type));
-        if (t.kind === "class" && t.base) reach(t.base);
-      } else if (t.kind === "union") t.members.forEach(reach);
-      else if (t.kind === "object") t.fields.forEach((f) => reach(f.type));
+      const r = this.typing.rec(t);
+      if (r.kind === "class" || r.kind === "variant") {
+        if (holders.has(t as ClassType | VariantType)) return;
+        holders.add(t as ClassType | VariantType);
+        r.fields.forEach((f) => reach(f.type));
+        if (r.kind === "class" && r.base) reach(r.base);
+      } else if (r.kind === "union") r.members.forEach(reach);
+      else if (r.kind === "object") r.fields.forEach((f) => reach(f.type));
     };
     reach(c);
-    for (const h of holders) for (const f of h.fields) f.type = swapped(typing, f.type, c, back);
+    for (const h of holders) for (const f of this.typing.rec(h).fields) f.type = swapped(this.typing, f.type, c, back);
   }
 
-  function contains(t: Type, inner: ClassType, seen: Set<Type>): boolean {
+  private contains(t: Type, inner: ClassType, seen: TypeSet<Type>): boolean {
     if (typeof t === "string" || seen.has(t)) return false;
     seen.add(t);
-    const parts = [...t.fields.map((f) => f.type), ...(t.kind === "class" && t.base ? [t.base] : []), ...(t.kind === "union" ? t.members : [])];
-    return parts.some((p) => p === inner || contains(p, inner, seen));
+    const r = this.typing.rec(t);
+    const parts = [...this.typing.fieldsOf(t).map((f) => f.type), ...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "union" ? r.members : [])];
+    return parts.some((p) => p === inner || this.contains(p, inner, seen));
   }
 
-  function classOf(t: ClassType): ClassInfo {
-    const c = infoOf.get(t)!;
-    layout(c);
+  classOf(this: Mut<this>, t: ClassType): ClassInfo {
+    const c = this.arenas.classOf(this.host.registryState.infoOf.get(t)!);
+    this.layout(c);
     return c;
   }
 }
 
 // A type with a class it holds inline, in a union, an object or a tuple, swapped for another.
 function swapped(typing: Typing, t: Type, from: ClassType, to: Type): Type {
-  const { unionType, retuple, objectType } = typing;
   if (t === from) return to;
   if (typeof t === "string") return t;
-  if (t.kind === "union") return unionType(t.members.map((m) => swapped(typing, m, from, to)), t.name);
-  if (t.kind === "object" && !t.match) return t.tuple ? retuple(t, (e) => swapped(typing, e, from, to)) : objectType(t.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
+  const r = typing.rec(t);
+  if (r.kind === "union") return typing.unionType(r.members.map((m) => swapped(typing, m, from, to)), r.name);
+  if (r.kind === "object" && !r.match) return r.tuple ? typing.retuple(t as ObjectType, (e) => swapped(typing, e, from, to)) : typing.objectType(r.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
   return t;
 }

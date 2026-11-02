@@ -77,7 +77,7 @@ export function partial(out: string): string {
   return `${out}.${process.pid}.${Math.random().toString(36).slice(2)}`;
 }
 
-function finish(u: Unit, code: number | null, stderr: string, temp: string, out: string) {
+function finish(u: Unit, code: i64 | null, stderr: string, temp: string, out: string) {
   if (code !== 0) {
     rmSync(temp, { force: true });
     throw new Error(`clang failed building ${u.name}:\n${stderr}`);

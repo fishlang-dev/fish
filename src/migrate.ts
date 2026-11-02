@@ -8,7 +8,7 @@ import { parseWithComments } from "./parser.ts";
 
 // The edition a file's directive names, and where the directive is, or undefined without one. The
 // directive is the file's first line, or its second after a shebang.
-export function directive(src: string): { edition: Edition; start: number; end: number } | undefined {
+export function directive(src: string): { edition: Edition; start: usize; end: usize } | undefined {
   const shebang = src.startsWith("#!");
   const start = shebang ? src.indexOf("\n") + 1 : 0;
   if (shebang && start === 0) return undefined;
@@ -34,8 +34,8 @@ export function refuseCompat(src: string, packaged: Edition | undefined) {
 // A construct a migration rule finds, by the rule's id, over a file's text. An auto rule's hit
 // carries the edits that fix it, applied together or not at all, and says what they change.
 export type Action = "auto" | "guided" | "reject";
-export type Edit = { start: number; end: number; text: string };
-export type Hit = { rule: string; action: Action; start: number; end: number; edits?: Edit[]; message?: string };
+export type Edit = { start: usize; end: usize; text: string };
+export type Hit = { rule: string; action: Action; start: usize; end: usize; edits?: Edit[]; message?: string };
 
 // The comment the lint leaves after each ownership type it inserts, for a person to confirm.
 export const MARKER = "/* fish: review */";
@@ -50,7 +50,7 @@ export const REJECTS: Record<string, string> = {
   R7: "declaration merging and module augmentation reopen a type after it is declared, and Fish types are closed; give everything in one declaration, or a new name",
 };
 
-export type Node = { kind: string; start: number; end: number; [key: string]: unknown };
+export type Node = { kind: string; start: usize; end: usize; [key: string]: unknown };
 export const isNode = (v: unknown): v is Node => typeof v === "object" && v !== null && typeof (v as Node).kind === "string" && typeof (v as Node).start === "number";
 export const named = (n: unknown, name: string) => isNode(n) && n.kind === "ident" && n.name === name;
 const OWN_MEMBERS = new Set(["field", "method", "get", "set"]);
@@ -61,7 +61,7 @@ const MERGING = new Set(["function", "class", "interface", "namespace", "enum"])
 // whether a relative `.ts` import's `.fsh` file is there, or will be. Gives the text and how many
 // hits were fixed. Throws a CompileError when `src` doesn't parse, or when the fixes give text
 // that doesn't, which would be the lint's mistake.
-export function fix(src: string, fsh?: Imported): { text: string; fixed: number } {
+export function fix(src: string, fsh?: Imported): { text: string; fixed: usize } {
   let [text, fixed, edited] = [src, 0, false];
   for (let round = 0; round < 5; round++) {
     const fixable = migrations(parseWithComments(text, { last: 0 }), text, fsh).filter((h) => (h.edits ?? []).length > 0).sort((a, b) => a.start - b.start);
@@ -131,7 +131,7 @@ export function rejects(program: unknown[], nodes: Node[] = everyNode(program)):
   // A class with its own member named `prototype` reads it as a field, not the JS prototype.
   const ownPrototype = new Set(nodes.flatMap((n) => (n.kind === "class" && typeof n.name === "string" && (n.members as Node[]).some((m) => OWN_MEMBERS.has(m.kind) && m.name === "prototype") ? [n.name] : [])));
   const hits: Hit[] = [];
-  const hit = (rule: string, start: number, end: number) => hits.push({ rule, action: "reject", start, end });
+  const hit = (rule: string, start: usize, end: usize) => hits.push({ rule, action: "reject", start, end });
   for (const n of nodes) {
     const callee = n.callee as Node | undefined;
     if (n.kind === "call" && (named(callee, "eval") || named(callee, "Function"))) hit("R1", callee!.start, callee!.end);
@@ -186,8 +186,8 @@ function byName(nodes: Node[]): { idents: Map<string, Node[]>; lets: Map<string,
 
 // How many times the file binds each name, anywhere: a declaration, a parameter, a caught error or
 // an import.
-function bindings(nodes: Node[]): Map<string, number> {
-  const names = new Map<string, number>();
+function bindings(nodes: Node[]): Map<string, usize> {
+  const names = new Map<string, usize>();
   const add = (name: string) => names.set(name, (names.get(name) ?? 0) + 1);
   const bind = (pattern: unknown) => {
     for (const p of everyNode([pattern])) if (p.kind === "ident" || p.kind === "shorthand") add(p.name as string);
@@ -208,7 +208,7 @@ function bindings(nodes: Node[]): Map<string, number> {
 
 // The declarations in one list of statements that TypeScript would merge with an earlier one of
 // the same name, each a hit.
-function merged(list: unknown[], hit: (rule: string, start: number, end: number) => void) {
+function merged(list: unknown[], hit: (rule: string, start: usize, end: usize) => void) {
   const seen = new Map<string, string[]>();
   for (const s of list) {
     const d = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : isNode(s) && s.kind === "exportDefault" && isNode(s.declaration) ? s.declaration : s;
@@ -229,15 +229,15 @@ function merges(a: string, b: string): boolean {
 }
 
 
-type Param = { pattern: Node; type?: Node; default?: Node; optional: boolean; rest: boolean; start: number; end: number };
+type Param = { pattern: Node; type?: Node; default?: Node; optional: boolean; rest: boolean; start: usize; end: usize };
 // What holds each object of a tree: the object, never an array, and the key it sits under.
 type Up = { holder: Record<string, unknown>; key: string; listed: boolean };
 // A file as the auto rules read it: its text and tokens, its nodes, what holds each, and how many
 // times it binds each name.
 // `idents`, `lets` and `calls` are the file's identifiers, its declarations of variables, functions
 // and classes, and its calls of a name, by the name, each list in source order.
-type File = { src: string; tokens: Token[]; nodes: Node[]; up: Map<object, Up>; bound: Map<string, number>; idents: Map<string, Node[]>; lets: Map<string, Node[]>; calls: Map<string, Node[]> };
-type Span = { start: number; end: number };
+type File = { src: string; tokens: Token[]; nodes: Node[]; up: Map<object, Up>; bound: Map<string, usize>; idents: Map<string, Node[]>; lets: Map<string, Node[]>; calls: Map<string, Node[]> };
+type Span = { start: usize; end: usize };
 
 const PRIMITIVES = new Set(["number", "string", "boolean", "bigint", "symbol", "any", "unknown", "never", "void", "null", "undefined", "object", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "isize", "usize"]);
 const MUTATORS = new Set(["push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin", "set", "delete", "clear", "add"]);
@@ -262,7 +262,7 @@ function parents(program: unknown[]): Map<object, Up> {
 }
 
 // The index of the first token starting at or after `at`.
-function tokenAt(f: File, at: number): number {
+function tokenAt(f: File, at: usize): usize {
   let [lo, hi] = [0, f.tokens.length];
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
@@ -273,8 +273,8 @@ function tokenAt(f: File, at: number): number {
 }
 
 // The first token at or after `at`, and the last one ending at or before it.
-const next = (f: File, at: number) => f.tokens[tokenAt(f, at)];
-const previous = (f: File, at: number) => {
+const next = (f: File, at: usize) => f.tokens[tokenAt(f, at)];
+const previous = (f: File, at: usize) => {
   let i = tokenAt(f, at) - 1;
   while (i >= 0 && f.tokens[i]!.end > at) i--;
   return f.tokens[i];
@@ -282,7 +282,7 @@ const previous = (f: File, at: number) => {
 
 // A type's span, taken on past the `)` tokens its own tokens leave open: a parenthesized type's
 // span stops short of its closing parenthesis.
-function closed(f: File, start: number, end: number): Span {
+function closed(f: File, start: usize, end: usize): Span {
   let open = 0;
   let i = tokenAt(f, start);
   for (; i < f.tokens.length && f.tokens[i]!.start < end; i++) open += isToken(f.tokens[i]!, "(") ? 1 : isToken(f.tokens[i]!, ")") ? -1 : 0;
@@ -291,7 +291,7 @@ function closed(f: File, start: number, end: number): Span {
 }
 
 // The span of the type written after the `:` that follows `from`, or undefined when no `:` does.
-function annotation(f: File, from: number, type: Node): { colon: Token; type: Span } | undefined {
+function annotation(f: File, from: usize, type: Node): { colon: Token; type: Span } | undefined {
   const colon = previous(f, type.start);
   if (!colon || colon.start < from) return undefined;
   // A parenthesized type's own span starts inside its parentheses, so its first token is the one
@@ -353,7 +353,7 @@ function autoFixes(program: unknown[], f: File, fsh: Imported): Hit[] {
       const hit = optionHit(f, n);
       if (hit) hits.push(hit);
     }
-    const optionals: { start: number; type?: Node }[] = [...(Array.isArray(n.params) ? (n.params as Param[]).filter((p) => p.optional) : []), ...((n.kind === "property" || n.kind === "field") && n.optional === true ? [n] : [])];
+    const optionals: { start: usize; type?: Node }[] = [...(Array.isArray(n.params) ? (n.params as Param[]).filter((p) => p.optional) : []), ...((n.kind === "property" || n.kind === "field") && n.optional === true ? [n] : [])];
     for (const p of optionals) {
       if (!isNode(p.type)) continue;
       const written = annotation(f, p.start, p.type);
@@ -601,7 +601,7 @@ function objectLike(t: Node, declared: Map<string, boolean>, generic: Set<string
 // Which parameters of the file's functions, by index, and which methods' receivers, the file
 // changes: from the syntax, then through calls to the file's own functions and methods, until
 // nothing more is found. A parameter or receiver already written `Mut` counts as changed.
-function changed(f: File): { params: Map<Node, Set<number>>; methods: Set<Node> } {
+function changed(f: File): { params: Map<Node, Set<usize>>; methods: Set<Node> } {
   const functions = f.nodes.filter((n) => isFunction(n) && n.body !== undefined);
   const byName = new Map<string, Node>();
   for (const n of functions) {
@@ -663,7 +663,7 @@ function ownScope(n: Node): Node[] {
 // Whether `x` changes a place rooted at what `root` accepts: assigning, incrementing or deleting a
 // field or element of it, destructuring into one, `Object.assign` onto it, calling a method known
 // to change it, or passing it to one of the file's functions that changes that parameter.
-function changes(x: Node, root: (r: unknown) => boolean, params: Map<Node, Set<number>>, byName: Map<string, Node>, mutating: (object: unknown, method: string) => boolean): boolean {
+function changes(x: Node, root: (r: unknown) => boolean, params: Map<Node, Set<usize>>, byName: Map<string, Node>, mutating: (object: unknown, method: string) => boolean): boolean {
   const rooted = (e: unknown): boolean => {
     let at = e;
     while (isNode(at) && (at.kind === "member" || at.kind === "index")) at = at.object;
@@ -685,7 +685,7 @@ function changes(x: Node, root: (r: unknown) => boolean, params: Map<Node, Set<n
 // A5 and A6: each object parameter used only through its fields and as an argument, borrowed as
 // `Mut<T>` when the file finds it changed and `Ref<T>` otherwise, marked for review. A parameter
 // used any other way, as a value stored or returned, is the function's to own, and keeps its type.
-function ownership(f: File, n: Node, declared: Map<string, boolean>, changedParams: Set<number> = new Set<number>()): Hit[] {
+function ownership(f: File, n: Node, declared: Map<string, boolean>, changedParams: Set<usize> = new Set<usize>()): Hit[] {
   const hits: Hit[] = [];
   const generic = new Set(((n.typeParams ?? []) as { name: string }[]).map((p) => p.name));
   const body = everyNode([n.body]);
@@ -809,7 +809,7 @@ const typeName = (t: unknown, name: string) => isNode(t) && t.kind === "ref" && 
 // The guided rules' hits: each a decision left to a person, with what to do, never an edit.
 function guided(program: unknown[], f: File): Hit[] {
   const hits: Hit[] = [];
-  const hit = (rule: string, start: number, end: number) => hits.push({ rule, action: "guided", start, end, message: GUIDES[rule] });
+  const hit = (rule: string, start: usize, end: usize) => hits.push({ rule, action: "guided", start, end, message: GUIDES[rule] });
   for (const s of program) {
     const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
     if (isNode(top) && top.kind === "expr" && !(isNode(top.expr) && top.expr.kind === "string") && !callsMain(top.expr)) hit("G7", top.start, top.end);
@@ -993,7 +993,7 @@ function aliases(f: File): Hit[] {
   };
   // The first node of `list`, sorted by start, starting at or after `from` and inside `scope`,
   // found by binary search and a walk that stops at the first.
-  const first = (list: Node[], from: number, scope: Span) => {
+  const first = (list: Node[], from: usize, scope: Span) => {
     let [lo, hi] = [0, list.length];
     while (lo < hi) {
       const mid = (lo + hi) >> 1;

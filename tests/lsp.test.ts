@@ -3,12 +3,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError } from "../src/diag.ts";
+import { compiledOf } from "../src/check.ts";
 import { analyze } from "../src/main.ts";
 import { frames } from "../src/lsp.ts";
 import { load } from "../src/modules.ts";
-import { newCompilation, newSession } from "../src/compilation.ts";
+import { newCompilation } from "../src/compilation.ts";
+import { cachedSession } from "../src/stdcache.ts";
 
-const session = newSession();
+const session = cachedSession();
 
 const dir = mkdtempSync(join(tmpdir(), "fishc-lsp-"));
 
@@ -22,7 +24,7 @@ function file(name: string, src: string): string {
 test("a file without main is checked as a module", () => {
   const src = "export class Oops { code: i64 = 1 }\nexport function f(n: i64): i64 throws Oops {\n  if (n < 0) throw new Oops();\n  return n;\n}\n";
   const { checked } = analyze(session, src, file("module.fsh", src));
-  expect(checked.instances.some((i) => i.symbol === "f")).toBe(true);
+  expect(compiledOf(checked).some((i) => i.symbol === "f")).toBe(true);
 });
 
 test("a type error is thrown at its span", () => {

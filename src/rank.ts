@@ -5,18 +5,18 @@ import { featureOf, featuresOf, scanFiles, type FileScan } from "./survey.ts";
 // feature it waits on exists; the curve picks, one at a time, the feature that makes the most
 // lines portable, so its order is the order to build in and its shares say how fast that goes.
 
-export type Share = { files: number; lines: number; share: number };
+export type Share = { files: usize; lines: usize; share: f64 };
 export type Step = {
   feature: string; rules: string[]; plan?: { item: string; done: boolean } | null;
-  files: number; lines: number; gained: { files: number; lines: number }; portable: Share;
+  files: usize; lines: usize; gained: { files: usize; lines: usize }; portable: Share;
 };
 // A file that can't be read stays out of the steps, since what else it waits on is unknown, but
 // its lines stay in every share, and `unread` lists them by what they are known to wait on.
-export type Curve = { start: Share; steps: Step[]; unread: { feature: string; files: number; lines: number }[] };
-export type Repo = { dir: string; files: number; lines: number; unread: { files: number; lines: number } };
+export type Curve = { start: Share; steps: Step[]; unread: { feature: string; files: usize; lines: usize }[] };
+export type Repo = { dir: string; files: usize; lines: usize; unread: { files: usize; lines: usize } };
 export type Ranking = { repos: Repo[]; curve: Curve; self?: { dir: string; curve: Curve } };
 
-export type Unit = { lines: number; waits: Set<string>; rules: [string, string][] };
+export type Unit = { lines: usize; waits: Set<string>; rules: [string, string][] };
 type Plan = Map<string, { item: string; done: boolean }>;
 
 export function rank(dirs: string[], self?: string, plan?: Plan): Ranking {
@@ -33,20 +33,20 @@ function unit(f: FileScan): Unit {
 
 function curveOf(scans: FileScan[], plan?: Plan): Curve {
   const { start, steps } = stepsOf(scans.filter((f) => f.read).map(unit), scans.reduce((n, f) => n + f.lines, 0), plan);
-  const unread = new Map<string, { files: number; lines: number }>();
+  const unread = new Map<string, { files: usize; lines: usize }>();
   for (const f of scans.filter((s) => !s.read)) {
     const feature = featuresOf(f)[0] ?? "files that couldn't be opened";
     const entry = unread.get(feature) ?? { files: 0, lines: 0 };
     unread.set(feature, { files: entry.files + 1, lines: entry.lines + f.lines });
   }
-  return { start, steps, unread: [...unread].map(([feature, n]) => ({ feature, ...n })).sort((a, b) => b.lines - a.lines) };
+  return { start, steps, unread: [...unread].map(([feature, n]) => ({ feature, ...n })).sort((a, b) => (b.lines as i64) - (a.lines as i64)) };
 }
 
 // The steps over files already read, each a unit of lines waiting on features; `total` counts
 // every line surveyed, unread ones too.
-export function stepsOf(units: Unit[], total: number, plan?: Plan): { start: Share; steps: Step[] } {
+export function stepsOf(units: Unit[], total: usize, plan?: Plan): { start: Share; steps: Step[] } {
   // Rounded down, so 100% means every line, unread ones included.
-  const share = (files: number, lines: number): Share => ({ files, lines, share: total === 0 ? 0 : Math.floor((lines * 1000) / total) / 10 });
+  const share = (files: usize, lines: usize): Share => ({ files, lines, share: total === 0 ? 0 : Math.floor((lines * 1000) / total) / 10 });
   const sum = (us: Unit[]) => us.reduce((n, u) => n + u.lines, 0);
   const picked = new Set<string>();
   let open = units.filter((u) => u.waits.size > 0);
@@ -62,7 +62,7 @@ export function stepsOf(units: Unit[], total: number, plan?: Plan): { start: Sha
     // noise can't beat the name.
     const weight = (w: string) => Math.round(open.filter((u) => u.waits.has(w)).reduce((n, u) => n + u.lines / needs(u).length, 0) * 1e6);
     const scored = remaining.map((w) => ({ w, gain: sum(freed(w)), weight: weight(w) }));
-    scored.sort((a, b) => b.gain - a.gain || b.weight - a.weight || (a.w < b.w ? -1 : 1));
+    scored.sort((a, b) => (b.gain as i64) - (a.gain as i64) || b.weight - a.weight || (a.w < b.w ? -1 : 1));
     const best = scored[0]!.w;
     const users = open.filter((u) => u.waits.has(best));
     const gained = new Set(freed(best));
@@ -94,8 +94,8 @@ export function readPlan(path: string): Plan {
   return plan;
 }
 
-const plural = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
-const sized = (files: number, lines: number) => `${plural(files, "file")} (${plural(lines, "line")})`;
+const plural = (n: usize, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+const sized = (files: usize, lines: usize) => `${plural(files, "file")} (${plural(lines, "line")})`;
 
 export function formatRanking(r: Ranking): string {
   const total = r.repos.reduce((n, x) => ({ files: n.files + x.files, lines: n.lines + x.lines }), { files: 0, lines: 0 });

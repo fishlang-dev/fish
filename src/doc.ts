@@ -6,12 +6,12 @@ export type Doc =
   | Doc[]
   | { kind: "group"; contents: Doc; break: boolean; id: string | undefined; expandedStates: Doc[] | undefined }
   | { kind: "indent"; contents: Doc }
-  | { kind: "align"; n: number; contents: Doc }
+  | { kind: "align"; n: f64; contents: Doc }
   | { kind: "line"; soft: boolean; hard: boolean; literal: boolean }
   | { kind: "ifBreak"; breakContents: Doc; flatContents: Doc; groupId: string | undefined }
   | { kind: "indentIfBreak"; contents: Doc; groupId: string; negate: boolean }
   // `printed` counts the parts already laid out, so a long fill is walked once, not copied.
-  | { kind: "fill"; parts: Doc[]; printed: number }
+  | { kind: "fill"; parts: Doc[]; printed: usize }
   | { kind: "breakParent" }
   // `endsLine` marks a suffix, such as a line comment, after which nothing may follow on its line.
   | { kind: "lineSuffix"; contents: Doc; endsLine: boolean }
@@ -38,7 +38,7 @@ export function conditionalGroup(states: Doc[], options: { shouldBreak?: boolean
 
 export const indent = (contents: Doc): Doc => ({ kind: "indent", contents });
 // An `n` of -Infinity goes back to the left margin, as Prettier's dedentToRoot does.
-export const align = (n: number, contents: Doc): Doc => ({ kind: "align", n, contents });
+export const align = (n: f64, contents: Doc): Doc => ({ kind: "align", n, contents });
 export const fill = (parts: Doc[]): Doc => ({ kind: "fill", parts, printed: 0 });
 export const lineSuffix = (contents: Doc, endsLine = false): Doc => ({ kind: "lineSuffix", contents, endsLine });
 export const label = (name: string, contents: Doc): Doc => ({ kind: "label", label: name, contents });
@@ -61,7 +61,7 @@ export function join(separator: Doc, docs: Doc[]): Doc[] {
 }
 
 type Mode = "break" | "flat";
-type Indentation = { value: string; length: number };
+type Indentation = { value: string; length: usize };
 type Command = { ind: Indentation; mode: Mode; doc: Doc };
 
 const root: Indentation = { value: "", length: 0 };
@@ -72,7 +72,7 @@ const deeper = (ind: Indentation, by: string): Indentation => ({ value: ind.valu
 const width = (s: string) => [...s].length;
 
 // Trailing spaces and tabs written so far, removed before a newline, giving how many went.
-function trimEnd(out: string[]): number {
+function trimEnd(out: string[]): usize {
   let removed = 0;
   while (out.length > 0) {
     const last = out[out.length - 1]!;
@@ -135,7 +135,7 @@ function propagateBreaks(doc: Doc) {
 }
 
 // Whether `next`, and then the commands after it up to the first line break, fit in `room`.
-function fits(next: Command, rest: Command[], room: number, hasLineSuffix: boolean, modes: Map<string, Mode>, mustBeFlat = false): boolean {
+function fits(next: Command, rest: Command[], room: i64, hasLineSuffix: boolean, modes: Map<string, Mode>, mustBeFlat = false): boolean {
   let restAt = rest.length;
   const cmds: { mode: Mode; doc: Doc }[] = [next];
   const out: string[] = [];
@@ -155,7 +155,7 @@ function fits(next: Command, rest: Command[], room: number, hasLineSuffix: boole
         pendingSpace = false;
       }
       out.push(doc);
-      room -= width(doc);
+      room -= width(doc) as i64;
       continue;
     }
     if (Array.isArray(doc)) {
@@ -173,7 +173,7 @@ function fits(next: Command, rest: Command[], room: number, hasLineSuffix: boole
         cmds.push({ mode, doc: doc.contents });
         break;
       case "trim":
-        room += trimEnd(out);
+        room += trimEnd(out) as i64;
         break;
       case "group": {
         if (mustBeFlat && doc.break) return false;
@@ -224,7 +224,7 @@ export function print(doc: Doc, printWidth = 80): string {
     const { ind, mode, doc } = cmds.pop()!;
     if (typeof doc === "string") {
       out.push(doc);
-      if (cmds.length > 0) pos += width(doc);
+      if (cmds.length > 0) pos += width(doc) as i64;
     } else if (Array.isArray(doc)) {
       for (let i = doc.length - 1; i >= 0; i--) cmds.push({ ind, mode, doc: doc[i]! });
     } else {
@@ -233,10 +233,10 @@ export function print(doc: Doc, printWidth = 80): string {
           cmds.push({ ind: deeper(ind, "  "), mode, doc: doc.contents });
           break;
         case "align":
-          cmds.push({ ind: doc.n === -Infinity ? root : deeper(ind, " ".repeat(doc.n)), mode, doc: doc.contents });
+          cmds.push({ ind: doc.n === -Infinity ? root : deeper(ind, " ".repeat(doc.n as usize)), mode, doc: doc.contents });
           break;
         case "trim":
-          pos -= trimEnd(out);
+          pos -= trimEnd(out) as i64;
           break;
         case "group": {
           if (mode === "flat" && !remeasure) {
@@ -334,9 +334,9 @@ export function print(doc: Doc, printWidth = 80): string {
             out.push("\n");
             pos = 0;
           } else {
-            pos -= trimEnd(out);
+            pos -= trimEnd(out) as i64;
             out.push("\n" + ind.value);
-            pos = ind.length;
+            pos = ind.length as i64;
           }
           break;
         }

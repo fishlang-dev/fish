@@ -144,11 +144,14 @@ beforeAll(async () => {
 
 test("a user file named like a std module gets no std allowances", async () => {
   const dir = mkdtempSync(join(tmp, "named-"));
-  writeFileSync(join(dir, "node:helper.fsh"), "export function first<T>(xs: T[]): T | null {\n  return null;\n}\n");
-  writeFileSync(join(dir, "main.fsh"), 'import { first } from "./node:helper.fsh";\nfunction main() {\n  console.log(first<i64>([1]));\n}\n');
-  writeFileSync(join(dir, "node:x.fsh"), "function wrap<T>(x: T): T | null {\n  return x;\n}\nfunction main() {\n  console.log(wrap<i64>(7));\n}\n");
+  // std's TLS helper is std's alone, so a file only named like std's can't call it.
+  const helper = 'export async function secure(conn: Ref<TcpStream>): Promise<void> throws IoError | AbortError {\n  await __tlsClient(conn, "localhost", "", new AbortController().signal);\n}\n';
+  const connect = 'const conn = await TcpStream.connect("127.0.0.1", 1, new AbortController().signal);\n';
+  writeFileSync(join(dir, "node:helper.fsh"), helper);
+  writeFileSync(join(dir, "main.fsh"), `import { secure } from "./node:helper.fsh";\nasync function main(): Promise<void> throws IoError | AbortError {\n  ${connect}  await secure(conn);\n}\n`);
+  writeFileSync(join(dir, "node:x.fsh"), `${helper}async function main(): Promise<void> throws IoError | AbortError {\n  ${connect}  await secure(conn);\n}\n`);
   for (const entry of ["main.fsh", "node:x.fsh"]) {
-    await expect(buildAsync(session, join(dir, entry), join(dir, "out"))).rejects.toThrow("unions holding a type parameter are not supported yet");
+    await expect(buildAsync(session, join(dir, entry), join(dir, "out"))).rejects.toMatchObject({ code: "E0401", message: expect.stringContaining("'__tlsClient'") });
   }
 });
 
