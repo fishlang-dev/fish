@@ -36,6 +36,7 @@ export const NATIVE = String.raw`
 #include <sys/random.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <dirent.h>
 #include <ftw.h>
 #include <signal.h>
@@ -51,9 +52,7 @@ export const NATIVE = String.raw`
 #ifdef __APPLE__
 #include <sys/event.h>
 #include <mach-o/dyld.h>
-#include <copyfile.h>
 #else
-#include <sys/ioctl.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #endif
@@ -6086,10 +6085,9 @@ int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str 
   *out = NULL;
   char *c = fsh_rt_str_cstring(path);
   if (!c) return fsh_fs_failed(error, EINVAL, "mkdir", "");
-  size_t n = strlen(c), depth = 0;
-  for (size_t i = 0; i < n; i++) depth += c[i] == '/';
-  // Each pending prefix by its length; each ENOENT adds at most one, so the slashes bound them.
-  size_t *pending = fsh_rt_alloc((depth + 2) * sizeof(size_t)), count = 0;
+  size_t n = strlen(c), room = 16;
+  // Each pending prefix by its length; a parent removed while the walk runs can make more.
+  size_t *pending = fsh_rt_alloc(room * sizeof(size_t)), count = 0;
   pending[count++] = n;
   char *at = fsh_rt_alloc(n + 1);
   int failure = 0;
@@ -6104,6 +6102,13 @@ int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str 
       if (!*out) *out = fsh_rt_str_from_cstring(at);
     } else if (made == EACCES || made == ENOSPC || made == ENOTDIR || made == EPERM) failure = made;
     else if (made == ENOENT && slash) {
+      if (count + 2 > room) {
+        size_t *grown = fsh_rt_alloc(room * 2 * sizeof(size_t));
+        memcpy(grown, pending, count * sizeof(size_t));
+        fsh_rt_free(pending);
+        pending = grown;
+        room *= 2;
+      }
       pending[count++] = length;
       pending[count++] = (size_t)(slash - at);
     } else if (made != ENOENT || count == 0) {
@@ -6146,19 +6151,11 @@ int32_t fsh_rt_fs_rename(fsh_str *from, fsh_str *to, fsh_str **error) {
   return result;
 }
 
-// The copy itself, as libuv makes it: 0 or an errno. On macOS copyfile(3) with every attribute;
-// elsewhere the bytes and the mode, a copy onto the same file left alone, and a failed copy's
-// destination removed.
+// The copy itself, as libuv makes it on every system: 0 or an errno. The source opened (a link
+// followed), the destination opened or made with its mode (through a link, even a dangling one),
+// a copy onto the same file left alone, the times and mode carried over, then the source's size
+// in bytes; a failed copy's destination is removed.
 static int fsh_copy_file(const char *from, const char *to, int64_t mode) {
-#ifdef __APPLE__
-  if (faccessat(AT_FDCWD, to, R_OK | W_OK, AT_EACCESS) != 0 && errno != ENOENT) return errno;
-  if (mode & 4) return ENOSYS;
-  // copyfile(3) would copy a directory's attributes; Node's copy refuses one.
-  struct stat src;
-  if (stat(from, &src) == 0 && S_ISDIR(src.st_mode)) return ENOTSUP;
-  copyfile_flags_t flags = COPYFILE_ALL | (mode & 1 ? COPYFILE_EXCL : 0) | (mode & 2 ? COPYFILE_CLONE : 0);
-  return copyfile(from, to, NULL, flags) == 0 ? 0 : errno;
-#else
   int in = open(from, O_RDONLY | O_CLOEXEC);
   if (in < 0) return errno;
   struct stat src, dst;
@@ -6182,17 +6179,38 @@ static int fsh_copy_file(const char *from, const char *to, int64_t mode) {
       return 0;
     } else if (ftruncate(out, 0) != 0) failure = errno;
   }
-  if (!failure && fchmod(out, src.st_mode) != 0 && errno != EPERM) failure = errno;
-  int cloned = 0;
+#ifdef __APPLE__
+  struct timespec times[2] = { src.st_atimespec, src.st_mtimespec };
+#else
+  struct timespec times[2] = { src.st_atim, src.st_mtim };
+#endif
+  if (!failure) {
+    (void)futimens(out, times);
+    (void)!fchown(out, src.st_uid, src.st_gid);
+    if (fchmod(out, src.st_mode) != 0 && errno != EPERM) failure = errno;
+  }
+  int done = 0;
+#ifdef __APPLE__
+  if (!failure && (mode & 4)) failure = ENOSYS;
+  // Darwin's sendfile, which libuv tries first, refuses a directory this way.
+  if (!failure && S_ISDIR(src.st_mode)) failure = ENOTSUP;
+#else
   if (!failure && (mode & 6)) {
     // FICLONE, written out as linux/fs.h defines it.
-    cloned = ioctl(out, 0x40049409, in) == 0;
-    if (!cloned && (mode & 4)) failure = errno;
+    done = ioctl(out, 0x40049409, in) == 0;
+    if (!done && (mode & 4)) failure = errno;
   }
+#endif
   char buffer[65536];
-  while (!failure && !cloned) {
-    ssize_t got = read(in, buffer, sizeof buffer);
+  int positioned = 1;
+  for (off_t at = 0; !failure && !done && at < src.st_size;) {
+    size_t want = src.st_size - at < (off_t)sizeof buffer ? (size_t)(src.st_size - at) : sizeof buffer;
+    ssize_t got = positioned ? pread(in, buffer, want, at) : read(in, buffer, want);
     if (got < 0 && errno == EINTR) continue;
+    if (got < 0 && positioned && at == 0 && (errno == EIO || errno == ESPIPE)) {
+      positioned = 0;
+      continue;
+    }
     if (got <= 0) {
       if (got < 0) failure = errno;
       break;
@@ -6202,12 +6220,13 @@ static int fsh_copy_file(const char *from, const char *to, int64_t mode) {
       if (n >= 0) put += n;
       else if (errno != EINTR) failure = errno;
     }
+    at += got;
   }
   close(in);
-  if (close(out) != 0 && !failure) failure = errno;
+  // An interrupted close has still closed the descriptor, as libuv counts it.
+  if (close(out) != 0 && errno != EINTR && !failure) failure = errno;
   if (failure) unlink(to);
   return failure;
-#endif
 }
 
 // copyFileSync, its mode the bits of COPYFILE_EXCL (1), COPYFILE_FICLONE (2) and

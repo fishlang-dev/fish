@@ -127,6 +127,11 @@ test("renameSync, copyFileSync and unlinkSync give what node's give", () => {
   copyFileSync("f", "c4", fs.constants.COPYFILE_FICLONE);
   copyFileSync("f", "f");
   copyFileSync("lf", "cl");
+  writeFileSync("c9", "old old");
+  copyFileSync("f", "c9", constants.COPYFILE_FICLONE);
+  copyFileSync("lf", "cl2", constants.COPYFILE_FICLONE);
+  copyFileSync("f", "dl");
+  console.log(readFileSync("c9", "utf8"), lstatSync("cl2").isSymbolicLink(), lstatSync("dl").isSymbolicLink(), readFileSync("made", "utf8"), statSync("c").mtimeMs === statSync("f").mtimeMs);
   console.log(readFileSync("c", "utf8"), readFileSync("c2", "utf8"), readFileSync("c3", "utf8"), readFileSync("f", "utf8"));
   console.log(statSync("c").mode === statSync("f").mode, lstatSync("cl").isSymbolicLink());
   unlinkSync("c");
@@ -151,5 +156,6 @@ test("renameSync, copyFileSync and unlinkSync give what node's give", () => {
     mkdirSync(join(dir, "x", "y"), { recursive: true });
     symlinkSync("f", join(dir, "lf"));
     symlinkSync("nowhere", join(dir, "ln"));
+    symlinkSync("made", join(dir, "dl"));
   });
 });
