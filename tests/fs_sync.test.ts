@@ -22,7 +22,7 @@ function compare(name: string, imports: string, body: string, setup: (dir: strin
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: fishDir, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants } = fs; (() => {${nodeBody}\n})();`;
+  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync } = fs; (() => {${nodeBody}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: nodeDir });
   expect(fish.stderr.toString()).toBe("");
   expect(node.stderr.toString()).toBe("");
@@ -157,5 +157,83 @@ test("renameSync, copyFileSync and unlinkSync give what node's give", () => {
     symlinkSync("f", join(dir, "lf"));
     symlinkSync("nowhere", join(dir, "ln"));
     symlinkSync("made", join(dir, "dl"));
+  });
+});
+
+test("openSync, readSync, writeSync and the other descriptor calls give what node's give", () => {
+  const imports = `import { readFileSync, writeFileSync, statSync, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync } from "node:fs";\nimport * as fs from "fs";`;
+  compare("fd", imports, `
+  const text = new TextDecoder();
+  const fd = openSync("f", "r+");
+  let b = new Uint8Array(4);
+  console.log(readSync(fd, b, 0, 4, 0), text.decode(b), readSync(fd, b), readSync(fd, b, 1, 3), text.decode(b));
+  console.log(readSync(fd, b, 0, 4, -1), readSync(fd, b, 0, 4, null), readSync(fd, b, 0, 0), readSync(fd, b, 4, 0), readSync(fd, b, 0, 2, 100));
+  console.log(writeSync(fd, "XY", 0), writeSync(fd, "Zé"), writeSync(fd, b, 1, 2, 12), fs.writeSync(fd, b, 3), writeSync(fd, ""), writeSync(fd, "ab", -2, "utf8"));
+  console.log(readFileSync("f", "utf8"));
+  const s = fstatSync(fd);
+  console.log(s.size, s.isFile(), s.isDirectory(), s.mode === statSync("f").mode, s.mtimeMs === statSync("f").mtimeMs);
+  ftruncateSync(fd, 3);
+  console.log(readFileSync("f", "utf8"));
+  ftruncateSync(fd, -5);
+  fchmodSync(fd, 0o600);
+  fsyncSync(fd);
+  console.log(statSync("f").size, statSync("f").mode & 0o777);
+  closeSync(fd);
+  let empty = new Uint8Array(0);
+  const reads: [i64, i64, i64 | null][] = [[-1, 2, null], [0, -1, null], [3, 2, null], [0, 2, -2], [0, 2, 9007199254740992], [0, 5, null]];
+  const g = openSync("g", "r");
+  for (const [offset, length, position] of reads) {
+    try { readSync(g, b, offset, length, position); } catch (e) { console.log(e.message, e.code); }
+  }
+  try { readSync(g, empty, 0, 1); } catch (e) { console.log(e.message, e.code); }
+  console.log(readSync(g, empty));
+  const writes: [i64, i64][] = [[-1, 0], [5, 0], [0, -1], [0, 5], [1, 4]];
+  for (const [offset, length] of writes) {
+    try { writeSync(g, b, offset, length); } catch (e) { console.log(e.message, e.code); }
+  }
+  try { writeSync(g, "x"); } catch (e) { console.log(e.message, e.code, e.syscall, e.path ?? "none"); }
+  closeSync(g);
+  try { readSync(g, b); } catch (e) { console.log(e.message, e.code, e.syscall, e.path ?? "none"); }
+  try { writeSync(g, b); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { fstatSync(g); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { ftruncateSync(g); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { fchmodSync(g, 0o644); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { fsyncSync(g); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { closeSync(g); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  const fds: i64[] = [-1, 2147483648, 4294967297, -4294967297];
+  for (const n of fds) {
+    try { closeSync(n); } catch (e) { console.log(e.message, e.code); }
+    try { readSync(n, b); } catch (e) { console.log(e.message, e.code); }
+    try { fs.writeSync(n, "x"); } catch (e) { console.log(e.message, e.code); }
+  }
+  try { readSync(g, b, 0, 4294967297); } catch (e) { console.log(e.message, e.code); }
+  console.log(readSync(g, b, 0, -1099511627776));
+  try { writeSync(g, b, 0, -1099511627776); } catch (e) { console.log(e.message, e.code); }
+  try { fchmodSync(4294967297, 4294967297); } catch (e) { console.log(e.message, e.code); }
+  try { ftruncateSync(4294967297, 1); } catch (e) { console.log(e.message, e.code); }
+  try { ftruncateSync(0, 9007199254740992); } catch (e) { console.log(e.message, e.code); }
+  try { fchmodSync(0, -1); } catch (e) { console.log(e.message, e.code); }
+  const d = openSync(".");
+  try { readSync(d, b); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  closeSync(d);
+  const w = openSync("w", "w", 0o640);
+  console.log(statSync("w").mode & 0o777);
+  try { readSync(w, b); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  writeSync(w, "one");
+  closeSync(w);
+  const a = openSync("w", "a");
+  writeSync(a, "two");
+  closeSync(a);
+  closeSync(openSync("w", "a+"));
+  closeSync(openSync("new", "wx+"));
+  closeSync(openSync("g", "rs+"));
+  closeSync(openSync("g", 0));
+  console.log(readFileSync("w", "utf8"), readFileSync("new", "utf8").length);
+  const opens: [string, string, i64][] = [["missing", "r", 0o666], ["missing", "r+", 0o666], ["g", "wx", 0o666], ["g", "xa+", 0o666], ["g", "bogus", 0o666], [".", "w", 0o666], ["", "r", 0o666], ["q", "w", -1], ["q", "w", 4294967296], ["a\\0b", "r", 0o666]];
+  for (const [path, flags, mode] of opens) {
+    try { closeSync(openSync(path, flags, mode)); } catch (e) { console.log(e.message, e.code, e.code.startsWith("ERR_") ? "-" : e.syscall, e.path ?? "none"); }
+  }`, (dir) => {
+    writeFileSync(join(dir, "f"), "hello world");
+    writeFileSync(join(dir, "g"), "abc");
   });
 });

@@ -6289,6 +6289,87 @@ int32_t fsh_rt_fs_unlink(fsh_str *path, fsh_str **error) {
   return result;
 }
 
+// An errno's Node code and wording, for std's fd calls to make an IoError from: written into
+// code and text as C strings.
+void fsh_rt_errno_words(int64_t number, char *code, int64_t code_size, char *text, int64_t text_size) {
+  fsh_errno_words((int)number, code, (size_t)code_size, text, (size_t)text_size);
+}
+
+// Node's string flags for open, as libuv's table reads them, in this system's bits; -1 for one
+// it doesn't know.
+int64_t fsh_rt_fd_flags(const char *s) {
+  size_t length = strlen(s);
+  static const struct { const char *names; int64_t bits; } table[] = {
+    {"r", O_RDONLY}, {"rs sr", O_RDONLY | O_SYNC}, {"r+", O_RDWR}, {"rs+ sr+", O_RDWR | O_SYNC},
+    {"w", O_TRUNC | O_CREAT | O_WRONLY}, {"wx xw", O_TRUNC | O_CREAT | O_WRONLY | O_EXCL},
+    {"w+", O_TRUNC | O_CREAT | O_RDWR}, {"wx+ xw+", O_TRUNC | O_CREAT | O_RDWR | O_EXCL},
+    {"a", O_APPEND | O_CREAT | O_WRONLY}, {"ax xa", O_APPEND | O_CREAT | O_WRONLY | O_EXCL},
+    {"as sa", O_APPEND | O_CREAT | O_WRONLY | O_SYNC}, {"a+", O_APPEND | O_CREAT | O_RDWR},
+    {"ax+ xa+", O_APPEND | O_CREAT | O_RDWR | O_EXCL}, {"as+ sa+", O_APPEND | O_CREAT | O_RDWR | O_SYNC},
+  };
+  for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
+    for (const char *at = table[i].names; *at;) {
+      size_t n = strcspn(at, " ");
+      if (n == length && memcmp(at, s, n) == 0) return table[i].bits;
+      at += n + (at[n] == ' ');
+    }
+  }
+  return -1;
+}
+
+// openSync: the new descriptor, or -errno.
+int64_t fsh_rt_fd_open(const char *path, int64_t flags, int64_t mode) {
+  int fd;
+  do fd = open(path, (int)flags | O_CLOEXEC, (int)mode);
+  while (fd < 0 && errno == EINTR);
+  return fd < 0 ? -errno : fd;
+}
+
+// readSync and writeSync: the count moved, or -errno; a position below 0 is the file's own.
+int64_t fsh_rt_fd_read(int64_t fd, uint8_t *at, int64_t length, int64_t position) {
+  ssize_t n;
+  do n = position < 0 ? read((int)fd, at, (size_t)length) : pread((int)fd, at, (size_t)length, (off_t)position);
+  while (n < 0 && errno == EINTR);
+  return n < 0 ? -errno : n;
+}
+
+int64_t fsh_rt_fd_write(int64_t fd, const uint8_t *at, int64_t length, int64_t position) {
+  ssize_t n;
+  do n = position < 0 ? write((int)fd, at, (size_t)length) : pwrite((int)fd, at, (size_t)length, (off_t)position);
+  while (n < 0 && errno == EINTR);
+  return n < 0 ? -errno : n;
+}
+
+// fstatSync: 0 with size, mode and kind in out and the modification time in mtime, as statSync
+// gives them, or -errno.
+int64_t fsh_rt_fd_stat(int64_t fd, int64_t *out, double *mtime) {
+  struct stat st;
+  if (fstat((int)fd, &st) != 0) return -errno;
+  out[0] = st.st_size;
+  out[1] = st.st_mode;
+  out[2] = S_ISREG(st.st_mode) ? 1 : S_ISDIR(st.st_mode) ? 2 : S_ISLNK(st.st_mode) ? 3 : 0;
+#ifdef __APPLE__
+  struct timespec m = st.st_mtimespec;
+#else
+  struct timespec m = st.st_mtim;
+#endif
+  *mtime = (double)m.tv_sec * 1000 + (double)m.tv_nsec / 1e6;
+  return 0;
+}
+
+// ftruncateSync, fchmodSync, fsyncSync and closeSync on a bare descriptor, by which: 0, or -errno.
+// close's EINTR has still closed it, as libuv takes it.
+int64_t fsh_rt_fd_call(int64_t which, int64_t fd, int64_t value) {
+  int r;
+  switch (which) {
+    case 0: do r = ftruncate((int)fd, (off_t)value); while (r < 0 && errno == EINTR); break;
+    case 1: do r = fchmod((int)fd, (mode_t)value); while (r < 0 && errno == EINTR); break;
+    case 2: r = fsync((int)fd); break;
+    default: r = close((int)fd); if (r < 0 && errno == EINTR) r = 0; break;
+  }
+  return r < 0 ? -errno : 0;
+}
+
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;

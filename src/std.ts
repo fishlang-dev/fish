@@ -4848,6 +4848,161 @@ export function copyFileSync(src: string, dest: string, mode: i64 = 0): void thr
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
 }
+
+declare function fsh_rt_errno_words(number: i64, code: MutPtr<u8>, codeSize: i64, text: MutPtr<u8>, textSize: i64): void;
+declare function fsh_rt_fd_flags(flags: Ptr<u8>): i64;
+declare function fsh_rt_fd_open(path: Ptr<u8>, flags: i64, mode: i64): i64;
+declare function fsh_rt_fd_read(fd: i64, at: MutPtr<u8>, length: i64, position: i64): i64;
+declare function fsh_rt_fd_write(fd: i64, at: Ptr<u8>, length: i64, position: i64): i64;
+declare function fsh_rt_fd_stat(fd: i64, out: MutPtr<i64>, mtime: MutPtr<f64>): i64;
+declare function fsh_rt_fd_call(which: i64, fd: i64, value: i64): i64;
+
+// A failed descriptor call's IoError, from the -errno the runtime gave: Node's code and words,
+// naming the path only for open.
+function failed(result: i64, syscall: string, path: string | null): IoError {
+  let code: u8[] = new Array(32).fill(0 as u8);
+  let text: u8[] = new Array(200).fill(0 as u8);
+  unsafe { fsh_rt_errno_words(-result, mutPtrOf(code[0]), 32, mutPtrOf(text[0]), 200) };
+  const name = unsafe { fromCString(ptrOf(code[0])) };
+  let e = new IoError(name + ": " + unsafe { fromCString(ptrOf(text[0])) } + ", " + syscall + (path === null ? "" : " '" + path + "'"));
+  e.code = name;
+  e.syscall = syscall;
+  e.path = path;
+  return e;
+}
+
+// Node's RangeError for a number outside what a call takes, the number grouped by threes past
+// 2^32 as Node writes it.
+// Node's own checks in C++ write it plainly, as given by plain.
+function outOfRange(name: string, range: string, n: i64, plain: boolean = false): IoError {
+  let shown = String(n);
+  if (!plain && (n > 4294967296 || n < -4294967296)) {
+    const start = n < 0 ? 1 : 0;
+    let grouped = "";
+    let i = shown.length as i64;
+    for (; i >= start + 4; i -= 3) grouped = "_" + shown.slice(i - 3, i) + grouped;
+    shown = shown.slice(0, i) + grouped;
+  }
+  let e = new IoError("The value of \"" + name + "\" is out of range. It must be " + range + ". Received " + shown);
+  e.code = "ERR_OUT_OF_RANGE";
+  return e;
+}
+
+function invalid(message: string): IoError {
+  let e = new IoError(message);
+  e.code = "ERR_INVALID_ARG_VALUE";
+  return e;
+}
+
+const SAFE = 9007199254740991;
+
+function checkFd(fd: i64, plain: boolean = true): void throws IoError {
+  if (fd < 0 || fd > 2147483647) throw outOfRange("fd", ">= 0 && <= 2147483647", fd, plain);
+}
+
+function checkMode(mode: i64): void throws IoError {
+  if (mode < 0 || mode > 4294967295) throw outOfRange("mode", ">= 0 && <= 4294967295", mode);
+}
+
+// Node's string flags, as "r" or "wx+", or a number given to open as it is.
+export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o666): i64 throws IoError {
+  if (path.includes("\0")) throw invalid("The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received '" + path.replaceAll("\0", "\\x00") + "'");
+  let bits = 0;
+  if (typeof flags === "string") {
+    bits = flags.includes("\0") ? -1 : unsafe { fsh_rt_fd_flags(cString(flags)) };
+    if (bits < 0) throw invalid("The argument 'flags' is invalid. Received '" + flags + "'");
+  } else {
+    bits = flags;
+  }
+  checkMode(mode);
+  const fd = unsafe { fsh_rt_fd_open(cString(path), bits, mode) };
+  if (fd < 0) throw failed(fd, "open", path);
+  return fd;
+}
+
+export function closeSync(fd: i64): void throws IoError {
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(3, fd, 0) };
+  if (r < 0) throw failed(r, "close", null);
+}
+
+// What's read lands at offset; a null or -1 position reads from the file's own, which moves.
+export function readSync(fd: i64, buffer: Mut<u8[]>): i64 throws IoError;
+export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64, length: i64, position?: i64 | null): i64 throws IoError;
+export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64 = 0, length?: i64, position?: i64 | null): i64 throws IoError {
+  checkFd(fd, false);
+  if (offset < 0 || offset > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", offset);
+  const size = buffer.length as i64;
+  // Node's length |= 0.
+  const n = ((length ?? size - offset) as i32) as i64;
+  if (n === 0) return 0;
+  if (size === 0) throw invalid("The argument 'buffer' is empty and cannot be written. Received Uint8Array(0) []");
+  if (n < 0) throw outOfRange("length", ">= 0", n);
+  if (offset + n > size) throw outOfRange("length", "<= " + String(size - offset), n);
+  const at = position ?? -1;
+  if (at < -1 || at > SAFE) throw outOfRange("position", ">= -1 && <= 9007199254740991", at);
+  const got = unsafe { fsh_rt_fd_read(fd, mutPtrOf(buffer[offset as usize]), n, at) };
+  if (got < 0) throw failed(got, "read", null);
+  return got;
+}
+
+// A write of length bytes from offset, or of a string's UTF-8; a negative or missing position
+// writes at the file's own.
+export function writeSync(fd: i64, buffer: Ref<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): i64 throws IoError;
+export function writeSync(fd: i64, text: string, position?: i64 | null, encoding?: "utf8" | "utf-8"): i64 throws IoError;
+export function writeSync(fd: i64, data: Ref<string | u8[]>, second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): i64 throws IoError {
+  checkFd(fd, false);
+  if (typeof data === "string") {
+    const bytes = new TextEncoder().encode(data);
+    return written(fd, bytes, 0, bytes.length as i64, second ?? -1);
+  }
+  const size = data.length as i64;
+  const offset = second ?? 0;
+  if (offset < 0 || offset > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", offset);
+  const n = typeof third === "number" ? third : size - offset;
+  if (offset > size) throw outOfRange("offset", "<= " + String(size), offset);
+  if (n > size - offset) throw outOfRange("length", "<= " + String(size - offset), n);
+  if (n < 0) throw outOfRange("length", ">= 0", n);
+  return written(fd, data, offset, n, position ?? -1);
+}
+
+function written(fd: i64, bytes: Ref<u8[]>, offset: i64, n: i64, position: i64): i64 throws IoError {
+  // A pointer for an empty write, which still reaches the system as Node's does.
+  const none: u8[] = [0];
+  const r = unsafe { fsh_rt_fd_write(fd, n === 0 ? ptrOf(none[0]) : ptrOf(bytes[offset as usize]), n, position) };
+  if (r < 0) throw failed(r, "write", null);
+  return r;
+}
+
+export function fstatSync(fd: i64): Stats throws IoError {
+  checkFd(fd);
+  let out: i64[] = [0, 0, 0];
+  let mtime: f64 = 0;
+  const r = unsafe { fsh_rt_fd_stat(fd, mutPtrOf(out[0]), mutPtrOf(mtime)) };
+  if (r < 0) throw failed(r, "fstat", null);
+  return new Stats(out[0], out[1], mtime, out[2]);
+}
+
+// A negative length truncates to nothing, as Node's does.
+export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
+  if (len < -SAFE || len > SAFE) throw outOfRange("len", ">= -9007199254740991 && <= 9007199254740991", len);
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(0, fd, len < 0 ? 0 : len) };
+  if (r < 0) throw failed(r, "ftruncate", null);
+}
+
+export function fchmodSync(fd: i64, mode: i64): void throws IoError {
+  checkMode(mode);
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(1, fd, mode) };
+  if (r < 0) throw failed(r, "fchmod", null);
+}
+
+export function fsyncSync(fd: i64): void throws IoError {
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(2, fd, 0) };
+  if (r < 0) throw failed(r, "fsync", null);
+}
 `,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
