@@ -796,3 +796,67 @@ function main() {
   look(xs).forEach((x) => console.log(x, xs.length));
   console.log(c.get());
 }
+// case: borrow_callback_replaces_element_origin
+// error: borrow_callback_replaces_element_origin.fsh:5:33: error[E0203]: cannot mutably lend 'xs' while 'xs' is lent to 'forEach' for this call
+function pick(l: Ref<string[][]>): Ref<string[][]> { return l; }
+function main() {
+  let xs = [["a" + "b", "c" + "d"]];
+  pick(xs)[0]!.forEach((x) => { xs = [["q" + "r"]]; console.log(x); });
+}
+// case: borrow_callback_replaces_field_origin
+// error: borrow_callback_replaces_field_origin.fsh:6:34: error[E0203]: cannot mutably lend 'b' while 'b' is lent to 'forEach' for this call
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function main() {
+  let b = new Box();
+  pick(b).items.forEach((x) => { b = new Box(); console.log(x); });
+}
+// case: borrow_callback_replaces_chained_origin
+// error: borrow_callback_replaces_chained_origin.fsh:7:38: error[E0203]: cannot mutably lend 'r' while 'r' is lent to 'forEach' for this call
+class B { xs: string[] = ["a" + "b", "c" + "d"]; }
+class A { b: B = new B(); get2(): Ref<B> { return this.b; } }
+class R { a: A = new A(); get(): Ref<A> { return this.a; } }
+function main() {
+  let r = new R();
+  r.get().get2().xs.forEach((x) => { r = new R(); console.log(x); });
+}
+// case: borrow_callback_replaces_this_origin
+// error: borrow_callback_replaces_this_origin.fsh:6:60: error[E0203]: cannot mutably lend 'this' while 'this' is lent to 'forEach' for this call
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class C {
+  b: Box = new Box();
+  get(): Ref<Box> { return this.b; }
+  run(this: Mut<this>) { this.get().items.forEach((x) => { this.b = new Box(); console.log(x); }); }
+}
+function main() { let c = new C(); c.run(); }
+// case: borrow_argument_replaces_field_origin
+// error: borrow_argument_replaces_field_origin.fsh:8:26: error[E0203]: cannot mutably lend 'a' while 'a' is lent to 'add' for this call
+class C { xs: string[] = ["a" + "b"]; add(this: Mut<this>, k: string) { this.xs.push(k); } }
+class B { c: C = new C(); }
+class A { b: B = new B(); }
+function pick(a: Mut<A>): Mut<B> { return a.b; }
+function main() {
+  let a = new A();
+  pick(a).c.add((() => { a = new A(); return "z" + "z"; })());
+  console.log(a.b.c.xs.length);
+}
+// case: borrow_projection_reads_origin
+// expect: ab! 2
+// expect: cd! 2
+// expect: 1
+class C { n: i64 = 1; add(this: Mut<this>, k: i64) { this.n += k; } }
+function pick(c: Mut<C>): Mut<C> { return c; }
+function look(c: Ref<C>): Ref<C> { return c; }
+function main() {
+  let c = new C();
+  let xs = ["a" + "b", "c" + "d"];
+  look(c).n;
+  xs.filter((x) => x.length > 0).map((x) => x + "!").forEach((x) => console.log(x, xs.length));
+  const l = new Lock<i64>(1);
+  console.log(look(c).n);
+}
+// case: borrow_returned_reference_read_in_callback
+// expect: ab 2 ab
+// expect: cd 2 ab
+function pick(a: Ref<string[]>): Ref<string[]> { return a; }
+function main() { let xs = ["a" + "b", "c" + "d"]; pick(xs).forEach((x) => console.log(x, xs.length, xs[0]!)); }

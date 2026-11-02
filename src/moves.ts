@@ -856,6 +856,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (e.kind === "arrow" || instance.envs?.has(e)) {
       return captured(e).filter(([, , from, , held]) => !held || reborrows(from!)).map(([place, use, , mutable, held]) => [place, use as Expr, mutable || held]);
     }
+    // A field, element or unwrapped Option of a returned reference reaches into what that
+    // reference borrows, so it lends what the reference does.
+    const root = projected(e);
+    if (root !== e && key(e) === undefined && borrowsFrom.has(root)) return lent(root);
     // A call's returned reference lends again what it borrows from, a receiver included; a
     // future lends it mutably when it holds a mutable reference.
     const from = borrowsFrom.get(e);
@@ -1442,6 +1446,15 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`, as are
   // `as`, `satisfies` and `unsafe { }`, which hand on their operand.
+  // What a chain of field reads, indexes and `!` starts from.
+  function projected(e: Expr): Expr {
+    for (e = unwrapped(e); ; ) {
+      if ((e.kind === "member" && !calls.has(e)) || e.kind === "index") e = unwrapped(e.object);
+      else if (e.kind === "nonNull") e = unwrapped(e.expr);
+      else return e;
+    }
+  }
+
   function unwrapped(e: Expr): Expr {
     return (e.kind === "nonNull" && typing.optionRef(types.get(e.expr))) || transparent(e) ? unwrapped((e as { expr: Expr }).expr) : e;
   }

@@ -134,3 +134,11 @@ function main() {
   h.first().update((v) => { h = new H(); v.push("x" + "y"); });
   console.log(h.l.update((v) => v.length));
 }
+// case: lock_update_through_returned_field
+// error: lock_update_through_returned_field.fsh:6:29: error[E0203]: cannot mutably lend 'h' while 'h' is lent to 'update' for this call
+class H { l: Lock<string[]> = new Lock<string[]>(["a" + "b"]); }
+function pick(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let h = new H();
+  pick(h).l.update((v) => { h = new H(); v.push("x" + "y"); console.log(v.length); });
+}
