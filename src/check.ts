@@ -423,7 +423,7 @@ function macroShape(f: Func) {
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 // With `module`, it may be a file another imports, checked on its own, so `main` is optional.
 // An error it throws names local declarations as they were written.
-export function check(compilation: Compilation, written: Stmt[], exportsToC: ReadonlySet<string> | false = false, macros = false, module = false): Checked {
+export function check(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false = false, macros = false, module = false): Checked {
   try {
     const checked = checkAll(compilation, written, exportsToC, macros, module);
     for (const w of checked.warnings) named(w, compilation.names);
@@ -433,7 +433,7 @@ export function check(compilation: Compilation, written: Stmt[], exportsToC: Rea
   }
 }
 
-function checkAll(compilation: Compilation, written: Stmt[], exportsToC: ReadonlySet<string> | false, macros: boolean, module: boolean): Checked {
+function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): Checked {
   return new Checker(compilation, written, exportsToC, macros, module).run();
 }
 
@@ -442,7 +442,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   written: Stmt[];
   library: boolean;
   // The C names a library's exports can't take.
-  takenInC: ReadonlySet<string>;
+  takenInC: Set<string>;
   macros: boolean;
   module: boolean;
   arenas: Compilation["arenas"];
@@ -536,7 +536,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // The error each failed body's check gave, which a call of it gives again rather than another.
   failed = new Map<BodyId, CompileError>();
 
-  constructor(compilation: Compilation, written: Stmt[], exportsToC: ReadonlySet<string> | false, macros: boolean, module: boolean) {
+  constructor(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean) {
     this.compilation = compilation;
     this.written = written;
     this.library = exportsToC !== false;
