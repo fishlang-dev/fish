@@ -34,7 +34,7 @@ export type Builtin = { module: string; files: usize; equivalent?: { name: strin
 const RULES: Rule[] = [
   { id: "R1", action: "reject", title: "eval and new Function: a native binary has no compiler to run code made at run time" },
   { id: "R2", action: "reject", title: "prototype edits and Object.defineProperty: Fish types have fixed layouts" },
-  { id: "R3", action: "reject", title: "delete: Fish objects have fixed layouts; use an Option field or a Map" },
+  { id: "R3", action: "reject", title: "delete on an object not declared as a dictionary: Fish objects have fixed layouts; use an Option field, a dictionary type or a Map" },
   { id: "R5", action: "reject", title: "the arguments object: use rest parameters" },
   { id: "R6", action: "reject", title: "Symbol: Fish has no runtime reflection" },
   { id: "R7", action: "reject", title: "declaration merging and module augmentation: Fish types are closed after they are declared" },
@@ -43,7 +43,7 @@ const RULES: Rule[] = [
   { id: "G3", action: "guided", title: "a number used as a count or an index: make it i64, or usize for an index" },
   { id: "G4", action: "guided", title: "class extends with the base used as a type: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
   { id: "G5", action: "guided", title: "instanceof a class others extend: match on an interface or an enum instead" },
-  { id: "G6", action: "guided", title: "indexing an object with a string key, or testing a key known only at run time with 'in': use a Map" },
+  { id: "G6", action: "guided", title: "indexing an object not declared as a dictionary with a string key, or testing a key known only at run time with 'in': declare it '{ [k: string]: T }' or 'Record<string, T>', or use a Map" },
   { id: "G7", action: "guided", title: "top-level code with side effects: move it into main() or a Lazy<T>" },
   { id: "G8", action: "guided", title: "isNaN after parsing: Fish's parsing gives an Option to check" },
   { id: "G9", action: "guided", title: ".call, .apply and .bind: pass the receiver explicitly or use a closure" },

@@ -330,13 +330,19 @@ test("G5 reports instanceof a class others extend, and leaves Error and classes 
 test("G6 reports a string key: a literal, a template, a string name or a for...in key; a numeric index is left", () => {
   const src = 'function f(o: Rec, k: string) {\n  const name = "a";\n  for (const key in o) g(o[key]);\n  return o["x"] + o[`y${1}`] + o[name] + o[k];\n}\n';
   expect(guidedIn(src)).toEqual(["G6 o[key]", 'G6 o["x"]', "G6 o[`y${1}`]", "G6 o[name]", "G6 o[k]"]);
-  expect(messageOf(src, "G6")).toBe("indexing with a string key, or testing one with 'in' that isn't written as a literal, reads the object as a dictionary, which a Fish object isn't; use a 'Map<string, T>'");
+  expect(messageOf(src, "G6")).toBe("indexing with a string key, or testing one with 'in' that isn't written as a literal, reads the object as a dictionary, which a Fish object isn't; declare it as one, '{ [k: string]: T }' or 'Record<string, T>', or use a 'Map<string, T>'");
   expect(guidedIn("function f(xs: number[], i: number) {\n  const j = 2;\n  return xs[0] + xs[i] + xs[j];\n}\n").filter((h) => h.startsWith("G6"))).toEqual([]);
 });
 
 test("G6 reports 'in' with any key but a string literal, as the checker refuses them; a string literal narrows, so it is left", () => {
   const src = 'function f(o: Rec, k: string, xs: number[]) {\n  return k in o || "a" in o || 0 in xs;\n}\n';
   expect(guidedIn(src)).toEqual(["G6 k in o", "G6 0 in xs"]);
+});
+
+test("G6 and R3 leave a dictionary: a name declared with an index signature, 'Record<string, V>' or an alias of one, or a field of this declared so", () => {
+  const src = 'type D = { [k: string]: number };\nclass C {\n  items: Record<string, string> = {};\n  f(k: string) {\n    delete this.items[k];\n    return this.items[k];\n  }\n}\nfunction f(a: D, b: { [k: string]: number }, c: Rec, k: string) {\n  delete a[k];\n  delete c.x;\n  return a[k] + b[k] + c[k] + (k in a ? 1 : 0) + (k in c ? 1 : 0);\n}\n';
+  const found = surveyHits(parse(src, { last: 0 })).filter((h) => h.rule === "G6" || h.rule === "R3").sort((a, b) => a.start - b.start).map((h) => `${h.rule} ${src.slice(h.start, h.end)}`);
+  expect(found).toEqual(["R3 delete c.x", "G6 c[k]", "G6 k in c"]);
 });
 
 test("G7 reports top-level code with side effects, suggesting main() or a Lazy", () => {
@@ -422,7 +428,7 @@ test("G2 ties a method call to its declaration through the receiver, and leaves 
 });
 
 test("G6 reads a name's string-ness from the binding it resolves to, and an index never gets both G6 and G3", () => {
-  const src = "function a(o: Record<string, number>) {\n  for (const i in o) g(o[i]);\n}\nfunction b(xs: number[]) {\n  for (let i = 0; i < xs.length; i++) g(xs[i]);\n}\nfunction c(key: string) {\n  return key;\n}\nfunction d(xs: number[], key: number) {\n  return xs[key];\n}\n";
+  const src = "function a(o: Rec) {\n  for (const i in o) g(o[i]);\n}\nfunction b(xs: number[]) {\n  for (let i = 0; i < xs.length; i++) g(xs[i]);\n}\nfunction c(key: string) {\n  return key;\n}\nfunction d(xs: number[], key: number) {\n  return xs[key];\n}\n";
   expect(guidedIn(src)).toEqual(["G6 o[i]", "G3 i", "G3 key"]);
 });
 
