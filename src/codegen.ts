@@ -6937,6 +6937,14 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (!types.has(e)) pending.push({ v: made, type: "string" });
         return made;
       }
+      // `Rc.ptrEq(a, b)` is given each Rc borrowed, a pointer to its handle.
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "Rc" && !types.has(e.callee.object)) {
+        const [a, b, result] = [temp(), temp(), temp()];
+        emit(`${a} = load ptr, ptr ${value(e.args[0]!)}`);
+        emit(`${b} = load ptr, ptr ${value(e.args[1]!)}`);
+        emit(`${result} = icmp eq ptr ${a}, ${b}`);
+        return result;
+      }
       if (e.callee.kind === "member" && recOf(valueType(e.callee.object))?.kind === "pointer") return pointerCall(e, e.callee);
       if (e.callee.kind === "member" && recOf(referent(valueType(e.callee.object)))?.kind === "interior") return atomicCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && recOf(referent(valueType(e.callee.object)))?.kind === "block") return blockCall(e, e.callee);

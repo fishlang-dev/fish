@@ -1232,6 +1232,7 @@ export class Expressions implements Union {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Object" && !this.ctx.lookup("Object") && !this.classes.has("Object") && !this.byName.has("Object") && !this.byName.has("const Object") && !this.enums.has("Object")) return this.objectStatic(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "String" && !this.ctx.lookup("String") && !this.classes.has("String") && !this.byName.has("String") && !this.byName.has("const String") && !this.enums.has("String")) return this.stringStatic(e, callee);
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Rc" && !this.ctx.lookup("Rc") && !this.classes.has("Rc") && !this.byName.has("Rc")) return this.ptrEq(e, callee);
     if (callee.kind === "member" && this.isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("E0505", "'Math' is always there, so its functions are called without '?.'", e.start, e.end);
       return this.mathCall(e, callee.name);
@@ -3972,6 +3973,23 @@ export class Expressions implements Union {
     return this.lockCall(e, callee, this.typing.interiorType("Lock", this.typing.rec(t).of), true);
   }
 
+  // `Rc.ptrEq(a, b)`: whether two Rcs share one block, which `===` doesn't ask, since it
+  // compares values. Each is borrowed for the test.
+  private ptrEq(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    if (callee.name !== "ptrEq") throw new CompileError("E0502", `'Rc' has no '${callee.name}'; it has 'ptrEq', which tells whether two Rcs share one value`, callee.start, callee.end);
+    if (callee.optional || e.optional) throw new CompileError("E0505", "'Rc' is always there, so 'Rc.ptrEq' is called without '?.'", e.start, e.end);
+    if (e.args.length !== 2 || e.typeArgs.length > 0 || e.args.some((a) => a.kind === "spread")) throw new CompileError("E0504", "'Rc.ptrEq' takes the two Rcs to compare, as in 'Rc.ptrEq(a, b)'", e.start, e.end);
+    const held = e.args.map((a) => {
+      const t = this.value(a);
+      const r = this.recOf(this.isRefType(t) ? this.typing.rec(t as RefType).to : t);
+      if (r?.kind !== "shared" || r.which !== "Rc") throw new CompileError("E0504", `'Rc.ptrEq' compares two Rcs, not '${this.typing.show(t)}'`, a.start, a.end);
+      if (!this.isRefType(t)) this.coerce(a, t, this.typing.refType(t, false), "");
+      return this.typing.lower(r.of);
+    });
+    if (held[0] !== held[1]) throw new CompileError("E0504", `'Rc.ptrEq' compares two Rcs of one type, not '${this.typing.show(this.types.get(e.args[0]!)!)}' and '${this.typing.show(this.types.get(e.args[1]!)!)}'`, e.start, e.end);
+    return { type: "boolean", what: "'Rc.ptrEq'" };
+  }
+
   // `w.upgrade()`: an Rc of the value a Weak reaches while any Rc of it is left, or else null.
   private weakCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
     if (callee.name !== "upgrade") throw new CompileError("E0502", `'Weak' has no method '${callee.name}'; reach its value with 'upgrade', which gives an 'Rc' or null, or copy it with 'clone'`, callee.start, callee.end);
@@ -5504,6 +5522,7 @@ export class Expressions implements Union {
     if (r?.kind === "class") return `a class compares through 'equals(other: Ref<this>): boolean', which '${r.name}' doesn't have; add one, or '@derive(Eq)'`;
     if (r?.kind === "variant") return "an enum holding values compares when it has '@derive(Eq)'";
     if (r?.kind === "map") return `a ${r.set ? "Set" : "Map"} isn't compared by value; compare its entries`;
+    if (r?.kind === "shared" && r.which === "Rc") return "it has no value equality; 'Rc.ptrEq(a, b)' tells whether two Rcs share one value";
     return "it has no value equality";
   }
 

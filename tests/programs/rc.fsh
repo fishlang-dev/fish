@@ -149,3 +149,35 @@ function main() {
 function main() {
   const w = new Weak();
 }
+// case: rc_ptr_eq
+// expect: true false true true
+// expect: true
+// expect: 1 1
+function same(a: Ref<Rc<{ n: i64 }>>, b: Rc<{ n: i64 }>): boolean {
+  return Rc.ptrEq(a, b);
+}
+
+function main() {
+  const a = new Rc({ n: 1 });
+  const b = a.clone();
+  const c = new Rc({ n: 1 });
+  console.log(Rc.ptrEq(a, b), Rc.ptrEq(a, c), same(a, b.clone()), Rc.ptrEq(a.clone(), b));
+  const w = a.downgrade();
+  const u = w.upgrade();
+  if (u !== null) console.log(Rc.ptrEq(u, a));
+  console.log(a.n, b.n);
+}
+// case: rc_ptr_eq_types
+// error: 'Rc.ptrEq' compares two Rcs of one type
+function main() {
+  const a = new Rc({ n: 1 });
+  const b = new Rc({ m: 1 });
+  console.log(Rc.ptrEq(a, b));
+}
+// case: rc_triple_equals
+// error: it has no value equality; 'Rc.ptrEq(a, b)' tells whether two Rcs share one value
+function main() {
+  const a = new Rc({ n: 1 });
+  const b = a.clone();
+  console.log(a === b);
+}
