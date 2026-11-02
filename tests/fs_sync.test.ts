@@ -22,7 +22,7 @@ function compare(name: string, imports: string, body: string, setup: (dir: strin
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: fishDir, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync } = fs; (() => {${nodeBody}\n})();`;
+  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants } = fs; (() => {${nodeBody}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: nodeDir });
   expect(fish.stderr.toString()).toBe("");
   expect(node.stderr.toString()).toBe("");
@@ -98,5 +98,64 @@ test("a failing realpathSync names the part node's walk stops at", () => {
     symlinkSync("real/deep", join(dir, "lnd"));
     symlinkSync("loop2", join(dir, "loop1"));
     symlinkSync("loop1", join(dir, "loop2"));
+  });
+});
+
+test("mkdirSync makes a directory, or with recursive its missing parents, as node's does", () => {
+  compare("mkdir", `import { mkdirSync, statSync, realpathSync } from "node:fs";`, `
+  console.log(mkdirSync("a") === undefined, mkdirSync("x/y/z", { recursive: true }), mkdirSync("x/y", { recursive: true }) === undefined);
+  console.log(mkdirSync("p/q/", { recursive: true }), mkdirSync("r/./s/../t", { recursive: true }), statSync("r/s/../t").isDirectory());
+  console.log(mkdirSync(realpathSync(".") + "/abs/b", { recursive: true }));
+  mkdirSync("m1", { mode: 0o700 });
+  mkdirSync("m2", 0o750);
+  console.log(statSync("m1").mode & 0o777, statSync("m2").mode & 0o777);
+  const cases: [string, boolean][] = [["a", false], ["f", false], ["x/missing/y", false], ["f", true], ["f/q/r", true], ["", false], ["", true]];
+  for (const [p, recursive] of cases) {
+    try { mkdirSync(p, { recursive }); } catch (e) { console.log(e.message, e.code, e.syscall, e.path === p); }
+  }`, (dir) => writeFileSync(join(dir, "f"), "hi"));
+});
+
+test("renameSync, copyFileSync and unlinkSync give what node's give", () => {
+  const imports = `import { readFileSync, writeFileSync, statSync, lstatSync, existsSync, readdirSync, renameSync, copyFileSync, unlinkSync, constants } from "node:fs";\nimport * as fs from "fs";`;
+  compare("move", imports, `
+  renameSync("f", "a/g");
+  renameSync("a/g", "f");
+  copyFileSync("f", "c");
+  writeFileSync("c2", "long text here");
+  fs.copyFileSync("f", "c2");
+  copyFileSync("f", "c3", constants.COPYFILE_EXCL);
+  copyFileSync("f", "c4", fs.constants.COPYFILE_FICLONE);
+  copyFileSync("f", "f");
+  copyFileSync("lf", "cl");
+  writeFileSync("c9", "old old");
+  copyFileSync("f", "c9", constants.COPYFILE_FICLONE);
+  copyFileSync("lf", "cl2", constants.COPYFILE_FICLONE);
+  copyFileSync("f", "dl");
+  console.log(readFileSync("c9", "utf8"), lstatSync("cl2").isSymbolicLink(), lstatSync("dl").isSymbolicLink(), readFileSync("made", "utf8"), statSync("c").mtimeMs === statSync("f").mtimeMs);
+  console.log(readFileSync("c", "utf8"), readFileSync("c2", "utf8"), readFileSync("c3", "utf8"), readFileSync("f", "utf8"));
+  console.log(statSync("c").mode === statSync("f").mode, lstatSync("cl").isSymbolicLink());
+  unlinkSync("c");
+  unlinkSync("ln");
+  console.log(existsSync("c"), readdirSync("."));
+  const pairs: [string, string][] = [["nope", "a/h"], ["a/missing", "zz/g"], ["md", "x"]];
+  for (const [from, to] of pairs) {
+    try { renameSync(from, to); } catch (e) { console.log(e.message, e.code, e.syscall, e.path ?? "none"); }
+  }
+  const copies: [string, string, i64][] = [["f", "c3", 1], ["nope", "c5", 0], ["a", "c6", 0], ["f", "a", 0], ["f", "zz/c", 0], ["f", "c7", 8], ["f", "c8", 4]];
+  for (const [from, to, mode] of copies) {
+    // A mode out of range is node's RangeError, with no system call; Fish's IoError gives "".
+    try { copyFileSync(from, to, mode); } catch (e) { console.log(e.message, e.code, e.code === "ERR_OUT_OF_RANGE" ? "-" : e.syscall, e.path ?? "none"); }
+  }
+  for (const p of ["c", "a", "f/x"]) {
+    try { unlinkSync(p); } catch (e) { console.log(e.message, e.code, e.syscall, e.path ?? "none"); }
+  }
+  console.log(readdirSync("."));`, (dir) => {
+    writeFileSync(join(dir, "f"), "hi");
+    mkdirSync(join(dir, "a"));
+    mkdirSync(join(dir, "md"));
+    mkdirSync(join(dir, "x", "y"), { recursive: true });
+    symlinkSync("f", join(dir, "lf"));
+    symlinkSync("nowhere", join(dir, "ln"));
+    symlinkSync("made", join(dir, "dl"));
   });
 });

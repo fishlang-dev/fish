@@ -36,6 +36,7 @@ export const NATIVE = String.raw`
 #include <sys/random.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <dirent.h>
 #include <ftw.h>
 #include <signal.h>
@@ -5691,6 +5692,7 @@ static const struct { int number; const char *code, *text; } fsh_errnos[] = {
   {EINVAL, "EINVAL", "invalid argument"}, {EIO, "EIO", "i/o error"}, {EBUSY, "EBUSY", "resource busy or locked"},
   {EAGAIN, "EAGAIN", "resource temporarily unavailable"}, {ENOTEMPTY, "ENOTEMPTY", "directory not empty"},
   {EXDEV, "EXDEV", "cross-device link not permitted"}, {EFBIG, "EFBIG", "file too large"},
+  {ENOSYS, "ENOSYS", "function not implemented"}, {ENOTSUP, "ENOTSUP", "operation not supported on socket"},
   {EBADF, "EBADF", "bad file descriptor"}, {ECHILD, "ECHILD", "no child processes"}, {ECONNREFUSED, "ECONNREFUSED", "connection refused"},
   {ECONNRESET, "ECONNRESET", "connection reset by peer"}, {EPIPE, "EPIPE", "broken pipe"},
   {ETIMEDOUT, "ETIMEDOUT", "connection timed out"}, {EADDRINUSE, "EADDRINUSE", "address already in use"},
@@ -6073,6 +6075,178 @@ int32_t fsh_rt_fs_mkdtemp(fsh_str *prefix, fsh_str **out, fsh_str **error) {
   else result = fsh_fs_failed(error, errno, "mkdtemp", pattern);
   fsh_rt_free(made);
   fsh_rt_free(pattern);
+  return result;
+}
+
+// mkdirSync. With recursive, Node's MKDirpSync walk: a prefix missing its parent is retried after
+// the prefix cut at its last '/', so *out is the first directory made as that prefix spells it,
+// or NULL when every one existed. A failure names the path as given.
+int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str **out, fsh_str **error) {
+  *out = NULL;
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "mkdir", "");
+  size_t n = strlen(c), room = 16;
+  // Each pending prefix by its length; a parent removed while the walk runs can make more.
+  size_t *pending = fsh_rt_alloc(room * sizeof(size_t)), count = 0;
+  pending[count++] = n;
+  char *at = fsh_rt_alloc(n + 1);
+  int failure = 0;
+  while (count > 0 && !failure) {
+    size_t length = pending[--count];
+    memcpy(at, c, length);
+    at[length] = 0;
+    int made = mkdir(at, (mode_t)mode) == 0 ? 0 : errno;
+    char *slash = strrchr(at, '/');
+    if (!recursive) failure = made;
+    else if (made == 0) {
+      if (!*out) *out = fsh_rt_str_from_cstring(at);
+    } else if (made == EACCES || made == ENOSPC || made == ENOTDIR || made == EPERM) failure = made;
+    else if (made == ENOENT && slash) {
+      if (count + 2 > room) {
+        size_t *grown = fsh_rt_alloc(room * 2 * sizeof(size_t));
+        memcpy(grown, pending, count * sizeof(size_t));
+        fsh_rt_free(pending);
+        pending = grown;
+        room *= 2;
+      }
+      pending[count++] = length;
+      pending[count++] = (size_t)(slash - at);
+    } else if (made != ENOENT || count == 0) {
+      struct stat st;
+      if (stat(at, &st) != 0) failure = errno;
+      else if (!S_ISDIR(st.st_mode)) failure = made == EEXIST && count > 0 ? ENOTDIR : EEXIST;
+    }
+  }
+  int32_t result = failure ? fsh_fs_failed(error, failure, "mkdir", c) : 1;
+  if (failure && *out) {
+    fsh_rt_str_release(*out);
+    *out = NULL;
+  }
+  fsh_rt_free(at);
+  fsh_rt_free(pending);
+  fsh_rt_free(c);
+  return result;
+}
+
+// A two-path call's failure, in Node's words: "ENOENT: no such file or directory, rename 'a' -> 'b'",
+// its path the first.
+static int32_t fsh_fs_failed_two(fsh_str **error, int number, const char *syscall, const char *from, const char *to) {
+  char code[32], text[200];
+  fsh_errno_words(number, code, sizeof code, text, sizeof text);
+  size_t size = strlen(code) + strlen(text) + strlen(syscall) + strlen(from) + strlen(to) + 24;
+  char *message = fsh_rt_alloc(size);
+  snprintf(message, size, "%s: %s, %s '%s' -> '%s'", code, text, syscall, from, to);
+  int32_t failed = fsh_io_parts(error, message, code, syscall, from);
+  fsh_rt_free(message);
+  return failed;
+}
+
+// renameSync.
+int32_t fsh_rt_fs_rename(fsh_str *from, fsh_str *to, fsh_str **error) {
+  char *a = fsh_rt_str_cstring(from), *b = fsh_rt_str_cstring(to);
+  int32_t result = !a || !b ? fsh_fs_failed_two(error, EINVAL, "rename", a ? a : "", b ? b : "")
+    : rename(a, b) != 0 ? fsh_fs_failed_two(error, errno, "rename", a, b) : 1;
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return result;
+}
+
+// The copy itself, as libuv makes it on every system: 0 or an errno. The source opened (a link
+// followed), the destination opened or made with its mode (through a link, even a dangling one),
+// a copy onto the same file left alone, the times and mode carried over, then the source's size
+// in bytes; a failed copy's destination is removed.
+static int fsh_copy_file(const char *from, const char *to, int64_t mode) {
+  int in = open(from, O_RDONLY | O_CLOEXEC);
+  if (in < 0) return errno;
+  struct stat src, dst;
+  if (fstat(in, &src) != 0) {
+    int failure = errno;
+    close(in);
+    return failure;
+  }
+  int out = open(to, O_WRONLY | O_CREAT | O_CLOEXEC | (mode & 1 ? O_EXCL : 0), src.st_mode);
+  if (out < 0) {
+    int failure = errno;
+    close(in);
+    return failure;
+  }
+  int failure = 0;
+  if (!(mode & 1)) {
+    if (fstat(out, &dst) != 0) failure = errno;
+    else if (src.st_dev == dst.st_dev && src.st_ino == dst.st_ino) {
+      close(in);
+      close(out);
+      return 0;
+    } else if (ftruncate(out, 0) != 0) failure = errno;
+  }
+#ifdef __APPLE__
+  struct timespec times[2] = { src.st_atimespec, src.st_mtimespec };
+#else
+  struct timespec times[2] = { src.st_atim, src.st_mtim };
+#endif
+  if (!failure) {
+    (void)futimens(out, times);
+    (void)!fchown(out, src.st_uid, src.st_gid);
+    if (fchmod(out, src.st_mode) != 0 && errno != EPERM) failure = errno;
+  }
+  int done = 0;
+#ifdef __APPLE__
+  if (!failure && (mode & 4)) failure = ENOSYS;
+  // Darwin's sendfile, which libuv tries first, refuses a directory this way.
+  if (!failure && S_ISDIR(src.st_mode)) failure = ENOTSUP;
+#else
+  if (!failure && (mode & 6)) {
+    // FICLONE, written out as linux/fs.h defines it.
+    done = ioctl(out, 0x40049409, in) == 0;
+    if (!done && (mode & 4)) failure = errno;
+  }
+#endif
+  char buffer[65536];
+  int positioned = 1;
+  for (off_t at = 0; !failure && !done && at < src.st_size;) {
+    size_t want = src.st_size - at < (off_t)sizeof buffer ? (size_t)(src.st_size - at) : sizeof buffer;
+    ssize_t got = positioned ? pread(in, buffer, want, at) : read(in, buffer, want);
+    if (got < 0 && errno == EINTR) continue;
+    if (got < 0 && positioned && at == 0 && (errno == EIO || errno == ESPIPE)) {
+      positioned = 0;
+      continue;
+    }
+    if (got <= 0) {
+      if (got < 0) failure = errno;
+      break;
+    }
+    for (ssize_t put = 0; put < got && !failure;) {
+      ssize_t n = write(out, buffer + put, got - put);
+      if (n >= 0) put += n;
+      else if (errno != EINTR) failure = errno;
+    }
+    at += got;
+  }
+  close(in);
+  // An interrupted close has still closed the descriptor, as libuv counts it.
+  if (close(out) != 0 && errno != EINTR && !failure) failure = errno;
+  if (failure) unlink(to);
+  return failure;
+}
+
+// copyFileSync, its mode the bits of COPYFILE_EXCL (1), COPYFILE_FICLONE (2) and
+// COPYFILE_FICLONE_FORCE (4), checked first as Node checks it.
+int32_t fsh_rt_fs_copyfile(fsh_str *from, fsh_str *to, int64_t mode, fsh_str **error) {
+  if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
+  char *a = fsh_rt_str_cstring(from), *b = fsh_rt_str_cstring(to);
+  int failure = !a || !b ? EINVAL : fsh_copy_file(a, b, mode);
+  int32_t result = failure ? fsh_fs_failed_two(error, failure, "copyfile", a ? a : "", b ? b : "") : 1;
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return result;
+}
+
+// unlinkSync.
+int32_t fsh_rt_fs_unlink(fsh_str *path, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "unlink", "");
+  int32_t result = unlink(c) == 0 ? 1 : fsh_fs_failed(error, errno, "unlink", c);
+  fsh_rt_free(c);
   return result;
 }
 
