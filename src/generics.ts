@@ -758,9 +758,12 @@ export class Instancing {
       const w = written && typeof written !== "string" ? this.typing.rec(written) : undefined;
       const type = w?.kind === "ref" ? w.to : written;
       // An optional parameter is an Option of its type, not a type parameter, save one of an
-      // interface type, which is an Option of a type parameter. A function-typed
-      // parameter property takes a closure as a declared field assigned from a parameter does.
-      if (!type || typeof type === "string" || (p.optional && (written !== type || this.typing.rec(type).kind !== "interface"))) return;
+      // interface type, which is an Option of a type parameter. One with a default holds the
+      // default's type when left out, which differs from an argument's, so it stays refused. A
+      // function-typed parameter property takes a closure as a declared field assigned from a
+      // parameter does.
+      const optional = p.optional && (written !== type || this.typing.recOf(type)?.kind !== "interface" || this.host.tables.defaulted.has(p));
+      if (!type || typeof type === "string" || optional) return;
       const t = this.typing.rec(type);
       if (p.modifiers.length > 0 && t.kind !== "function") return;
       if (f.accessor && t.kind === "interface") {

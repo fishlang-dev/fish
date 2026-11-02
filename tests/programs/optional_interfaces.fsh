@@ -139,3 +139,12 @@ function main(): void {
   console.log(measure(3));
 }
 // error: argument of type 'i64' is not assignable to parameter of type 'Shape'
+
+// case: optional_interfaces_default
+interface Shape { area(): f64; }
+class Sq { constructor(public s: f64) {} area(): f64 { return this.s * this.s; } }
+function measure(x: Shape = new Sq(1)): f64 { return x.area(); }
+function main(): void {
+  console.log(measure());
+}
+// error: defaults on parameters of type 'Shape' are not supported yet

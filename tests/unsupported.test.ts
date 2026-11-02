@@ -305,3 +305,12 @@ test("a generic arrow const with a written type", () => {
     message: "a const holding a generic arrow takes its type from the arrow; drop the const's written type", start, end: start + "<T>(x: T) => T".length,
   }));
 });
+
+// An optional interface parameter is taken, but a default on one is still refused at the parameter.
+test("a default on an interface-typed parameter", () => {
+  const src = "interface Shape { area(): f64; }\nclass Sq { area(): f64 { return 1; } }\nfunction f(x: Shape = new Sq()): f64 { return x.area(); }\nfunction g(x?: Shape): f64 { return x === undefined ? 0 : x.area(); }\nfunction main() { f(); g(); }";
+  const start = src.indexOf("x: Shape =");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "defaults on parameters of type 'Shape' are not supported yet", start, end: src.indexOf("): f64 {", start),
+  }));
+});
