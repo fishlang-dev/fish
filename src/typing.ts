@@ -1,6 +1,6 @@
 import type { CompileError } from "./diag.ts";
 import type { Expr } from "./parser.ts";
-import { WeakNodeMap, type Id } from "./nodes.ts";
+import { NodeMap, type Id } from "./nodes.ts";
 import type { RustClass } from "./rust.ts";
 
 // The checker's types: a primitive's name, or the id of a record in its program's arena, read
@@ -1088,10 +1088,10 @@ export class Typing {
 
   // The members of a package's shapes Fish can't type, each with why: refused only where used.
   jsUntyped = new TypeMap<InterfaceType, Map<string, CompileError>>();
-  // The refusals of members held aside that are optional, which a value may leave out.
-  jsOptional = new WeakSet<CompileError>();
+  // The members held aside that are optional, which a value may leave out, by shape.
+  jsOptional = new TypeMap<InterfaceType, Set<string>>();
   // The same for a package's function a program imports but doesn't call.
-  jsUncalled = new WeakNodeMap<Id, CompileError>();
+  jsUncalled = new NodeMap<Id, CompileError>();
 
   // The prelude's JsError, what awaiting a JS promise that rejects throws, once the prelude is read.
   private jsError: Type | undefined;

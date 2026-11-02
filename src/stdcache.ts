@@ -4,7 +4,6 @@ import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { newSession } from "./compilation.ts";
 import { buildSession, cacheDir, partial, type BuildSession } from "./mathlib.ts";
-import { renumber } from "./nodes.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_SOURCE } from "./std.ts";
 
@@ -48,8 +47,9 @@ export function cachedSession(): BuildSession {
     }
     if (bytes === undefined) {
       session.std.parses++;
-      // Ids are each compilation's own, so the cached tree holds zeros.
-      bytes = new Uint8Array(serialize(renumber("stmt", parse(STD_SOURCE, { last: 0 }), () => 0)));
+      // Each compilation renumbers its copy; until then the parse's own ids, one per node, tell a
+      // node reached twice apart from two nodes.
+      bytes = new Uint8Array(serialize(parse(STD_SOURCE, { last: 0 })));
       if (path !== null) {
         try {
           const temp = partial(path);

@@ -8,7 +8,7 @@ import { FILE_SPAN } from "./program.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
-import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, Rewrites, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
+import { nextId, NodeMap, NodeSet, renumber, Rewrites, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
 import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
@@ -511,7 +511,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   instancingState: InstancingState;
   querying: Set<string>;
   // A generic definition's placeholder for each comptime argument, one per argument.
-  placeholders: WeakNodeMap<Expr, Type>;
+  placeholders: NodeMap<Expr, Type>;
   // The targets some `break` leaves, and the loops some `continue` repeats.
   broken: NodeSet<Stmt>;
   continued: NodeSet<Stmt>;
@@ -578,7 +578,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.declarations = this.tables.declarations;
     this.equalities = this.tables.equalities;
     this.madeArrows = this.tables.madeArrows;
-    this.files = this.compilation.fileNames.get(this.written);
+    this.files = this.macros ? undefined : this.compilation.fileNames;
     // A macro applies only to a top-level declaration; the top-level ones are expanded already.
     holdsNode("stmt", this.written, (n) => {
       const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
@@ -771,7 +771,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.demanded = 0;
     this.instancingState = new InstancingState(this.typing);
     this.querying = new Set<string>();
-    this.placeholders = new WeakNodeMap<Expr, Type>();
+    this.placeholders = new NodeMap<Expr, Type>();
     this.broken = new NodeSet<Stmt>();
     this.continued = new NodeSet<Stmt>();
     this.inProgress = new Set<InstanceId>();
@@ -1490,7 +1490,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     try {
       this.jsSigned(instance);
     } catch (e) {
-      if (!(e instanceof CompileError) || this.jsCalledAt.has(bodyOf(instance))) throw e;
+      if (!(e instanceof CompileError) || this.jsCalledAt.has(bodyOf(instance).bodyId)) throw e;
       this.typing.jsUncalled.set(bodyOf(instance), e);
       instance.signature = [];
       instance.returns = this.typing.blockType("JsValue");
@@ -1502,7 +1502,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const f = bodyOf(instance);
     const named = `'${f.js!.name}' from '${f.js!.module}'`;
     // A declaration Fish can't type is refused where it is declared, noting the call that reached it.
-    const at = this.jsCalledAt.get(f);
+    const at = this.jsCalledAt.get(f.bodyId);
     const refuse = (message: string, where: Span) => new CompileError("E1005", message, where.start, where.end, at && { message: `'${f.js!.name}' is called here`, start: at.start, end: at.end });
     // A generic one is checked for each set of type arguments it is called with, as what crosses
     // is known only then; its definition, never compiled, is typed only by each call.

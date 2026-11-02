@@ -806,7 +806,10 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
           const key = "name" in m && typeof m.name === "string" ? m.name : `[${m.kind}]`;
           if (!this.typing.jsUntyped.has(t)) this.typing.jsUntyped.set(t, new Map());
           this.typing.jsUntyped.get(t)!.set(key, e);
-          if ("optional" in m && m.optional) this.typing.jsOptional.add(e);
+          if ("optional" in m && m.optional) {
+            if (!this.typing.jsOptional.has(t)) this.typing.jsOptional.set(t, new Set());
+            this.typing.jsOptional.get(t)!.add(key);
+          } else this.typing.jsOptional.get(t)?.delete(key);
         }
         continue;
       }

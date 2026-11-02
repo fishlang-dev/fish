@@ -11,13 +11,29 @@ import { expandMacros } from "../src/macros.ts";
 import { analyze } from "../src/main.ts";
 import { flatten, load } from "../src/modules.ts";
 import type { Id } from "../src/ids.ts";
-import { latest, NodeMap, NodeSet, Rewrites, WeakNodeMap, WeakNodeSet } from "../src/nodes.ts";
+import { NodeMap, NodeSet, Rewrites } from "../src/nodes.ts";
 import { parse, type Expr, type Stmt } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
 import { Typing, TypeMap, TypeSet, type Type } from "../src/typing.ts";
 
 const src = join(import.meta.dir, "..", "src");
+
+// What each node lowering replaced was replaced by, noted as each replacement is made: the
+// compiler tells nodes apart by id alone, and these tests check the ids by object.
+const replacedBy = new WeakMap<object, object>();
+const replace = Rewrites.prototype.replace;
+Rewrites.prototype.replace = function (this: Rewrites, node, by) {
+  const was = this.current(node);
+  if (was !== by) replacedBy.set(was, by);
+  return replace.call(this, node, by);
+} as typeof replace;
+// What `node` is now: the last of its replacements, or itself.
+function latest(node: object): object {
+  let n = node;
+  while (replacedBy.has(n)) n = replacedBy.get(n)!;
+  return n;
+}
 const programs = join(import.meta.dir, "programs");
 
 // Every node reachable from `roots`, an object with a span, has an id, and no two objects share
@@ -193,36 +209,15 @@ test("no two types of the checked test programs share a Field array or Field", (
   expect([...kinds]).toEqual([]);
 }, 240_000);
 
-test("a node table refuses a second node with an id already in use", () => {
-  const a = { id: 1, kind: "a" };
-  const b = { id: 1, kind: "b" };
-  const map = new NodeMap<{ id: number }, string>().set(a, "a");
-  expect(map.get(a)).toBe("a");
-  expect(() => map.get(b)).toThrow("internal error: two nodes share id 1");
-  const set = new NodeSet<{ id: number }>([a]);
-  expect(() => set.add(b)).toThrow("internal error: two nodes share id 1");
-  expect(() => set.has({ kind: "c" } as unknown as { id: number })).toThrow("has no id");
-  const weak = new WeakNodeMap<{ id: number }, string>().set(a, "a");
-  expect(weak.get(a)).toBe("a");
-  expect(() => weak.has(b)).toThrow("internal error: two nodes share id 1");
-  expect(() => new WeakNodeSet<{ id: number }>().add(a).add(b)).toThrow("internal error: two nodes share id 1");
-});
-
-// A weak table keeps an entry while any version of its node lives: the node lowering replaced
-// is gone from the tree, but the replacement still reads the entry after a collection.
-test("a weak node table keeps an entry its node's replacement still reaches", async () => {
-  const weak = new WeakNodeMap<Expr, string>();
+test("a node table reads one entry for a node and its replacement, and refuses a node without an id", () => {
+  const map = new NodeMap<Expr, string>();
   const rewrites = new Rewrites();
-  const by = ((): Expr => {
-    const node: Expr = { id: 7, kind: "ident", name: "x", start: 0, end: 1 };
-    weak.set(node, "kept");
-    return rewrites.replace(node, { id: 0, kind: "ident", name: "y", start: 0, end: 1 });
-  })();
-  for (let i = 0; i < 5; i++) {
-    Bun.gc(true);
-    await Bun.sleep(10);
-  }
-  expect(weak.get(by)).toBe("kept");
+  const node: Expr = { id: 7, kind: "ident", name: "x", start: 0, end: 1 };
+  map.set(node, "kept");
+  const by = rewrites.replace(node, { id: 0, kind: "ident", name: "y", start: 0, end: 1 });
+  expect(map.get(by)).toBe("kept");
+  expect(new NodeSet<Expr>([node]).has(by)).toBe(true);
+  expect(() => new NodeSet<{ id: number }>().has({ kind: "c" } as unknown as { id: number })).toThrow("has no id");
 });
 
 // The AST types a table may not be keyed by: every type in src/parser.ts carrying `Id`, and any
@@ -326,12 +321,8 @@ test("no Map or Set in the checker holds an instance, body, local or class", () 
 });
 
 // Tables still keyed by objects, each until it is given a key of its own: a walk's set of the
-// values it has visited, the quote, call and scope tables keyed by tree nodes without ids, and
-// refusals held aside.
-const OBJECT_KEYED = [
-  "check.ts: Set<unknown", "locals.ts: Set<unknown", "warnings.ts: Set<unknown",
-  "compilation.ts: WeakMap<Stmt[]", "compilation.ts: WeakMap<object", "codegen.ts: WeakSet<object", "typing.ts: WeakSet<CompileError",
-];
+// values it has visited, and codegen's.
+const OBJECT_KEYED = ["check.ts: Set<unknown", "locals.ts: Set<unknown", "warnings.ts: Set<unknown", "codegen.ts: WeakSet<object"];
 
 // Fish's Map and Set key on strings and numbers, so every table the checker keeps does: by a
 // string, an integer, an arena id, a string-literal union, or through NodeMap, TypeMap and their

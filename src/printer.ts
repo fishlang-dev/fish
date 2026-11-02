@@ -2,7 +2,7 @@
 // a document (src/doc.ts) and laid out at 80 columns.
 
 import { CompileError } from "./diag.ts";
-import { nextId, WeakNodeMap, type Ids } from "./nodes.ts";
+import { nextId, NodeMap, type Ids } from "./nodes.ts";
 import {
   align, breakParent, conditionalGroup, fill, group, hardline, ifBreak, indent, indentIfBreak, join, label, line,
   lineSuffix, lineSuffixBoundary, literalline, print, softline, type Doc,
@@ -830,9 +830,9 @@ function printer(attached: Attachment, ids: Ids) {
   const visited = new Set<object>();
   // Each expression's document, printed once per place as Prettier caches it: hugging prints an
   // argument a second time, and without the cache nested callbacks would cost 2^depth.
-  const printedCache = new WeakNodeMap<Expr, { parent: unknown; key: string; doc: Doc }>();
+  const printedCache = new NodeMap<Expr, { parent: unknown; key: string; doc: Doc }>();
   // The pipe each binary view stands for, which its comments attach to.
-  const viewed = new WeakNodeMap<Expr, Expr>();
+  const viewed = new NodeMap<Expr, Expr>();
   let groups = 0;
 
   // A name for a group, so an `ifBreak` elsewhere can ask how it was printed.

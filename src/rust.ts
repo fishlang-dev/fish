@@ -1,6 +1,6 @@
 import type { ClassMember, ClassNode, Func } from "./parser.ts";
 import type { Type, Typing } from "./typing.ts";
-import type { WeakNodeMap } from "./nodes.ts";
+import type { NodeMap } from "./nodes.ts";
 
 // A Rust function: its crate, its path from the crate's root, and the shim's C symbol for it.
 export type RustName = { crate: string; path: string; symbol: string };
@@ -13,7 +13,7 @@ export type RustClass = { crate: string; path: string; name: string };
 // Rust module declares names, and the Rust type of each class one declares, by its declaration;
 // its type, once the checker has one, holds it too. They are kept off the AST, so a macro, which
 // sees and makes AST, can't make a function or class Rust.
-export type RustTables = { names: WeakNodeMap<Func | ClassMember, RustName>; classNodes: WeakNodeMap<ClassNode, RustClass> };
+export type RustTables = { names: NodeMap<Func | ClassMember, RustName>; classNodes: NodeMap<ClassNode, RustClass> };
 
 // The field a handle's class holds its boxed Rust value in.
 export const HANDLE = "#handle";

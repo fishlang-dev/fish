@@ -1,6 +1,7 @@
 import type { Instance } from "./check.ts";
 import { bodyOf, type LocalId } from "./arenas.ts";
 import { CompileError } from "./diag.ts";
+import { nextId } from "./ids.ts";
 import { fileAt, stdModuleAt } from "./program.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
@@ -13,8 +14,9 @@ import { INTEGERS, range, redundantBang, type LiteralType, isFloat, isInteger, t
 // program, or wait, is refused at the comptime site.
 
 // An object or a class instance, its fields by name (a base's among them).
-export type Record = { kind: "record"; type: ObjectType | ClassType; fields: Map<string, Value> };
-export type Items = { kind: "array"; items: Value[] };
+// A quote's value, and a clone of one, holds `quote`, naming its entries in the quote tables.
+export type Record = { kind: "record"; type: ObjectType | ClassType; fields: Map<string, Value>; quote?: usize };
+export type Items = { kind: "array"; items: Value[]; quote?: usize };
 // A data-carrying enum's member and its payload.
 export type Variant = { kind: "variant"; type: VariantType; args: Value[] };
 // An Atomic or a Lock a top-level const holds: a global the program changes at run time, made
@@ -109,7 +111,8 @@ export function comptimeArgument(instance: Instance, arg: Expr): Value {
 
 // Renames, in a quote's value, the names spelled `from` in nodes its quotes made.
 function renameQuoted({ quotedSpans }: Tables, v: Value, from: string, to: string) {
-  const spans = quotedSpans.get(untagged(v) as object) ?? new Set<string>();
+  const q = quoteOf(v);
+  const spans = (q === undefined ? undefined : quotedSpans.get(q)) ?? new Set<string>();
   const visit = (x: Value) => {
     const u = untagged(x);
     if (!u || typeof u !== "object") return;
@@ -254,6 +257,12 @@ class Interpreter {
   private scopes: Tables["quoteScopes"];
   private frees: Tables["quoteFrees"];
   private quotedSpans: Tables["quotedSpans"];
+
+  // What `table` holds for `v`, when `v` is a quote's value or a clone of one.
+  private quoteEntry<T>(table: Map<usize, T>, v: Value): T | undefined {
+    const q = quoteOf(v);
+    return q === undefined ? undefined : table.get(q);
+  }
   private typing: Tables["typing"];
   private files: Tables["files"];
   private asserts: Tables["asserts"];
@@ -537,11 +546,11 @@ class Interpreter {
         const holes = q.holes.map((x) => ({ value: this.expr(f, x), type: f.instance.types.get(x) }));
         // A quote spliced in shares its bindings with this one, and a name it leaves free means
         // this one's binding of it; what this one leaves free, a quote around it may bind.
-        const scope = new Map(holes.flatMap((h) => [...(this.scopes.get(untagged(h.value) as object) ?? [])]));
+        const scope = new Map(holes.flatMap((h) => [...(this.quoteEntry(this.scopes, h.value) ?? [])]));
         const free: Free = new Map();
         const splice = (i: usize, into: Type) => {
           const v = holes[i]!.value;
-          const inner = this.frees.get(untagged(v) as object);
+          const inner = this.quoteEntry(this.frees, v);
           if (inner) {
             for (const [name, spelling] of inner) {
               const to = scope.get(name);
@@ -552,10 +561,12 @@ class Interpreter {
           return retag(this.typing, v, holes[i]!.type, into);
         };
         const made = built<Value>(this.tables, q, types, e, astValues(splice, holes.map((h) => h.value), e), scope, free);
-        if (made && typeof made === "object") {
-          this.scopes.set(untagged(made) as object, scope);
-          this.frees.set(untagged(made) as object, free);
-          this.quotedSpans.set(untagged(made) as object, new Set([...holes.flatMap((h) => [...(this.quotedSpans.get(untagged(h.value) as object) ?? [])]), `${e.start}:${e.end}`]));
+        const u = untagged(made);
+        if (u && typeof u === "object" && (u.kind === "record" || u.kind === "array")) {
+          const at = (u.quote = nextId(this.tables.quoteValues));
+          this.scopes.set(at, scope);
+          this.frees.set(at, free);
+          this.quotedSpans.set(at, new Set([...holes.flatMap((h) => [...(this.quoteEntry(this.quotedSpans, h.value) ?? [])]), `${e.start}:${e.end}`]));
         }
         return made;
       }
@@ -1397,13 +1408,15 @@ function cloned(tables: Tables, v: Value): Value {
   if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(copied) };
   if (v.kind === "map") return { kind: "map", type: v.type, entries: new Map([...v.entries].map(([k, [key, x]]) => [k, [copied(key), copied(x)]])) };
   const copy: Record = { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, copied(x)])) };
+  if (v.quote === undefined) return copy;
   // A clone of a quote's value keeps its bindings and free names for a quote it is spliced into.
-  const scope = scopes.get(v);
-  if (scope) scopes.set(copy, scope);
-  const free = frees.get(v);
-  if (free) frees.set(copy, new Map(free));
-  const spans = quotedSpans.get(v);
-  if (spans) quotedSpans.set(copy, spans);
+  const at = (copy.quote = nextId(tables.quoteValues));
+  const scope = scopes.get(v.quote);
+  if (scope) scopes.set(at, scope);
+  const free = frees.get(v.quote);
+  if (free) frees.set(at, new Map(free));
+  const spans = quotedSpans.get(v.quote);
+  if (spans) quotedSpans.set(at, spans);
   return copy;
 }
 
@@ -1488,6 +1501,12 @@ export function memberOf(typing: Typing, value: Value, union: UnionType): Type {
 }
 
 // The value inside a union's tag, for baking.
+// The number naming a quote's value in the quote tables, when it is one or a clone of one.
+function quoteOf(v: Value): usize | undefined {
+  const u = untagged(v);
+  return u && typeof u === "object" && (u.kind === "record" || u.kind === "array") ? u.quote : undefined;
+}
+
 export function untagged(v: Value): Value {
   return unwrap(v);
 }

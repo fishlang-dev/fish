@@ -26,7 +26,7 @@ import { bodyOf, type BodyId, type ClassId, type InstanceId, type LocalId } from
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
-import { forEachChild, nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
+import { forEachChild, nextId, NodeMap, NodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
 import { rebuiltExpr } from "./rebuild.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
@@ -337,13 +337,13 @@ export class ExpressionsState {
   // The pairs of JS shapes being compared, each taken to fit while it is.
   comparing = new TypeMap<Type, TypeSet<Type>>();
   // Arrows checked to own what they capture, being stored.
-  owning = new WeakNodeSet<Expr>();
+  owning = new NodeSet<Expr>();
   // Array literals written where a tuple is expected, which are that tuple, and those passed where
   // a generic function takes a tuple, which are a tuple of their own elements' types.
   tuples = new NodeMap<Expr, ObjectType>();
-  shaped = new WeakNodeSet<Expr>();
+  shaped = new NodeSet<Expr>();
   // Those passed where the tuple has optional or rest elements take its shape, by its type node.
-  shapedBy = new WeakNodeMap<Expr, Extract<TypeNode, { kind: "tuple" }>>();
+  shapedBy = new NodeMap<Expr, Extract<TypeNode, { kind: "tuple" }>>();
   fixedLiterals = new NodeMap<Expr, FixedType>();
   // The place an assignment is checking as its target, while it does.
   writing: Expr | undefined;
@@ -352,11 +352,11 @@ export class ExpressionsState {
   // The assignment an expression statement is, whose value nothing uses.
   statementAssign: Expr | undefined;
   // Objects of index expressions already checked, which their next read takes as checked.
-  once = new WeakNodeSet<Expr>();
+  once = new NodeSet<Expr>();
   // Variables read as declared, whatever a check or assignment narrowed them to.
-  asDeclared = new WeakNodeSet<Expr>();
+  asDeclared = new NodeSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
-  objects = new WeakNodeSet<Expr>();
+  objects = new NodeSet<Expr>();
   oversized: Extract<Expr, { kind: "int" }>[] = [];
   // How many \`unsafe\` blocks enclose the code being checked.
   unsafeDepth: usize;
@@ -1717,7 +1717,7 @@ export class Expressions implements Union {
       if (this.isArray(array)) this.clonable(this.typing.rec(array).element, e, target.name.slice("array ".length));
     }
     if (target.js) this.jsCrossings.add(e);
-    if (target.js && !this.jsCalledAt.has(target)) this.jsCalledAt.set(target, e);
+    if (target.js && !this.jsCalledAt.has(target.bodyId)) this.jsCalledAt.set(target.bodyId, e);
     // Its declaration was refused before a call reached it: this call is where that counts.
     const refused = target.js ? this.typing.jsUncalled.get(target) : undefined;
     if (refused) {
@@ -3848,7 +3848,8 @@ export class Expressions implements Union {
     }
     // A member Fish couldn't type that the shape declares is one only a handle of it has.
     const held = wanted.kind === "interface" ? this.typing.jsUntyped.get(shape as InterfaceType) : undefined;
-    const aside = [...(held ?? [])].filter(([, why]) => !this.typing.jsOptional.has(why)).map(([n]) => n);
+    const optional = wanted.kind === "interface" ? this.typing.jsOptional.get(shape as InterfaceType) : undefined;
+    const aside = [...(held ?? [])].filter(([n]) => !(optional?.has(n) ?? false)).map(([n]) => n);
     const unseen = aside.find((n) => owned?.kind !== "interface" || !(this.typing.jsUntyped.get(own as InterfaceType)?.has(n) ?? false));
     if (unseen !== undefined) return unseen.startsWith("[") ? `its ${unseen === "[index]" ? "index" : "call"} signature comes only with a value JS made` : `property '${unseen}' is missing`;
     // A Fish class's private fields stay its own.

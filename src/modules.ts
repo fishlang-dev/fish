@@ -425,7 +425,7 @@ type Linked = {
 // With `lenient`, an import of a name no file exports is left unlinked, as one an expansion of a
 // macro has yet to make.
 export function flatten(compilation: Compilation, { modules }: Loaded, library = false, lenient = false): Stmt[] {
-  const { ids, fileNames } = compilation;
+  const { ids } = compilation;
   const linked = new Map(modules.map((m, i) => [m, linkOf(ids, m, i, library)]));
   const exported = (m: Module, name: string, seen: Set<string> = new Set<string>()): Decl | undefined => {
     const key = `${m.path}\0${name}`;
@@ -512,7 +512,7 @@ export function flatten(compilation: Compilation, { modules }: Loaded, library =
       return !known;
     });
   });
-  fileNames.set(program, names);
+  if (!lenient) compilation.fileNames = names;
   return program;
 }
 
