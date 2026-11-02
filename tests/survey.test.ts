@@ -47,7 +47,7 @@ test("each rule counts what the sample shows", () => {
   const got = Object.fromEntries([...r.rules, ...r.waiting].filter((x) => x.count > 0).map((x) => [x.id, x.count]));
   expect(got).toEqual({
     parse: 1, R1: 1, R2: 1, R3: 1, declarators: 1,
-    numberKeys: 1, forIn: 1, decorators: 1,
+    forIn: 1, decorators: 1,
     G1: 3, G6: 1, G7: 1, G8: 1, G10: 1, A1: 1, A2: 1, A3: 1, A4: 1, A8: 1, A9: 1,
   });
 });
@@ -72,6 +72,12 @@ test("the survey counts G2, G3 and G11 through the migration detector, with rows
     const ids = [...survey(dir).rules, ...survey(dir).waiting].map((r) => r.id);
     for (const id of ["G2", "G3", "G11"]) expect(ids).toContain(id);
   });
+});
+
+test("import.meta is counted unless it reads a member Fish fixes while compiling", () => {
+  expect(counts("const a = import.meta.dir;\nconst b = join(import.meta.dirname, import.meta.file, import.meta.env.HOME);\nif (import.meta.main) run(import.meta.path, import.meta.url);\n")).toEqual({ importMeta: 1 });
+  expect(counts("const r = import.meta.resolve(\"x\");\nconst m = import.meta;\nconst t = new.target;\n")).toEqual({ importMeta: 2 });
+  expect(counts("const { file, dirname } = import.meta;\nconst p = import.meta[\"filename\"];\n")).toEqual({});
 });
 
 test("the timer forms Fish doesn't take are counted, and the timers it does aren't", () => {

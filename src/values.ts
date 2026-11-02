@@ -15,7 +15,7 @@ import { infer } from "./generics.ts";
 import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
-import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
+import { EXPRESSION_FORMS, IMPORT_META_MEMBERS, unsupported } from "./unsupported.ts";
 import { isIteratorKey, knownKey, unknownKey } from "./keys.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
@@ -5873,6 +5873,9 @@ export class Expressions implements Union {
       // A spread anywhere but in an array literal or a call filling a rest parameter.
       case "spread":
         throw new CompileError("E0408", "'...' spreads into an array literal, or as an argument into a rest parameter, as in 'function f(...xs: T[])'; it can't be used here yet", e.start, e.end);
+      case "meta":
+        if (e.name === "import.meta") throw new CompileError("E0801", `meta properties are not supported yet; 'import.meta' is read through its members ${IMPORT_META_MEMBERS.join(", ")}, or destructured into them`, e.start, e.end);
+        throw unsupported(EXPRESSION_FORMS[e.kind], e);
       default:
         throw unsupported(EXPRESSION_FORMS[e.kind], e);
     }

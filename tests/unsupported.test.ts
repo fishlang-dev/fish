@@ -121,25 +121,25 @@ for (const [signature, what, part] of SIGNATURES) {
 }
 
 // Each expression form that parses but has no meaning yet, as a `let` initializer.
-const EXPRESSIONS: [string, string][] = [
+const EXPRESSIONS: [string, string, string?][] = [
   ["super", "'super' expressions"],
   ["[1, , 2]", "holes in array literals"],
   ["function () {}", "function expressions"],
   ["class {}", "class expressions"],
   ["true[0]", "indexed access expressions"],
   ["f<i64>", "instantiation expressions"],
-  ["import.meta", "meta properties"],
+  ["import.meta", "meta properties", "; 'import.meta' is read through its members path, file, dir, url, main, dirname, filename, or destructured into them"],
   ["import('m')", "dynamic imports"],
   ["f?.()", "optional calls"],
   ["<i64>1", "type assertions"],
 ];
 
-for (const [expr, what] of EXPRESSIONS) {
+for (const [expr, what, more] of EXPRESSIONS) {
   test(expr, () => {
     const src = `function main() {\n  let x = ${expr}\n}`;
     const start = src.indexOf(expr, src.indexOf("="));
     expect(() => checkSource(src)).toThrow(expect.objectContaining({
-      message: `${what} are not supported yet`, start, end: start + expr.length,
+      message: `${what} are not supported yet${more ?? ""}`, start, end: start + expr.length,
     }));
   });
 }
