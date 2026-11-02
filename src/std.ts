@@ -3789,8 +3789,6 @@ function __arrayFromHex(s: string): u8[] throws TypeError {
   return out;
 }
 `;
-// btoa and atob, each in a program that names it and doesn't declare it, so a program's own
-// polyfill of one keeps its name and std's other stays.
 // The typed arrays' helpers, in a program that names a typed array or DataView. Every typed array
 // owns its elements, so one made over an ArrayBuffer takes it and copies out the range it views,
 // reading the bytes in the host's order, little-endian on every target Fish builds for.
@@ -3822,7 +3820,7 @@ function __arrayTypedBuffer${name}(xs: Ref<${t}[]>, size: i64): ArrayBuffer {
   if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(out[0]), ptrOf(xs[0]) as Ptr<u8>, n) };
   return out;
 }
-function __arrayTypedSet${name}(target: Mut<${t}[]>, source: Ref<${t}[]>, offset: i64, size: i64): void {
+function __arrayTypedSet${name}(source: Ref<${t}[]>, target: Mut<${t}[]>, offset: i64, size: i64): void {
   const n = source.length as i64;
   assert(offset >= 0 && offset + n <= (target.length as i64), "RangeError: offset is out of bounds");
   if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(target[offset as usize]) as MutPtr<u8>, ptrOf(source[0]) as Ptr<u8>, n * size) };
@@ -3903,6 +3901,8 @@ class DataView {
 }
 `;
 
+// btoa and atob, each in a program that names it and doesn't declare it, so a program's own
+// polyfill of one keeps its name and std's other stays.
 const BTOA = `
 // btoa and atob, as the HTML spec has them: base64 of a string's characters as Latin-1 bytes. The
 // UTF-8 the string holds is read back as code points up to U+00FF.

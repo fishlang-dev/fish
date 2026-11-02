@@ -353,6 +353,8 @@ export class ExpressionsState {
   statementAssign: Expr | undefined;
   // Objects of index expressions already checked, which their next read takes as checked.
   once = new WeakNodeSet<Expr>();
+  // A typed array's `subarray` calls, each by the place it copies, which a write can't reach.
+  subarrays = new NodeMap<Expr, string>();
   // Variables read as declared, whatever a check or assignment narrowed them to.
   asDeclared = new WeakNodeSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
@@ -2230,14 +2232,24 @@ export class Expressions implements Union {
     // doesn't reach the array it came from.
     // Its positions, like set's offset, may be an `i64` or a `usize`, as JavaScript code holding
     // positions in either ports as written.
-    if (typed && callee.name === "subarray") return this.call(this.become(e, { ...e, callee: { ...callee, id: nextId(this.ids), name: "slice" }, args: e.args.map((a) => this.arrayLength(a, false)) }) as Call);
-    // `set(source, offset?)` copies the source's elements in at the offset.
+    if (typed && callee.name === "subarray") {
+      const made = this.become(e, { ...e, callee: { ...callee, id: nextId(this.ids), name: "slice" }, args: e.args.map((a) => this.arrayLength(a, false)) }) as Call;
+      this.ctx.exprsState.subarrays.set(made, this.placeText(callee.object));
+      return this.call(made);
+    }
+    if (SUBARRAY_WRITES.has(callee.name)) this.readOnlySubarray(callee.object);
+    // `set(source, offset?)` copies the source's elements in at the offset. The source comes
+    // first, so one made from the target, as in `a.set(a.subarray(0, 3), 1)`, is made before the
+    // target is borrowed to change; the target itself as the source is copied first.
     if (typed && callee.name === "set") {
       if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", "'set' takes the array to copy in, and an optional offset", e.start, e.end);
       const at = { start: e.start, end: e.end };
-      const [source, offset] = e.args as [Expr, Expr | undefined];
+      const [written, offset] = e.args as [Expr, Expr | undefined];
+      const root = (x: Expr): string | undefined => (x.kind === "ident" ? x.name : x.kind === "this" ? "this" : x.kind === "member" || x.kind === "index" ? root(x.object) : undefined);
+      const same = root(written) !== undefined && root(written) === root(callee.object);
+      const source: Expr = same ? { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: written, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at } : written;
       this.expect(source, array);
-      return this.call(this.become(e, this.typedCall(`array typed set ${TYPED_ARRAYS[typed]}`, [callee.object, source, offset ? this.arrayLength(offset, false) : { id: nextId(this.ids), kind: "int", value: 0n, ...at }, { id: nextId(this.ids), kind: "int", value: BigInt(typedSize(typed)), ...at }], at)) as Call);
+      return this.call(this.become(e, this.typedCall(`array typed set ${TYPED_ARRAYS[typed]}`, [source, callee.object, offset ? this.arrayLength(offset, false) : { id: nextId(this.ids), kind: "int", value: 0n, ...at }, { id: nextId(this.ids), kind: "int", value: BigInt(typedSize(typed)), ...at }], at)) as Call);
     }
     if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, ARRAY_METHODS)}`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
@@ -2931,17 +2943,23 @@ export class Expressions implements Union {
     }
     if (this.isArray(held) && rest.length === 0 && name !== "ArrayBuffer") {
       const element = this.typing.lower(this.typing.rec(held).element);
-      if (element !== TYPED_ARRAYS[name]) throw new CompileError("E0101", `'new ${name}' copies elements of type '${this.typing.show(TYPED_ARRAYS[name])}', not '${this.typing.show(element)}'; convert them first, as in 'xs.map((x) => x as ${TYPED_ARRAYS[name]})'`, source.start, source.end);
+      if (element !== TYPED_ARRAYS[name]) throw new CompileError("E0101", `'new ${name}' copies elements of type '${this.typing.show(TYPED_ARRAYS[name])}', not '${this.typing.show(element)}'; convert them first, as in 'xs.map((x) => x as ${TYPED_ARRAYS[name]})'${floatInto(element, TYPED_ARRAYS[name])}`, source.start, source.end);
       return this.typedAs(e, { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at }, typed);
     }
     throw new CompileError("E0504", usage, e.start, e.end);
   }
 
   // `e` rewritten as `to`, which makes a typed array's elements, typed as that typed array.
-  private typedAs(this: Mut<this>, e: Expr, to: Expr, typed: ArrayType): Type {
+  private typedAs(this: Mut<this>, e: Expr, to: Expr, typed: ArrayType, mapped = false): Type {
     const made = this.become(e, to);
     this.expect(made, typed);
     const t = this.value(made);
+    const name = this.typing.typedName(typed)!;
+    const element = this.isArray(t) ? this.typing.lower(this.typing.rec(t).element) : undefined;
+    // A map function giving another number type is told how to convert what it gives.
+    if (mapped && element !== undefined && isNumeric(element) && !this.typing.fits(t, typed)) {
+      throw new CompileError("E0101", `'${name}.from' holds elements of type '${this.typing.show(TYPED_ARRAYS[name])}', and this function gives '${this.typing.show(element)}'; convert what it gives, as in '(x) => (...) as ${TYPED_ARRAYS[name]}'${floatInto(element, TYPED_ARRAYS[name])}`, e.start, e.end);
+    }
     this.coerce(made, t, typed, `type '${this.typing.show(t)}' is not assignable to type '${this.typing.show(typed)}'`);
     return typed;
   }
@@ -2959,6 +2977,15 @@ export class Expressions implements Union {
     if (e.name === "buffer") return this.typeOf(this.become(e, this.typedCall(`array typed buffer ${TYPED_ARRAYS[name]}`, [e.object, int(BigInt(size))], at)));
     const length: Expr = { id: nextId(this.ids), kind: "member", object: e.object, name: "length", optional: false, ...at };
     return this.typeOf(this.become(e, size === 1 ? length : { id: nextId(this.ids), kind: "binary", op: "*", left: length, right: int(BigInt(size)), ...at }));
+  }
+
+  // A `subarray` is a copy, so a write to it would be lost where JavaScript's reaches the array
+  // it views: it is read, and never bound with 'let', assigned, lent mutably or changed.
+  readOnlySubarray(e: Expr) {
+    const from = this.ctx.exprsState.subarrays.get(this.rewrites.current(e));
+    if (from === undefined) return;
+    const named = from === "(...)" ? "the array it came from" : `'${from}'`;
+    throw new CompileError("E0212", `subarray copies in Fish, so writes would not reach ${named}; use 'slice()' for a copy you'll change, or write through ${named} at an offset`, e.start, e.end);
   }
 
   private typedCall(name: string, args: Expr[], at: Span): Expr {
@@ -2984,7 +3011,7 @@ export class Expressions implements Union {
     const [source, f] = e.args as [Expr, Expr | undefined];
     if (f) {
       const mapped: Expr = { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
-      return { type: this.typedAs(e, mapped, typed), what: `'${name}.from'` };
+      return { type: this.typedAs(e, mapped, typed, true), what: `'${name}.from'` };
     }
     const made: Expr = { id: nextId(this.ids), kind: "new", callee: { id: nextId(this.ids), kind: "ident", name, ...at }, args: [source], typeArgs: [], ...at };
     return { type: this.typedAs(e, made, typed), what: `'${name}.from'` };
@@ -5282,6 +5309,7 @@ export class Expressions implements Union {
     this.arity(list.length, bodyOf(target).params, at);
     list.forEach((a, i) => {
       const [type, expected] = [argTypes[i]!, params[i]!];
+      if (this.isRefType(expected) && this.typing.rec(expected).mutable) this.readOnlySubarray(a);
       const shown = this.defaultedArg(a, type, bodyOf(target).params[i]!) ?? expected;
       this.coerce(a, type, expected, `argument of type '${this.typing.show(type)}' is not assignable to parameter of type '${this.typing.show(shown)}'`);
     });
@@ -5843,6 +5871,7 @@ export class Expressions implements Union {
         const place = this.bare(e.target);
         if (op === "=") this.expect(e.value, target);
         const assigned = op === "=" ? this.value(e.value) : this.read(e.value);
+        if (op === "=") this.readOnlySubarray(e.value);
         // A variable whose type is still open takes the integer type assigned to it.
         if (op === "=" && isInteger(assigned) && assigned !== target && this.ctx.infer(place, assigned)) return assigned;
         const type = op === "=" ? assigned
@@ -7674,6 +7703,14 @@ const BYTE_METHODS: Record<string, string> = { toBase64: "array to base64", toHe
 // How many arguments each of a Map's and a Set's methods takes, and those changing it.
 const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
+// Converting floats to an integer element with 'as' saturates at its bounds, where a typed array
+// in JavaScript wraps modulo 2 to its bit count; said wherever 'as' is suggested for that.
+function floatInto(from: Type, to: Type): string {
+  return isFloat(from) && isInteger(to) ? `; from a float, 'as' saturates at the bounds of '${to}', where JavaScript wraps modulo 2^${INTEGERS[to].bits}${to === "u8" ? ", so 300.5 becomes 255 rather than 44" : ""}` : "";
+}
+
+// The array methods that change their array, which a subarray's copy can't take.
+const SUBARRAY_WRITES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "set", "reserve", "shrinkToFit"]);
 const TYPED_MEMBERS = new Set(["byteLength", "byteOffset", "buffer", "BYTES_PER_ELEMENT"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...COPYING_METHODS, ...CHANGING_METHODS]);
 

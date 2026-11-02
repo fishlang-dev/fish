@@ -118,8 +118,7 @@ function main() {
 // expect:   2,   0, 0, 0
 // expect: ] Uint8Array(2) [ 9, 1 ]
 // expect: hi 3 ArrayBuffer { [Uint8Contents]: <01 02>, byteLength: 2 }
-// subarray copies as slice does, so a write to it leaves the array it came from as it was; set
-// copies elements in at an offset.
+// subarray copies as slice does; set copies elements in at an offset.
 function main() {
   const w: Uint32Array = [1, 2];
   console.log(w.byteLength, w.byteOffset, w.BYTES_PER_ELEMENT, w.buffer);
@@ -128,7 +127,7 @@ function main() {
   h.set([1, 2], 3);
   h.set(b.subarray(1));
   console.log(h, h.subarray(2, 4), h.slice(-2), h.every((x) => x === 0), h.reduce((s, x) => s + (x as i64), 0));
-  let s = h.subarray(2, 4);
+  let s = h.slice(2, 4);
   s[0] = 9;
   console.log(h, s);
   const raw: ArrayBuffer = [1, 2, 3];
@@ -143,7 +142,7 @@ function main() {
   console.log(a, buf);
 }
 // case: typed_array_element_mismatch
-// error: 'new Uint8Array' copies elements of type 'u8', not 'number'; convert them first, as in 'xs.map((x) => x as u8)'
+// error: 'new Uint8Array' copies elements of type 'u8', not 'number'; convert them first, as in 'xs.map((x) => x as u8)'; from a float, 'as' saturates at the bounds of 'u8', where JavaScript wraps modulo 2^8, so 300.5 becomes 255 rather than 44
 function main() {
   const xs: f64[] = [1, 2];
   const a = new Uint8Array(xs);
@@ -195,4 +194,64 @@ function main() {
   h.set(new TextEncoder().encode("hi"), at);
   const raw: ArrayBuffer = [1, 2, 3, 4];
   console.log(h, h.subarray(at, at + n), new Uint8Array(raw, at, n), h.subarray(-1));
+}
+// case: typed_array_subarray_reads
+// expect: Uint8Array(2) [ 1, 2 ]
+// expect: Uint8Array(5) [ 1, 1, 2, 3, 5 ] Uint8Array(4) [ 2, 3, 4, 5 ] [ 1 ]
+// expect: 3
+// expect: 5
+// expect: Uint8Array(5) [ 1, 1, 2, 3, 5 ] Uint8Array(1) [ 8 ]
+// A subarray is read: bound with const, lent read-only, given away, iterated, or set's source,
+// even when it comes from set's own target.
+function look(x: Ref<Uint8Array>): void {
+  console.log(x);
+}
+function main() {
+  let a = new Uint8Array([1, 2, 3, 4, 5]);
+  const s = a.subarray(1);
+  const u: u8[] = a.subarray(0, 1);
+  look(a.subarray(0, 2));
+  a.set(a.subarray(0, 3), 1);
+  console.log(a, s, u);
+  for (const x of a.subarray(3)) console.log(x);
+  a.set(a);
+  const b = new Uint8Array(new Uint8Array([7, 8]).subarray(1));
+  console.log(a, b);
+}
+// case: typed_array_subarray_let
+// error: subarray copies in Fish, so writes would not reach 'a'; use 'slice()' for a copy you'll change, or write through 'a' at an offset
+function main() {
+  const a = new Uint8Array([1, 2, 3]);
+  let s = a.subarray(1);
+  s[0] = 9;
+}
+// case: typed_array_subarray_assign
+// error: subarray copies in Fish, so writes would not reach 'a'
+function main() {
+  const a = new Uint8Array([1, 2, 3]);
+  let t: Uint8Array = [1];
+  t = a.subarray(1);
+  console.log(t);
+}
+// case: typed_array_subarray_mut
+// error: subarray copies in Fish, so writes would not reach 'a'
+function zero(x: Mut<Uint8Array>): void {
+  x.fill(0);
+}
+function main() {
+  let a = new Uint8Array([1, 2, 3, 4]);
+  zero(a.subarray(0, 1));
+  console.log(a);
+}
+// case: typed_array_subarray_fill
+// error: subarray copies in Fish, so writes would not reach 'a'
+function main() {
+  let a = new Uint8Array([1, 2, 3, 4]);
+  a.subarray(0, 1).fill(3);
+}
+// case: typed_array_from_map_hint
+// error: 'Uint8Array.from' holds elements of type 'u8', and this function gives 'i64'; convert what it gives, as in '(x) => (...) as u8'
+function main() {
+  const f = Uint8Array.from([1, 2], (x) => x * 2);
+  console.log(f);
 }
