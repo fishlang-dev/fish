@@ -209,12 +209,12 @@ function main() {
   const b = new Box<<T>(x: T) => T>((x) => x);
 }
 // case: fta_map_key
-// error: a 'Map' is keyed by strings or integers, or unions of their literals, not '() => i64'
+// error: a 'Map' is keyed by strings or numbers, or unions of their literals, not '() => i64'
 function main() {
   const m = new Map<() => i64, i64>();
 }
 // case: fta_set_member
-// error: a 'Set' holds strings or integers, or unions of their literals, not '() => i64'
+// error: a 'Set' holds strings or numbers, or unions of their literals, not '() => i64'
 function main() {
   const s = new Set<() => i64>();
 }

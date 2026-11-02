@@ -1280,7 +1280,7 @@ function unlocked(typing: Typing, u: Type): boolean {
 function keyable(typing: Typing, t: Type): boolean {
   const lowered = typing.lower(t);
   // A key is hashed as 64 bits, which a 128-bit integer doesn't fit.
-  if (lowered === "string" || (isInteger(lowered) && INTEGERS[lowered].bits <= 64)) return true;
+  if (lowered === "string" || isFloat(lowered) || (isInteger(lowered) && INTEGERS[lowered].bits <= 64)) return true;
   if (typeof lowered === "string") return false;
   const k = typing.rec(lowered);
   if (k.kind === "param") return !k.concrete;
@@ -1296,7 +1296,7 @@ function keyable(typing: Typing, t: Type): boolean {
 // A `Map<K, V>`, or a `Set<K>` when `set`: keys it can hash, and values it can own.
 export function collection(typing: Typing, key: Type, value: Type, set: boolean, at: Span, dict?: true): MapType {
   const what = set ? "a 'Set'" : "a 'Map'";
-  if (!keyable(typing, key)) throw new CompileError("E0116", `${what} ${set ? "holds" : "is keyed by"} strings or integers, or unions of their literals, not '${typing.show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
+  if (!keyable(typing, key)) throw new CompileError("E0116", `${what} ${set ? "holds" : "is keyed by"} strings or numbers, or unions of their literals, not '${typing.show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
   if (typing.holdsRef(value)) throw unsupported("maps of references", at);
   const lowered = typing.lower(value);
   const v = typeof lowered === "string" ? undefined : typing.rec(lowered);

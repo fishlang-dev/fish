@@ -1127,10 +1127,27 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return n;
   }
 
+  // A float key as JavaScript's SameValueZero sees it: `-0` becomes `+0`, which adding `+0` does.
+  function sameValueZero(v: string, key: Type): string {
+    const k = typing.lower(key);
+    if (!isFloat(k)) return v;
+    const zeroed = temp();
+    emit(`${zeroed} = fadd ${llvm(k)} ${v}, 0.0`);
+    return zeroed;
+  }
+
   // A key as the runtime hashes and compares it: a string's pointer, an integer widened to 64
-  // bits, or a union's member index.
+  // bits, a float's bits with every NaN one NaN, or a union's member index.
   function keyBits(v: string, key: Type): string {
     const k = typing.lower(key);
+    if (isFloat(k)) {
+      const [wide, raw, nan, bits] = [k === "f64" ? sameValueZero(v, key) : temp(), temp(), temp(), temp()];
+      if (k === "f32") emit(`${wide} = fpext float ${sameValueZero(v, key)} to double`);
+      emit(`${raw} = bitcast double ${wide} to i64`);
+      emit(`${nan} = fcmp uno double ${wide}, 0.0`);
+      emit(`${bits} = select i1 ${nan}, i64 ${0x7ff8000000000000n}, i64 ${raw}`);
+      return bits;
+    }
     if (k === "string") {
       const bits = temp();
       emit(`${bits} = ptrtoint ptr ${v} to i64`);
@@ -1207,7 +1224,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     startBlock(fresh);
     const keySlot = temp();
     emit(`${keySlot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
-    emit(`store ${kt} ${key}, ptr ${keySlot}`);
+    emit(`store ${kt} ${sameValueZero(key, typing.rec(t).key)}, ptr ${keySlot}`);
     if (v !== undefined) emit(`store ${vt} ${v}, ptr ${valueAt(at)}`);
     emit(`br label %${done}`);
     startBlock(done);
