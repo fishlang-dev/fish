@@ -338,3 +338,99 @@ function main() {
   const r = new B().a().a();
   console.log(r.n, r.s);
 }
+
+// case: subclass_param_hides_global
+// error: argument of type '"hi"' is not assignable to parameter of type 'i64'
+// A subclass's type parameter doesn't change what a type name in an inherited method means.
+type Foo = i64;
+class A {
+  n: i64 = 0;
+  tag(this: Mut<this>, x: Foo): Mut<this> {
+    const y: Foo = x;
+    console.log(y);
+    return this;
+  }
+}
+
+class B<Foo> extends A {}
+
+function main() {
+  let b = new B<string>();
+  b.tag("hi").tag("yo");
+}
+
+// case: subclass_param_named_as_global
+// expect: axy 1
+type Foo = string;
+class A {
+  v: Foo = "a";
+  tag(this: Mut<this>, x: Foo): Mut<this> {
+    this.v = this.v + x;
+    return this;
+  }
+}
+
+class B<Foo> extends A {
+  w: Foo;
+  constructor(w: Foo) {
+    super();
+    this.w = w;
+  }
+}
+
+function main() {
+  let b = new B<i64>(1);
+  b.tag("x").tag("y");
+  console.log(b.v, b.w);
+}
+
+// case: subclass_param_named_as_base_param
+// expect: 2 s
+// expect: 2
+// The subclass's 'T' and the base's 'T' are different parameters.
+class A<T> {
+  v: T[] = [];
+  put(this: Mut<this>, x: T, times: i64 = 1): Mut<this> {
+    for (let i = 0; i < times; i++) this.v.push(x.clone());
+    return this;
+  }
+}
+
+class B<T> extends A<i64> {
+  mine: T[] = [];
+  own(this: Mut<this>, x: T): Mut<this> {
+    this.mine.push(x);
+    return this;
+  }
+}
+
+class C<T> extends A<T[]> {}
+
+function main() {
+  let b = new B<string>();
+  b.put(1).own("s").put(2);
+  console.log(b.v.length, b.mine.join(""));
+  let c = new C<string>();
+  c.put(["a"]).put(["b"]);
+  console.log(c.v.length);
+}
+
+// case: abstract_template_param_hides_global
+// error: argument of type '"hi"' is not assignable to parameter of type 'i64'
+type Foo = i64;
+abstract class A {
+  abstract k(): i64;
+  show(x: Foo) {
+    const y: Foo = x;
+    console.log(y, this.k());
+  }
+}
+
+class B<Foo> extends A {
+  k(): i64 { return 1; }
+}
+
+function main() {
+  const b = new B<string>();
+  b.show("hi");
+}
