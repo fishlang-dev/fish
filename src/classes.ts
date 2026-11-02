@@ -3,7 +3,7 @@ import { CompileError } from "./diag.ts";
 import type { RustName, RustTables } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { rebuiltParam } from "./rebuild.ts";
-import { MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.ts";
+import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
@@ -483,10 +483,6 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   constructor.params = params;
   constructor.body = [{ id: nextId(ids), kind: "expr", expr: call, ...at }, ...c.prelude];
 }
-
-// The field a class extending Map or Set holds its collection in: a private name no source can
-// spell, so printing and JSON leave it out.
-export const EMBEDDED = "#embedded base";
 
 // Links a class to the Map or Set it extends, held in the field `EMBEDDED`. Its constructor's
 // `super(...)` makes the collection, as `new Map<K, V>(...)` would; without a constructor of

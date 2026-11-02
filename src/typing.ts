@@ -253,6 +253,10 @@ export type RecordOf<T> = T extends { readonly __record?: infer R } ? Exclude<R,
 // The name a `[Symbol.iterator]` method takes, which no identifier or member read can spell.
 export const ITERATOR = "[Symbol.iterator]";
 
+// The field a class extending Map or Set holds its collection in: a private name no source can
+// spell, so printing and JSON leave it out.
+export const EMBEDDED = "#embedded base";
+
 // A Map's and a Set's methods.
 export const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "keys", "values", "entries", "forEach"]);
 export const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);

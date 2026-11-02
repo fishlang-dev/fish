@@ -135,3 +135,40 @@ function main() {
   console.log([...n], Array.from(n, (x) => x.length).length)
   console.log([...new Countdown()].join(" "))
 }
+// case: extend_map_print
+// expect: P(2) [Map] { 'a' => 1, 'b' => 2, n: 3 }
+// expect: Q(1) [Set] { 'x' }
+// expect: R(0) [Map] {}
+// expect: P(0) [Map] { n: 3 }
+// expect: {
+// expect:   deep: { deeper: { p: [P [Map]], q: Q(0) [Set] {}, r: R(0) [Map] {} } }
+// expect: }
+// expect: S(1) [Map] { 'z' => 9, n: 3, m: 'x' }
+// A class extending Map or Set prints as Node prints one: its name, the collection's size and
+// entries, then its own fields.
+class P extends Map<string, i64> {
+  n: i64
+  constructor(e: [string, i64][]) {
+    super(e)
+    this.n = 3
+  }
+}
+
+class Q extends Set<string> {}
+
+class R extends Map<i64, i64> {}
+
+class S extends P {
+  m: string = "x"
+}
+
+function main() {
+  console.log(new P([["a", 1], ["b", 2]]))
+  let q = new Q()
+  q.add("x")
+  console.log(q)
+  console.log(new R())
+  console.log(new P([]))
+  console.log({ deep: { deeper: { p: new P([["a", 1]]), q: new Q(), r: new R() } } })
+  console.log(new S([["z", 9]]))
+}
