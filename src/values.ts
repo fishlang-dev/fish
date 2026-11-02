@@ -157,6 +157,8 @@ export type Context = {
   // and a change to a capture, `this` when undefined, which makes it mutable.
   captured(l: Local): boolean;
   closing: boolean;
+  // The body's parameters it changes.
+  changedParams: Set<LocalId>;
   // Whether the body is a generator's.
   generator: boolean;
   // Whether the program runs on the async runtime: its `main` is async.
@@ -6843,9 +6845,11 @@ export class Expressions implements Union {
       if (lr.mutable) return;
       throw new CompileError("E0206", `cannot ${action} '${local.name}${path}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
     }
-    if (local.param) {
+    if (local.param && local.mutable) this.ctx.changedParams.add(local.localId);
+    if (local.param && !local.mutable) {
+      if (lr?.kind === "ref") throw new CompileError("E0206", `cannot point the reference parameter '${local.name}' elsewhere; it borrows what the caller passed, so declare a 'let' for another reference`, target.start, target.end);
       const what = action === "assign to" ? "assigning to" : action === "mutably borrow" ? "mutably borrowing" : "calling a mutating method on";
-      throw new CompileError("E0801", `${what} a parameter is not supported yet; copy it into a 'let'`, target.start, target.end);
+      throw new CompileError("E0801", `${what} a parameter holding a reference is not supported yet; copy it into a 'let'`, target.start, target.end);
     }
     if (!local.mutable) {
       const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;

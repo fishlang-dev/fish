@@ -596,12 +596,17 @@ function f(m: Mut<P | Q>) {
 function main() {}
 // error: can't give 'm' another member inside a closure while a check outside it narrows it
 // case: closure_mutable_param
-// A closure can't assign a captured parameter, as the body can't.
-function f(x: i64) {
-  const g = () => { x = 2 }
+// A closure assigns a captured parameter as it would a captured 'let'.
+function f(x: i64): i64 {
+  const g = () => { x += 2 }
+  g()
+  g()
+  return x
 }
-function main() {}
-// error: assigning to a parameter is not supported yet; copy it into a 'let'
+function main() {
+  console.log(f(1))
+}
+// expect: 5
 // case: closure_mutable_shared_ref
 // A closure can't change what a captured shared reference points to.
 class P { x = 0 }

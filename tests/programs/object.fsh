@@ -73,12 +73,15 @@ function main() {
 }
 // error: argument of type '{ a: { x: i64 }; y: i64 }' is not assignable to parameter of type '{ a: { x: i64; y: i64 } }'
 // case: object_parameter_field
-function reset(p: { n: i64 }) {
+function reset(p: { n: i64 }): i64 {
   p.n = 0
+  return p.n
 }
 
-function main() {}
-// error: assigning to a parameter is not supported yet; copy it into a 'let'
+function main() {
+  console.log(reset({ n: 5 }))
+}
+// expect: 0
 // case: object_primitive_property
 function main() {
   const n = 1
