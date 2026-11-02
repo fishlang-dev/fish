@@ -4665,6 +4665,10 @@ export class Expressions implements Union {
       this.ctx.exprsState.once.add(member.object);
       return false;
     }
+    // A Dyn's table has no slot for a method no Dyn can call, so it can't say whether one is there.
+    if (held?.kind === "dyn" && (m.generic || (this.recOf(m.returns)?.kind === "interface" && this.typing.promiseElement(m.returns) === undefined))) {
+      throw new CompileError("E0211", `'${m.name}' can't be called through a Dyn, ${m.generic ? "being generic" : "returning an interface type"}, so a Dyn can't tell whether it is there; take a type parameter bounded by '${(trait as { name: string }).name}' instead`, member.start, member.end);
+    }
     const when = test ? (e.op === "===") === (named === "function") : e.op === "!==";
     this.presenceTests.set(e, { object: member.object, name: member.name, when });
     if (held?.kind === "param" && this.lacks(held.concrete, member.name)) (this.ctx.instance.absent ??= new NodeSet()).add(e);

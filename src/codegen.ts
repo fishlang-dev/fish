@@ -2631,12 +2631,24 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   function presence(e: Expr): string {
     const { object, name, when } = presenceTests.get(e)!;
     const t = referent(valueType(object));
-    if (recOf(t)?.kind !== "dyn") return String(current.absent?.has(e) ? !when : when);
+    if (recOf(t)?.kind !== "dyn") {
+      ranFor(object);
+      return String(current.absent?.has(e) ? !when : when);
+    }
     const [, table] = opened(object, false);
     const fn = vslot(table, typing.rec(typing.rec(t as DynType).of).methods.findIndex((m) => m.name === name));
     const result = temp();
     emit(`${result} = icmp ${when ? "ne" : "eq"} ptr ${fn}, null`);
     return result;
+  }
+
+  // A receiver whose method is known present or absent still runs, as JavaScript reads it, unless
+  // it is a place, whose reading does nothing; a value it makes is dropped.
+  function ranFor(object: Expr) {
+    const place = (x: Expr): boolean => x.kind === "ident" || x.kind === "this" || (x.kind === "member" && !x.optional && place(x.object));
+    if (place(object)) return;
+    const v = evaluate(object);
+    if (fresh(object)) pending.push({ v, type: types.get(object)! });
   }
 
   // `d.m?.()` through a Dyn: the empty Option when the type left the method out, its slot empty.
@@ -6713,7 +6725,10 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // guards, is never reached.
   function absentCall(e: Extract<Expr, { kind: "call" }>): string | undefined {
     const type = types.get(e);
-    if (optionalCalls.has(e)) return type && convert("zeroinitializer", "null", type);
+    if (optionalCalls.has(e)) {
+      ranFor((e.callee as Extract<Expr, { kind: "member" }>).object);
+      return type && convert("zeroinitializer", "null", type);
+    }
     emit("unreachable");
     startBlock(label());
     return type && "undef";

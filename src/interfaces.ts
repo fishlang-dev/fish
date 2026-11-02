@@ -180,6 +180,8 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     const method = c ? inherited(members.arenas, c, "methods", m.name) : undefined;
     // An optional method may be left out, but not stood in for by a field.
     if (!method && m.omittable && (typeof type === "string" || !typing.field(type, m.name))) continue;
+    if (m.omittable && !method) return `property '${m.name}' of type '${typing.show(type)}' is a field, where '${typing.rec(trait).name}' declares an optional method`;
+    if (m.omittable && method!.access !== "public") return `method '${m.name}' is ${method!.access} in type '${typing.show(type)}', where '${typing.rec(trait).name}' declares it public`;
     // An object's fields hold values, and a callable held in one isn't a method yet.
     if (t?.kind === "object") return `${missing("method", m.name)}; an object can't supply a method yet, so use a class`;
     if (!method || method.access !== "public") return missing("method", m.name);

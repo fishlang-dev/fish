@@ -35,7 +35,7 @@ class A { onClose(code: i64): void {} }
 function f(h: Handler): void {}
 function main(): void { f(new A()); }
 // case: optionalmethods_field_for_method
-// error: method 'grow' is missing in type '{ grow: i64 }' but required in type '{ grow?(): void }'
+// error: property 'grow' of type '{ grow: i64 }' is a field, where '{ grow?(): void }' declares an optional method
 function f(x: { grow?(): void }): void {}
 function main(): void { f({ grow: 1 }); }
 // case: optionalmethods_optional_for_required
@@ -260,4 +260,46 @@ function main(): void {
     const s = "h" + "i";
     console.log(h.greet?.(s));
   }
+}
+// case: optionalmethods_private
+// error: method 'onClose' is private in type 'A', where 'Handler' declares it public
+interface Handler { onClose?(): void }
+class A { private onClose(): void {} }
+function f(h: Handler): void {}
+function main(): void { f(new A()); }
+// case: optionalmethods_extends_required
+// expect: closed
+interface H { onClose?(): void }
+interface R extends H { onClose(): void }
+class A { onClose(): void { console.log("closed"); } }
+function f(r: R): void { r.onClose(); }
+function main(): void { f(new A()); }
+// case: optionalmethods_effects
+// expect: picked
+// expect: true
+// expect: picked
+// expect: ma
+// expect: picked
+// expect: false
+// expect: picked
+// expect: none
+interface H { name(): string; m?(): string }
+class A implements H { xs: i64[] = [1, 2]; name(): string { return "a"; } m(): string { return "ma"; } }
+class B implements H { xs: i64[] = [1, 2]; name(): string { return "b"; } }
+function pick<T extends H>(h: T): T { console.log("picked"); return h; }
+function use<T extends H>(h: T, k: T): void {
+  console.log(pick(h).m !== undefined);
+  console.log(pick(k).m?.() ?? "none");
+}
+function main(): void {
+  use(new A(), new A());
+  use(new B(), new B());
+}
+// case: optionalmethods_dyn_generic_presence
+// error: 'g' can't be called through a Dyn, being generic, so a Dyn can't tell whether it is there
+interface H { g?<U>(x: U): U }
+class A { g<U>(x: U): U { return x; } }
+function main(): void {
+  const d: Dyn<H> = new A();
+  console.log(d.g !== undefined);
 }

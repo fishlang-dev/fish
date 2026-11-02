@@ -770,7 +770,10 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // TypeScript lets a derived member replace its base's.
     const inherited = new Set<string>();
     const add = (name: string, at: Span) => {
-      if (i.js && inherited.delete(name)) {
+      // An interface may require a method its base leaves optional, as TypeScript lets it.
+      const written = at as { kind?: string; optional?: boolean };
+      const requires = written.kind === "method" && !written.optional && this.typing.rec(t).methods.some((m) => m.name === name && m.omittable);
+      if ((i.js || requires) && inherited.delete(name)) {
         this.typing.rec(t).fields = this.typing.rec(t).fields.filter((f) => f.name !== name);
         this.typing.rec(t).methods = this.typing.rec(t).methods.filter((m) => m.name !== name);
         return;
