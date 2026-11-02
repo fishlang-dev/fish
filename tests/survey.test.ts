@@ -618,12 +618,13 @@ test("for await over an array of promises is a guided rewrite, counted as Fish r
     "  for await (const x of [Promise.resolve(1)]) {}",
     "  for await (const r of urls.map((u) => fetch(u))) {}",
     "  for await (const p of ps) {}",
+    "  for await (const q of ps.toSpliced(0, 1)) {}",
     "  const held = [Promise.resolve(2)];",
     "  for await (const h of held) {}",
     "  for await (const t of ticks()) {}",
     "}",
     "",
-  ].join("\n"))).toEqual({ forAwaitArrays: 4 });
+  ].join("\n"))).toEqual({ forAwaitArrays: 5 });
 });
 
 test("std's random functions and hash make Math.random, crypto imports of them, and uuid and nanoid portable", () => {
