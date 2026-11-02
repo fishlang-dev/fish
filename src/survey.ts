@@ -185,7 +185,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // `fetch` and `serve` are the client and the server, but importing `http` itself needs its shim.
   ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
-  ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
+  ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("createHash, createHmac and randomBytes from node:crypto")],
   // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
   // Node's own connect and its sockets with events.
   ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
@@ -194,7 +194,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["buffer", PLANNED("Typed arrays and DataView")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
   // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
   // `buffer` is more than the base64 and hex std has: `Buffer` is a typed array with endian reads.
-  // `crypto` is more than the random functions std has: an import of only those is portable.
+  // `crypto` is more than std's random functions and one-shot hashes: an import of only those is portable.
   ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
   ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
