@@ -156,3 +156,29 @@ type R = [i64, ...string[]];
 type B = R[1];
 type A = R[number];
 function main() { const b: B = "x"; const a: A = 3; console.log(b, a); }
+// case: const_assertion_rows_destructured
+// expect: b -2
+// expect: a 1
+// expect: b -2
+// expect: [ 'a', 'b' ]
+// expect: q 3
+// A union of objects destructures field by field, each field the union of its members'.
+const ROWS = [{ k: "a", n: 1 }, { k: "b", n: -2 }] as const;
+type Shape = { kind: "p"; size: i64 } | { kind: "q"; size: i64; extra: string };
+function main() {
+  const { k, n } = ROWS[1];
+  console.log(k, n);
+  for (const { k: kk, n: nn } of ROWS) console.log(kk, nn);
+  console.log(ROWS.map(({ k }) => k));
+  const s: Shape = { kind: "q", size: 3, extra: "e" };
+  const { kind, size } = s;
+  console.log(kind, size);
+}
+// case: const_assertion_rows_missing_field
+// error: property 'extra' does not exist on type '{ extra: string; kind: "q"; size: i64 } | { kind: "p"; size: i64 }'
+type Shape = { kind: "p"; size: i64 } | { kind: "q"; size: i64; extra: string };
+function main() {
+  const s: Shape = { kind: "p", size: 3 };
+  const { extra } = s;
+  console.log(extra);
+}

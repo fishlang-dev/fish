@@ -2426,19 +2426,23 @@ class BodyChecker implements Context, Outer, Sight {
       parts.push([target.target, empty ? { id: nextId(this.cx.ids), kind: "binary", op: "??", left: read, right: target.value, start: target.start, end: target.end } : read, t]);
     };
     if (pattern.kind === "object") {
-      if (w?.kind !== "object" && w?.kind !== "class") {
+      // A union of objects, as `as const` rows give, is read field by field, each field the union
+      // of its members', as a member read of it is.
+      const members = w?.kind === "union" ? w.members : [whole];
+      if (!members.every((m) => this.cx.recOf(m)?.kind === "object" || this.cx.recOf(m)?.kind === "class")) {
         throw new CompileError("E0003", `'{ ... }' destructures an object or an instance, not '${this.cx.typing.show(destructuring)}'`, pattern.start, pattern.end);
       }
       const taken = new Set<string>();
       for (const p of pattern.props) {
         if (typeof p.key !== "string") throw unsupported("computed keys in destructuring patterns", p);
-        const f = this.cx.typing.field(whole as ClassType | ObjectType, p.key);
-        if (!f) throw new CompileError("E0502", `property '${p.key}' does not exist on type '${this.cx.typing.show(whole)}'`, p.start, p.end);
+        const found = members.map((m) => this.cx.typing.field(m as ClassType | ObjectType, p.key as string));
+        if (found.some((f) => !f)) throw new CompileError("E0502", `property '${p.key}' does not exist on type '${this.cx.typing.show(whole)}'`, p.start, p.end);
         taken.add(p.key);
-        part(p.value, { id: nextId(this.cx.ids), kind: "member", object: from(p), name: p.key, optional: false, start: p.start, end: p.end }, f.type);
+        part(p.value, { id: nextId(this.cx.ids), kind: "member", object: from(p), name: p.key, optional: false, start: p.start, end: p.end }, this.cx.typing.unionType(found.map((f) => f!.type)));
       }
+      if (pattern.rest && w?.kind === "union") throw unsupported("rest patterns over a union of objects", pattern.rest);
       // The rest is an object of the fields the pattern didn't name, taken over.
-      if (pattern.rest) {
+      if (pattern.rest && (w?.kind === "object" || w?.kind === "class")) {
         const fields = w.kind === "class" ? this.cx.typing.allFields(whole as ClassType) : w.fields;
         const props = fields.filter((f) => !taken.has(f.name) && (f.access ?? "public") === "public").map((f): ObjectProp => ({ id: nextId(this.cx.ids), kind: "property", key: f.name, value: { id: nextId(this.cx.ids), kind: "member", object: from(pattern.rest!), name: f.name, optional: false, start: pattern.rest!.start, end: pattern.rest!.end }, start: pattern.rest!.start, end: pattern.rest!.end }));
         parts.push([pattern.rest, { id: nextId(this.cx.ids), kind: "object", props, start: pattern.rest.start, end: pattern.rest.end }, whole]);
