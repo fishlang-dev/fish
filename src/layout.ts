@@ -3,7 +3,7 @@ import { category, ofKind, typeofTest, type Verdict } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Tables } from "./compilation.ts";
-import { isLock, type LiteralType, INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
+import { isLock, isNumeric, type LiteralType, INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -163,25 +163,6 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
   // by the member it holds, so only that member's payload is read; literals compare by value,
   // so two enum members that share a value are equal.
   function equals(a: string, aType: Type, b: string, bType: Type): string {
-    // A member that holds itself is compared as what its block holds, unless both sides are it.
-    const [ar, br] = [typeof aType === "string" ? undefined : typing.rec(aType), typeof bType === "string" ? undefined : typing.rec(bType)];
-    if (ar?.kind === "recursive" && aType !== bType) {
-      const loaded = temp();
-      emit(`${loaded} = load ${llvm(ar.of)}, ptr ${a}`);
-      return equals(loaded, ar.of, b, bType);
-    }
-    if (br?.kind === "recursive" && aType !== bType) return equals(b, bType, a, aType);
-    if (ar?.kind === "union") {
-      return eachMember(a, aType as UnionType, "boolean", (part, m) => equals(part, m, b, bType));
-    }
-    if (br?.kind === "union") return equals(b, bType, a, aType);
-    // A reference held in a value is compared through, as a reference on its own is.
-    if (ar?.kind === "ref") {
-      const loaded = temp();
-      emit(`${loaded} = load ${llvm(ar.to)}, ptr ${a}`);
-      return equals(loaded, ar.to, b, bType);
-    }
-    if (br?.kind === "ref") return equals(b, bType, a, aType);
     const literal = (t: Type) => {
       const r = typeof t === "string" ? undefined : typing.rec(t);
       return r?.kind === "literal" ? r : undefined;
@@ -191,6 +172,27 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
       return l ? String(l.value) : v;
     };
     const base = (t: Type) => (literal(t) ? (typing.baseOf(t as LiteralType) ?? t) : t);
+    // A member that holds itself is compared as what its block holds, unless both sides are it.
+    const [ar, br] = [typeof aType === "string" ? undefined : typing.rec(aType), typeof bType === "string" ? undefined : typing.rec(bType)];
+    if (ar?.kind === "recursive" && aType !== bType) {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(ar.of)}, ptr ${a}`);
+      return equals(loaded, ar.of, b, bType);
+    }
+    if (br?.kind === "recursive" && aType !== bType) return equals(b, bType, a, aType);
+    if (ar?.kind === "union") {
+      // An unknown holds JavaScript's numbers, which are equal across the kinds Fish has.
+      const numbers = (m: Type) => ar.unknown === true && isNumeric(m) && isNumeric(base(bType)) && m !== base(bType);
+      return eachMember(a, aType as UnionType, "boolean", (part, m) => (numbers(m) ? sameNumber(part, m, value(bType, b), base(bType)) : equals(part, m, b, bType)));
+    }
+    if (br?.kind === "union") return equals(b, bType, a, aType);
+    // A reference held in a value is compared through, as a reference on its own is.
+    if (ar?.kind === "ref") {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(ar.to)}, ptr ${a}`);
+      return equals(loaded, ar.to, b, bType);
+    }
+    if (br?.kind === "ref") return equals(b, bType, a, aType);
     if (ar?.kind === "literal" && br?.kind === "literal") {
       return String(ar.value === br.value);
     }
@@ -253,6 +255,57 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
     const out = temp();
     emit(`${out} = load ${llvm(to)}, ptr ${result}`);
     return out;
+  }
+
+  // A value of `to` read from an unknown that narrowing has shown holds a member giving one. A
+  // number read as JavaScript's `number` is converted to an f64.
+  function fromUnknown(v: string, from: UnionType, to: Type): string {
+    const { members } = typing.rec(from);
+    const held = members.filter((m) => typing.unknownGives(m, to));
+    if (held.length === 1 && held[0] === to) return payload(v, from, to);
+    const result = alloca(llvm(to));
+    const tag = temp();
+    emit(`${tag} = extractvalue ${llvm(from)} ${v}, 0`);
+    const cases = held.map(() => label());
+    const end = label();
+    emit(`switch i32 ${tag}, label %${end} [ ${held.map((m, i) => `i32 ${members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
+    held.forEach((member, i) => {
+      startBlock(cases[i]!);
+      const part = payload(v, from, member);
+      const kept = typeof to !== "string" && typing.rec(to).kind === "union" && typing.membersFor(member, to as UnionType).length > 0;
+      const number = isNumeric(member) && member !== "f64" && !kept;
+      emit(`store ${llvm(to)} ${number ? convert(asDouble(part, member), "f64", to) : convert(part, member, to)}, ptr ${result}`);
+      emit(`br label %${end}`);
+    });
+    startBlock(end);
+    const out = temp();
+    emit(`${out} = load ${llvm(to)}, ptr ${result}`);
+    return out;
+  }
+
+  // Two numbers of different kinds, equal by value: integers exactly, as i128, and through f64
+  // only when one is a float, as codegen's mixed comparisons do.
+  // ponytail: a u128 beside a signed type compares as i128, wrong past i128's range.
+  function sameNumber(a: string, aType: Type, b: string, bType: Type): string {
+    const result = temp();
+    if (isInteger(aType) && isInteger(bType)) emit(`${result} = icmp eq i128 ${wide(a, aType)}, ${wide(b, bType)}`);
+    else emit(`${result} = fcmp oeq double ${asDouble(a, aType)}, ${asDouble(b, bType)}`);
+    return result;
+  }
+
+  function wide(v: string, from: Type): string {
+    if (from === "i128" || from === "u128") return v;
+    const result = temp();
+    emit(`${result} = ${INTEGERS[from as keyof typeof INTEGERS].signed ? "sext" : "zext"} ${llvm(from)} ${v} to i128`);
+    return result;
+  }
+
+  function asDouble(v: string, from: Type): string {
+    if (from === "f64") return v;
+    const result = temp();
+    if (from === "f32") emit(`${result} = fpext float ${v} to double`);
+    else emit(`${result} = ${INTEGERS[from as keyof typeof INTEGERS].signed ? "sitofp" : "uitofp"} ${llvm(from)} ${v} to double`);
+    return result;
   }
 
   // Whether a union holds one of these members.
@@ -369,6 +422,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
     // A literal's value is known, so leaving one makes a constant, and entering one keeps nothing.
     if (fr?.kind === "literal" && tr?.kind !== "union") return String(fr.value);
     if (tr?.kind === "literal") return "zeroinitializer";
+    if (fr?.kind === "union" && fr.unknown) return fromUnknown(v, from as UnionType, to);
     if (tr?.kind === "union") {
       return fr?.kind === "union" ? retag(v, from as UnionType, to as UnionType) : inject(v, from, to as UnionType);
     }
@@ -415,7 +469,8 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
       emit(`${block} = load ptr, ptr ${v}`);
       return lend(block, r.of, to);
     }
-    if (r?.kind === "union" && r.members.includes(to)) {
+    // An unknown narrowed to a number may hold another kind of number, converted on its way out.
+    if (r?.kind === "union" && r.members.includes(to) && !(r.unknown && r.members.some((m) => m !== to && typing.unknownGives(m, to)))) {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(from)}, ptr ${v}, i32 0, i32 1`);
       return at;
@@ -429,7 +484,8 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
 
   // Sets the tag of the member `from` goes into, and stores its value as the payload.
   function inject(v: string, from: Type, to: UnionType): string {
-    const member = typing.membersFor(from, to)[0]!;
+    const member = typing.membersFor(from, to)[0];
+    if (member === undefined) throw new Error(`internal error: '${typing.show(from)}' has no member in '${typing.show(to)}' to go into`);
     const slot = alloca(llvm(to));
     emit(`store i32 ${typing.rec(to).members.indexOf(member)}, ptr ${slot}`);
     const value = convert(v, from, member);

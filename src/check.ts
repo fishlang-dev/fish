@@ -1056,8 +1056,24 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     };
     const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
     const compiledIds = compiledInstances.map((i) => i.id);
+    this.typing.closeUnknown();
+    this.unknownJson();
     this.typing.layOutForCodegen();
     return { instances: compiledIds, tables: this.tables, compilation: this.compilation, warnings: warnings(this.tables, compiledIds, required) };
+  }
+
+  // A value given to `JSON.stringify` holding an `unknown` needs each type stored in one to have a
+  // JSON form, which is known only now.
+  private unknownJson(this: Mut<this>) {
+    const at = this.tables.unknownJson[0];
+    if (at === undefined) return;
+    const json = (t: ClassType | VariantType): boolean => {
+      const r = this.typing.rec(t);
+      if (r.kind === "variant") return [...this.enums.values()].some((e) => e.data?.name === r.enum && e.data.json);
+      return this.registry().classOf(t as ClassType).node.derives?.includes("Json") ?? false;
+    };
+    const part = this.typing.unjson(this.typing.unknownType(), json);
+    if (part !== undefined) throw new CompileError("E0509", `this 'unknown' can't be written as JSON, since the program puts a '${this.typing.show(part)}' in one, which has no JSON form`, at.start, at.end);
   }
 
   localOf(this: Mut<this>, id: LocalId): Local {

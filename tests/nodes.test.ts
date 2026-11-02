@@ -262,7 +262,7 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by a type", () => {
   const typing = readFileSync(join(src, "typing.ts"), "utf8");
   const kinds = [...typing.matchAll(/^export type (\w+Type) = TypeId<(\w+Record)>;/gm)].flatMap((m) => [m[1]!, m[2]!]);
   expect(kinds).toContain("ObjectType");
-  expect(kinds.length).toBe(50);
+  expect(kinds.length).toBe(52);
   const types = ["Type", "Bound", "TypeRecord", ...kinds];
   const offenders: string[] = [];
   for (const f of readdirSync(src).filter((f) => f.endsWith(".ts"))) {

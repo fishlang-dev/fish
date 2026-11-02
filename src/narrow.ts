@@ -49,6 +49,8 @@ export function ofKind(typing: Typing, t: Type, kind: Kind): boolean {
 export const TYPEOF = new Set(["number", "boolean", "string", "bigint", "object", "undefined"]);
 export const JS_TYPEOF = new Set(["number", "boolean", "string", "object", "undefined", "function", "bigint", "symbol"]);
 const JS_READS: Record<string, Type> = { string: "string", number: "f64", boolean: "boolean" };
+// What `typeof` narrows an `unknown` to: any number reads as JavaScript's, an f64.
+const UNKNOWN_READS: Record<string, Type> = { string: "string", number: "f64", boolean: "boolean", bigint: "bigint", undefined: "null" };
 
 // The operand of `typeof x === "name"` or `"name" !== typeof x`, and the name, if `e` is one.
 export function typeofTest(e: Expr): { operand: Expr; name: Expr } | undefined {
@@ -80,7 +82,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
   const proved = e.kind === "call" && predicate ? predicate(e) : undefined;
   if (proved && e.kind === "call" && e.args[proved.index]) {
-    const facts = split(e.args[proved.index]!, (m) => (typing.fits(m, proved.type) ? "yes" : "no"), true);
+    const facts = split(e.args[proved.index]!, (m) => (typing.fits(m, proved.type) ? "yes" : "no"), true, proved.type);
     proved.narrows(facts.yes.size > 0, facts.no.size > 0);
     return facts;
   }
@@ -108,7 +110,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
   }
   if (e.op === "instanceof") {
     const c = types.get(e.right);
-    return split(e.left, (m) => (c !== undefined && typing.isSubclass(m, c) ? "yes" : "no"), true);
+    return split(e.left, (m) => (c !== undefined && typing.isSubclass(m, c) ? "yes" : "no"), true, c);
   }
   if (e.op !== "===" && e.op !== "!==") return nothing;
   const test = typeofTest(e);
@@ -123,11 +125,11 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
       return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
     }
     if (local && tested && typing.holdsPlainJs(tested)) return nothing;
-    return name ? split(test.operand, (m) => (category(typing, m) === name ? "yes" : "no"), e.op === "===") : nothing;
+    return name ? split(test.operand, (m) => (category(typing, m) === name ? "yes" : "no"), e.op === "===", UNKNOWN_READS[name]) : nothing;
   }
   for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
     // `x === null` leaves x's empty member, and `x !== null` the rest.
-    if (isEmpty(other, locals) && (subject.kind === "ident" || subject.kind === "member")) return split(subject, (m) => (m === "null" ? "yes" : "no"), e.op === "===");
+    if (isEmpty(other, locals) && (subject.kind === "ident" || subject.kind === "member")) return split(subject, (m) => (m === "null" ? "yes" : "no"), e.op === "===", "null");
     const value = literalValue(other);
     if (value === undefined) continue;
     // `x === "up"` leaves x's member for that literal. `x.kind === "up"` leaves the members
@@ -158,8 +160,10 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     return r.kind === "literal" && r.value === value;
   }
 
-  // Splits a narrowable variable's or field path's members by whether a check holds for them.
-  function split(subject: Expr, check: (m: Type) => "yes" | "no" | "both", positive: boolean): Guard {
+  // Splits a narrowable variable's or field path's members by whether a check holds for them. An
+  // `unknown`'s members aren't known while checking, so a check that proves it holds `unknownTo`
+  // narrows it to that, and its failing leaves it as it was.
+  function split(subject: Expr, check: (m: Type) => "yes" | "no" | "both", positive: boolean, unknownTo?: Type): Guard {
     const local = subject.kind === "ident" ? tables.arenas.localOf(locals.get(subject)) : undefined;
     const key = local && narrowable(local) ? bindingKey(local.localId) : subject.kind === "member" ? path(subject) : undefined;
     const type = types.get(subject);
@@ -173,6 +177,12 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     const p = typeof read === "string" ? undefined : typing.rec(read);
     const held = p?.kind === "param" && p.concrete && !p.bound ? (p.within ? p.concrete : typing.lowerKeepingBrands(read)) : read;
     const h = typeof held === "string" ? undefined : typing.rec(held);
+    if (h?.kind === "unknown") {
+      if (unknownTo === undefined) return nothing;
+      // A number may be held as another kind, so a mutable reference to one can't point at it.
+      const facts: Guard = { yes: new Map([[key, ref ? typing.refType(unknownTo, ref.mutable && unknownTo !== "f64") : unknownTo]]), no: new Map() };
+      return positive ? facts : { yes: facts.no, no: facts.yes };
+    }
     // A member that holds itself stands for its own members, which the check may tell apart.
     const members = (h?.kind === "union" ? h.members : [held]).flatMap((m) => {
       const inner = typing.unfold(m);

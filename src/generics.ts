@@ -104,6 +104,12 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
       bindings.set(node.name, typing.widenLet(arg));
       return;
     }
+    // An `unknown` takes whatever else is given beside it, as TypeScript infers it.
+    if (earlier && typing.isUnknown(earlier) && typing.fits(arg, earlier)) return;
+    if (earlier && typing.isUnknown(arg) && typing.fits(earlier, arg)) {
+      bindings.set(node.name, arg);
+      return;
+    }
     if (earlier && !(typing.sameLowered(earlier, arg) && typing.sameLowered(arg, earlier))) {
       throw new CompileError("E0104", `the type argument for '${node.name}' can't be both '${typing.show(earlier)}' and '${typing.show(arg)}'`, at.start, at.end);
     }
