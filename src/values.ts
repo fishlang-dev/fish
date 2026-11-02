@@ -12,7 +12,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { ITERATOR, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -1329,8 +1329,12 @@ export class Expressions implements Union {
       if (t !== "i64" && t !== "usize") throw new CompileError("E0504", `an array's length is an 'i64' or a 'usize', not '${this.typing.show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       return { type: "i64", what: "an array length" };
     }
+    // `super.m(...)` the bases don't declare runs on the Map or Set the class embeds.
+    if (callee.kind === "member" && callee.object.kind === "super" && this.superDelegated(callee.name)) return this.call(this.become(e, { ...e, callee: this.throughEmbedded(callee) }) as Call);
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? this.receiverType(callee) : undefined;
+    // A method a class extending Map or Set doesn't declare is the embedded collection's.
+    if (callee.kind === "member" && this.delegated(receiver, callee.name)) return this.call(this.become(e, { ...e, callee: this.throughEmbedded(callee) }) as Call);
     if (callee.kind === "member" && callee.name === "clone" && receiver && this.copies(receiver)) return this.cloned(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && stringLike(this.typing, receiver)) return this.stringCall(e, callee, receiver);
     // A bigint's digits, in base 10 or the radix given.
@@ -1345,7 +1349,16 @@ export class Expressions implements Union {
     if (callee.kind === "member" && recv?.kind === "map" && recv.dict && callee.name !== "clone" && !this.dictCalls.has(e)) {
       throw new CompileError("E0502", `a dictionary has no methods, as a plain object has none; its keys are read as properties, like '${this.placeText(callee.object)}[k]'`, callee.start, callee.end);
     }
-    if (callee.kind === "member" && recv?.kind === "map" && callee.name !== "clone") return this.mapCall(e, callee, receiver as MapType);
+    if (callee.kind === "member" && recv?.kind === "map" && callee.name !== "clone") {
+      const result = this.mapCall(e, callee, receiver as MapType);
+      // A class extending Map or Set gets itself back from `set` and `add`, as JavaScript's
+      // `this`: the collection is its first field, so a pointer to one points at the other.
+      const holder = callee.object.kind === "member" && callee.object.name === EMBEDDED ? callee.object.object : undefined;
+      if (!holder || (callee.name !== "set" && callee.name !== "add")) return result;
+      this.borrowsFrom.set(e, [holder]);
+      const held = this.types.get(holder)!;
+      return { type: this.typing.refType(this.isRefType(held) ? this.typing.rec(held).to : held, true), what: result.what };
+    }
     if (callee.kind === "member" && receiver !== undefined && this.typing.yieldsOf(receiver) !== undefined) return this.generatorCall(e, callee, receiver, this.typing.yieldsOf(receiver)!);
     if (callee.kind === "member" && receiver !== undefined && this.typing.yieldsOf(receiver, true) !== undefined && recv?.kind !== "dyn") return this.generatorCall(e, callee, receiver, this.typing.yieldsOf(receiver, true)!, true);
     if (callee.kind === "member" && recv?.kind === "pointer") return this.pointerCall(e, callee, receiver as PointerType);
@@ -2154,7 +2167,7 @@ export class Expressions implements Union {
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
-    if (["at", "find", "filter", "slice", "concat", "fill", "entries", "values"].includes(callee.name) || (callee.name === "reduce" && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
+    if (["at", "find", "findLast", "filter", "slice", "concat", "fill", "entries", "values", "copyWithin", ...COPYING_METHODS].includes(callee.name) || ((callee.name === "reduce" || callee.name === "reduceRight") && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
     if (callee.name === "flat" && this.isArray(this.typing.lower(this.typing.rec(array).element))) this.clonable(this.typing.rec(this.typing.lower(this.typing.rec(array).element) as ArrayType).element, callee, "flat");
     // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
@@ -2169,14 +2182,15 @@ export class Expressions implements Union {
       if (e.args.length > most) throw new CompileError("E0504", most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
       return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] }));
     }
-    if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
+    if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"].includes(callee.name)) {
       throw new CompileError("E0211", `'${callee.name}' changes its array, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
     }
     const held = this.types.get(callee.object)!;
     if (this.isRefType(held)) this.coercions.set(callee.object, array);
     if (CALLBACK_METHODS.has(callee.name)) return this.callbackCall(e, callee, array);
     if (READING_METHODS.has(callee.name)) return this.readingCall(e, callee, array);
-    if (callee.name === "sort") return this.sortCall(e, callee, array);
+    if (callee.name === "sort" || callee.name === "toSorted") return this.sortCall(e, callee, array);
+    if (COPYING_METHODS.has(callee.name)) return this.copyingCall(e, callee, array);
     // `at(i)`: a clone of the element at a position counted from either end, or nothing.
     if (callee.name === "at") {
       if (e.args.length !== 1) throw new CompileError("E0504", "'at' takes a position, like 'at(-1)' for the last element", e.start, e.end);
@@ -2204,7 +2218,7 @@ export class Expressions implements Union {
   // clone of the first element.
   private callbackCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
-    const reducing = name === "reduce";
+    const reducing = name === "reduce" || name === "reduceRight";
     if (reducing ? e.args.length < 1 || e.args.length > 2 : e.args.length !== 1) {
       throw new CompileError("E0506", `'${name}' takes ${reducing ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'"}`, e.start, e.end);
     }
@@ -2235,45 +2249,48 @@ export class Expressions implements Union {
     if (PREDICATES.has(name) && gives !== "boolean") {
       throw new CompileError("E0506", `'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'reduce''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
+    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'${name}''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     if (name === "map" && (gives === "void" || this.typing.holdsRef(gives))) throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.typing.show(gives)}'`, callback.start, callback.end);
     const many = this.typing.lower(gives);
     if (name === "flatMap" && (typeof many === "string" || this.typing.rec(many).kind !== "array")) {
       throw new CompileError("E0506", `'flatMap''s callback gives an array for each element, whose elements make up the result; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    const type = name === "map" ? this.typing.arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" ? this.typing.unionType([this.typing.rec(array).element, "null"])
-      : name === "findIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
+    const type = name === "map" ? this.typing.arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" || name === "findLast" ? this.typing.unionType([this.typing.rec(array).element, "null"])
+      : name === "findIndex" || name === "findLastIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
     return { type, what: `'${name}'` };
   }
 
   // `sort()` orders numbers numerically and strings by UTF-16 code units; `sort(compare)` by
   // the sign of what the comparator gives for two elements. Stable, and in place, so it gives
   // nothing.
+  // `toSorted` checks as `sort` does, and gives the sorted copy.
   private sortCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
-    if (e.args.length > 1) throw new CompileError("E0506", "'sort' takes an optional comparator like '(a, b) => a - b'", e.start, e.end);
-    if (!this.place(callee.object)) throw new CompileError("E0212", "'sort' sorts its array in place, so call it on a variable or a field", callee.start, callee.end);
-    this.changeable(callee.object, "sort");
-    const what = "'sort', which sorts its array in place,";
+    const name = callee.name;
+    const copying = name === "toSorted";
+    if (e.args.length > 1) throw new CompileError("E0506", `'${name}' takes an optional comparator like '(a, b) => a - b'`, e.start, e.end);
+    if (!copying && !this.place(callee.object)) throw new CompileError("E0212", "'sort' sorts its array in place, so call it on a variable or a field", callee.start, callee.end);
+    if (!copying) this.changeable(callee.object, "sort");
+    const gives: { type: Type; what: string } = { type: copying ? array : "void", what: copying ? "'toSorted'" : "'sort', which sorts its array in place," };
     let compare = e.args[0];
     if (!compare) {
       const element = this.typing.lower(this.typing.rec(array).element);
       if (!isNumeric(element) && element !== "string") {
-        throw new CompileError("E0506", `'sort()' without a comparator orders numbers and strings, not '${this.typing.show(this.typing.rec(array).element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
+        throw new CompileError("E0506", `'${name}()' without a comparator orders numbers and strings, not '${this.typing.show(this.typing.rec(array).element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
       }
-      return { type: "void", what };
+      return gives;
     }
     compare = this.namedFunction(compare);
-    if (compare.kind !== "arrow") throw new CompileError("E0506", "'sort' takes a comparator written in place, like '(a, b) => a - b', or a function by name", compare.start, compare.end);
-    if (compare.params.length > 2) throw new CompileError("E0506", "'sort' passes its comparator two elements", compare.params[2]!.start, compare.params[2]!.end);
+    if (compare.kind !== "arrow") throw new CompileError("E0506", `'${name}' takes a comparator written in place, like '(a, b) => a - b', or a function by name`, compare.start, compare.end);
+    if (compare.params.length > 2) throw new CompileError("E0506", `'${name}' passes its comparator two elements`, compare.params[2]!.start, compare.params[2]!.end);
     const held = this.typing.rec(array).element;
     const element = this.typing.isCopy(held) ? held : this.typing.refType(held, false);
     this.expect(compare, this.typing.functionType(["a", "b"], [element, element], "void"));
     const called = this.value(compare);
     const c = this.recOf(called);
-    if (c?.kind !== "closure") throw new CompileError("E0506", "'sort' takes a comparator like '(a, b) => a - b'", compare.start, compare.end);
-    this.runsOften(called as ClosureType, "sort", "its comparator many times", compare);
+    if (c?.kind !== "closure") throw new CompileError("E0506", `'${name}' takes a comparator like '(a, b) => a - b'`, compare.start, compare.end);
+    this.runsOften(called as ClosureType, name, "its comparator many times", compare);
     c.params.forEach((p, i) => {
-      this.passedExactly("sort", element, p, compare.params[i], compare);
+      this.passedExactly(name, element, p, compare.params[i], compare);
     });
     const order = this.typing.lower(c.returns);
     if (isInteger(order) && !INTEGERS[order].signed) {
@@ -2282,11 +2299,32 @@ export class Expressions implements Union {
     if (!isNumeric(order)) {
       throw new CompileError("E0506", `a comparator gives a number: negative when 'a' comes first, positive when 'b' does, zero to keep their order; this one gives '${this.typing.show(c.returns)}'`, compare.start, compare.end);
     }
-    return { type: "void", what };
+    return gives;
+  }
+
+  // `toReversed()`, `toSpliced(start?, count?, ...items)` and `with(i, v)` give a copy of the
+  // array changed as `reverse`, `splice` and a write at `i` change theirs; values given move in.
+  private copyingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    const name = callee.name;
+    const element = this.typing.rec(array).element;
+    const counts: Record<string, [usize, usize, string]> = {
+      toReversed: [0, 0, "no arguments"], toSpliced: [0, Infinity, "an optional start, an optional count to remove and the values to put in their place"],
+      with: [2, 2, "a position, like 'with(-1, x)' for the last element, and the value to put there"],
+    };
+    const [least, most, takes] = counts[name]!;
+    if (e.args.length < least || e.args.length > most) throw new CompileError("E0504", `'${name}' takes ${takes}`, e.start, e.end);
+    e.args.forEach((a, i) => {
+      const target = i === 0 || (i === 1 && name === "toSpliced") ? "i64" : element;
+      this.expect(a, target);
+      const given = this.value(a);
+      this.coerce(a, given, target, `argument of type '${this.typing.show(given)}' is not assignable to parameter of type '${this.typing.show(target)}'`);
+    });
+    return { type: array, what: `'${name}'` };
   }
 
   // `shift` moves the first element out; `unshift` moves values in at the front; `splice`
-  // moves a run out and values in where it was; `reverse` and `fill` change the array in place.
+  // moves a run out and values in where it was; `reverse`, `fill` and `copyWithin` change the
+  // array in place.
   // What they give, JavaScript's new length for `unshift` and the array itself for `reverse`
   // and `fill`, they don't.
   private changingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
@@ -2306,6 +2344,7 @@ export class Expressions implements Union {
     const counts: Record<string, [usize, usize, string]> = {
       shift: [0, 0, "no arguments"], reverse: [0, 0, "no arguments"], unshift: [0, Infinity, "the values to put at the front"],
       splice: [1, Infinity, "a start, an optional count to remove and the values to put in their place"], fill: [1, 3, "a value and an optional start and end"],
+      copyWithin: [2, 3, "a position to copy to, a start and an optional end"],
       reserve: [1, 1, "a count of elements to make room for"], shrinkToFit: [0, 0, "no arguments"],
     };
     const [least, most, takes] = counts[name]!;
@@ -2313,7 +2352,7 @@ export class Expressions implements Union {
     if (name === "unshift") e.args.forEach(element);
     if (name === "splice") e.args.forEach((a, i) => (i < 2 ? position(a) : element(a)));
     if (name === "fill") e.args.forEach((a, i) => (i === 0 ? element(a) : position(a)));
-    if (name === "reserve") position(e.args[0]!);
+    if (name === "reserve" || name === "copyWithin") e.args.forEach(position);
     const what = `'${name}', which changes its array in place,`;
     if (name === "shift") return { type: this.typing.unionType([this.typing.rec(array).element, "null"]), what: "'shift'" };
     if (name === "splice") return { type: array, what: "'splice'" };
@@ -2820,6 +2859,11 @@ export class Expressions implements Union {
       const t = this.value(source);
       const held = this.isRefType(t) ? this.typing.rec(t).to : t;
       if (this.typing.iterableElement(held) !== undefined) throw unsupported("'Array.from' over an 'Iterable' parameter", source);
+      const inner = this.embeddedIterated(source, held);
+      if (inner) {
+        const listed: Expr = { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: inner, name: this.embeddedOf(held)!.embedded === "Set" ? "values" : "entries", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+        return this.call(this.rewrites.replace(e, { ...e, args: [listed, ...e.args.slice(1)] }) as Call);
+      }
       if (this.isArray(held)) made = f ? source : { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
       else if (stringLike(this.typing, held)) made = prelude("array chars", [source]);
       else if (this.typing.yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
@@ -2934,6 +2978,8 @@ export class Expressions implements Union {
     let from: Expr | undefined;
     if (this.dictOf(held)) throw this.notIterable(source);
     if (this.typing.iterableElement(held) !== undefined) throw unsupported("spreads of an 'Iterable' parameter", source);
+    const inner = this.embeddedIterated(source, held);
+    if (inner) return this.spreadElements(this.rewrites.replace(x, { ...x, value: inner }) as typeof x);
     if (stringLike(this.typing, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array chars", ...at }, [source]);
     else if (this.typing.yieldsOf(held) !== undefined) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [source]);
     else if (this.iteratorCall(source, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [this.iteratorCall(source, held)!]);
@@ -3234,7 +3280,9 @@ export class Expressions implements Union {
     if (this.isRefType(held)) this.coercions.set(callee.object, t);
     if (MAP_CHANGES.has(name)) {
       if (this.readCopy(callee.object)) throw new CompileError("E0211", `'${name}' changes its ${kind}, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
-      const lent = this.isRefType(held) && this.typing.rec(held).mutable;
+      // A class extending Map or Set lends its collection where it is lent.
+      const holder = callee.object.kind === "member" && callee.object.name === EMBEDDED ? this.types.get(callee.object.object) : undefined;
+      const lent = (this.isRefType(held) && this.typing.rec(held).mutable) || (holder !== undefined && this.isRefType(holder) && this.typing.rec(holder).mutable);
       if (!this.place(callee.object) && !lent) throw new CompileError("E0212", `'${name}' changes its ${kind}, so call it on a variable or a field`, callee.start, callee.end);
       if (!lent) this.changeable(callee.object, name === "clear" ? "clear" : name === "delete" ? "delete from" : name === "update" ? "update" : "add to");
     }
@@ -4408,7 +4456,7 @@ export class Expressions implements Union {
     if (lent && gives !== "boolean") {
       throw new CompileError("E0506", `'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'reduce''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
+    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'${name}''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     if (name === "map" && (gives === "void" || this.typing.holdsRef(gives))) throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.typing.show(gives)}'`, callback.start, callback.end);
     let target = GENERATOR_HELPERS[name]!;
     if (name === "flatMap") {
@@ -4776,6 +4824,38 @@ export class Expressions implements Union {
     return undefined;
   }
 
+  // The class, or the base it extends, holding the Map or Set its `extends` names.
+  private embeddedOf(t: Type | undefined): ClassInfo | undefined {
+    if (t === undefined || this.recOf(t)?.kind !== "class") return undefined;
+    for (let b: ClassInfo | undefined = this.ctx.classOf(t as ClassType); b; b = this.arenas.classOf(b.base)) if (b.embedded) return b;
+    return undefined;
+  }
+
+  // Whether `name` on a class reaches the Map or Set it embeds: neither it nor its bases declare it.
+  // Only the collection's own members are: `clone`, `equals` and the like stay the class's.
+  private delegated(t: Type | undefined, name: string): boolean {
+    const embedding = this.embeddedOf(t);
+    if (!embedding || !collectionMember(embedding, name)) return false;
+    const c = this.ctx.classOf(t as ClassType);
+    return !this.typing.field(t as ClassType, name) && !(["methods", "getters", "setters"] as const).some((table) => inherited(this.arenas, c, table, name));
+  }
+
+  // Whether `super.name` reaches the embedded Map or Set: no base between declares it.
+  private superDelegated(name: string): boolean {
+    const self = this.self?.type;
+    const embedding = self && this.embeddedOf(self);
+    if (!embedding || !collectionMember(embedding, name)) return false;
+    const base = this.arenas.classOf(this.ctx.classOf(self).base);
+    return !base || !(this.typing.field(base.type, name) || (["methods", "getters", "setters"] as const).some((table) => inherited(this.arenas, base, table, name)));
+  }
+
+  // `x.name` as `x`'s embedded collection's `name`; `super.name` as `this`'s.
+  private throughEmbedded(e: Extract<Expr, { kind: "member" }>): Extract<Expr, { kind: "member" }> {
+    const at = { start: e.object.start, end: e.object.end };
+    const object: Expr = e.object.kind === "super" ? { id: nextId(this.ids), kind: "this", ...at } : e.object;
+    return { ...e, id: nextId(this.ids), object: { id: nextId(this.ids), kind: "member", object, name: EMBEDDED, optional: false, ...at } };
+  }
+
   // Replaces `e` with `to`, keeping its own span and id.
   private become(e: Expr, to: Expr): Expr {
     return this.rewrites.replace(e, { ...to, start: e.start, end: e.end });
@@ -4833,6 +4913,14 @@ export class Expressions implements Union {
     if (!has) return undefined;
     const at = { start: source.start, end: source.end };
     return { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: ITERATOR, optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+  }
+
+  // The Map or Set a class extending one embeds, which iterating the class iterates unless the
+  // class declares its own `[Symbol.iterator]`.
+  embeddedIterated(source: Expr, held: Type): Expr | undefined {
+    const t = this.typing.lower(held);
+    if (!this.embeddedOf(t) || inherited(this.arenas, this.ctx.classOf(t as ClassType), "methods", ITERATOR)) return undefined;
+    return { id: nextId(this.ids), kind: "member", object: source, name: EMBEDDED, optional: false, start: source.start, end: source.end };
   }
 
   // A dictionary isn't iterable, as a plain object isn't in JavaScript.
@@ -4958,7 +5046,8 @@ export class Expressions implements Union {
   // TypeScript's access rules: a private member is reachable only from inside its class, and
   // a protected one also from the classes that embed it.
   private visible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string, at: Span) {
-    if (this.accessible(access, declaring, name)) return;
+    // Only delegation reads the embedded collection, from wherever the class is used.
+    if (name === EMBEDDED || this.accessible(access, declaring, name)) return;
     const message = name.startsWith("#")
       ? `property '${shownName(name)}' is not accessible outside class '${this.typing.rec(declaring).name}' because it has a private identifier`
       : `property '${name}' is ${access} and only accessible within class '${this.typing.rec(declaring).name}'${access === "protected" ? " and its subclasses" : ""}`;
@@ -5206,6 +5295,7 @@ export class Expressions implements Union {
         for (const x of e.exprs) this.joined(x, this.operand(x), "a template");
         return "string";
       case "member": {
+        if (e.object.kind === "super" && this.superDelegated(e.name)) return this.typeOf(this.become(e, this.throughEmbedded(e)));
         // A static property of a package's class.
         const jsClass = e.object.kind === "ident" && !this.ctx.lookup(e.object.name) ? this.jsClasses.get(e.object.name) : undefined;
         if (jsClass) {
@@ -5298,6 +5388,7 @@ export class Expressions implements Union {
           this.text(e.object, plain, this.linked(e));
           return this.linked(e) ? this.optional("usize", e) : "usize";
         }
+        if (this.delegated(object, e.name)) return this.typeOf(this.become(e, this.throughEmbedded(e)));
         const found = or === undefined || or.kind === "closure" ? undefined : this.typing.field(object as Exclude<Type, string>, e.name);
         const c = or?.kind === "class" ? this.ctx.classOf(object as ClassType) : undefined;
         const getter = !found && c ? inherited(this.arenas, c, "getters", e.name) : undefined;
@@ -6200,6 +6291,9 @@ export class Expressions implements Union {
       return;
     }
     const sub = this.recOf(type);
+    if (sub?.kind === "class" && tr?.kind === "map" && this.embeddedOf(type)) {
+      throw new CompileError("E0704", `'${sub.name}' extends '${this.typing.show(to)}' by embedding one, so it can't be used as '${this.typing.show(to)}'; take '${sub.name}' itself, or hold the collection in a field and pass that`, e.start, e.end);
+    }
     if (sub?.kind === "class" && tr?.kind === "class" && this.typing.derives(type as ClassType, to as ClassType)) {
       throw new CompileError("E0704", `'${sub.name}' extends '${tr.name}' by embedding one, so it can't be used as '${tr.name}'; extract an interface both classes implement`, e.start, e.end);
     }
@@ -7085,7 +7179,7 @@ export class Expressions implements Union {
     this.ctx.changesPath("this", path, action, target);
     if (this.closing) return this.ctx.changesCapture(undefined, path, action, target, false);
     if (this.self?.mutable) return;
-    throw new CompileError("E0206", `cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
+    throw new CompileError("E0206", `cannot ${action} 'this${shownPath(path)}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
   }
 
   // Whether a variable may change here, at `path` inside it, possibly through a mutable
@@ -7099,7 +7193,7 @@ export class Expressions implements Union {
     const lr = this.recOf(local.type);
     if ((path || action !== "assign to") && lr?.kind === "ref") {
       if (lr.mutable) return;
-      throw new CompileError("E0206", `cannot ${action} '${local.name}${path}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
+      throw new CompileError("E0206", `cannot ${action} '${local.name}${shownPath(path)}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
     }
     if (local.param && local.mutable) this.ctx.changedParams.add(local.localId);
     if (local.param && !local.mutable) {
@@ -7108,7 +7202,7 @@ export class Expressions implements Union {
       throw new CompileError("E0801", `${what} a parameter holding a reference is not supported yet; copy it into a 'let'`, target.start, target.end);
     }
     if (!local.mutable) {
-      const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;
+      const what = path ? `'${local.name}${shownPath(path)}' because '${local.name}'` : `'${local.name}' because it`;
       throw new CompileError("E0207", `cannot ${action} ${what} is a constant`, target.start, target.end);
     }
   }
@@ -7168,6 +7262,8 @@ export class Expressions implements Union {
   private placeText(e: Expr): string {
     const rest = restText(this.restStarts, e, (x) => this.placeText(x));
     if (rest) return rest;
+    // The collection a class extending Map or Set embeds reads as the object itself.
+    if (e.kind === "member" && e.name === EMBEDDED) return this.placeText(e.object);
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${this.placeText(e.object)}[${e.name}]` : `${this.placeText(e.object)}.${shownName(e.name)}`;
     if (e.kind === "index") return `${this.placeText(e.object)}[${indexText(e.index)}]`;
     if (e.kind === "nonNull") return `${this.placeText(e.expr)}!`;
@@ -7366,30 +7462,36 @@ const stringMethods = (typing: Typing): Record<string, [Type[], Type, usize]> =>
 const article = (name: string) => `${/^[aeiou]/i.test(name) ? "an" : "a"} '${name}'`;
 
 // The methods that run a callback on each element.
-const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex"]);
+const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex", "findLast", "findLastIndex", "reduceRight"]);
 // Generators' iterator helpers, and the std function each calls.
 const GENERATOR_HELPERS: Record<string, string> = {
   map: "iter map", filter: "iter filter", take: "iter take", drop: "iter drop", flatMap: "iter flat map",
   reduce: "iter reduce", toArray: "array collect", forEach: "iter for each", some: "iter some", every: "iter every", find: "iter find",
 };
 // The callback methods whose callback decides yes or no.
-const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
+const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex", "findLast", "findLastIndex"]);
 // The methods that read an array's elements by value.
 const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "slice", "concat", "flat"]);
 // The methods that change an array in place, beside push, pop and sort.
-const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
+// The methods giving a changed copy of the array, leaving it as it is.
+const COPYING_METHODS = new Set(["toReversed", "toSorted", "toSpliced", "with"]);
+const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"]);
 // The methods giving an iterator over an array, as generators in the prelude.
 const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
 // `u8`'s statics decoding text into bytes, and the prelude function each calls.
 const BYTE_DECODERS: Record<string, string> = { fromBase64: "array from base64", fromHex: "array from hex" };
 // The methods encoding a `u8[]` as text, and the prelude function each calls.
 const BYTE_METHODS: Record<string, string> = { toBase64: "array to base64", toHex: "array to hex" };
-// A Map's and a Set's methods, how many arguments each takes, and those changing it.
-const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "keys", "values", "entries", "forEach"]);
-const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
+// How many arguments each of a Map's and a Set's methods takes, and those changing it.
 const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
-const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
+const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...COPYING_METHODS, ...CHANGING_METHODS]);
+
+// Whether `name` is a member of the Map or Set a class embeds.
+const collectionMember = (c: ClassInfo, name: string) => name === "size" || (c.embedded === "Set" ? SET_METHODS : MAP_METHODS).has(name);
+
+// A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.
+const shownPath = (path: string) => path.replaceAll(`.${EMBEDDED}`, "");
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
 export function indexText(e: Expr): string {

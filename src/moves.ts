@@ -7,7 +7,7 @@ import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
 import { indexText, restText, MAP_CHANGES } from "./values.ts";
 import { holdsNode } from "./check.ts";
-import { redundantBang, bare, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
+import { EMBEDDED, redundantBang, bare, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 import { nextId, NodeMap } from "./nodes.ts";
 
 // Moves and borrows: a value that isn't Copy has one owner, so passing, assigning, storing or
@@ -40,7 +40,7 @@ type Named = Expr | Extract<ObjectProp, { kind: "shorthand" }>;
 type Access = "read" | "change" | "move" | "lend" | "lend mutably";
 
 // The array methods that change their array.
-const ARRAY_CHANGES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
+const ARRAY_CHANGES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"]);
 // The place a temporary or a copy stands for: a reference into one can't be returned.
 const TEMPORARY = "temporary";
 
@@ -1590,6 +1590,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A tuple's element reads as it is written, `t[0]`.
     const rest = restText(restStarts, e as Expr, (x) => text(x as Named));
     if (rest) return rest;
+    if (e.kind === "member" && e.name === EMBEDDED) return text(e.object);
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${text(e.object)}[${e.name}]` : `${text(e.object)}.${e.name}`;
     if (e.kind === "index") return `${text(e.object)}[${indexText(e.index)}]`;
     if (e.kind === "nonNull") return `${text(e.expr)}!`;
@@ -1604,7 +1605,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A rest tuple's array is its elements from where its fixed ones end, as `t[1...]`.
     const held = record(local && typing.lower(local.type));
     const start = held?.kind === "object" && held.rest !== undefined ? held.fields.length - 1 : undefined;
-    const named = fields.map((f, i) => (f === "..." ? (i === 0 && start !== undefined ? `[${start}...]` : "[...]") : f === "[]" ? "[...]" : f));
+    // The collection a class extending Map or Set embeds reads as the object itself.
+    const named = fields.filter((f) => f !== EMBEDDED).map((f, i) => (f === "..." ? (i === 0 && start !== undefined ? `[${start}...]` : "[...]") : f === "[]" ? "[...]" : f));
     return [local?.name ?? id, ...named].join(".").replaceAll(".[", "[").replace(/\.(\d+)(?=\.|\[|$)/g, "[$1]");
   }
 }
