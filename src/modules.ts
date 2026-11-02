@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Compilation } from "./compilation.ts";
 import { dependencyLib, dependencyOf, packageOf, resolvePackages, type Package as FishPackage } from "./dependencies.ts";
 import { CompileError, type Source } from "./diag.ts";
@@ -84,6 +85,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
       throw e;
     }
     if (base > 0) shiftSpans("stmt", statements, base);
+    if (!path.startsWith("std:")) lowerImportMeta(ids, statements, key, modules.length === 0);
     // A Rust crate's declarations are reached by importing `rust:<crate>`, not as this file's own.
     if (!path.startsWith("std:")) rustBlocks.set(key, statements.flatMap((s) => rustBlock(s) ?? []));
     statements = statements.filter((s) => !rustBlock(s));
@@ -647,6 +649,22 @@ function scoped(matters: (name: string) => boolean, visit: (n: Record<string, un
     if (!visit(n.node as Record<string, unknown>, hidden, walk)) forEachChild(n, (c) => walk(c, hidden));
   };
   return walk;
+}
+
+// `import.meta.path`, `file`, `dir`, `url` and `main` as constants: the file's real path where it
+// was built, which the binary keeps as Bun's compiled executables do, and whether it is the entry
+// file. Any other use of `import.meta` is left for the checker to refuse.
+function lowerImportMeta(ids: Ids, statements: Stmt[], path: string, entry: boolean) {
+  const values: Record<string, string | boolean> = { path, file: basename(path), dir: dirname(path), url: pathToFileURL(path).href, main: entry };
+  const rewrites = new Rewrites();
+  walk("stmt", statements, ({ node }) => {
+    const n = node as Expr;
+    if (n.kind !== "member" || n.object.kind !== "meta" || n.object.name !== "import.meta" || !Object.hasOwn(values, n.name)) return;
+    const value = values[n.name]!;
+    const at = { start: n.start, end: n.end };
+    rewrites.replace(n, typeof value === "string" ? { id: nextId(ids), kind: "string", value, ...at } : { id: nextId(ids), kind: "bool", value, ...at });
+  });
+  rebuiltStmts(statements, rewrites);
 }
 
 // Turns each `os.hostname` on a std module bound whole into a name imported from it, written
