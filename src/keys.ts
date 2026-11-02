@@ -2,6 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { ClassMember, Expr, Stmt, TypeMember } from "./parser.ts";
 import { forEachChild, Rewrites, walk, type AnyNode } from "./nodes.ts";
 import { rebuiltStmts } from "./rebuild.ts";
+import { ITERATOR } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 
 // Computed property names, `[key]`, whose key is known while compiling: an object or class has a
@@ -39,6 +40,9 @@ export function numberKey(e: Expr): string | undefined {
   const n = x.kind === "unary" && x.op === "-" ? x.operand : x;
   return n.kind === "int" || n.kind === "float" ? knownKey(x, () => "") : undefined;
 }
+
+// Whether `key` is `Symbol.iterator`.
+export const isIteratorKey = (key: Expr): boolean => key.kind === "member" && key.name === "iterator" && key.object.kind === "ident" && key.object.name === "Symbol";
 
 // A key `Symbol.iterator` and its kind, which no name stands for.
 export function symbolKey(key: Expr): CompileError {
@@ -85,18 +89,21 @@ export function topKeys(program: Stmt[]): (e: Expr) => string {
 
 // Gives every class member and type member with a computed name the name its key gives. Their
 // layouts are settled before any body is checked, so a key there is a literal, a top-level const
-// holding one, a member of a top-level enum, or a template of those. A `Symbol` key is left for
-// the checker to refuse.
+// holding one, a member of a top-level enum, or a template of those. A method keyed
+// `Symbol.iterator` is named `ITERATOR`; any other `Symbol` key is left for the checker to refuse.
 export function lowerKeys(program: Stmt[]) {
   const leaf = topKeys(program);
   const rewrites = new Rewrites();
   walk("stmt", program, (n) => {
     if (n.of !== "classMember" && n.of !== "typeMember") return;
     const m = n.node as (ClassMember | TypeMember) & { name?: unknown };
+    if (m.name === ITERATOR) throw new CompileError("E0120", `'${ITERATOR}' as a quoted name would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`, m.start, m.end);
     if (typeof m.name !== "object" || m.name === null) return;
     const key = m.name as Expr;
+    if (isIteratorKey(key) && m.kind === "method") return void rewrites.replace(m, { ...m, name: ITERATOR } as ClassMember | TypeMember);
     if (key.kind === "member" && key.object.kind === "ident" && key.object.name === "Symbol") return;
     const name = knownKey(key, leaf);
+    if (name === ITERATOR) throw unknownKey(key, `'${name}' would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`);
     if (n.of === "classMember" && name.startsWith("#")) throw unknownKey(key, `'${name}' would name a private field, which is only written as '${name}'`);
     rewrites.replace(m, { ...m, name } as ClassMember | TypeMember);
   });

@@ -50,7 +50,7 @@ function main() {
   console.log(xs.length, ys.length);
 }
 // case: spread_number
-// error: '...' spreads an array, a string, a generator, a Map or a Set, not 'i64'
+// error: '...' spreads an array, a string, a generator, a Map, a Set or an iterable class, not 'i64'
 function main() { const n = 5; console.log([...n].length); }
 // case: spread_order
 // expect: 1,2,3,3

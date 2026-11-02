@@ -2810,15 +2810,15 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // `for...of` over a generator: each `next()` gives the variable its value, until it finishes.
   // The loop owns a generator it was given, and drops it once the loop ends however it ends; one
   // it borrows through a `Mut` stays with its owner.
-  function generatorLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type) {
+  function generatorLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type, right: Expr = s.right) {
     const local = resolved(s.left as Stmt);
     const generator = referent(iterated) as GeneratorType;
     scopes.push([]);
     const held = loopSlot(s, 0, llvm(iterated));
-    if (isRef(iterated)) emit(`store ptr ${value(s.right)}, ptr ${held}`);
+    if (isRef(iterated)) emit(`store ptr ${value(right)}, ptr ${held}`);
     else {
       own(held, generator);
-      emit(`store ${llvm(generator)} ${owned(s.right)}, ptr ${held}`);
+      emit(`store ${llvm(generator)} ${owned(right)}, ptr ${held}`);
     }
     settle();
     const [test, loop, end] = [label(), label(), label()];
@@ -2829,7 +2829,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       at = temp();
       emit(`${at} = load ptr, ptr ${held}`);
     }
-    const result = resume(generator, at, s.right);
+    const result = resume(generator, at, right);
     const [finished, more] = nextShapes(typing.rec(generator).yields);
     emit(`br i1 ${holds(result, typing.nextResult(typing.rec(generator).yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
     startBlock(loop);
@@ -3103,6 +3103,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       // The array is read once; one the loop made itself is owned by the loop until it ends.
       // Each pass gives the variable a pointer to its element, or a copy of a Copy one.
       case "forOf": {
+        const via = current.iterators?.get(s);
+        if (via) return generatorLoop(s, types.get(via)!, via);
         const iterated = types.get(s.right)!;
         if (s.await) return awaitLoop(s, iterated);
         const yielding = referent(iterated);
