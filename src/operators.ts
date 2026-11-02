@@ -21,6 +21,8 @@ export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
 
 // The result of a binary operator, or an error when its operands don't suit it.
 export function binaryType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type {
+  // A value of no type is in code an instance never reaches, where anything goes.
+  if (left === "never" || right === "never") return ["===", "!==", "<", "<=", ">", ">=", "&&", "||"].includes(op) ? "boolean" : "never";
   const branded = brandedType(typing, op, left, right, at);
   if (branded !== undefined) return branded;
   // Value equality comes through Eq, which objects don't have yet. A literal's value is known.

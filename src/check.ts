@@ -106,6 +106,9 @@ export type Instance = {
   patterns: NodeMap<Pattern, PatternInfo>;
   // Each read of a shared value's plain field: a copy made under its lock, not a place.
   copiesOut: NodeSet<Expr>;
+  // Statements this instance never reaches, as a check its type argument rules out guards:
+  // checked, but not compiled.
+  unreached?: NodeSet<Stmt>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -2650,6 +2653,7 @@ class BodyChecker implements Context, Outer, Sight {
       const s = list[i]!;
       this.siblings = { list, at: i };
       const mark = this.changed.length;
+      if (this.ruledOut()) (this.instance.unreached ??= new NodeSet()).add(s);
       const after = each(s, (x) => this.statement(x));
       if (after) this.facts.push(this.current(after, mark));
     }
@@ -3608,6 +3612,12 @@ class BodyChecker implements Context, Outer, Sight {
 
   // Whether control never reaches the end of these statements, leaving by `return`, `break`
   // or `continue`.
+  // Whether a check made here rules out what an instance's type parameter stands for, which the
+  // narrowing marks by giving its variable the type `never`.
+  private ruledOut(): boolean {
+    return this.facts.some((m) => [...m].some(([key, t]) => t === "never" && !isPath(key) && this.cx.typing.recOf(this.cx.localOf(Number(key) as LocalId).type)?.kind === "param"));
+  }
+
   leaves(stmts: Stmt[]): boolean {
     const last = stmts.at(-1);
     return alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue";

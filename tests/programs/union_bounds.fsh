@@ -279,3 +279,43 @@ function main() {
   console.log(len("abc"), sum(1 as A, 2 as A), sum(5 as B, 5 as B))
 }
 // expect: 3 3 10
+// case: union_bounds_number_widths
+// Numbers of different types compare by value, as JavaScript's numbers do.
+function w<K extends i64 | u8>(k: K, n: i64): boolean {
+  return k === n
+}
+
+function f<K extends i64 | f64>(k: K, n: i64): boolean {
+  return k === n
+}
+
+function lit<K extends i64 | f64>(k: K): boolean {
+  return k === 3
+}
+
+function main() {
+  const b: u8 = 3
+  const x: f64 = 3.0
+  const y: f64 = 3.5
+  console.log(w(b, 3), w(b, 259), w(3, 3))
+  console.log(f(x, 3), f(y, 3), lit(x), lit(y))
+}
+// expect: true false true
+// expect: true false true false
+// case: union_bounds_ruled_out
+// A branch an instance's argument rules out isn't checked against it or compiled.
+function t2<K extends i64 | string>(k: K): string {
+  if (typeof k === "number") return `n:${k * 2}`
+  return `s:${k}`
+}
+
+function t3<K extends i64 | string>(k: K): i64 {
+  if (typeof k === "string") return k.length as i64
+  return k
+}
+
+function main() {
+  const s: string = "zz"
+  console.log(t2(5), t2(s), t3(5), t3(s), t3("abcd"))
+}
+// expect: n:10 s:zz 5 2 4

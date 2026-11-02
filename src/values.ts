@@ -5134,6 +5134,7 @@ export class Expressions implements Union {
         const through = this.linked(e) ? this.unwrapped(e.object, e.optional) : this.value(e.object);
         const tr = this.recOf(through);
         const object = this.typing.unfold(tr?.kind === "ref" ? tr.to : through);
+        if (object === "never") return "never";
         const or = this.recOf(object);
         // A field read through a reference loads what it points to; a getter gets the pointer.
         if (or?.kind === "shared") return this.sharedField(e, object as SharedType);
@@ -5887,7 +5888,8 @@ export class Expressions implements Union {
       if (type !== "string") this.coerce(e, type, "string", "");
       return;
     }
-    if (isNumeric(type) || type === "boolean" || type === "bigint") return;
+    // A value of no type is in code an instance never reaches.
+    if (isNumeric(type) || type === "boolean" || type === "bigint" || type === "never") return;
     throw new CompileError("E0510", `${into} works with strings, numbers and booleans, not '${this.typing.show(type)}'`, e.start, e.end);
   }
 

@@ -174,7 +174,8 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     });
     const facts = (keep: string): Facts => {
       const left = members.filter((m) => check(m) !== keep);
-      if (left.length === 0) return new Map();
+      // An instance's argument a check rules out leaves the branch unreachable, as `never`.
+      if (left.length === 0) return held !== read && p?.kind === "param" && !p.within ? new Map([[key, "never"]]) : new Map();
       // A mutable reference can point at one member inside the union, but to several only
       // through a shared copy.
       return new Map([[key, ref ? typing.refType(typing.unionType(left), ref.mutable && left.length === 1) : typing.unionType(left)]]);
