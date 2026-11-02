@@ -6,7 +6,7 @@ import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { timed, type Tables } from "./compilation.ts";
-import { INTEGERS, range, redundantBang, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
+import { INTEGERS, range, redundantBang, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type MapType, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -20,13 +20,16 @@ export type Variant = { kind: "variant"; type: VariantType; args: Value[] };
 // An Atomic or a Lock a top-level const holds: a global the program changes at run time, made
 // while compiling but never used then.
 export type Interior = { kind: "interior"; value: Value };
+// A Map, a Set (each value undefined) or a dictionary: its entries in the order they were made,
+// by a string naming the key, as JavaScript's Map compares keys by value.
+export type Table = { kind: "map"; type: MapType; entries: Map<string, [Value, Value]> };
 // A value in a union, and which member it is, as the program's tag says.
 export type Member = { kind: "member"; type: Type; value: Value };
 
 // A value while compiling: an integer as a bigint, a float as a number, a boolean, a string,
 // null for an empty Option, or an aggregate. Objects are values in Fish, moved rather than shared,
 // so a JS reference stands for one.
-export type Value = bigint | f64 | boolean | string | null | undefined | Record | Items | Variant | Interior | Member | Place;
+export type Value = bigint | f64 | boolean | string | null | undefined | Record | Items | Variant | Interior | Table | Member | Place;
 
 // Where a value lives, as a `Mut` holds it: reading and writing go through to it.
 export type Place = { kind: "place"; get(): Value; set(v: Value): void };
@@ -400,7 +403,7 @@ class Interpreter {
       case "forOf": {
         const over = unwrap(this.expr(f, s.right));
         const local = f.instance.locals.get(s.left as Stmt)!;
-        const items = typeof over === "string" ? [...over] : over && typeof over === "object" && over.kind === "array" ? over.items : this.unsupported("looping over this", s.right);
+        const items = this.iterated(over, s.right);
         for (const item of [...items]) {
           f.locals.set(local, item);
           if (!this.loopBody(f, s, s.body)) break;
@@ -627,7 +630,7 @@ class Interpreter {
         return { kind: "record", type: type as ObjectType, fields };
       }
       case "array":
-        return { kind: "array", items: e.elements.map((x) => (x ? this.expr(f, x) : this.unsupported("a hole in an array", e))) };
+        return { kind: "array", items: e.elements.flatMap((x) => (!x ? this.unsupported("a hole in an array", e) : x.kind === "spread" ? this.iterated(unwrap(this.expr(f, x.value)), x).map((v) => cloned(this.tables, v)) : [this.expr(f, x)])) };
       case "new":
         return this.construct(f, e, type);
       case "member":
@@ -653,6 +656,15 @@ class Interpreter {
   private construct(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "new" }>, type: Type): Value {
     const r = typeof type === "string" ? undefined : this.typing.rec(type);
     if (r?.kind === "interior" && r.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: this.expr(f, e.args[0]!) };
+    if (r?.kind === "map") {
+      const made: Table = { kind: "map", type: type as MapType, entries: new Map() };
+      const from = e.args?.[0] ? unwrap(this.expr(f, e.args[0])) : undefined;
+      for (const item of from ? this.iterated(from, e.args![0]!) : []) {
+        const [k, v] = r.set ? [item, undefined] : this.pair(item);
+        this.put(made, k, v);
+      }
+      return made;
+    }
     if (r?.kind !== "class") return this.refuse(`'new ${this.typing.show(type)}'`, e);
     const ctor = this.calledAt(f, e)!;
     const made: Record = { kind: "record", type: type as ClassType, fields: new Map() };
@@ -674,6 +686,7 @@ class Interpreter {
     if (getter) return this.call(getter, [], object as Record, e);
     if (e.name === "length" && typeof object === "string") return BigInt(object.length);
     if (object && typeof object === "object" && object.kind === "array" && e.name === "length") return BigInt(object.items.length);
+    if (object && typeof object === "object" && object.kind === "map" && e.name === "size") return BigInt(object.entries.size);
     if (object && typeof object === "object" && object.kind === "record" && this.typing.isTuple(object.type) && e.name === "length") return this.tupleLength(object);
     if (object && typeof object === "object" && object.kind === "record") return object.fields.get(e.name);
     return this.unsupported(`reading '${e.name}' here`, e);
@@ -737,9 +750,82 @@ class Interpreter {
         if (callee.name === "push") return void held.items.push(this.expr(f, e.args[0]!));
         if (callee.name === "pop") return held.items.length > 0 ? held.items.pop()! : null;
       }
+      if (held && typeof held === "object" && held.kind === "map") return this.tableMethod(f, callee.name, held, e, type);
       return this.unsupported(`calling '${callee.name}' here`, e);
     }
     return this.refuse(`'${this.timerNames.get(e) ?? (callee.kind === "ident" ? callee.name : "this call")}'`, e);
+  }
+
+  // A Map's or a Set's method; `get` and the arrays of entries hand out clones, as at run time.
+  private tableMethod(this: Mut<this>, f: Frame, name: string, table: Table, e: Extract<Expr, { kind: "call" }>, type: Type): Value {
+    const args = e.args.map((a) => this.expr(f, a));
+    const key = () => this.keyName(args[0]);
+    switch (name) {
+      case "set":
+      case "add":
+        this.put(table, args[0], args[1]);
+        return table;
+      case "get": {
+        const found = table.entries.get(key());
+        return found ? cloned(this.tables, found[1]) : null;
+      }
+      case "has":
+        return table.entries.has(key());
+      case "delete":
+        return table.entries.delete(key());
+      case "clear":
+        table.entries.clear();
+        return undefined;
+      case "keys":
+      case "values":
+      case "entries": {
+        const listed = this.iterated(table, e);
+        const which = (x: Value) => (x && typeof x === "object" && x.kind === "record" ? x.fields.get(name === "keys" ? "0" : "1") : x);
+        return { kind: "array", items: name === "entries" ? listed : listed.map((x) => (this.typing.rec(table.type).set ? x : which(x))) };
+      }
+      default:
+        return this.unsupported(`calling '${name}' on a ${this.typing.rec(table.type).set ? "Set" : "Map"}`, e);
+    }
+  }
+
+  // Puts a key and its value in a table: a key already there keeps its place, as JavaScript's does.
+  private put(table: Table, k: Value, v: Value) {
+    const name = this.keyName(k);
+    const was = table.entries.get(name);
+    table.entries.set(name, [was ? was[0] : k, v]);
+  }
+
+  // The string a key is compared by: the checker keys a Map by strings or integers.
+  private keyName(k: Value): string {
+    const v = unwrap(k);
+    return typeof v === "string" ? `s${v}` : `i${v as bigint}`;
+  }
+
+  // A Map's entry as the pair of its key and value.
+  private pair(item: Value): [Value, Value] {
+    const v = unwrap(item);
+    if (v && typeof v === "object" && v.kind === "array") return [v.items[0], v.items[1]];
+    if (v && typeof v === "object" && v.kind === "record") return [v.fields.get("0"), v.fields.get("1")];
+    throw new Error("internal error: a Map's entry that isn't a pair");
+  }
+
+  // What looping over a value visits: a string's characters, an array's elements, a Set's
+  // members, or a Map's entries as pairs of clones. A dictionary's entries come in the order
+  // JavaScript gives an object's keys: integer keys first, from smallest.
+  private iterated(this: Mut<this>, over: Value, at: Span): Value[] {
+    if (typeof over === "string") return [...over];
+    if (over && typeof over === "object" && over.kind === "array") return over.items;
+    if (!over || typeof over !== "object" || over.kind !== "map") return this.unsupported("looping over this", at);
+    const r = this.typing.rec(over.type);
+    let entries = [...over.entries.values()];
+    if (r.dict) {
+      const index = (k: Value) => (typeof k === "string" && /^(0|[1-9]\d*)$/.test(k) && Number(k) < 2 ** 32 - 1 ? Number(k) : undefined);
+      const numbered = entries.filter(([k]) => index(k) !== undefined).sort(([a], [b]) => index(a)! - index(b)!);
+      entries = [...numbered, ...entries.filter(([k]) => index(k) === undefined)];
+    }
+    if (r.set) return entries.map(([k]) => cloned(this.tables, k));
+    const tuple = this.typing.tupleType([r.key, r.value]);
+    return entries.map(([k, v]): Record => ({ kind: "record", type: tuple, fields: new Map([["0", cloned(this.tables, k)], ["1", cloned(this.tables, v)]]) }));
   }
 
   private stringMethod(name: string, s: string, args: Value[], at: Span): Value {
@@ -1307,6 +1393,7 @@ function cloned(tables: Tables, v: Value): Value {
   if (v.kind === "member") return { kind: "member", type: v.type, value: copied(v.value) };
   if (v.kind === "array") return { kind: "array", items: v.items.map(copied) };
   if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(copied) };
+  if (v.kind === "map") return { kind: "map", type: v.type, entries: new Map([...v.entries].map(([k, [key, x]]) => [k, [copied(key), copied(x)]])) };
   const copy: Record = { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, copied(x)])) };
   // A clone of a quote's value keeps its bindings and free names for a quote it is spliced into.
   const scope = scopes.get(v);
@@ -1383,6 +1470,7 @@ export function memberOf(typing: Typing, value: Value, union: UnionType): Type {
   if (v && typeof v === "object") {
     if (v.kind === "array") return m.find((t) => kindOf(t) === "array")!;
     if (v.kind === "interior") return m.find((t) => kindOf(t) === "interior")!;
+    if (v.kind === "map") return m.find((t) => t === v.type) ?? m.find((t) => kindOf(t) === "map")!;
     if (v.kind === "member" || v.kind === "place") return memberOf(typing, unwrap(v), union);
     return m.find((t) => t === v.type) ?? m.find((t) => typing.fits(v.type, t))!;
   }
