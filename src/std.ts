@@ -4914,10 +4914,12 @@ export function lutimesSync(path: string, atime: f64 | Date, mtime: f64 | Date):
   pathUtimes(path, seconds(atime), seconds(mtime), false);
 }
 
-// A string as Node's inspect quotes it in an argument error, cut at 128 characters.
+// A string as Node's inspect quotes it in an argument error, cut at 128 characters: in single
+// quotes, unless it holds one and another quote kind is free; with all taken, its ' escaped.
 function quoted(text: string): string {
-  const quote = !text.includes("'") ? "'" : !text.includes("\"") ? "\"" : !text.includes("${"`"}") ? "${"`"}" : "'";
-  const shown = quote + text + quote;
+  const backtick = !text.includes("${"`"}") && !text.includes("$" + "{");
+  const quote = !text.includes("'") ? "'" : !text.includes("\"") ? "\"" : backtick ? "${"`"}" : "'";
+  const shown = quote + (quote === "'" ? text.replaceAll("'", "\\'") : text) + quote;
   return shown.length > 128 ? shown.slice(0, 128) + "..." : shown;
 }
 

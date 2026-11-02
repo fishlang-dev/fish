@@ -6333,9 +6333,10 @@ int32_t fsh_rt_fs_readlink(fsh_str *path, fsh_str **out, fsh_str **error) {
       fsh_rt_free(c);
       return 1;
     }
+    int failure = errno;
     fsh_rt_free(text);
     if (n < 0) {
-      int32_t failed = fsh_fs_failed(error, errno, "readlink", c);
+      int32_t failed = fsh_fs_failed(error, failure, "readlink", c);
       fsh_rt_free(c);
       return failed;
     }

@@ -238,7 +238,7 @@ test("chmodSync and chmod give what node's give", () => {
   chmodSync("d", "0700");
   await chmod("h", 0o640);
   await fsp.chmod("i", "4");
-  const modes: (i64 | string)[] = ["0o644", "abc", "", "8", "it's", "a'b\\"c", "x".repeat(140), -1, 4294967296, 2147483647, -5000000000, 9000000000, "7777777777777"];
+  const modes: (i64 | string)[] = ["0o644", "abc", "", "8", "it's", "a'b\\"c", "a'b\\"c${"`"}d", "a'b\\"c$\\{d}", "x".repeat(140), -1, 4294967296, 2147483647, -5000000000, 9000000000, "7777777777777"];
   // A mode refused before any system call is node's TypeError or RangeError; Fish's IoError gives "".
   for (const m of modes) {
     try { chmodSync("j", m); console.log("ok", m); } catch (e) { console.log(e.message, e.code, e.code.startsWith("ERR_") ? "-" : e.syscall, e.path ?? "none"); }
