@@ -3,7 +3,7 @@ import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { nextId, NodeMap, walk } from "./nodes.ts";
+import { nextId, NodeMap, walk, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { unitPowers, isNumeric, type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
@@ -19,6 +19,14 @@ import { mutates, owns, withoutUndefined } from "./classes.ts";
 export function addAlias(aliases: Map<string, TypeAlias>, s: TypeAlias, ...others: Map<string, unknown>[]) {
   typeName(s.name, s, aliases, ...others);
   aliases.set(s.name, s);
+}
+
+// An object type with a method describes values by what they do, as an interface does, so an
+// alias of one is that interface.
+export function traitAlias(ids: Ids, a: TypeAlias): Interface | undefined {
+  const t = a.type;
+  if (t.kind !== "object" || !t.members.some((m) => m.kind === "method")) return undefined;
+  return { id: nextId(ids), kind: "interface", name: a.name, typeParams: a.typeParams, extends: [], members: t.members, start: a.start, end: a.end };
 }
 
 // Whether a parameter is written as a tag's strings: `comptime` and a string array.
@@ -93,6 +101,8 @@ export class ResolverState {
   traits = new NodeMap<Stmt, Map<string, InterfaceType>>();
   // Each combined interface `A & B`, by its sides.
   combined = new Map<string, InterfaceType>();
+  // Each object type with a method written in place, as the interface it stands for.
+  inline = new Map<string, Interface>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
   scope = new Map<string, Type>();
   // Above zero while a generic alias is checked with placeholders, before any use.
@@ -171,7 +181,8 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   }
   // The instance of a generic interface for other type arguments.
   interfaceInstance(this: Mut<this>, t: InterfaceType, args: Type[]) {
-    return this.interfaceOf(this.interfaces.get(this.typing.rec(t).generic!.name)!, args);
+    const name = this.typing.rec(t).generic!.name;
+    return this.interfaceOf(this.interfaces.get(name) ?? this.host.resolverState.inline.get(name)!, args);
   }
   // A recursive alias's type made again with other type arguments.
   remakeRecursive(this: Mut<this>, t: RecursiveType, args: Type[]): RecursiveType {
@@ -401,6 +412,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (t.kind === "object") {
       const index = t.members.find((m) => m.kind === "index");
       if (index?.kind === "index") return this.dictionary(index, t.members.length);
+      if (t.members.some((m) => m.kind === "method")) return this.inlineTrait(t);
       return this.typing.objectType(fields(t.members.map((m) => this.member(m)), t.members));
     }
     if (t.kind === "literal") return this.literal(t.value);
@@ -690,6 +702,26 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       }
     }
     return found;
+  }
+
+  // An object type with a method, written in place, is an interface of its own, generic over the
+  // type parameters around it, since its members may name them.
+  private inlineTrait(this: Mut<this>, t: Extract<TypeNode, { kind: "object" }>): InterfaceType {
+    const scope = [...this.host.resolverState.scope];
+    const name = `{} ${t.id} ${scope.map(([k]) => k).join(",")}`;
+    const named = t.members.flatMap((m) => ("name" in m && typeof m.name === "string" ? [m.name] : []));
+    const twice = t.members.find((m, k) => "name" in m && typeof m.name === "string" && named.indexOf(m.name) !== k);
+    if (twice) throw new CompileError("E0402", `duplicate member '${(twice as { name: string }).name}'`, twice.start, twice.end);
+    let i = this.host.resolverState.inline.get(name);
+    if (!i) {
+      const typeParams = scope.map(([k]) => ({ id: nextId(this.ids), name: k, constraint: undefined, default: undefined, modifiers: [], start: t.start, end: t.end }));
+      this.host.resolverState.inline.set(name, i = { id: nextId(this.ids), kind: "interface", name, typeParams, extends: [], members: t.members, start: t.start, end: t.end });
+    }
+    const made = this.interfaceOf(i, scope.map(([, v]) => v), t);
+    const r = this.typing.rec(made);
+    const parts = [...r.fields.map((f) => `${f.name}${f.optional ? "?" : ""}: ${this.typing.show(f.type)}`), ...r.methods.map((m) => `${m.name}(${m.params.map((p) => this.typing.show(p)).join(", ")}): ${this.typing.show(m.returns)}`)];
+    r.name = `{ ${parts.join("; ")} }`;
+    return made;
   }
 
   // The interface is registered before its members resolve, so a member may name it. A generic

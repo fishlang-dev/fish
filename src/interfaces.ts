@@ -176,6 +176,8 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
       continue;
     }
     const method = c ? inherited(members.arenas, c, "methods", m.name) : undefined;
+    // An object's fields hold values, and a callable held in one isn't a method yet.
+    if (t?.kind === "object") return `${missing("method", m.name)}; an object can't supply a method yet, so use a class`;
     if (!method || method.access !== "public") return missing("method", m.name);
     // An interface's methods can't declare what they throw yet, so a throwing one can't
     // stand in for one.

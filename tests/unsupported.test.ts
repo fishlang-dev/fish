@@ -33,7 +33,6 @@ for (const [type, what] of TYPES) {
 
 // Object type members besides plain properties: the rejected part is the third column.
 const MEMBERS: [string, string, string][] = [
-  ["{ f(): i64 }", "methods in object types", "f(): i64"],
   ["{ (): i64 }", "call signatures", "(): i64"],
   ["{ new (): i64 }", "construct signatures", "new (): i64"],
   ["{ readonly [k: string]: i64 }", "readonly index signatures", "readonly [k: string]: i64"],
@@ -182,6 +181,15 @@ test("in on a Dyn", () => {
   const start = src.indexOf("\"a\" in s");
   expect(() => checkSource(src)).toThrow(expect.objectContaining({
     message: "a 'Dyn<S>' keeps no record of its value's class, so 'in' can't test it; add a method to the interface that says", start, end: start + "\"a\" in s".length,
+  }));
+});
+
+// An interface-typed value is destructured by its fields, never as a whole.
+test("rest over an interface's fields", () => {
+  const src = "type H = { a: i64; f(): i64 }\nfunction g(h: H) {\n  const { a, ...more } = h\n}\nfunction main() {}";
+  const start = src.indexOf("more");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "rest patterns over an interface's fields are not supported yet", start, end: start + "more".length,
   }));
 });
 
