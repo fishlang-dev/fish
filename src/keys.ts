@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { ClassMember, Expr, Stmt, TypeMember } from "./parser.ts";
-import { Rewrites, walk } from "./nodes.ts";
+import { forEachChild, Rewrites, walk, type AnyNode } from "./nodes.ts";
 import { rebuiltStmts } from "./rebuild.ts";
 import { unsupported } from "./unsupported.ts";
 
@@ -13,14 +13,15 @@ export function knownKey(key: Expr, leaf: (e: Expr) => string): string {
   switch (key.kind) {
     case "string":
       return key.value;
+    // A number key is a double's name, as in JavaScript.
     case "int":
-      return String(key.value);
+      return String(Number(key.value));
     case "float":
       return String(key.value);
     case "template":
       return key.quasis.map((q, i) => q + (i < key.exprs.length ? knownKey(key.exprs[i]!, leaf) : "")).join("");
     case "unary":
-      if (key.op === "-" && (key.operand.kind === "int" || key.operand.kind === "float")) return String(-key.operand.value);
+      if (key.op === "-" && (key.operand.kind === "int" || key.operand.kind === "float")) return String(-Number(key.operand.value));
       break;
     case "as":
       if (key.type.kind === "ref" && key.type.name === "const") return knownKey(key.expr, leaf);
@@ -32,6 +33,13 @@ export function knownKey(key: Expr, leaf: (e: Expr) => string): string {
   return leaf(key);
 }
 
+// The name a number literal, maybe negated or written `as const`, gives as a key.
+export function numberKey(e: Expr): string | undefined {
+  const x = e.kind === "as" && e.type.kind === "ref" && e.type.name === "const" ? e.expr : e;
+  const n = x.kind === "unary" && x.op === "-" ? x.operand : x;
+  return n.kind === "int" || n.kind === "float" ? knownKey(x, () => "") : undefined;
+}
+
 // A key `Symbol.iterator` and its kind, which no name stands for.
 export function symbolKey(key: Expr): CompileError {
   return unsupported(key.kind === "member" ? `'[Symbol.${key.name}]' members` : "computed property names", key);
@@ -41,11 +49,8 @@ export function unknownKey(key: Expr, what: string): CompileError {
   return new CompileError("E0120", `a computed key has to be known while compiling, and ${what}; use a literal, a const holding one, an enum member or a template of those, or a Map for keys known only at run time`, key.start, key.end);
 }
 
-// Gives every class member and type member with a computed name the name its key gives. Their
-// layouts are settled before any body is checked, so a key there is a literal, a top-level const
-// holding one, a member of a top-level enum, or a template of those. A `Symbol` key is left for
-// the checker to refuse.
-export function lowerKeys(program: Stmt[]) {
+// The names a key there may read: top-level consts and enums, by their written literals.
+export function topKeys(program: Stmt[]): (e: Expr) => string {
   const consts = new Map<string, Expr>();
   const enums = new Map<string, Extract<Stmt, { kind: "enum" }>>();
   for (const s of program) {
@@ -63,7 +68,11 @@ export function lowerKeys(program: Stmt[]) {
       if (held.kind === "template" && held.exprs.length > 0) throw unknownKey(e, "this is a 'string'");
       reading.add(e.name);
       try {
-        return knownKey(consts.get(e.name)!, leaf);
+        return knownKey(init, leaf);
+      } catch (err) {
+        // Pointing at the key, which is what has to change, rather than inside the const.
+        if (err instanceof CompileError && err.code === "E0120" && (err.start < e.start || err.start >= e.end)) throw unknownKey(e, `'${e.name}' doesn't hold a literal`);
+        throw err;
       } finally {
         reading.delete(e.name);
       }
@@ -71,6 +80,15 @@ export function lowerKeys(program: Stmt[]) {
     if (e.kind === "member" && e.object.kind === "ident" && enums.has(e.object.name)) return enumMember(enums.get(e.object.name)!, e);
     throw unknownKey(e, "a class's or a type's member name can only read a top-level const or enum");
   };
+  return leaf;
+}
+
+// Gives every class member and type member with a computed name the name its key gives. Their
+// layouts are settled before any body is checked, so a key there is a literal, a top-level const
+// holding one, a member of a top-level enum, or a template of those. A `Symbol` key is left for
+// the checker to refuse.
+export function lowerKeys(program: Stmt[]) {
+  const leaf = topKeys(program);
   const rewrites = new Rewrites();
   walk("stmt", program, (n) => {
     if (n.of !== "classMember" && n.of !== "typeMember") return;
@@ -78,9 +96,42 @@ export function lowerKeys(program: Stmt[]) {
     if (typeof m.name !== "object" || m.name === null) return;
     const key = m.name as Expr;
     if (key.kind === "member" && key.object.kind === "ident" && key.object.name === "Symbol") return;
-    rewrites.replace(m, { ...m, name: knownKey(key, leaf) } as ClassMember | TypeMember);
+    const name = knownKey(key, leaf);
+    if (n.of === "classMember" && name.startsWith("#")) throw unknownKey(key, `'${name}' would name a private field, which is only written as '${name}'`);
+    rewrites.replace(m, { ...m, name } as ClassMember | TypeMember);
   });
   rebuiltStmts(program, rewrites);
+}
+
+// Refuses a class's or a type's member key, inside a function, that reads one of the function's
+// own variables: the member is laid out with the program's top-level names, so a variable there
+// shadowing a top-level const would otherwise be read past. Runs before local declarations are
+// hoisted out of their functions.
+export function localKeys(program: Stmt[]) {
+  const visit = (n: AnyNode, locals: Set<string>) => {
+    if ((n.of === "classMember" || n.of === "typeMember") && typeof (n.node as { name?: unknown }).name === "object") {
+      walk("expr", (n.node as { name: Expr }).name, (k) => {
+        if (k.of === "expr" && k.node.kind === "ident" && locals.has(k.node.name)) throw unknownKey(k.node, `'${k.node.name}' is a variable of the function around it; a class's or a type's member name can only read a top-level const or enum`);
+      });
+    }
+    const inner = bodied(n) ? new Set([...locals, ...declared(n)]) : locals;
+    forEachChild(n, (c) => visit(c, inner));
+  };
+  for (const s of program) visit({ of: "stmt", node: s }, new Set<string>());
+}
+
+const bodied = (n: AnyNode): boolean =>
+  (n.of === "stmt" && n.node.kind === "function") || (n.of === "expr" && (n.node.kind === "arrow" || n.node.kind === "function")) ||
+  (n.of === "classMember" && ["method", "constructor", "get", "set"].includes(n.node.kind)) || (n.of === "objectProp" && ["method", "get", "set"].includes(n.node.kind));
+
+// Every variable, parameter and nested function a body declares, at any depth.
+function declared(n: AnyNode): string[] {
+  const names: string[] = [];
+  walk(n.of as Exclude<AnyNode["of"], "stmts">, n.node as never, (x) => {
+    if (x.of === "pattern" && x.node.kind === "ident") names.push(x.node.name);
+    if (x.of === "stmt" && x.node.kind === "function" && x.node.name !== undefined) names.push(x.node.name);
+  });
+  return names;
 }
 
 // A member of an enum whose values are written as literals, or counted on from one.

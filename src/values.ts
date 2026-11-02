@@ -2421,8 +2421,11 @@ export class Expressions implements Union {
   // `o[K]` on an object or an instance, with a key known while compiling, reads the field it names.
   private keyRead(this: Mut<this>, e: Extract<Expr, { kind: "index" }>, object: Type): boolean {
     const r = this.recOf(object);
-    if (r?.kind !== "object" && r?.kind !== "class") return false;
+    const shaped = (k: string | undefined) => k === "object" || k === "class";
+    // A type parameter, an object-typed parameter's included, reads its fields as a member does.
+    if (!shaped(r?.kind) && r?.kind !== "param" && !(r?.kind === "union" && r.members.every((m) => shaped(this.recOf(m)?.kind)))) return false;
     const name = this.knownKey(e.index);
+    if (name.startsWith("#")) throw new CompileError("E0502", `'${name}' names no field: a private field is read as '${this.placeText(e.object)}.${name}'`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
     this.rewrites.replace(e, { id: 0, kind: "member", object: e.object, name, optional: false, start: e.start, end: e.end });
     return true;
@@ -4754,6 +4757,11 @@ export class Expressions implements Union {
       const t = this.value(leaf);
       const r = this.recOf(t);
       if (r?.kind === "literal") return String(r.value);
+      // A const holding a number is typed by its number type, so its name comes from its value.
+      const local = leaf.kind === "ident" ? this.ctx.lookup(leaf.name) : undefined;
+      const number = local && this.ctx.tables.numberKeys.get(local.localId);
+      if (number !== undefined) return number;
+      if (leaf.kind === "ident" && !local && isNumeric(t) && this.ctx.tables.topKeys) return this.ctx.tables.topKeys(leaf);
       throw unknownKey(leaf, `this is a '${this.typing.show(t)}'`);
     });
   }

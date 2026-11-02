@@ -144,3 +144,46 @@ class C {
 function main() {
   console.log(new C());
 }
+// case: computed_keys_shadowed_local
+// error: 'K' is a variable of the function around it
+// A local class or type is laid out with top-level names, so a local shadowing one is refused
+// rather than read past.
+const K = "a";
+function main() {
+  const K = "b";
+  type T = { [K]: i64 };
+  const t: T = { b: 1 };
+  console.log(t);
+}
+// case: computed_keys_number_consts
+// expect: 1 2 3 1
+// A const holding a number names the field its value names, local or top-level, as a class's
+// member name does.
+const N = 2;
+const F = 1.5;
+class C { [N]: i64 = 1; }
+function main() {
+  const M = 3;
+  const o = { [N]: 1, [M]: 2, [F]: 3 };
+  console.log(o["2"], o[M], o[F], new C()[N]);
+}
+// case: computed_keys_index_params
+// expect: 1 1 2
+// A literal key reads a field wherever a member read does: through an object-typed parameter, a
+// reference, or a union whose members all have it.
+type U = { k: "a"; x: i64 } | { k: "b"; x: i64 };
+function f(o: { a: i64 }): i64 { return o["a"]; }
+function g(o: Ref<{ a: i64 }>): i64 { return o["a"]; }
+function main() {
+  const u: U = { k: "b", x: 2 };
+  console.log(f({ a: 1 }), g({ a: 1 }), u["x"]);
+}
+// case: computed_keys_private
+// error: '#a' names no field: a private field is read as 'this.#a'
+class C {
+  #a: i64 = 1;
+  get(): i64 { return this["#a"]; }
+}
+function main() {
+  console.log(new C().get());
+}

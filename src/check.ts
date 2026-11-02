@@ -25,7 +25,7 @@ import { lowerDefaults, writtenName } from "./defaults.ts";
 import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type InstanceMaker, type Bound } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
-import { lowerKeys } from "./keys.ts";
+import { localKeys, lowerKeys, numberKey, topKeys } from "./keys.ts";
 import { lowerOverloads } from "./overloads.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -562,8 +562,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       return false;
     });
     this.written = lowerOverloads(this.ids, this.written);
+    localKeys(this.written);
     this.written = [...this.written, ...hoistLocals(this.compilation, this.written)];
     lowerKeys(this.written);
+    this.tables.topKeys = topKeys(this.written);
     holdsNode("stmt", this.written, (n) => {
       if (n.kind === "get" && typeof (n as { name?: unknown; key?: unknown }).name === "string") this.getterNames.add((n as { name: string }).name);
       if (n.kind === "get" && typeof (n as { key?: unknown }).key === "string") this.getterNames.add((n as { key: string }).key);
@@ -2819,6 +2821,8 @@ class BodyChecker implements Context, Outer, Sight {
         const describes = annotated && (this.cx.isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
         this.declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
         if (s.keyword === "let" && !annotated && type === "i64" && this.exprs().literalOnly(d.init, false)) this.cx.candidates.set(this.locals.get(s)!, s);
+        const number = s.keyword === "const" ? numberKey(d.init) : undefined;
+        if (number !== undefined) this.cx.tables.numberKeys.set(this.locals.get(s)!, number);
         // A nested function's declaration, met as this `const` again when a body is checked anew.
         if (this.cx.nestedFunctions.has(d.init)) this.cx.nestedBindings.add(this.locals.get(s)!);
         return;
