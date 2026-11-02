@@ -151,6 +151,10 @@ type Outer = {
   narrowed(l: Local): Type | undefined;
   // Whether a binding of this body is written anywhere in it.
   reassigned(l: Local): boolean;
+  lendsWhole(l: Local, at: Expr): void;
+  narrowRead(l: Local, at: Expr): void;
+  // Notes a binding a nested function lends mutably, which any call of it could change.
+  lentPerCall(l: Local): void;
   thisReady(e: Expr): boolean;
   noteThis(e: Expr): void;
   changesLocal(l: Local, path: string, action: string, target: Expr, throughMut: boolean): void;
@@ -1723,6 +1727,12 @@ class BodyChecker implements Context, Outer, Sight {
   written: { local: LocalId; at: usize }[];
   // The names closures and nested functions in the body assign, which never narrow outside them.
   closureAssigned: Set<string>;
+  // The bindings nested functions lend mutably, which never narrow once one is seen.
+  nestedLent: Set<LocalId>;
+  // Each read of a binding as narrowed, in order, and for each loop being checked, how many facts
+  // and such reads there were where it starts.
+  narrowReads: { local: LocalId; at: Expr }[];
+  loops: { facts: usize; reads: usize }[];
   // The list being checked and the place in it, for a statement that becomes several.
   siblings: { list: Stmt[]; at: usize } | undefined;
   // For each enclosing `try`, the errors its block raises so far, where and of what type.
@@ -1842,6 +1852,9 @@ class BodyChecker implements Context, Outer, Sight {
     this.assigned = assignedNames(this.f.body);
     this.written = [];
     this.closureAssigned = closureAssigned(this.f.body);
+    this.nestedLent = new Set();
+    this.narrowReads = [];
+    this.loops = [];
     this.changedParams = new Set();
     this.assignedParams = new Set();
     this.copiedParams = [];
@@ -2166,7 +2179,7 @@ class BodyChecker implements Context, Outer, Sight {
   // A capture narrows as a variable of the closure's would. A binding holding no reference
   // narrows between its writes, unless a closure writes it, whose calls a check can't see.
   narrowable(this: Mut<this>, l: Local) {
-    const own = this.captures?.has(l.localId) ? !this.assigned.has(l.name) : !this.cx.typing.holdsRef(l.type) ? !this.closureAssigned.has(l.name) : l.param ? !this.assignedParams.has(l.localId) : !l.mutable || !this.assigned.has(l.name);
+    const own = this.captures?.has(l.localId) ? !this.assigned.has(l.name) && !this.nestedLent.has(l.localId) : !this.cx.typing.holdsRef(l.type) ? !this.closureAssigned.has(l.name) && !this.nestedLent.has(l.localId) : l.param ? !this.assignedParams.has(l.localId) : !l.mutable || !this.assigned.has(l.name);
     return own || (this.cx.isRef(l.type) && this.cx.typing.rec(l.type).mutable);
   }
   // Whether a binding of this body is written anywhere in it, so a closure can't trust a check
@@ -2195,17 +2208,35 @@ class BodyChecker implements Context, Outer, Sight {
       if (assignsOwn([loop], l.name)) this.forget(l, loop);
     }
   }
-  // Lending a narrowed binding mutably lends it whole, so what was known of it is forgotten;
-  // inside a loop, only a check inside the loop may be forgotten, or an earlier read in the loop
-  // could have been checked as narrowed.
-  lendsWhole(this: Mut<this>, l: Local, at: Expr): boolean {
-    if (this.captures?.has(l.localId) || this.cx.typing.holdsRef(l.type)) return false;
+  // Lending a binding mutably may give it another member, so what was known of it is forgotten,
+  // in the body a closure captures it from too. A read earlier in a loop, checked as narrowed by
+  // something from before the loop, would see the new member the next time round, so that is
+  // refused.
+  lendsWhole(this: Mut<this>, l: Local, at: Expr) {
+    if (this.cx.typing.holdsRef(l.type)) return;
+    const outside = this.captures?.get(l.localId);
+    if (outside === "this") return;
+    if (outside !== undefined) {
+      this.forget(l, at);
+      const from = this.cx.localOf(outside);
+      this.outer!.lendsWhole(from, at);
+      if (this.f.closure?.self !== undefined) this.outer!.lentPerCall(from);
+      return;
+    }
     const from = this.facts.findIndex((f) => f.has(l.localId));
-    if (from >= 0 && this.targets.some((t) => t.kind === "loop" && t.facts! > from)) {
-      throw new CompileError("E0109", `can't lend '${l.name}' mutably inside a loop here: a check outside the loop narrowed it; check it inside the loop`, at.start, at.end);
+    const loop = from < 0 ? undefined : this.loops.find((x) => x.facts > from);
+    if (loop && this.narrowReads.slice(loop.reads).some((r) => r.local === l.localId && r.at !== at)) {
+      throw new CompileError("E0109", `can't lend '${l.name}' mutably here: it was read as narrowed earlier in this loop, by a check before the loop, and the next time round it may hold another member; check it inside the loop`, at.start, at.end);
     }
     this.forget(l, at);
-    return true;
+  }
+  narrowRead(this: Mut<this>, l: Local, at: Expr) {
+    this.narrowReads.push({ local: l.localId, at });
+    const outside = this.captures?.get(l.localId);
+    if (outside !== undefined && outside !== "this") this.outer!.narrowRead(this.cx.localOf(outside), at);
+  }
+  lentPerCall(l: Local) {
+    this.nestedLent.add(l.localId);
   }
   // A call of a function whose result is `x is T` narrows its argument for x to T.
   predicate(this: Mut<this>, call: Extract<Expr, { kind: "call" }>) {
@@ -2856,6 +2887,18 @@ class BodyChecker implements Context, Outer, Sight {
 
   statement(this: Mut<this>, written: Stmt): Facts | undefined {
     const s = this.cx.rewrites.current(written);
+    if (s.kind !== "while" && s.kind !== "doWhile" && s.kind !== "for" && s.kind !== "forOf") return this.statementOf(s);
+    // A loop's condition and update are inside it, run again each time round.
+    this.forgetLoop(s);
+    this.loops.push({ facts: this.facts.length, reads: this.narrowReads.length });
+    try {
+      return this.statementOf(s);
+    } finally {
+      this.loops.pop();
+    }
+  }
+
+  statementOf(this: Mut<this>, s: Stmt): Facts | undefined {
     const declaration = unsupportedDeclaration(s);
     if (declaration) throw declaration;
     switch (s.kind) {
@@ -2968,7 +3011,6 @@ class BodyChecker implements Context, Outer, Sight {
         return this.joined(after, entry, [[thenLeaves, thenEnds, proven.yes], [elseLeaves, elseEnds, proven.no]]);
       }
       case "while":
-        this.forgetLoop(s);
         this.exprs().condition(s.cond);
         this.within({ stmt: s, kind: "loop" }, () => this.assume(this.proves(s.cond).yes, () => this.scoped(s.body)));
         return;
@@ -3013,7 +3055,6 @@ class BodyChecker implements Context, Outer, Sight {
         return;
       }
       case "for":
-        this.forgetLoop(s);
         // A name declared in the head is scoped to the loop.
         this.scopes.push(new Map());
         if (s.init) this.statement(s.init);
@@ -3031,7 +3072,6 @@ class BodyChecker implements Context, Outer, Sight {
           if (this.targets.some((t) => t.kind === "arm")) throw unsupported("'for await' loops inside match arms", s);
           if (this.finalizing > 0) throw unsupported("'for await' loops in a 'try' with a 'finally'", s);
         }
-        this.forgetLoop(s);
         const left = s.left;
         if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
         const d = left.declarations[0]!;
@@ -3134,7 +3174,6 @@ class BodyChecker implements Context, Outer, Sight {
         return;
       }
       case "doWhile":
-        this.forgetLoop(s);
         this.within({ stmt: s, kind: "loop" }, () => this.scoped(s.body));
         this.exprs().condition(s.cond);
         return;

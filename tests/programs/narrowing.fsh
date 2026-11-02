@@ -223,18 +223,81 @@ function main() {
 // expect: 2
 // expect: 5
 // case: narrowing_lent_mutably_in_loop
+// A loop lending a variable mutably reads it as declared from the lend on.
+function inc(p: Mut<i64 | null>) { p = 1 }
+function main() {
+  let x: i64 | null = 5
+  x = null
+  let n = 0
+  while (n < 2) {
+    inc(x)
+    n++
+  }
+  console.log(x)
+}
+// expect: 1
+// case: narrowing_lent_in_do_while_condition
+function bump(x: Mut<string | i64>): boolean { x = 5; return true }
+function main() {
+  let x: string | i64 = "abc"
+  let n = 0
+  if (typeof x === "string") {
+    do {
+      console.log(x.length)
+      n++
+    } while (n < 3 && bump(x))
+  }
+}
+// error: 9:28: error[E0109]: can't lend 'x' mutably here: it was read as narrowed earlier in this loop, by a check before the loop, and the next time round it may hold another member; check it inside the loop
+// case: narrowing_lent_in_while_condition
+function bump(x: Mut<string | i64>): boolean { x = 5; return true }
+function main() {
+  let x: string | i64 = "abc"
+  let n = 0
+  if (typeof x === "string") {
+    while (x.length > 0 && n < 3 && bump(x)) {
+      n++
+    }
+  }
+}
+// error: 6:42: error[E0109]: can't lend 'x' mutably here: it was read as narrowed earlier in this loop
+// case: narrowing_lent_by_closure
+// A closure lending a variable mutably forgets what was known of it where the closure is made.
 function bump(x: Mut<string | i64>) { x = 5 }
 function main() {
   let x: string | i64 = 1
-  x = "ab"
-  let n = 0
-  while (n < 2) {
-    console.log(x.length)
-    bump(x)
-    n++
-  }
+  x = "abc"
+  const f = () => bump(x)
+  f()
+  console.log(x.length)
 }
-// error: can't lend 'x' mutably inside a loop here: a check outside the loop narrowed it
+// error: 8:15: error[E0502]: property 'length' does not exist on type 'i64 | string'
+// case: narrowing_lent_by_nested_function
+// A variable a nested function lends mutably never narrows after it, since any call could change it.
+function bump(x: Mut<string | i64>) { x = 5 }
+function main() {
+  let x: string | i64 = 1
+  x = "abc"
+  function g() { bump(x) }
+  g()
+  console.log(x.length)
+}
+// error: 8:15: error[E0502]: property 'length' does not exist on type 'i64 | string'
+// case: narrowing_redundant_null_check
+// A narrowed variable compared with null or a literal it can't be is compared as declared.
+function main() {
+  let c: i64 | null = null
+  c = 7
+  if (c === null) console.log("none")
+  let s: string | i64 = "a"
+  s = 4
+  if (typeof s === "string") console.log("str")
+  let k: "a" | "b" = "a"
+  k = "b"
+  if (k === "a") console.log("a")
+  console.log(c, s, k)
+}
+// expect: 7 4 b
 // case: narrowing_reassigned_comptime
 function len(i: i64): i64 {
   let x: string | i64 = i
