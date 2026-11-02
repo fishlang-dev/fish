@@ -270,3 +270,13 @@ for (const [where, src] of [
     }));
   });
 }
+
+
+// A written type on a generic arrow const is refused at that type.
+test("a generic arrow const with a written type", () => {
+  const src = "const f: <T>(x: T) => T = <T>(x: T) => x;\nfunction main() {}";
+  const start = src.indexOf("<T>(x: T) =>");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "a const holding a generic arrow takes its type from the arrow; drop the const's written type", start, end: start + "<T>(x: T) => T".length,
+  }));
+});
