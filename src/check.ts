@@ -2924,6 +2924,9 @@ class BodyChecker implements Context, Outer, Sight {
           this.awaitLoop(s, d.target.name, left.keyword === "let", through, object);
           return;
         }
+        // A class with a `[Symbol.iterator]` method is looped over through what it gives.
+        const iterator = this.exprs().iteratorCall(s.right, object);
+        if (iterator) return this.statement(this.cx.rewrites.replace(s, { ...s, right: iterator }));
         // A loop borrows what it reads from as long as it runs, so it can't read a part of a
         // value made for the statement, which is gone before the first pass.
         // A reference reaches a value living elsewhere, wherever it came from.
@@ -2977,7 +2980,7 @@ class BodyChecker implements Context, Outer, Sight {
           return;
         }
         if (this.cx.typing.yieldsOf(object, true) !== undefined) throw new CompileError("E0119", "an async generator's values are awaited, so loop over it with 'for await'", s.right.start, s.right.end);
-        if (o?.kind !== "array") throw new CompileError("E0119", `'for...of' needs an array, a Map, a Set, a string or a generator, not '${this.cx.typing.show(object)}'`, s.right.start, s.right.end);
+        if (o?.kind !== "array") throw new CompileError("E0119", `'for...of' needs an array, a Map, a Set, a string, a generator or an iterable class, not '${this.cx.typing.show(object)}'`, s.right.start, s.right.end);
         if (object !== through) this.coercions.set(s.right, object);
         this.scopes.push(new Map());
         this.declare(d.target.name, this.cx.typing.isCopy(o.element) ? o.element : this.cx.typing.refType(o.element, false), left.keyword === "let", false, left);

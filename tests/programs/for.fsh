@@ -55,7 +55,7 @@ function main() {
   const n = 5;
   for (const x of n) console.log(x);
 }
-// error: 'for...of' needs an array, a Map, a Set, a string or a generator, not 'i64'
+// error: 'for...of' needs an array, a Map, a Set, a string, a generator or an iterable class, not 'i64'
 // case: for_of_pattern_array
 // error: only tuples, like '[i64, string]', can be destructured so far, not 'i64[]'
 function main() { const grid: i64[][] = [[1, 2]]; for (const [a, b] of grid) console.log(a, b); }

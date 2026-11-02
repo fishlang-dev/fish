@@ -2792,7 +2792,8 @@ export class Expressions implements Union {
       if (this.isArray(held)) made = f ? source : { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
       else if (stringLike(this.typing, held)) made = prelude("array chars", [source]);
       else if (this.typing.yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
-      else throw new CompileError("E0119", `'Array.from' makes an array from an array, a string, a generator or '{ length: n }', not '${this.typing.show(t)}'`, source.start, source.end);
+      else if (this.iteratorCall(source, held)) made = prelude("array collect", [this.iteratorCall(source, held)!]);
+      else throw new CompileError("E0119", `'Array.from' makes an array from an array, a string, a generator, an iterable class or '{ length: n }', not '${this.typing.show(t)}'`, source.start, source.end);
     }
     if (f) made = { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
     return this.call(this.rewrites.replace(e, { ...made, start: e.start, end: e.end }) as Call);
@@ -2903,8 +2904,9 @@ export class Expressions implements Union {
     if (this.dictOf(held)) throw this.notIterable(source);
     if (stringLike(this.typing, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array chars", ...at }, [source]);
     else if (this.typing.yieldsOf(held) !== undefined) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [source]);
+    else if (this.iteratorCall(source, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [this.iteratorCall(source, held)!]);
     else if (this.recOf(held)?.kind === "map") from = made({ id: nextId(this.ids), kind: "member", object: source, name: this.typing.rec(held as MapType).set ? "values" : "entries", optional: false, ...at });
-    else if (!this.isArray(held)) throw new CompileError("E0119", `'...' spreads an array, a string, a generator, a Map or a Set, not '${this.typing.show(t)}'`, source.start, source.end);
+    else if (!this.isArray(held)) throw new CompileError("E0119", `'...' spreads an array, a string, a generator, a Map, a Set or an iterable class, not '${this.typing.show(t)}'`, source.start, source.end);
     if (from) {
       this.ctx.exprsState.once.add(source);
       x = this.rewrites.replace(x, { ...x, value: from });
@@ -4695,6 +4697,14 @@ export class Expressions implements Union {
     this.coerce(key, t, "string", `a dictionary's keys are strings, not '${this.typing.show(t)}'`);
     this.ctx.exprsState.once.add(key);
     return key;
+  }
+
+  // `source[Symbol.iterator]()`, when `held` is a class with that method: what iterating it runs.
+  iteratorCall(this: Mut<this>, source: Expr, held: Type): Expr | undefined {
+    const t = this.typing.lower(held);
+    if (this.recOf(t)?.kind !== "class" || !inherited(this.arenas, this.ctx.classOf(t as ClassType), "methods", ITERATOR)) return undefined;
+    const at = { start: source.start, end: source.end };
+    return { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: ITERATOR, optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
   }
 
   // A dictionary isn't iterable, as a plain object isn't in JavaScript.
