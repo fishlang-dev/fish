@@ -5466,6 +5466,12 @@ export class Expressions implements Union {
           : op === "+" && target === "string" ? this.join(place, target, e.value, this.widen(e.value, assigned))
           : op === "**" ? this.power(place, target, e.value, this.widen(e.value, assigned), e)
           : binaryType(this.typing, op, ...this.sameNumbers(place, target, e.value, this.widen(e.value, assigned)), e);
+        // A parameter typed by an object type or interface takes any value with its members, so
+        // what it holds may have more fields than any value written here.
+        const param = place.kind === "ident" ? this.localAt(place) : undefined;
+        if (op === "=" && param?.param && this.recOf(target)?.kind === "param" && !this.typing.fits(type, target)) {
+          throw new CompileError("E0101", `'${param.name}' takes any value with the members of '${this.typing.show(target)}', which may have more, so it can't be given a '${this.typing.show(type)}'; declare 'let ${param.name}2: ${this.typing.show(target)} = ${param.name}' to hold just those`, e.start, e.end);
+        }
         this.coerce(e.value, type, target, `type '${this.typing.show(type)}' is not assignable to type '${this.typing.show(target)}'`);
         // A handle's property is written in JS, with the value converted.
         if (this.jsMembers.has(place)) {

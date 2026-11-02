@@ -12,7 +12,7 @@ import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, Rewrites, walk, type I
 import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
-import { alwaysReturns, assignedNames } from "./flow.ts";
+import { alwaysReturns, assignedNames, assignsOwn } from "./flow.ts";
 import { declareEnum, type EnumInfo, type EnumInstance } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
@@ -1733,6 +1733,8 @@ class BodyChecker implements Context, Outer, Sight {
   // The parameters the body changes, and those an async nested function takes a copy of, which
   // are checked against each other once the whole body is seen.
   changedParams: Set<LocalId>;
+  // The parameters the body assigns, an inner binding of the same name aside.
+  assignedParams: Set<LocalId>;
   copiedParams: { local: Local; nested: string; at: Span }[];
   // How many scopes enclose each binding's declaration.
   depths: Map<LocalId, usize>;
@@ -1833,6 +1835,7 @@ class BodyChecker implements Context, Outer, Sight {
     this.changed = [];
     this.assigned = assignedNames(this.f.body);
     this.changedParams = new Set();
+    this.assignedParams = new Set();
     this.copiedParams = [];
     this.depths = new Map<LocalId, usize>();
     this.caseOnly = new Set<LocalId>();
@@ -1883,7 +1886,10 @@ class BodyChecker implements Context, Outer, Sight {
     this.params = this.f.closure ? this.f.params.map((p, i) => this.closureParam(p, i, this.f.closure!.expected)) : this.cx.instancing().paramTypes(this.instance, this.cx.instancing().scopeOf(this.instance));
     // An owned parameter is the body's own, as a `let` is; one holding a reference keeps the
     // caller's lifetime, which a new value could outlive.
-    this.f.params.forEach((p, i) => this.declare(paramName(p), this.params[i]!, !this.cx.typing.holdsRef(this.params[i]!), true, p));
+    this.f.params.forEach((p, i) => {
+      this.declare(paramName(p), this.params[i]!, !this.cx.typing.holdsRef(this.params[i]!), true, p);
+      if (assignsOwn(this.f.body, paramName(p))) this.assignedParams.add(this.locals.get(p)!);
+    });
     this.hidden = false;
   }
   // The expression checker, made over this body where it is used.
@@ -2151,7 +2157,7 @@ class BodyChecker implements Context, Outer, Sight {
   // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
   // A capture narrows as a variable of the closure's would.
   narrowable(this: Mut<this>, l: Local) {
-    return (this.captures?.has(l.localId) ? !this.assigned.has(l.name) : !l.mutable || !this.assigned.has(l.name)) || (this.cx.isRef(l.type) && this.cx.typing.rec(l.type).mutable);
+    return (this.captures?.has(l.localId) ? !this.assigned.has(l.name) : l.param ? !this.assignedParams.has(l.localId) : !l.mutable || !this.assigned.has(l.name)) || (this.cx.isRef(l.type) && this.cx.typing.rec(l.type).mutable);
   }
   // A call of a function whose result is `x is T` narrows its argument for x to T.
   predicate(this: Mut<this>, call: Extract<Expr, { kind: "call" }>) {

@@ -113,6 +113,52 @@ function main() {
   console.log(a.length)
 }
 // expect: 2
+// case: parameter_mut_replace
+// Unlike TypeScript, where it would only rebind the local, assigning a 'Mut' parameter a new
+// object replaces the caller's.
+class T {
+  constructor(public n: i64) {}
+}
+
+function f(p: Mut<T>) {
+  p = new T(9)
+}
+
+function main() {
+  let t = new T(1)
+  f(t)
+  console.log(t.n)
+}
+// expect: 9
+// case: parameter_shadowed_narrow
+// An inner binding of the same name being assigned doesn't stop the parameter narrowing.
+function f(n: i64 | null): i64 {
+  if (n === null) return 0
+  {
+    let n = 2
+    n = 3
+    console.log(n)
+  }
+  const g = (n: i64): i64 => {
+    n = n + 1
+    return n
+  }
+  return g(n) + 1
+}
+
+function main() {
+  console.log(f(4))
+}
+// expect: 3
+// expect: 6
+// case: parameter_shape_assign
+type O = { s: string }
+function h(o: O): string {
+  o = { s: "x" }  // error: 'o' takes any value with the members of '{ s: string }', which may have more, so it can't be given a '{ s: string }'
+  return o.s
+}
+
+function main() {}
 // case: parameter_readonly_array
 function f(xs: readonly i64[]) {
   xs = []  // error: cannot point the reference parameter 'xs' elsewhere
