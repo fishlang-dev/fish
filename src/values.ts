@@ -7648,6 +7648,8 @@ const syncFileSignatures = (typing: Typing): Record<string, [Type[], Type, boole
   pathUnlink: [["string"], "void", true],
   // A path and the R_OK, W_OK and X_OK bits.
   pathAccess: [["string", "i64"], "void", true],
+  // A path and a mode std has checked.
+  pathChmod: [["string", "i64"], "void", true],
   // A path, atime and mtime in seconds, and whether a link is followed.
   pathUtimes: [["string", "f64", "f64", "boolean"], "void", true],
   // A command, its arguments, the working directory ("" for this one's) and stdin, giving the

@@ -7028,7 +7028,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         emit(`${status} = call i32 @fsh_rt_fs_unlink(ptr ${path}, ptr ${parts})`);
         break;
       case "pathAccess":
-        emit(`${status} = call i32 @fsh_rt_fs_access(ptr ${path}, i64 ${value(e.args[1]!)}, ptr ${parts})`);
+      case "pathChmod":
+        emit(`${status} = call i32 @fsh_rt_fs_${name === "pathAccess" ? "access" : "chmod"}(ptr ${path}, i64 ${value(e.args[1]!)}, ptr ${parts})`);
         break;
       case "pathUtimes": {
         const follow = temp();

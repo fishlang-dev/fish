@@ -24,7 +24,7 @@ function compare(name: string, imports: string, body: string, setup: (dir: strin
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: fishDir, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, constants } = fs; const fsp = require("node:fs/promises"); const { access, utimes, lutimes } = fsp; (${async ? "async " : ""}() => {${nodeBody}\n})();`;
+  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, readlinkSync, linkSync, constants } = fs; const fsp = require("node:fs/promises"); const { access, utimes, lutimes, chmod, symlink, readlink, link, realpath } = fsp; (${async ? "async " : ""}() => {${nodeBody}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: nodeDir });
   expect(fish.stderr.toString()).toBe("");
   expect(node.stderr.toString()).toBe("");
@@ -225,4 +225,34 @@ test("utimesSync, lutimesSync, utimes and lutimes give what node's give", () => 
     return [p, s.atimeNs, s.mtimeNs];
   });
   expect(times(fishDir)).toEqual(times(nodeDir));
+});
+
+test("chmodSync and chmod give what node's give", () => {
+  const imports = `import { chmodSync, statSync } from "node:fs";\nimport * as fsp from "node:fs/promises";\nimport { chmod } from "fs/promises";`;
+  const [fishDir, nodeDir] = compare("chmod", imports, `
+  chmodSync("f", 0o600);
+  console.log(statSync("f").mode);
+  chmodSync("f", "644");
+  console.log(statSync("f").mode);
+  chmodSync("g", 0o100755);
+  chmodSync("d", "0700");
+  await chmod("h", 0o640);
+  await fsp.chmod("i", "4");
+  const modes: (i64 | string)[] = ["0o644", "abc", "", "8", "it's", "a'b\\"c", "x".repeat(140), -1, 4294967296, 2147483647, -5000000000, 9000000000, "7777777777777"];
+  // A mode refused before any system call is node's TypeError or RangeError; Fish's IoError gives "".
+  for (const m of modes) {
+    try { chmodSync("j", m); console.log("ok", m); } catch (e) { console.log(e.message, e.code, e.code.startsWith("ERR_") ? "-" : e.syscall, e.path ?? "none"); }
+    try { await chmod("j", m); console.log("ok", m); } catch (e) { console.log(e.message, e.code, e.code.startsWith("ERR_") ? "-" : e.syscall, e.path ?? "none"); }
+  }
+  chmodSync("j", 0o600);
+  for (const p of ["missing", "dl", "", "f/x"]) {
+    try { chmodSync(p, 0o644); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+    try { await fsp.chmod(p, "644"); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+  }`, (dir) => {
+    mkdirSync(join(dir, "d"));
+    for (const f of ["f", "g", "h", "i", "j"]) writeFileSync(join(dir, f), "hi");
+    symlinkSync("nowhere", join(dir, "dl"));
+  });
+  const modes = (dir: string) => ["f", "g", "h", "i", "j", "d"].map((p) => [p, lstatSync(join(dir, p)).mode]);
+  expect(modes(fishDir)).toEqual(modes(nodeDir));
 });

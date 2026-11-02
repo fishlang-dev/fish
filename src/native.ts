@@ -6299,6 +6299,15 @@ int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
   return result;
 }
 
+// chmodSync, its mode already checked by std as Node checks it.
+int32_t fsh_rt_fs_chmod(fsh_str *path, int64_t mode, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "chmod", "");
+  int32_t result = chmod(c, (mode_t)mode) == 0 ? 1 : fsh_fs_failed(error, errno, "chmod", c);
+  fsh_rt_free(c);
+  return result;
+}
+
 // A time in seconds as libuv 1.51 hands it to utimensat, cut to whole microseconds.
 static struct timespec fsh_utime_spec(double time) {
   struct timespec ts;
