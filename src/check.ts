@@ -2961,6 +2961,7 @@ class BodyChecker implements Context, Outer, Sight {
         }
         // A Map gives each entry as a `[key, value]` pair, and a Set each member, in insertion
         // order: each part borrowed, or a copy when it copies.
+        if (o?.kind === "map" && o.dict) throw this.exprs().notIterable(s.right);
         if (o?.kind === "map") {
           if (object !== through) this.coercions.set(s.right, object);
           const lend = (u: Type) => (this.cx.typing.isCopy(u) ? u : this.cx.typing.refType(u, false));

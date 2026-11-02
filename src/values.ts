@@ -332,6 +332,7 @@ export class Expressions implements Union {
     this.clocks = this.ctx.tables.clocks;
     this.combinedCalls = this.ctx.tables.combinedCalls;
     this.computed = this.ctx.tables.computed;
+    this.dictCalls = this.ctx.tables.dictCalls;
     this.declaredTypes = this.ctx.tables.declaredTypes;
     this.deepEqualities = this.ctx.tables.deepEqualities;
     this.defaulted = this.ctx.tables.defaulted;
@@ -424,6 +425,7 @@ export class Expressions implements Union {
   private clocks: Tables["clocks"];
   private combinedCalls: Tables["combinedCalls"];
   private computed: Tables["computed"];
+  private dictCalls: Tables["dictCalls"];
   private declaredTypes: Tables["declaredTypes"];
   private deepEqualities: Tables["deepEqualities"];
   private defaulted: Tables["defaulted"];
@@ -647,6 +649,7 @@ export class Expressions implements Union {
     if (t !== undefined) t = this.typing.unfolded(t);
     // A literal lent to a reference is a temporary of the type it refers to.
     if ((e.kind === "object" || e.kind === "array") && this.isRefType(t)) t = this.typing.unfolded(this.typing.rec(t).to);
+    if (e.kind === "object" && t !== undefined && this.dictOf(t)) return this.dictLiteral(e, t as MapType);
     // A generic function value meeting a function type that isn't generic is the one instance
     // that type gives it: an arrow calling it, its parameters typed from there.
     const r = this.recOf(t);
@@ -1307,6 +1310,9 @@ export class Expressions implements Union {
     }
     if (callee.kind === "member" && receiver !== undefined && this.isArray(receiver)) return this.arrayCall(e, callee, receiver);
     const recv = this.recOf(receiver);
+    if (callee.kind === "member" && recv?.kind === "map" && recv.dict && callee.name !== "clone" && !this.dictCalls.has(e)) {
+      throw new CompileError("E0502", `a dictionary has no methods, as a plain object has none; its keys are read as properties, like '${this.placeText(callee.object)}[k]'`, callee.start, callee.end);
+    }
     if (callee.kind === "member" && recv?.kind === "map" && callee.name !== "clone") return this.mapCall(e, callee, receiver as MapType);
     if (callee.kind === "member" && receiver !== undefined && this.typing.yieldsOf(receiver) !== undefined) return this.generatorCall(e, callee, receiver, this.typing.yieldsOf(receiver)!);
     if (callee.kind === "member" && receiver !== undefined && this.typing.yieldsOf(receiver, true) !== undefined && recv?.kind !== "dyn") return this.generatorCall(e, callee, receiver, this.typing.yieldsOf(receiver, true)!, true);
@@ -2775,8 +2781,25 @@ export class Expressions implements Union {
     return this.call(this.rewrites.replace(e, { ...made, start: e.start, end: e.end }) as Call);
   }
 
+  // An object literal meeting a dictionary: the Map it is, made from its entries in order.
+  private dictLiteral(this: Mut<this>, e: Extract<Expr, { kind: "object" }>, t: MapType) {
+    const at = { start: e.start, end: e.end };
+    const entries = e.props.map((p): Expr => {
+      if (p.kind === "spread") throw unsupported("spreads into a dictionary", p);
+      if (p.kind !== "property" && p.kind !== "shorthand") throw unsupported("methods and accessors in a dictionary", p);
+      if (p.kind === "property" && typeof p.key !== "string") throw unsupported("computed keys in a dictionary", p);
+      const key: Expr = { id: nextId(this.ids), kind: "string", value: p.kind === "property" ? p.key as string : p.name, start: p.start, end: p.end };
+      const value: Expr = p.kind === "property" ? p.value : { id: nextId(this.ids), kind: "ident", name: p.name, start: p.start, end: p.end };
+      return { id: nextId(this.ids), kind: "array", elements: [key, value], start: p.start, end: p.end };
+    });
+    const args: Expr[] = entries.length > 0 ? [{ id: nextId(this.ids), kind: "array", elements: entries, ...at }] : [];
+    const made = this.become(e, { id: nextId(this.ids), kind: "new", callee: { id: nextId(this.ids), kind: "ident", name: "Map", ...at }, args, typeArgs: [], ...at });
+    this.ctx.exprsState.wanted.set(made, t);
+  }
+
   // `Object.keys(o)`, `Object.values(o)` and `Object.entries(o)`: o's fields are known while
-  // compiling, so each becomes an array literal reading them, the values cloned.
+  // compiling, so each becomes an array literal reading them, the values cloned. A dictionary's
+  // become calls of its Map's own, which give its entries in the order they were made.
   private objectStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const name = callee.name;
     if (name !== "keys" && name !== "values" && name !== "entries") throw new CompileError("E0502", `'Object' has no '${name}' yet; it has 'keys', 'values' and 'entries'`, callee.start, callee.end);
@@ -2784,6 +2807,7 @@ export class Expressions implements Union {
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'Object.${name}' takes no type arguments`, e.start, e.end);
     const o = e.args[0];
     if (!o || e.args.length > 1 || o.kind === "spread") throw new CompileError("E0504", `'Object.${name}' takes the object to read`, e.start, e.end);
+    if (this.dictOf(this.value(this.spanned(renumber("expr", structuredClone(o), () => nextId(this.ids)), o)))) return this.call(this.dictCall(e, o, name, []));
     const fields = this.objectRead(name, o).fields;
     const at = { start: e.start, end: e.end };
     const key = (f: Field): Expr => ({ id: nextId(this.ids), kind: "string", value: f.name, ...at });
@@ -2859,6 +2883,7 @@ export class Expressions implements Union {
     const at = { start: source.start, end: source.end };
     const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: nextId(this.ids), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
     let from: Expr | undefined;
+    if (this.dictOf(held)) throw this.notIterable(source);
     if (stringLike(this.typing, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array chars", ...at }, [source]);
     else if (this.typing.yieldsOf(held) !== undefined) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [source]);
     else if (this.recOf(held)?.kind === "map") from = made({ id: nextId(this.ids), kind: "member", object: source, name: this.typing.rec(held as MapType).set ? "values" : "entries", optional: false, ...at });
@@ -4613,6 +4638,57 @@ export class Expressions implements Union {
     return this.rewrites.replace(e, { ...to, start: e.start, end: e.end });
   }
 
+  // The dictionary a value is, or a reference to one is.
+  private dictOf(t: Type): MapType | undefined {
+    const r = this.recOf(t);
+    const held = r?.kind === "ref" ? r.to : t;
+    return this.recOf(held)?.kind === "map" && this.typing.rec(held as MapType).dict ? held as MapType : undefined;
+  }
+
+  // `e`, a dictionary's read, write, delete or key test, become the call of its Map method.
+  private dictCall(e: Expr, object: Expr, name: string, args: Expr[]): Call {
+    const call = this.become(e, { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object, name, optional: false, start: e.start, end: e.end }, args, typeArgs: [], optional: false, start: e.start, end: e.end }) as Call;
+    this.dictCalls.add(call);
+    return call;
+  }
+
+  // `o[k]` or `o.k` on a dictionary, being written or deleted: its object, checked, and its key.
+  private dictEntry(this: Mut<this>, written: Expr): { place: Expr; object: Expr; key: Expr } | undefined {
+    const place = this.bare(written);
+    if ((place.kind !== "index" && place.kind !== "member") || place.optional) return undefined;
+    // A name that isn't a variable may be a class or an enum, which the write's own check reads.
+    if (place.object.kind === "ident" && !this.ctx.lookup(place.object.name)) return undefined;
+    if (place.object.kind === "ident") this.ctx.exprsState.objects.add(place.object);
+    const t = this.value(place.object);
+    this.ctx.exprsState.once.add(place.object);
+    if (!this.dictOf(t)) return undefined;
+    const key: Expr = place.kind === "index" ? place.index : { id: nextId(this.ids), kind: "string", value: place.name, start: place.start, end: place.end };
+    return { place, object: place.object, key };
+  }
+
+  // A dictionary isn't iterable, as a plain object isn't in JavaScript.
+  notIterable(at: Span): CompileError {
+    return new CompileError("E0119", "a dictionary can't be looped over or spread, as a plain object can't; use 'Object.keys', 'Object.values' or 'Object.entries'", at.start, at.end);
+  }
+
+  // Why a dictionary's entry can't be updated in place.
+  private dictWrite(place: Expr): CompileError {
+    return new CompileError("E0801", `a dictionary's entry is read as an Option, so it isn't updated in place; read it, then write it back, as in '${this.placeText(place)} = (${this.placeText(place)} ?? 0) + 1'`, place.start, place.end);
+  }
+
+  // `o[k]` on a dictionary reads the entry under k as an Option, as the Map's `get` does.
+  private undict(this: Mut<this>, e: Expr): boolean {
+    e = this.rewrites.current(e);
+    if (e.kind !== "index") return false;
+    const through = this.value(e.object);
+    this.ctx.exprsState.once.add(e.object);
+    if (!this.dictOf(through)) return false;
+    if (e.optional) throw unsupported("optional index expressions", e);
+    if (this.ctx.exprsState.writing === e) throw this.dictWrite(e);
+    this.dictCall(e, e.object, "get", [e.index]);
+    return true;
+  }
+
   private staticRead(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, found: Static): Expr {
     const at = { start: e.start, end: e.end };
     if (found.field) {
@@ -4909,7 +4985,7 @@ export class Expressions implements Union {
         if (e.object.kind === "ident") this.ctx.exprsState.objects.add(e.object);
         // An enum's reverse mapping, `Color[0]`, has no meaning yet.
         if (e.object.kind === "ident" && !this.ctx.lookup(e.object.name) && this.enums.has(e.object.name)) throw unsupported(EXPRESSION_FORMS.index, e);
-        if (this.untuple(e) || this.rewrites.current(e) !== e) return this.typeOf(this.rewrites.current(e));
+        if (this.untuple(e) || this.undict(e) || this.rewrites.current(e) !== e) return this.typeOf(this.rewrites.current(e));
         const through = this.value(e.object);
         const object = this.isRefType(through) ? this.typing.rec(through).to : through;
         // A fixed array's element, checked against its known length when the program runs.
@@ -4981,6 +5057,13 @@ export class Expressions implements Union {
           return this.linked(e) ? this.optional(shared, e) : shared;
         }
         if (or?.kind === "class") this.ctx.classOf(object as ClassType);
+        // A dictionary's property is the entry under that key, as `o[k]` reads it.
+        if (or?.kind === "map" && or.dict) {
+          if (this.linked(e)) throw unsupported("optional chains reading a dictionary", e);
+          if (this.ctx.exprsState.writing === e) throw this.dictWrite(e);
+          this.ctx.exprsState.once.add(e.object);
+          return this.typeOf(this.dictCall(e, e.object, "get", [{ id: nextId(this.ids), kind: "string", value: e.name, start: e.start, end: e.end }]));
+        }
         // A Map's or a Set's one property is its size, the number of entries it holds.
         if (or?.kind === "map") {
           if ((or.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError("E0503", `'${or.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
@@ -5272,6 +5355,8 @@ export class Expressions implements Union {
           if (gives === "void") throw new CompileError("E0305", "this Promise gives nothing once awaited, so its value can't be used", e.start, e.end);
           return gives;
         }
+        const deleted = e.op === "delete" ? this.dictEntry(e.operand) : undefined;
+        if (deleted) return this.typeOf(this.dictCall(e, deleted.object, "delete", [deleted.key]));
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = this.operand(e.operand);
         // The smallest i64 is written as the negation of a literal one past the largest.
@@ -5288,6 +5373,12 @@ export class Expressions implements Union {
         if (this.staticWrite(e)) throw new CompileError("E0705", "a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
         const op = ASSIGNMENTS[e.op];
         if (!op) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
+        const entry = this.dictEntry(e.target);
+        if (entry) {
+          if (op !== "=") throw this.dictWrite(entry.place);
+          if (this.ctx.exprsState.statementAssign !== e) throw new CompileError("E0801", "writing a dictionary's entry gives no value to use, so write it as a statement of its own", e.start, e.end);
+          return this.typeOf(this.dictCall(e, entry.object, "set", [entry.key, e.value]));
+        }
         const target = this.assignable(e.target, op !== "=");
         const place = this.bare(e.target);
         if (op === "=") this.expect(e.value, target);
@@ -5313,6 +5404,8 @@ export class Expressions implements Union {
       }
       case "update": {
         if (this.staticWrite(e)) throw new CompileError("E0705", "a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
+        const entry = this.dictEntry(e.operand);
+        if (entry) throw this.dictWrite(entry.place);
         const target = this.assignable(e.operand, true);
         if (!isNumeric(target) && target !== "bigint") throw new CompileError("E0103", `operator '${e.op}' cannot be applied to type '${this.typing.show(target)}'`, e.start, e.end);
         return target;
@@ -5389,7 +5482,13 @@ export class Expressions implements Union {
         if (e.op === "in" && e.left.kind === "privateName") {
           throw new CompileError("E0802", `'${e.left.name} in' can't be used: Fish has no run-time reflection, and a value's class is known while compiling`, e.start, e.end);
         }
-        if (e.op === "in") return keyCheck(e, this);
+        if (e.op === "in") {
+          if (e.right.kind === "ident") this.ctx.exprsState.objects.add(e.right);
+          const tested = this.value(e.right);
+          this.ctx.exprsState.once.add(e.right);
+          if (this.dictOf(tested)) return this.typeOf(this.dictCall(e, e.right, "has", [e.left]));
+          return keyCheck(e, this);
+        }
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
         if (e.op === "+") {
           const [left, right] = [this.operand(e.left), this.operand(e.right)];
@@ -5613,7 +5712,7 @@ export class Expressions implements Union {
     const r = this.recOf(t);
     if (r?.kind === "class") return `a class compares through 'equals(other: Ref<this>): boolean', which '${r.name}' doesn't have; add one, or '@derive(Eq)'`;
     if (r?.kind === "variant") return "an enum holding values compares when it has '@derive(Eq)'";
-    if (r?.kind === "map") return `a ${r.set ? "Set" : "Map"} isn't compared by value; compare its entries`;
+    if (r?.kind === "map") return `a ${r.set ? "Set" : r.dict ? "dictionary" : "Map"} isn't compared by value; compare its entries`;
     if (r?.kind === "shared" && r.which === "Rc") return "it has no value equality; 'Rc.ptrEq(a, b)' tells whether two Rcs share one value";
     return "it has no value equality";
   }

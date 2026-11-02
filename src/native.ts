@@ -3198,6 +3198,15 @@ void fsh_rt_insp_field(fsh_insp *object, const char *key, fsh_insp *value) {
   fsh_insp_add(object, value, key);
 }
 
+// A dictionary's entry, its key known only at run time.
+void fsh_rt_insp_entry(fsh_insp *object, fsh_str *key, fsh_insp *value) {
+  char *text = fsh_rt_alloc(key->length + 1);
+  memcpy(text, key->bytes, key->length);
+  text[key->length] = 0;
+  fsh_insp_add(object, value, text);
+  fsh_rt_free(text);
+}
+
 fsh_insp *fsh_rt_insp_list(int32_t kind, int64_t size) {
   fsh_insp *v = fsh_insp_new(kind, "", 0);
   v->size = size;
