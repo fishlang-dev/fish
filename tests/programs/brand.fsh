@@ -271,3 +271,16 @@ function main() {
   const id: Id = n
 }
 // error: type 'i64' is not assignable to type 'i64 & { __brand: "Id" }'; make one with 'as i64 & { __brand: "Id" }'
+// case: brand_own_alias
+type Brand<K, T> = K & { __brand: T }
+type UserId = Brand<usize, "UserId">
+
+class Unit {
+  n = 1
+}
+
+function main() {
+  const id = 3 as UserId
+  console.log(id, new Unit().n)
+}
+// expect: 3 1

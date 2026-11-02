@@ -437,17 +437,6 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (t.name === "FixedArray") return this.fixedArray(t);
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return this.reference(t);
-    if (t.name === "Unit") {
-      const [of, text] = t.args;
-      const base = of && this.resolveType(of);
-      const powers = text?.kind === "literal" && text.value.kind === "string" ? unitPowers(text.value.value) : undefined;
-      if (t.args.length !== 2 || !isNumeric(base!) || !powers) throw new CompileError("E0116", "'Unit' takes a number type and its unit, like 'Unit<f64, \"m/s\">', the unit names with powers over at most one '/'", t.start, t.end);
-      return this.typing.unitType(base!, powers);
-    }
-    if (t.name === "Brand") {
-      if (t.args.length !== 2) throw new CompileError("E0116", "'Brand' takes the type it brands and a tag naming it, like 'Brand<usize, \"UserId\">'", t.start, t.end);
-      return this.brand(this.resolveType(t.args[0]!), this.resolveType(t.args[1]!), t.args[0]!, t.args[1]!);
-    }
     if (t.name === "never" && t.args.length === 0) return "never";
     if (t.name === "null" || t.name === "undefined") {
       if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
@@ -549,6 +538,18 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // A package's interface or class is a JS handle of its shape.
     if (trait?.js) return this.typing.blockType("JsValue", this.interfaceOf(trait, args, t));
     if (trait) return this.interfaceOf(trait, args.map((t) => this.typing.heldArgument(t)), t);
+    // Brands and units, unless the program declares its own of the name.
+    if (t.name === "Unit") {
+      const [of, text] = t.args;
+      const base = of && args[0];
+      const powers = text?.kind === "literal" && text.value.kind === "string" ? unitPowers(text.value.value) : undefined;
+      if (t.args.length !== 2 || !isNumeric(base!) || !powers) throw new CompileError("E0116", "'Unit' takes a number type and its unit, like 'Unit<f64, \"m/s\">', the unit names with powers over at most one '/'", t.start, t.end);
+      return this.typing.unitType(base!, powers);
+    }
+    if (t.name === "Brand") {
+      if (t.args.length !== 2) throw new CompileError("E0116", "'Brand' takes the type it brands and a tag naming it, like 'Brand<usize, \"UserId\">'", t.start, t.end);
+      return this.brand(args[0]!, args[1]!, t.args[0]!, t.args[1]!);
+    }
     // TypeScript's utility types, unless the program declares its own of the name.
     const utility = UTILITIES.get(t.name);
     if (utility) {
@@ -570,7 +571,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       if (args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it gives, like '${t.name}<i64>'`, t.start, t.end);
       return t.name === "Iterable" ? this.typing.iterableInterface(args[0]!) : this.typing.generatorInterface(args[0]!);
     }
-    throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...ITERATORS, ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
+    throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "Brand", "Unit", "never", ...ITERATORS, ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
   }
 
   // TypeScript's brand idiom, `usize & { readonly __brand: "X" }`: a primitive and an object of
@@ -651,6 +652,10 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // types as a side distributes, as in TypeScript: `A & (B | C)` is `(A & B) | (A & C)`.
   private intersection(this: Mut<this>, nodes: TypeNode[]): Type {
     const resolved = nodes.map((node) => this.resolveType(node));
+    // A generic alias checked before any use, as `type Brand<K, T> = K & { __brand: T }`, is
+    // known only per use.
+    const open = this.host.resolverState.deferring > 0 ? resolved.map((t) => openParam(this.typing, t, true)).find((t) => t) : undefined;
+    if (open) return open;
     const branded = this.brandIdiom(nodes, resolved);
     if (branded !== undefined) return branded;
     const sides = nodes.map((node, i): ObjectType | InterfaceType | UnionType => {
@@ -1245,7 +1250,7 @@ export function collection(typing: Typing, key: Type, value: Type, set: boolean,
 
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Brand", "Unit", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

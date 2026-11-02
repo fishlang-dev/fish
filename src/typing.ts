@@ -148,11 +148,11 @@ export type Hole = "string" | Numeric;
 
 // The powers of each base unit a unit's text writes, as `"kg*m/s^2"` does: names with integer
 // powers, multiplied with `*`, over at most one `/`. Undefined for text of another form.
-export function unitPowers(text: string): Record<string, number> | undefined {
+export function unitPowers(text: string): Record<string, i64> | undefined {
   const [top, bottom, extra] = text.split("/");
   if (extra !== undefined) return undefined;
-  const powers: Record<string, number> = {};
-  const add = (part: string, sign: number): boolean => {
+  const powers: Record<string, i64> = {};
+  const add = (part: string, sign: i64): boolean => {
     if (part.trim() === "1") return true;
     for (const factor of part.split("*")) {
       const m = /^\s*([A-Za-z_]\w*)\s*(?:\^\s*(-?\d+))?\s*$/.exec(factor);
@@ -165,7 +165,7 @@ export function unitPowers(text: string): Record<string, number> | undefined {
 }
 
 // A unit's text in one form for each unit: names in order, positive powers over negative ones.
-export function unitText(powers: Record<string, number>): string {
+export function unitText(powers: Record<string, i64>): string {
   const names = Object.keys(powers).sort();
   const part = (ns: string[]) => ns.map((n) => (Math.abs(powers[n]!) === 1 ? n : `${n}^${Math.abs(powers[n]!)}`)).join("*");
   const [top, bottom] = [names.filter((n) => powers[n]! > 0), names.filter((n) => powers[n]! < 0)];
@@ -178,7 +178,7 @@ export function unitText(powers: Record<string, number>): string {
 // TypeScript's `B & { readonly f?: "X" }` is. `field` is that idiom's property, kept for display.
 // A unit is a numeric brand whose `unit` maps each base unit to its power, which `*` and `/`
 // combine.
-export type BrandRecord = { kind: "brand"; base: Type; tag: Type; loose?: true; field?: string; unit?: Record<string, number>; fields: Field[] };
+export type BrandRecord = { kind: "brand"; base: Type; tag: Type; loose?: true; field?: string; unit?: Record<string, i64>; fields: Field[] };
 export type BrandType = TypeId<BrandRecord>;
 
 // The texts a template's holes take in `s`, as TypeScript matches: each hole but the last takes
@@ -864,7 +864,7 @@ export class Typing {
   }
 
   // A unit over a numeric base, or the base alone when no unit is left, as `m / m` leaves none.
-  unitType(this: Mut<this>, base: Type, powers: Record<string, number>): Type {
+  unitType(this: Mut<this>, base: Type, powers: Record<string, i64>): Type {
     const names = Object.keys(powers).filter((n) => powers[n] !== 0).sort();
     if (names.length === 0) return base;
     const unit = Object.fromEntries(names.map((n) => [n, powers[n]!]));
@@ -878,7 +878,7 @@ export class Typing {
   }
 
   private brands = new Map<string, BrandType>();
-  brandType(this: Mut<this>, base: Type, tag: Type, how: { loose?: true; field?: string; unit?: Record<string, number> } = {}): BrandType {
+  brandType(this: Mut<this>, base: Type, tag: Type, how: { loose?: true; field?: string; unit?: Record<string, i64> } = {}): BrandType {
     const key = `brand ${this.keyOf(base)} ${this.keyOf(tag)} ${how.loose ? "?" : ""}${how.field ?? ""} ${how.unit ? JSON.stringify(how.unit) : ""}`;
     let t = this.brands.get(key);
     if (!t) {
