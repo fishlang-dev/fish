@@ -2147,7 +2147,7 @@ export class Expressions implements Union {
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
-    if (["at", "find", "filter", "slice", "concat", "fill", "entries", "values"].includes(callee.name) || (callee.name === "reduce" && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
+    if (["at", "find", "findLast", "filter", "slice", "concat", "fill", "entries", "values", "copyWithin", ...COPYING_METHODS].includes(callee.name) || ((callee.name === "reduce" || callee.name === "reduceRight") && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
     if (callee.name === "flat" && this.isArray(this.typing.lower(this.typing.rec(array).element))) this.clonable(this.typing.rec(this.typing.lower(this.typing.rec(array).element) as ArrayType).element, callee, "flat");
     // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
@@ -2162,14 +2162,15 @@ export class Expressions implements Union {
       if (e.args.length > most) throw new CompileError("E0504", most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
       return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] }));
     }
-    if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
+    if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"].includes(callee.name)) {
       throw new CompileError("E0211", `'${callee.name}' changes its array, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
     }
     const held = this.types.get(callee.object)!;
     if (this.isRefType(held)) this.coercions.set(callee.object, array);
     if (CALLBACK_METHODS.has(callee.name)) return this.callbackCall(e, callee, array);
     if (READING_METHODS.has(callee.name)) return this.readingCall(e, callee, array);
-    if (callee.name === "sort") return this.sortCall(e, callee, array);
+    if (callee.name === "sort" || callee.name === "toSorted") return this.sortCall(e, callee, array);
+    if (COPYING_METHODS.has(callee.name)) return this.copyingCall(e, callee, array);
     // `at(i)`: a clone of the element at a position counted from either end, or nothing.
     if (callee.name === "at") {
       if (e.args.length !== 1) throw new CompileError("E0504", "'at' takes a position, like 'at(-1)' for the last element", e.start, e.end);
@@ -2197,7 +2198,7 @@ export class Expressions implements Union {
   // clone of the first element.
   private callbackCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
-    const reducing = name === "reduce";
+    const reducing = name === "reduce" || name === "reduceRight";
     if (reducing ? e.args.length < 1 || e.args.length > 2 : e.args.length !== 1) {
       throw new CompileError("E0506", `'${name}' takes ${reducing ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'"}`, e.start, e.end);
     }
@@ -2228,45 +2229,48 @@ export class Expressions implements Union {
     if (PREDICATES.has(name) && gives !== "boolean") {
       throw new CompileError("E0506", `'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'reduce''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
+    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'${name}''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     if (name === "map" && (gives === "void" || this.typing.holdsRef(gives))) throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.typing.show(gives)}'`, callback.start, callback.end);
     const many = this.typing.lower(gives);
     if (name === "flatMap" && (typeof many === "string" || this.typing.rec(many).kind !== "array")) {
       throw new CompileError("E0506", `'flatMap''s callback gives an array for each element, whose elements make up the result; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    const type = name === "map" ? this.typing.arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" ? this.typing.unionType([this.typing.rec(array).element, "null"])
-      : name === "findIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
+    const type = name === "map" ? this.typing.arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" || name === "findLast" ? this.typing.unionType([this.typing.rec(array).element, "null"])
+      : name === "findIndex" || name === "findLastIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
     return { type, what: `'${name}'` };
   }
 
   // `sort()` orders numbers numerically and strings by UTF-16 code units; `sort(compare)` by
   // the sign of what the comparator gives for two elements. Stable, and in place, so it gives
   // nothing.
+  // `toSorted` checks as `sort` does, and gives the sorted copy.
   private sortCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
-    if (e.args.length > 1) throw new CompileError("E0506", "'sort' takes an optional comparator like '(a, b) => a - b'", e.start, e.end);
-    if (!this.place(callee.object)) throw new CompileError("E0212", "'sort' sorts its array in place, so call it on a variable or a field", callee.start, callee.end);
-    this.changeable(callee.object, "sort");
-    const what = "'sort', which sorts its array in place,";
+    const name = callee.name;
+    const copying = name === "toSorted";
+    if (e.args.length > 1) throw new CompileError("E0506", `'${name}' takes an optional comparator like '(a, b) => a - b'`, e.start, e.end);
+    if (!copying && !this.place(callee.object)) throw new CompileError("E0212", "'sort' sorts its array in place, so call it on a variable or a field", callee.start, callee.end);
+    if (!copying) this.changeable(callee.object, "sort");
+    const gives: { type: Type; what: string } = { type: copying ? array : "void", what: copying ? "'toSorted'" : "'sort', which sorts its array in place," };
     let compare = e.args[0];
     if (!compare) {
       const element = this.typing.lower(this.typing.rec(array).element);
       if (!isNumeric(element) && element !== "string") {
-        throw new CompileError("E0506", `'sort()' without a comparator orders numbers and strings, not '${this.typing.show(this.typing.rec(array).element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
+        throw new CompileError("E0506", `'${name}()' without a comparator orders numbers and strings, not '${this.typing.show(this.typing.rec(array).element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
       }
-      return { type: "void", what };
+      return gives;
     }
     compare = this.namedFunction(compare);
-    if (compare.kind !== "arrow") throw new CompileError("E0506", "'sort' takes a comparator written in place, like '(a, b) => a - b', or a function by name", compare.start, compare.end);
-    if (compare.params.length > 2) throw new CompileError("E0506", "'sort' passes its comparator two elements", compare.params[2]!.start, compare.params[2]!.end);
+    if (compare.kind !== "arrow") throw new CompileError("E0506", `'${name}' takes a comparator written in place, like '(a, b) => a - b', or a function by name`, compare.start, compare.end);
+    if (compare.params.length > 2) throw new CompileError("E0506", `'${name}' passes its comparator two elements`, compare.params[2]!.start, compare.params[2]!.end);
     const held = this.typing.rec(array).element;
     const element = this.typing.isCopy(held) ? held : this.typing.refType(held, false);
     this.expect(compare, this.typing.functionType(["a", "b"], [element, element], "void"));
     const called = this.value(compare);
     const c = this.recOf(called);
-    if (c?.kind !== "closure") throw new CompileError("E0506", "'sort' takes a comparator like '(a, b) => a - b'", compare.start, compare.end);
-    this.runsOften(called as ClosureType, "sort", "its comparator many times", compare);
+    if (c?.kind !== "closure") throw new CompileError("E0506", `'${name}' takes a comparator like '(a, b) => a - b'`, compare.start, compare.end);
+    this.runsOften(called as ClosureType, name, "its comparator many times", compare);
     c.params.forEach((p, i) => {
-      this.passedExactly("sort", element, p, compare.params[i], compare);
+      this.passedExactly(name, element, p, compare.params[i], compare);
     });
     const order = this.typing.lower(c.returns);
     if (isInteger(order) && !INTEGERS[order].signed) {
@@ -2275,11 +2279,32 @@ export class Expressions implements Union {
     if (!isNumeric(order)) {
       throw new CompileError("E0506", `a comparator gives a number: negative when 'a' comes first, positive when 'b' does, zero to keep their order; this one gives '${this.typing.show(c.returns)}'`, compare.start, compare.end);
     }
-    return { type: "void", what };
+    return gives;
+  }
+
+  // `toReversed()`, `toSpliced(start?, count?, ...items)` and `with(i, v)` give a copy of the
+  // array changed as `reverse`, `splice` and a write at `i` change theirs; values given move in.
+  private copyingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    const name = callee.name;
+    const element = this.typing.rec(array).element;
+    const counts: Record<string, [usize, usize, string]> = {
+      toReversed: [0, 0, "no arguments"], toSpliced: [0, Infinity, "an optional start, an optional count to remove and the values to put in their place"],
+      with: [2, 2, "a position, like 'with(-1, x)' for the last element, and the value to put there"],
+    };
+    const [least, most, takes] = counts[name]!;
+    if (e.args.length < least || e.args.length > most) throw new CompileError("E0504", `'${name}' takes ${takes}`, e.start, e.end);
+    e.args.forEach((a, i) => {
+      const target = i === 0 || (i === 1 && name === "toSpliced") ? "i64" : element;
+      this.expect(a, target);
+      const given = this.value(a);
+      this.coerce(a, given, target, `argument of type '${this.typing.show(given)}' is not assignable to parameter of type '${this.typing.show(target)}'`);
+    });
+    return { type: array, what: `'${name}'` };
   }
 
   // `shift` moves the first element out; `unshift` moves values in at the front; `splice`
-  // moves a run out and values in where it was; `reverse` and `fill` change the array in place.
+  // moves a run out and values in where it was; `reverse`, `fill` and `copyWithin` change the
+  // array in place.
   // What they give, JavaScript's new length for `unshift` and the array itself for `reverse`
   // and `fill`, they don't.
   private changingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
@@ -2299,6 +2324,7 @@ export class Expressions implements Union {
     const counts: Record<string, [usize, usize, string]> = {
       shift: [0, 0, "no arguments"], reverse: [0, 0, "no arguments"], unshift: [0, Infinity, "the values to put at the front"],
       splice: [1, Infinity, "a start, an optional count to remove and the values to put in their place"], fill: [1, 3, "a value and an optional start and end"],
+      copyWithin: [2, 3, "a position to copy to, a start and an optional end"],
       reserve: [1, 1, "a count of elements to make room for"], shrinkToFit: [0, 0, "no arguments"],
     };
     const [least, most, takes] = counts[name]!;
@@ -2306,7 +2332,7 @@ export class Expressions implements Union {
     if (name === "unshift") e.args.forEach(element);
     if (name === "splice") e.args.forEach((a, i) => (i < 2 ? position(a) : element(a)));
     if (name === "fill") e.args.forEach((a, i) => (i === 0 ? element(a) : position(a)));
-    if (name === "reserve") position(e.args[0]!);
+    if (name === "reserve" || name === "copyWithin") e.args.forEach(position);
     const what = `'${name}', which changes its array in place,`;
     if (name === "shift") return { type: this.typing.unionType([this.typing.rec(array).element, "null"]), what: "'shift'" };
     if (name === "splice") return { type: array, what: "'splice'" };
@@ -4401,7 +4427,7 @@ export class Expressions implements Union {
     if (lent && gives !== "boolean") {
       throw new CompileError("E0506", `'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'reduce''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
+    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'${name}''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     if (name === "map" && (gives === "void" || this.typing.holdsRef(gives))) throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.typing.show(gives)}'`, callback.start, callback.end);
     let target = GENERATOR_HELPERS[name]!;
     if (name === "flatMap") {
@@ -7297,18 +7323,20 @@ const stringMethods = (typing: Typing): Record<string, [Type[], Type, usize]> =>
 const article = (name: string) => `${/^[aeiou]/i.test(name) ? "an" : "a"} '${name}'`;
 
 // The methods that run a callback on each element.
-const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex"]);
+const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex", "findLast", "findLastIndex", "reduceRight"]);
 // Generators' iterator helpers, and the std function each calls.
 const GENERATOR_HELPERS: Record<string, string> = {
   map: "iter map", filter: "iter filter", take: "iter take", drop: "iter drop", flatMap: "iter flat map",
   reduce: "iter reduce", toArray: "array collect", forEach: "iter for each", some: "iter some", every: "iter every", find: "iter find",
 };
 // The callback methods whose callback decides yes or no.
-const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
+const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex", "findLast", "findLastIndex"]);
 // The methods that read an array's elements by value.
 const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "slice", "concat", "flat"]);
 // The methods that change an array in place, beside push, pop and sort.
-const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
+// The methods giving a changed copy of the array, leaving it as it is.
+const COPYING_METHODS = new Set(["toReversed", "toSorted", "toSpliced", "with"]);
+const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"]);
 // The methods giving an iterator over an array, as generators in the prelude.
 const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
 // `u8`'s statics decoding text into bytes, and the prelude function each calls.
@@ -7320,7 +7348,7 @@ const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "
 const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
 const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
-const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
+const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...COPYING_METHODS, ...CHANGING_METHODS]);
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
 export function indexText(e: Expr): string {

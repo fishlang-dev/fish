@@ -1398,6 +1398,14 @@ void fsh_rt_panic_bounds(const char *at, int64_t length, int64_t index) {
   fsh_rt_panic(reason);
 }
 
+// The same for an index that counts back from the end when negative, shown as written.
+void fsh_rt_panic_index(const char *at, int64_t length, int64_t index) {
+  char reason[96];
+  snprintf(reason, sizeof reason, "index out of bounds: the len is %lld but the index is %lld\n", (long long)length, (long long)index);
+  fsh_panic_at(at);
+  fsh_rt_panic(reason);
+}
+
 // An assertion's panic, its message the reason; at is the "panicked at" line. The message is
 // released here, as the panic unwinds past the statement that would release it.
 void fsh_rt_panic_assert(const char *at, fsh_str *message) {

@@ -341,7 +341,7 @@ function scan(path: string, program: unknown[], note: (id: string, offset: usize
 }
 
 // The array methods that give a new array, as in `for await (const r of urls.map(fetch))`.
-const ARRAY_MAKERS = new Set(["map", "filter", "slice", "concat", "flat", "flatMap", "toSorted", "toReversed"]);
+const ARRAY_MAKERS = new Set(["map", "filter", "slice", "concat", "flat", "flatMap", "toSorted", "toReversed", "toSpliced", "with"]);
 
 // Whether an expression is an array: a literal, an array method's result, `Array.from`, or a name
 // the file declares as one. Read from syntax alone, so an array reached any other way is missed.

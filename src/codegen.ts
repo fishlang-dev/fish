@@ -84,6 +84,8 @@ function byName(lines: string[]): string[] {
 // correctly rounded ones, since libm's differ by platform and LLVM folds constants with the
 // libm of the machine compiling.
 const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt"]);
+// The array methods that are another walking from the last element back.
+const BACKWARD: Record<string, string> = { findLast: "find", findLastIndex: "findIndex", reduceRight: "reduce" };
 
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
@@ -5656,7 +5658,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // element, a copy when it copies and otherwise a pointer to it, and its index. The array is
   // only read, so its length and data are read once. `some`, `every` and `find` stop at the
   // first element that decides them.
-  function callbackLoop(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
+  function callbackLoop(e: Extract<Expr, { kind: "call" }>, written: string, array: ArrayType, at: string): string | undefined {
+    const backward = Object.hasOwn(BACKWARD, written);
+    const method = backward ? BACKWARD[written]! : written;
     const [callback, init] = e.args as [Expr, Expr | undefined];
     const element = typing.rec(array).element;
     const t = llvm(element);
@@ -5699,18 +5703,30 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nreduce of empty array with no initial value\n`)})`);
       emit("unreachable");
       startBlock(ok);
-      emit(`store ${llvm(result)} ${convert(copied(load(elementAt("0")), element), element, result)}, ptr ${out}`);
+      let start = "0";
+      if (backward) {
+        start = temp();
+        emit(`${start} = sub i64 ${length}, 1`);
+      }
+      emit(`store ${llvm(result)} ${convert(copied(load(elementAt(start)), element), element, result)}, ptr ${out}`);
       first = "1";
     }
     emit(`store i64 ${first}, ptr ${index}`);
     const [head, body, next, done] = [label(), label(), label(), label()];
     emit(`br label %${head}`);
     startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${length}`);
+    const [k, more] = [temp(), temp()];
+    emit(`${k} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${k}, ${length}`);
     emit(`br i1 ${more}, label %${body}, label %${done}`);
     startBlock(body);
+    let i = k;
+    if (backward) {
+      const last = temp();
+      i = temp();
+      emit(`${last} = sub i64 ${length}, 1`);
+      emit(`${i} = sub i64 ${last}, ${k}`);
+    }
     const slot = elementAt(i);
     const given = typing.rec(closure).params[reducing ? 1 : 0];
     const passed = given === undefined ? [] : [isRef(given) ? `ptr ${slot}` : `${llvm(given)} ${convert(copied(load(slot), element), element, given)}`];
@@ -5759,7 +5775,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (method === "map" || method === "flatMap" || method === "forEach" || reducing) emit(`br label %${next}`);
     startBlock(next);
     const after = temp();
-    emit(`${after} = add i64 ${i}, 1`);
+    emit(`${after} = add i64 ${k}, 1`);
     emit(`store i64 ${after}, ptr ${index}`);
     emit(`br label %${head}`);
     startBlock(done);
@@ -5909,9 +5925,64 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return name;
   }
 
-  // `shift`, `unshift`, `splice`, `reverse` and `fill`. Elements move in and out bitwise, through
-  // the runtime's gap and take helpers; only `fill` makes copies, each stored before the element
-  // it replaces is dropped.
+  // `toReversed`, `toSorted`, `toSpliced` and `with`: a clone of the array, changed as `reverse`,
+  // `sort`, `splice` and a write change theirs. The clone is held as a statement value until the
+  // arguments and a comparator have run, so their panics drop it; until then it is unchanged, or
+  // only permuted in its own buffer.
+  function copying(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string {
+    const element = typing.rec(array).element;
+    const t = llvm(element);
+    const [lengthAt, length] = [temp(), temp()];
+    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    emit(`${length} = load i64, ptr ${lengthAt}`);
+    // `with` checks its position, then writes over the clone's element, dropping the old one.
+    const [index, given] = method !== "with" ? [] : delivered((hand) => {
+      const [i, v] = [value(e.args[0]!), hand(owned(e.args[1]!), element)];
+      const [negative, fromEnd, k, outside, fail, ok] = [temp(), temp(), temp(), temp(), label(), label()];
+      emit(`${negative} = icmp slt i64 ${i}, 0`);
+      emit(`${fromEnd} = add i64 ${length}, ${i}`);
+      emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${i}`);
+      emit(`${outside} = icmp uge i64 ${k}, ${length}`);
+      emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
+      startBlock(fail);
+      unwinding(`call void @fsh_rt_panic_index(ptr ${cString(`panicked at ${where(e)}:\n`)}, i64 ${length}, i64 ${i})`);
+      emit("unreachable");
+      startBlock(ok);
+      return [k, v];
+    });
+    const whole = temp();
+    emit(`${whole} = load ${ARRAY}, ptr ${at}`);
+    const copy = alloca(ARRAY);
+    const kept = given === undefined ? [] : [{ v: given, type: element }];
+    pending.push(...kept);
+    const held = { v: copied(whole, array), type: array as Type };
+    emit(`store ${ARRAY} ${held.v}, ptr ${copy}`);
+    pending.push(held);
+    if (method === "toReversed") changed(e, "reverse", array, copy);
+    if (method === "toSorted") sorted(e, array, copy);
+    if (method === "toSpliced" && e.args.length > 0) {
+      const removed = changed(e, "splice", array, copy)!;
+      if (types.has(e)) dispose(removed, array);
+    }
+    pending = pending.filter((p) => p !== held && !kept.includes(p));
+    if (index !== undefined) {
+      const [dataAt, data, slot, old] = [temp(), temp(), temp(), temp()];
+      emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${copy}, i32 0, i32 0`);
+      emit(`${data} = load ptr, ptr ${dataAt}`);
+      emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${index}`);
+      emit(`${old} = load ${t}, ptr ${slot}`);
+      emit(`store ${t} ${given}, ptr ${slot}`);
+      dispose(old, element);
+    }
+    const v = temp();
+    emit(`${v} = load ${ARRAY}, ptr ${copy}`);
+    if (!types.has(e)) pending.push({ v, type: array });
+    return v;
+  }
+
+  // `shift`, `unshift`, `splice`, `reverse`, `fill` and `copyWithin`. Elements move in and out
+  // bitwise, through the runtime's gap and take helpers; only `fill` and `copyWithin` make copies,
+  // each stored before the element it replaces is dropped.
   function changed(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
     const element = typing.rec(array).element;
     const t = llvm(element);
@@ -5996,6 +6067,10 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       if (!types.has(e)) pending.push({ v, type: array });
       return v;
     }
+    if (method === "copyWithin") {
+      copiedWithin(args, element, length, at);
+      return undefined;
+    }
     // `fill`: a copy of the value in each slot of the range, then the value itself dropped.
     const given = args[0]!;
     const from = args[1] !== undefined ? position(args[1], length) : "0";
@@ -6023,6 +6098,54 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     startBlock(done);
     dispose(given, element);
     return undefined;
+  }
+
+  // `copyWithin(target, start, end?)`: a clone of each element of the range written over the
+  // element `target - start` on, which drops. Copying back to front when the range runs over its
+  // destination reads each element before it is written, as through a buffer.
+  function copiedWithin(args: string[], element: Type, length: string, at: string) {
+    const t = llvm(element);
+    const to = position(args[0]!, length);
+    const from = position(args[1]!, length);
+    const end = args[2] !== undefined ? position(args[2], length) : length;
+    const [span, room, shorter, count, after, ahead, overlaps, backward, last] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${span} = sub i64 ${end}, ${from}`);
+    emit(`${room} = sub i64 ${length}, ${to}`);
+    emit(`${shorter} = icmp slt i64 ${span}, ${room}`);
+    emit(`${count} = select i1 ${shorter}, i64 ${span}, i64 ${room}`);
+    emit(`${after} = add i64 ${from}, ${count}`);
+    emit(`${ahead} = icmp slt i64 ${from}, ${to}`);
+    emit(`${overlaps} = icmp slt i64 ${to}, ${after}`);
+    emit(`${backward} = and i1 ${ahead}, ${overlaps}`);
+    emit(`${last} = sub i64 ${count}, 1`);
+    const index = alloca("i64");
+    emit(`store i64 0, ptr ${index}`);
+    const [head, body, done] = [label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [k, more, back, j, dataAt, data, source, target, v, old, next] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${k} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${k}, ${count}`);
+    emit(`br i1 ${more}, label %${body}, label %${done}`);
+    startBlock(body);
+    emit(`${back} = sub i64 ${last}, ${k}`);
+    emit(`${j} = select i1 ${backward}, i64 ${back}, i64 ${k}`);
+    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    const [i, o] = [temp(), temp()];
+    emit(`${i} = add i64 ${from}, ${j}`);
+    emit(`${o} = add i64 ${to}, ${j}`);
+    emit(`${source} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+    emit(`${target} = getelementptr ${t}, ptr ${data}, i64 ${o}`);
+    emit(`${v} = load ${t}, ptr ${source}`);
+    const copy = copied(v, element);
+    emit(`${old} = load ${t}, ptr ${target}`);
+    emit(`store ${t} ${copy}, ptr ${target}`);
+    dispose(old, element);
+    emit(`${next} = add i64 ${k}, 1`);
+    emit(`store i64 ${next}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
   }
 
   // Where `lastIndexOf` searches back from, as an end past it: a negative position counts from
@@ -6248,6 +6371,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       return undefined;
     }
     if (callee.name === "sort") return sorted(e, type, at);
+    if (["toReversed", "toSorted", "toSpliced", "with"].includes(callee.name)) return copying(e, callee.name, type, at);
     if (callee.name === "at") return elementAt(e, type, at);
     if (callee.name === "reserve") {
       // A count below zero panics, which drops what is live here.
@@ -6259,7 +6383,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       return undefined;
     }
     if (callee.name === "concat" || callee.name === "flat") return gathered(e, callee.name, type, at);
-    if (["shift", "unshift", "splice", "reverse", "fill"].includes(callee.name)) return changed(e, callee.name, type, at);
+    if (["shift", "unshift", "splice", "reverse", "fill", "copyWithin"].includes(callee.name)) return changed(e, callee.name, type, at);
     if (["includes", "indexOf", "lastIndexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
     if (callee.name !== "pop") return callbackLoop(e, callee.name, type, at);
     const option = typing.unionType([typing.rec(type).element, "null"]);
