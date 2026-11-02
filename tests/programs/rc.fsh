@@ -244,3 +244,25 @@ function main() {
   const d: Dyn<Named> = new Tag(new Rc(1));
   console.log(d.name());
 }
+// case: rc_update_replaces_receiver
+// error: rc_update_replaces_receiver.fsh:4:21: error[E0203]: cannot mutably lend 'r' while 'r' is lent to 'update' for this call
+function main() {
+  let r = new Rc({ s: "a" + "b" });
+  r.update((v) => { r = new Rc({ s: "q" + "" }); v.s = "x" + "y"; });
+  console.log(r.s);
+}
+// case: rc_update_pops_receiver
+// error: rc_update_pops_receiver.fsh:4:26: error[E0203]: cannot mutably lend 'xs' while 'xs[...]' is lent to 'update' for this call
+function main() {
+  let xs = [new Rc({ s: "a" + "b" })];
+  xs[0]!.update((v) => { xs.pop(); v.s = "x" + "y"; });
+  console.log(xs.length);
+}
+// case: rc_update_replaces_field_receiver
+// error: rc_update_replaces_field_receiver.fsh:5:23: error[E0203]: cannot mutably lend 'h' while 'h.c' is lent to 'update' for this call
+type H = { c: Rc<{ s: string }> };
+function main() {
+  let h: H = { c: new Rc({ s: "a" + "b" }) };
+  h.c.update((v) => { h.c = new Rc({ s: "q" + "" }); v.s = "x" + "y"; });
+  console.log(h.c.s);
+}

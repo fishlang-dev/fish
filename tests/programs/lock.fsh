@@ -105,3 +105,9 @@ function main() {
   const popped = items.update((xs) => xs.pop());
   console.log(popped! - 1);
 }
+// case: lock_update_replaces_receiver
+// error: lock_update_replaces_receiver.fsh:4:21: error[E0203]: cannot mutably lend 'r' while 'r' is lent to 'update' for this call
+function main() {
+  let r = new Lock({ s: "a" + "b" });
+  r.update((v) => { r = new Lock({ s: "q" + "" }); v.s = "x" + "y"; });
+}

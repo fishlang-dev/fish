@@ -564,7 +564,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const changes = builtin && (generator(object) || (array(object) && ARRAY_CHANGES.has(method)) || (mapped(object) && MAP_CHANGES.has(method)));
           // Any other array, Map or Set method reads it, lent shared while its callback runs, as
           // a string is while a regex goes through it.
-          const reads = builtin && !changes && (array(object) || mapped(object) || regexStringCalls.has(e));
+          // A shared value's, an Rc's or a lock's `update` and `read` hand their callback a pointer
+          // into the value the receiver reaches, so the callback can't replace or drop the receiver.
+          const reads = builtin && !changes && (array(object) || mapped(object) || regexStringCalls.has(e) || (locking(object) && (method === "update" || method === "read")));
           if (object && place !== undefined && (self || changes || reads)) lend(place, false, object, undefined, name, e);
           handOver(e.args, name, e);
           for (const c of captures) {
@@ -1470,6 +1472,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const t = types.get(e);
     const held = t && deref(t);
     return held !== undefined && (typing.yieldsOf(held) !== undefined || typing.yieldsOf(held, true) !== undefined);
+  }
+
+  function locking(e: Expr): boolean {
+    const t = types.get(e);
+    const r = t && record(deref(t));
+    return r?.kind === "shared" || (r?.kind === "interior" && (r.which === "Lock" || r.which === "RwLock"));
   }
 
   function mapped(e: Expr): boolean {

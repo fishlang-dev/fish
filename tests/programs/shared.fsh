@@ -240,3 +240,10 @@ function main() {
   const state = shared({ hits: 0 });
   state.hits = 1;
 }
+// case: shared_update_replaces_receiver
+// error: shared_update_replaces_receiver.fsh:4:21: error[E0203]: cannot mutably lend 'r' while 'r' is lent to 'update' for this call
+function main() {
+  let r = shared({ s: "a" + "b" });
+  r.update((v) => { r = shared({ s: "q" + "" }); v.s = "x" + "y"; });
+  console.log(r.s);
+}
