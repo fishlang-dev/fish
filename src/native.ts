@@ -3137,6 +3137,8 @@ typedef struct fsh_insp {
   // An Error's OBJECT, its text the bracketed header Node prints in place of its stack, and
   // what it is past the depth, its class's name bracketed.
   int32_t error;
+  // An OBJECT whose bracketed keys are written as they are, as Node writes keys it shows itself.
+  int32_t shown;
   char *cut;
 } fsh_insp;
 
@@ -3345,6 +3347,30 @@ static void fsh_sb_spaces(fsh_sb *b, int64_t n) {
 static char *fsh_sb_done(fsh_sb *b) {
   if (!b->p) fsh_sb_put(b, "", 0);
   return b->p;
+}
+
+// An ArrayBuffer as Node shows one: its first 100 bytes in hex, then its length.
+fsh_insp *fsh_rt_insp_buffer(const uint8_t *data, int64_t length) {
+  fsh_insp *v = fsh_rt_insp_object("ArrayBuffer");
+  v->shown = 1;
+  fsh_sb b = {0};
+  fsh_sb_str(&b, "<");
+  for (int64_t i = 0; i < length && i < 100; i++) {
+    char hex[4];
+    snprintf(hex, sizeof hex, i > 0 ? " %02x" : "%02x", data[i]);
+    fsh_sb_str(&b, hex);
+  }
+  if (length > 100) {
+    char more[64];
+    snprintf(more, sizeof more, " ... %lld more byte%s", (long long)(length - 100), length > 101 ? "s" : "");
+    fsh_sb_str(&b, more);
+  }
+  fsh_sb_str(&b, ">");
+  char *contents = fsh_sb_done(&b);
+  fsh_insp_add(v, fsh_rt_insp_text(contents), "[Uint8Contents]");
+  fsh_rt_free(contents);
+  fsh_insp_add(v, fsh_rt_insp_i64(length), "byteLength");
+  return v;
 }
 
 // An Error as Node prints one with no stack lines: its name and message, the class's name when
@@ -3706,7 +3732,11 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   char *text = v->error ? fsh_insp_indented(v->text, c->indent) : fsh_insp_copy(v->text);
   int64_t room = strlen(text) + 40;
   char *open = fsh_rt_alloc(room), *cut = fsh_rt_alloc(room);
-  if (v->kind == FSH_INSP_ARRAY) {
+  if (v->kind == FSH_INSP_ARRAY && v->length) {
+    // A typed array, under its name.
+    snprintf(open, room, "%s(%lld) [", text, (long long)size);
+    snprintf(cut, room, "[%s]", text);
+  } else if (v->kind == FSH_INSP_ARRAY) {
     strcpy(open, "[");
     strcpy(cut, "[Array]");
   } else if (v->kind == FSH_INSP_OBJECT) {
@@ -3768,7 +3798,7 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     int64_t length = v->lengths[i];
     // An own key named __proto__ is bracketed, as Node writes it apart from the prototype.
     if (length == 9 && strcmp(key, "__proto__") == 0) fsh_sb_str(&b, "['__proto__']");
-    else if ((fsh_insp_identifier(key) && (int64_t)strlen(key) == length) || (v->error && key[0] == '[')) fsh_sb_str(&b, key);
+    else if ((fsh_insp_identifier(key) && (int64_t)strlen(key) == length) || ((v->error || v->shown) && key[0] == '[')) fsh_sb_str(&b, key);
     else fsh_insp_quote(&b, key, length);
     fsh_sb_str(&b, ": ");
     fsh_sb_str(&b, x);
