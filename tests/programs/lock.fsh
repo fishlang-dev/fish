@@ -111,3 +111,26 @@ function main() {
   let r = new Lock({ s: "a" + "b" });
   r.update((v) => { r = new Lock({ s: "q" + "" }); v.s = "x" + "y"; });
 }
+// case: lock_update_through_returned_reference
+// error: lock_update_through_returned_reference.fsh:7:7: error[E0203]: cannot mutably lend 'l' while 'l' is lent to 'update' for this call
+function pick(l: Ref<Lock<string[]>>): Ref<Lock<string[]>> { return l; }
+function main() {
+  let l = new Lock<string[]>(["a" + "b", "c" + "d"]);
+  pick(l).update((v) => {
+    for (const x of v) {
+      l = new Lock<string[]>(["q" + "r"]);
+      console.log(x);
+    }
+  });
+}
+// case: lock_update_through_method_reference
+// error: lock_update_through_method_reference.fsh:8:29: error[E0203]: cannot mutably lend 'h' while 'h' is lent to 'update' for this call
+class H {
+  l: Lock<string[]> = new Lock<string[]>(["a" + "b"]);
+  first(): Ref<Lock<string[]>> { return this.l; }
+}
+function main() {
+  let h = new H();
+  h.first().update((v) => { h = new H(); v.push("x" + "y"); });
+  console.log(h.l.update((v) => v.length));
+}

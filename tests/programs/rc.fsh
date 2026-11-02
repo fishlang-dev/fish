@@ -405,3 +405,13 @@ async function main() {
     v.n++;
   });
 }
+// case: rc_read_through_returned_reference
+// error: rc_read_through_returned_reference.fsh:6:5: error[E0203]: cannot mutably lend 'r' while 'r' is lent to 'read' for this call
+function pick(l: Ref<Rc<string[]>>): Ref<Rc<string[]>> { return l; }
+function main() {
+  let r = new Rc<string[]>(["a" + "b", "c" + "d"]);
+  pick(r).read((v) => {
+    r = new Rc<string[]>(["q" + "r"]);
+    console.log(v[0]!, v.length);
+  });
+}

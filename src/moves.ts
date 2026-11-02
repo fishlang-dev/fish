@@ -514,9 +514,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // below zero and between whole numbers, one per capture, so no other loan can replace
           // these.
           const built = instance.envs?.get(e);
-          const lent = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias: arenas.localOf(alias), changes: instance.changed?.has(alias) === true }))
+          const using = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias: arenas.localOf(alias), changes: instance.changed?.has(alias) === true }))
             : built ? built.env.map((alias, i) => ({ alias: arenas.localOf(alias), changes: arenas.instanceOf(built.of).changed?.has([...arenas.instanceOf(built.of).captures!.keys()][i]!) === true })) : [];
-          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start + (i + 1) / 8192), at: { id: nextId(ids), kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
+          const captures = using.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start + (i + 1) / 8192), at: { id: nextId(ids), kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
           for (const c of captures) {
             try {
               usable(c.at, String(c.alias.id));
@@ -568,6 +568,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // into the value the receiver reaches, so the callback can't replace or drop the receiver.
           const reads = builtin && !changes && (array(object) || mapped(object) || regexStringCalls.has(e) || (locking(object) && (method === "update" || method === "read")));
           if (object && place !== undefined && (self || changes || reads)) lend(place, false, object, undefined, name, e);
+          // A receiver that is a reference a call gave lends again what that reference borrows
+          // from, for the whole call, so its callback can't replace what the reference reaches.
+          const origins = object && place === undefined && (self || changes || reads) ? lent(object) : [];
+          origins.forEach(([p, part], i) => lend(p, false, part, undefined, name, e, part.start, partKey(part, i)));
           handOver(e.args, name, e);
           for (const c of captures) {
             if (!c.changes || !state) continue;
@@ -581,6 +585,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (object && place !== undefined && self?.mutable && state) {
             state.loans.delete(object.start);
             lend(place, true, object, undefined, name, e, e.end - 1);
+          }
+          const loans = state?.loans;
+          if (self?.mutable && loans) {
+            origins.forEach(([p, part, mutable], i) => {
+              loans.delete(partKey(part, i));
+              lend(p, mutable, part, undefined, name, e, e.end - 1, partKey(part, i));
+            });
           }
           // A method that changes its object, or a base's constructor, may keep what is lent,
           // when the object has somewhere to keep a reference.

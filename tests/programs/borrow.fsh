@@ -775,3 +775,24 @@ function main() {
   console.log(r as i32);
 }
 // error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
+// case: borrow_callback_replaces_returned_reference_origin
+// error: borrow_callback_replaces_returned_reference_origin.fsh:5:29: error[E0203]: cannot mutably lend 'xs' while 'xs' is lent to 'forEach' for this call
+function pick(l: Ref<string[]>): Ref<string[]> { return l; }
+function main() {
+  let xs = ["a" + "b", "c" + "d"];
+  pick(xs).forEach((x) => { xs = ["q" + "r"]; console.log(x); });
+}
+// case: borrow_mut_method_through_returned_reference
+// expect: ab 1
+// expect: 4
+class C { n: i64 = 0; add(this: Mut<this>, k: i64) { this.n += k; } get(): i64 { return this.n; } }
+function pick(c: Mut<C>): Mut<C> { return c; }
+function look(l: Ref<string[]>): Ref<string[]> { return l; }
+function main() {
+  let xs = ["a" + "b"];
+  let c = new C();
+  pick(c).add(2);
+  pick(c).add(c.n);
+  look(xs).forEach((x) => console.log(x, xs.length));
+  console.log(c.get());
+}
