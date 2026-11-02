@@ -4432,6 +4432,9 @@ class Conn {
       saltBytes = [];
     }
     if (!serverNonce.startsWith(nonce) || saltBytes.length === 0 || rounds <= 0) throw new IoError("the Postgres server sent a malformed SCRAM challenge");
+    // Postgres's default is 4096. Ten million is far above any server's setting yet still under a
+    // second of hashing; a count near INT_MAX would hold a worker thread for minutes, uncancellably.
+    if (rounds > 10000000) throw new IoError("the Postgres server asks for " + String(rounds) + " SCRAM iterations, more than the 10000000 Fish allows, as hashing that many would hold a thread for minutes");
     const salted = digest(2, new TextEncoder().encode(password), saltBytes, rounds);
     const clientKey = hmac(salted, "Client Key");
     const none: u8[] = [];

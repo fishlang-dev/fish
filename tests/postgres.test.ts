@@ -121,10 +121,25 @@ async function main(): Promise<void> throws IoError | AbortError | TypeError | P
 }
 `;
 
-let binaries: { auth: string; queries: string; concurrent: string };
+// A COPY FROM STDIN, then a statement on the same connection.
+const COPY = `import { Pool, PostgresError } from "postgres";
+
+async function main(): Promise<void> throws IoError | AbortError | TypeError | PostgresError {
+  const pool = await Pool.connect(process.argv[2]);
+  try {
+    await pool.execute("copy");
+  } catch (e) {
+    if (e instanceof PostgresError) console.log("PostgresError", e.code, e.message);
+  }
+  const after = await pool.execute("after");
+  console.log("after", after);
+}
+`;
+
+let binaries: { auth: string; queries: string; concurrent: string; copy: string };
 beforeAll(async () => {
-  const [auth, queries, concurrent] = await Promise.all([build("auth", AUTH), build("queries", QUERIES), build("concurrent", CONCURRENT)]);
-  binaries = { auth, queries, concurrent };
+  const [auth, queries, concurrent, copy] = await Promise.all([build("auth", AUTH), build("queries", QUERIES), build("concurrent", CONCURRENT), build("copy", COPY)]);
+  binaries = { auth, queries, concurrent, copy };
 });
 
 test("a user file named like a std module gets no std allowances", async () => {
@@ -162,9 +177,11 @@ const errorResponse = (code: string, text: string, detail?: string) =>
 
 // What a statement gives: columns as name and type OID, rows as text or null, and its tag; or the
 // error it raises; or the connection dropped. status is the transaction status after it.
-type Answer = { columns?: [string, number][]; rows?: (string | null)[][]; tag?: string; error?: [string, string, string?]; drop?: boolean; status?: string; delay?: number };
+// raw is sent in place of every reply, for servers that misbehave.
+type Answer = { columns?: [string, number][]; rows?: (string | null)[][]; tag?: string; error?: [string, string, string?]; drop?: boolean; status?: string; delay?: number; raw?: Buffer };
 type Seen = { conn: number; sql: string; params: (string | null)[] } | { conn: number; simple: string };
-type Script = { auth: "trust" | "cleartext" | "md5" | "scram"; user?: string; password?: string; forgeSignature?: boolean; answer?: (sql: string, params: (string | null)[]) => Answer };
+// challenge, given the client's nonce, replaces the SCRAM server-first message a server would send.
+type Script = { auth: "trust" | "cleartext" | "md5" | "scram"; user?: string; password?: string; forgeSignature?: boolean; challenge?: (nonce: string) => string; answer?: (sql: string, params: (string | null)[]) => Answer };
 
 // A server for one test: each connection is authenticated as the script says, then each Sync
 // answers the statement parsed and bound before it.
@@ -198,7 +215,7 @@ function fakeServer(script: Script) {
       expect(initial.startsWith("n,,n=,r=")).toBe(true);
       const first = initial.slice(3);
       const salt = randomBytes(16);
-      const serverFirst = `r=${first.slice(5)}server-nonce,s=${salt.toString("base64")},i=4096`;
+      const serverFirst = script.challenge?.(first.slice(5)) ?? `r=${first.slice(5)}server-nonce,s=${salt.toString("base64")},i=4096`;
       st.scram = { first, serverFirst, salted: pbkdf2Sync(password, salt, 4096, 32, "sha256") };
       return s.write(message("R", int32(11), Buffer.from(serverFirst)));
     }
@@ -226,6 +243,7 @@ function fakeServer(script: Script) {
     if (answer.delay) await Bun.sleep(answer.delay);
     stats.busy--;
     if (answer.drop) return s.end();
+    if (answer.raw) return void s.write(answer.raw);
     const out: Buffer[] = [message("1"), message("2")];
     if (answer.error) out.push(errorResponse(...answer.error));
     else {
@@ -259,7 +277,10 @@ function fakeServer(script: Script) {
         if (length > 0) at += length;
       }
     } else if (kind === "S") await onSync(s);
-    else if (kind === "Q") {
+    else if (kind === "f") {
+      seen.push({ conn: st.id, simple: `CopyFail: ${body.toString("utf8", 0, body.length - 1)}` });
+      s.write(Buffer.concat([errorResponse("57014", "COPY from stdin failed"), ready()]));
+    } else if (kind === "Q") {
       const sql = body.toString("utf8", 0, body.length - 1);
       seen.push({ conn: st.id, simple: sql });
       s.write(Buffer.concat([message("C", cstring(sql)), ready()]));
@@ -515,3 +536,29 @@ test.skipIf(!PG_BIN)("a real Postgres over TLS, its certificate verified against
   const ca = join(import.meta.dir, "fixtures", "tls", "ca.pem");
   expect(await run(binary, [`${real!.url}?sslmode=require&sslrootcert=${encodeURIComponent(ca)}`, "tls"])).toBe("ssl true\n");
 });
+
+// A server that misbehaves is refused with an error, never trusted, panicked on or waited on.
+const PRESENT = message("T", int16(1), cstring("who"), int32(0), int16(0), int32(25), int16(-1), int32(-1), int16(0));
+const lengthOnly = (kind: string, length: number) => {
+  const head = Buffer.alloc(5);
+  head.write(kind, 0, "latin1");
+  head.writeInt32BE(length, 1);
+  return head;
+};
+const HOSTILE: [string, Partial<Script>, string][] = [
+  ["too many SCRAM iterations", { auth: "scram", challenge: (nonce) => `r=${nonce}x,s=c2FsdA==,i=2147483647` }, "IoError the Postgres server asks for 2147483647 SCRAM iterations, more than the 10000000 Fish allows, as hashing that many would hold a thread for minutes"],
+];
+for (const [what, script, said] of HOSTILE) {
+  test(`refused: ${what}`, async () => {
+    const fake = fakeServer({ auth: "trust", ...script });
+    // A client that waits on a server that sent all it will gets a closed connection instead.
+    const closing = setTimeout(() => fake.server.stop(true), 3000);
+    try {
+      expect(await run(binaries.auth, [fake.url()])).toBe(`${said}\n`);
+    } finally {
+      clearTimeout(closing);
+      fake.server.stop(true);
+    }
+  }, 15_000);
+}
+
