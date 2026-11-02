@@ -1,13 +1,13 @@
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId } from "./arenas.ts";
 import { holdsNode, type Instance } from "./check.ts";
-import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { declareClass, inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
-import { INTERIORS, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
 import { WeakNodeMap, NodeMap, NodeSet, forEachChild, type AnyNode } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
@@ -525,7 +525,7 @@ export class Instancing {
       params.forEach((p, i) => bindings.set(p.name, this.typing.heldArgument(this.host.resolveType(typeArgs[i]!))));
     } else {
       const names = new Set(params.map((p) => p.name));
-      f.params.forEach((p, i) => p.type && argTypes[i] && infer(this.host.tables, p.type, argTypes[i]!, names, bindings, at));
+      f.params.forEach((p, i) => p.type && argTypes[i] && infer(this.host.tables, p.type, this.iteratesAs(p.type, argTypes[i]!, at), names, bindings, at));
       // `G extends Generator<U>` decides `U` from what `G`'s generator yields.
       for (const p of params) {
         const c = p.constraint;
@@ -578,7 +578,7 @@ export class Instancing {
     ]);
     for (const [i, bound] of this.implicitOf(f)) {
       const meant = this.rebound(bound, decided);
-      own.set(`#${i}`, this.implicitArgument(args[i]!, argTypes[i]!, meant, this.host.instancingState.lent.get(f.bodyId)!.has(i)));
+      own.set(`#${i}`, this.implicitArgument(args[i]!, argTypes[i]!, meant, this.host.instancingState.lent.get(f.bodyId)!.get(i)));
       const given = argTypes[i]!;
       const r = typeof given === "string" ? undefined : this.typing.rec(given);
       const held = r?.kind === "ref" ? r.to : given;
@@ -710,6 +710,21 @@ export class Instancing {
     return new Map(made);
   }
 
+  // What a class argument to an `Iterable<T>` parameter, or a reference to one, gives to infer `T`
+  // from: what its `[Symbol.iterator]` method gives, which inference alone can't read.
+  private iteratesAs(this: Mut<this>, node: TypeNode, t: Type, at: Span): Type {
+    const written = node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args.length === 1 ? node.args[0]! : node;
+    if (written.kind !== "ref" || written.name !== "Iterable") return t;
+    const r = typeof t === "string" ? undefined : this.typing.rec(t);
+    const held = r?.kind === "ref" ? r.to : t;
+    if (this.typing.recOf(held)?.kind !== "class") return t;
+    const members = this.host.members();
+    const method = inherited(members.arenas, members.classOf(held as ClassType), "methods", ITERATOR);
+    if (!method) return t;
+    const gives = members.returnOf(method, at);
+    return r?.kind === "ref" ? this.typing.refType(gives, r.mutable) : gives;
+  }
+
   // A parameter typed with an interface or an object type is an implicit type parameter, so
   // each concrete argument type gets its own instance instead of being copied down. A
   // parameter property and a setter's parameter keep their type, since it is a field's, save a
@@ -752,9 +767,15 @@ export class Instancing {
   // What an implicit type parameter stands for in a call: the argument's own type, which must
   // satisfy the parameter's. A fresh object literal takes the declared object type instead, so
   // it gets TypeScript's excess property check.
-  private implicitArgument(arg: Expr, type: Type, bound: Bound, borrowed: boolean): Type {
+  private implicitArgument(arg: Expr, type: Type, bound: Bound, lent: RefType | undefined): Type {
+    const borrowed = lent !== undefined;
     // A borrowed argument stands for what it is, or what it refers to.
     const given = typeof type === "string" ? undefined : this.typing.rec(type);
+    // Looping over a generator advances it, which a shared reference to one can't.
+    const referred = given?.kind === "ref" ? given.to : type;
+    if (lent && !this.typing.rec(lent).mutable && this.typing.iterableElement(bound) !== undefined && this.typing.recOf(this.typing.lower(referred))?.kind === "generator") {
+      throw new CompileError("E0206", `an 'Iterable' parameter is looped over, which advances a generator, so a generator passed by reference needs a 'Mut' parameter, not a 'Ref'`, arg.start, arg.end);
+    }
     if (borrowed && given?.kind === "ref") type = given.to;
     else if (given?.kind === "ref") {
       throw new CompileError("E0202", "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);

@@ -203,7 +203,7 @@ function main() {
   console.log(total(e));
   const t = new Table();
   for (const k of t) console.log(k);
-  console.log(size<string>(t), size([1, 2, 3]), size(new Map<string, i64>([["a", 1]])), size<i64>(e));
+  console.log(size(t), size([1, 2, 3]), size(new Map<string, i64>([["a", 1]])), size(e));
 }
 // expect: 6
 // expect: x
@@ -245,3 +245,108 @@ function main() {
 }
 // expect: a
 // expect: b
+// case: iterable_generic_class_in_generic_function
+class Wrap<T> {
+  items: T[] = [];
+  push(this: Mut<this>, x: T) { this.items.push(x); }
+  *[Symbol.iterator](): Generator<T> { for (const x of this.items) yield x.clone(); }
+}
+function cnt<T>(w: Ref<Wrap<T>>): i64 { let n = 0; for (const _ of w) n++; for (const _ of w[Symbol.iterator]()) n++; return n; }
+function main() {
+  let a = new Wrap<i64>(); a.push(1);
+  console.log(cnt(a));
+}
+// expect: 2
+// case: generator_method_of_generic_class_in_generic_function
+class Wrap<T> {
+  items: T[] = [];
+  push(this: Mut<this>, x: T) { this.items.push(x); }
+  *each(): Generator<T> { for (const x of this.items) yield x.clone(); }
+}
+function cnt<T>(w: Ref<Wrap<T>>): i64 { let n = 0; for (const _ of w.each()) n++; return n; }
+function main() {
+  let a = new Wrap<i64>(); a.push(1);
+  console.log(cnt(a));
+}
+// expect: 1
+// case: iterable_parameter_owns_each_value
+class P { n: i64 = 0; constructor(n: i64) { this.n = n; } }
+class Ps { *[Symbol.iterator](): Generator<P> { yield new P(4); } }
+function collect(xs: Iterable<P>): P[] {
+  let out: P[] = [];
+  for (const x of xs) out.push(x);
+  return out;
+}
+function* g(): Generator<P> { yield new P(3); }
+function main() {
+  console.log(collect(g()));
+  const ps = new Ps();
+  console.log(collect(ps));
+}
+// expect: [ P { n: 3 } ]
+// expect: [ P { n: 4 } ]
+// case: iterable_infers_from_class
+class Stack<T> {
+  items: T[] = [];
+  push(this: Mut<this>, x: T) { this.items.push(x); }
+  *[Symbol.iterator](): Generator<T> { for (const x of this.items) yield x.clone(); }
+}
+class Rev<T> {
+  items: T[] = [];
+  push(this: Mut<this>, x: T) { this.items.push(x); }
+  *[Symbol.iterator](): Generator<T> { for (let i = this.items.length; i > 0; i--) yield this.items[i-1]!.clone(); }
+}
+class Base { *[Symbol.iterator](): Generator<string> { yield "base"; } }
+class Over extends Base { *[Symbol.iterator](): Generator<string> { yield "over"; } }
+function show<T>(xs: Ref<Iterable<T>>) {
+  for (const x of xs) console.log(x);
+}
+function* g(): Generator<i64> { yield 7; }
+function main() {
+  let a = new Stack<i64>(); a.push(1); a.push(2);
+  let s = new Stack<string>(); s.push("x"); s.push("y");
+  let r = new Rev<i64>(); r.push(1); r.push(2);
+  show(a); show(s); show(r);
+  show([3, 4]); show(new Map<string, i64>([["k", 1], ["j", 2]])); show("a😀b"); show(new Set<i64>([9, 8]));
+  const b = new Base(); const o = new Over(); show(b); show(o);
+
+
+
+
+}
+// expect: 1
+// expect: 2
+// expect: x
+// expect: y
+// expect: 2
+// expect: 1
+// expect: 3
+// expect: 4
+// expect: [ 'k', 1 ]
+// expect: [ 'j', 2 ]
+// expect: a
+// expect: 😀
+// expect: b
+// expect: 9
+// expect: 8
+// expect: base
+// expect: over
+// case: iterable_string_literals
+type Dir = "n" | "s";
+function count(xs: Iterable<string>): i64 { let n = 0; for (const _x of xs) n++; return n; }
+function opt(xs: Iterable<i64 | null>): i64 { let n = 0; for (const _x of xs) n++; return n; }
+function main() {
+  const ds: Dir[] = ["n", "s"];
+  console.log(count(ds));
+
+
+}
+// expect: 2
+// case: iterable_ref_generator
+function* g(): Generator<i64> { yield 1; }
+function show(xs: Ref<Iterable<i64>>) { for (const x of xs) console.log(x); }
+function main() {
+  let b = g();
+  show(b);
+}
+// error: 5:8: error[E0206]: an 'Iterable' parameter is looped over, which advances a generator

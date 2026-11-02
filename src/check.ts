@@ -1254,7 +1254,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         if (type) (instance.spelled ??= new NodeMap()).set(x, type);
       }
     }
-    for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, this.typing.lower(t)));
+    // A generator a member of a class made from a type parameter gives is the one its counterpart
+    // gives, which is the one compiled.
+    const made = new TypeMap<Type, Type>();
+    instance.calls.forEach((target) => {
+      const [from, to] = [this.arenas.instanceOf(target), this.counterpart(this.arenas.instanceOf(target))];
+      if (from.generator && to.generator && from.generator !== to.generator) made.set(from.generator, to.generator);
+    });
+    const lowered = (t: Type) => (made.size > 0 ? this.typing.replaced(this.typing.lower(t), made) : this.typing.lower(t));
+    for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lowered(t)));
     // A pipe's topic written in as a field read would run a getter once for each `%`.
     for (const e of instance.types.keys()) {
       if (e.kind !== "member" || !this.substituted.has(e)) continue;
@@ -1267,7 +1275,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     instance.caught.forEach((t, s) => instance.caught.set(s, this.typing.lower(t)));
     instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: this.typing.lower(p.type) }));
     if (instance.throws) instance.throws = this.typing.lower(instance.throws);
-    for (const local of new Set(instance.locals.values())) this.arenas.localOf(local).type = this.typing.lower(this.arenas.localOf(local).type);
+    for (const local of new Set(instance.locals.values())) this.arenas.localOf(local).type = lowered(this.arenas.localOf(local).type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, this.counterpart(this.arenas.instanceOf(target)).id));
     instance.returns = this.typing.lower(instance.returns);
   }
