@@ -73,3 +73,27 @@ import crypto from "node:crypto";
 function main() {
   console.log(crypto.createHash("sha256"));
 }
+// case: crypto_sha
+// expect: a9993e364706816aba3e25717850c26c9cd0d89d
+// expect: da39a3ee5e6b4b0d3255bfef95601890afd80709
+// expect: 84983e441c3bd26ebaae4aa1f95129e5e54670f1
+// expect: 34aa973cd4c4daa4f61eeb2bdbad27316534016f
+// expect: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+// expect: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+// expect: 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+// expect: cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0
+// expect: 20 32 true
+// FIPS 180's vectors: "abc", the empty message, the 448-bit message, and a million "a"s.
+function main() {
+  const two = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+  const million = new TextEncoder().encode("a".repeat(1000000));
+  console.log(crypto.sha1("abc").toHex());
+  console.log(crypto.sha1("").toHex());
+  console.log(crypto.sha1(two).toHex());
+  console.log(crypto.sha1(million.clone()).toHex());
+  console.log(crypto.sha256("abc").toHex());
+  console.log(crypto.sha256([]).toHex());
+  console.log(crypto.sha256(two).toHex());
+  console.log(crypto.sha256(million).toHex());
+  console.log(crypto.sha1("x").length, crypto.sha256("x").length, crypto.sha256("é").toHex() === crypto.sha256(new TextEncoder().encode("é")).toHex());
+}

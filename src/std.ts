@@ -4039,6 +4039,34 @@ export function randomUUID(): string {
   }
   return new TextDecoder().decode(out);
 }
+
+declare function fsh_rt_sha(which: i64, data: Ptr<u8>, length: i64, out: MutPtr<u8>): void;
+
+// SHA-1 when which is 1, SHA-256 when it's 256.
+function shaOf(which: i64, data: Ref<u8[]>): u8[] {
+  let out: u8[] = new Array(which === 1 ? 20 : 32).fill(0 as u8);
+  if (data.length > 0) {
+    unsafe { fsh_rt_sha(which, ptrOf(data[0]), data.length as i64, mutPtrOf(out[0])) };
+  } else {
+    // A pointer is taken to an element, so empty input is one byte of length 0.
+    const none: u8[] = [0 as u8];
+    unsafe { fsh_rt_sha(which, ptrOf(none[0]), 0, mutPtrOf(out[0])) };
+  }
+  return out;
+}
+
+function bytesOf(data: string | u8[]): u8[] {
+  return typeof data === "string" ? new TextEncoder().encode(data) : data;
+}
+
+// A string is hashed as its UTF-8 bytes.
+export function sha1(data: string | u8[]): u8[] {
+  return shaOf(1, bytesOf(data));
+}
+
+export function sha256(data: string | u8[]): u8[] {
+  return shaOf(256, bytesOf(data));
+}
 `,
   // The checker gives these their meaning, as each takes values of any type; a rest parameter
   // keeps them from being used as values.
