@@ -1273,3 +1273,38 @@ async function main() {
   console.log(sum);
 }
 // expect: 52500
+// case: async_method_temporary_receiver_awaited
+class Bag {
+  items: string[] = [];
+  constructor(s: string) { this.items.push(s); }
+  async first(): Promise<string> { return this.items[0]!; }
+}
+async function main() {
+  const v = await new Bag("a" + 1).first();
+  console.log(v);
+}
+// error: 7:19: error[E0204]: the awaited Promise would keep borrowing this temporary
+// case: async_method_call_result_receiver_awaited
+class Bag {
+  items: string[] = [];
+  constructor(s: string) { this.items.push(s); }
+  async first(): Promise<string> { return this.items[0]!; }
+}
+function mk(): Bag { return new Bag("a" + 1); }
+async function main() {
+  const v = await mk().first();
+  console.log(v);
+}
+// error: 8:19: error[E0204]: the awaited Promise would keep borrowing this temporary
+// case: async_method_named_receiver_awaited
+class Bag {
+  items: string[] = [];
+  constructor(s: string) { this.items.push(s); }
+  async first(): Promise<string> { return this.items[0]!; }
+}
+async function main() {
+  const b = new Bag("a" + 1);
+  const v = await b.first();
+  console.log(v);
+}
+// expect: a1
