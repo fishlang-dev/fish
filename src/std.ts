@@ -4330,6 +4330,8 @@ class Conn {
     if (held < 5) return false;
     const length = get32(this.buffer, this.start + 1);
     if (length < 4) throw new IoError("the Postgres server sent a malformed message");
+    // Postgres builds no message past MaxAllocSize, 1 GiB, so a longer one isn't Postgres's.
+    if (length > 1073741824) throw new IoError("the Postgres server sent a message of " + String(length + 1) + " bytes, more than the 1 GiB Postgres itself can send");
     return held >= 1 + length;
   }
 

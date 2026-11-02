@@ -547,6 +547,7 @@ const lengthOnly = (kind: string, length: number) => {
 };
 const HOSTILE: [string, Partial<Script>, string][] = [
   ["too many SCRAM iterations", { auth: "scram", challenge: (nonce) => `r=${nonce}x,s=c2FsdA==,i=2147483647` }, "IoError the Postgres server asks for 2147483647 SCRAM iterations, more than the 10000000 Fish allows, as hashing that many would hold a thread for minutes"],
+  ["a message over 1 GiB", { answer: () => ({ raw: Buffer.concat([message("1"), lengthOnly("D", 1073741829)]) }) }, "IoError the Postgres server sent a message of 1073741830 bytes, more than the 1 GiB Postgres itself can send"],
 ];
 for (const [what, script, said] of HOSTILE) {
   test(`refused: ${what}`, async () => {
