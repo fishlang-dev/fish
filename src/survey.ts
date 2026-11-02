@@ -69,7 +69,7 @@ const RULES: Rule[] = [
   { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
   { id: "declarators", action: "guided", title: "a let with neither a type nor a value: write its type, as in 'let x: string', since Fish doesn't work it out from later assignments" },
   { id: "tuples", action: "unsupported", title: "a rest element before the end of a tuple type, or one beside optional elements" },
-  { id: "spread", action: "guided", title: "rest parameters on arrow functions, and spread arguments: Fish takes rest parameters on declared functions and methods, and spreads an argument only into a rest parameter" },
+  { id: "spread", action: "guided", title: "rest parameters on arrow functions, and spread arguments: Fish takes rest parameters on declared functions and methods, and spreads an array argument only into a rest parameter, or a tuple held in a variable into any parameters" },
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet", feature: "WeakMap and WeakSet over Rc" },
   { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
   { id: "forAwaitArrays", action: "guided", title: "for await over an array of promises: Fish loops with for await over an async generator or a Channel, so await Promise.all(...) and loop over its result with for...of" },
@@ -303,8 +303,10 @@ function scan(path: string, program: unknown[], note: (id: string, offset: usize
   const stack: [unknown, usize, boolean][] = program.map((s) => [s, 0, false]);
   const scanning: Scanning = { path, envKeys: new WeakSet(), statementDestructures: new WeakSet() };
   const heads = new WeakSet<object>();
-  // Spreads written as call arguments, which fill only a rest parameter.
-  const inCalls = new WeakSet<object>();
+  // Spreads written as call arguments, which fill only a rest parameter unless they spread a
+  // name the file declares as a tuple, judged once its tuples are known.
+  const inCalls: Node[] = [];
+  const tuples = new Set<string>();
   // The names the file declares as arrays, and its `for await` loops, judged once both are known.
   const arrays = new Set<string>();
   const awaitLoops: Node[] = [];
@@ -323,8 +325,9 @@ function scan(path: string, program: unknown[], note: (id: string, offset: usize
       if ((o.kind === "forOf" || o.kind === "forIn") && isNode(o.left)) heads.add(o.left);
       if (o.kind === "forOf" && o.await === true) awaitLoops.push(o);
       for (const name of arrayNames(o)) arrays.add(name);
-      if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.add(a);
-      for (const [id, at, module] of classify(scanning, o, depth, ambient, heads.has(o), inCalls.has(o))) note(id, at, module);
+      for (const name of tupleNames(o)) tuples.add(name);
+      if ((o.kind === "call" || o.kind === "new") && Array.isArray(o.args)) for (const a of o.args) if (isNode(a) && a.kind === "spread") inCalls.push(a);
+      for (const [id, at, module] of classify(scanning, o, depth, ambient, heads.has(o))) note(id, at, module);
       const whole = o.kind === "member" && isNode(o.object) && o.object.kind === "ident" ? wholes.get(o.object.name as string) : undefined;
       if (whole && !whole.has.has(o.name as string)) note("nodeBuiltins", o.start as usize, Object.hasOwn(whole.names, o.name as string) ? whole.names[o.name as string] : whole.module);
       if (Array.isArray(o.params)) params(o.params as Record<string, unknown>[], note, o.kind === "arrow");
@@ -334,6 +337,7 @@ function scan(path: string, program: unknown[], note: (id: string, offset: usize
     for (const [key, child] of Object.entries(o)) if (key !== "start" && key !== "end" && typeof child === "object") stack.push([child, inner, under]);
   }
   for (const loop of awaitLoops) if (isNode(loop.right) && arrayValue(loop.right, arrays)) note("forAwaitArrays", loop.right.start);
+  for (const a of inCalls) if (!(isNode(a.value) && a.value.kind === "ident" && tuples.has(a.value.name as string))) note("spread", a.start);
 }
 
 // The array methods that give a new array, as in `for await (const r of urls.map(fetch))`.
@@ -356,6 +360,15 @@ function arrayNames(n: Node): string[] {
   if (n.kind === "let" && Array.isArray(n.declarations)) {
     return (n.declarations as Record<string, unknown>[]).flatMap((d) => (typed(d.type) || arrayValue(d.init, new Set()) ? declared(d.target) : []));
   }
+  if (Array.isArray(n.params)) return (n.params as Record<string, unknown>[]).flatMap((p) => (typed(p.type) ? declared(p.pattern) : []));
+  return [];
+}
+
+// The names a declaration or a parameter list types as a tuple, readonly or not.
+function tupleNames(n: Node): string[] {
+  const typed = (t: unknown) => isNode(t) && (t.kind === "tuple" || (t.kind === "operator" && t.op === "readonly" && isNode(t.type) && t.type.kind === "tuple"));
+  const declared = (target: unknown) => (isNode(target) && target.kind === "ident" ? [target.name as string] : []);
+  if (n.kind === "let" && Array.isArray(n.declarations)) return (n.declarations as Record<string, unknown>[]).flatMap((d) => (typed(d.type) ? declared(d.target) : []));
   if (Array.isArray(n.params)) return (n.params as Record<string, unknown>[]).flatMap((p) => (typed(p.type) ? declared(p.pattern) : []));
   return [];
 }
@@ -390,7 +403,7 @@ type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures:
 // `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
 const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
 
-function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean, argument: boolean): [string, usize, string?][] {
+function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean): [string, usize, string?][] {
   const found: [string, usize, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
@@ -444,7 +457,6 @@ function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, d
       memberRules(n, push);
       break;
   }
-  if (n.kind === "spread" && argument) push("spread");
   // A regex literal ports; one built while the program runs can't.
   if (n.kind === "call" && isNode(n.callee) && n.callee.kind === "member") {
     const [first] = n.args as Node[];

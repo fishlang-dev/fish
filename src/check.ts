@@ -2832,6 +2832,55 @@ class BodyChecker implements Context, Outer, Sight {
   // `for (const [k, v] of pairs)` and `for (const { x, y } of points)`: the element goes to a
   // variable named for the pattern, and each name becomes a `const` of its part at the top of
   // the body. A part of a borrowed element is borrowed, or copied when it copies.
+  // `for (const x of t)` over a tuple reads each position in turn, as a counted loop over its
+  // length choosing `t[0]`, `t[1]` and so on: each element is a copy when they all copy, typed
+  // as their union, or lent when they share one type that doesn't. A union of references to
+  // different types can't be held, so those are refused.
+  private tupleLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, tuple: ObjectType): Stmt {
+    const typing = this.cx.typing;
+    const ids = this.cx.ids;
+    const { rest } = typing.rec(tuple);
+    const fixed = typing.elementsOf(tuple);
+    const parts = [...fixed, ...(rest === undefined ? [] : [rest])];
+    if (parts.length === 0) throw new CompileError("E0119", "this tuple is empty, so a 'for...of' over it would never run its body", s.right.start, s.right.end);
+    const element = parts.every((p) => typing.isCopy(p)) ? typing.unionType(parts) : parts.every((p) => p === parts[0]) ? typing.refType(parts[0]!, false) : undefined;
+    if (element === undefined) throw unsupported("'for...of' loops over a tuple whose elements differ in type and don't all copy", s.right);
+    const at = { start: s.right.start, end: s.right.end };
+    // Each element reads the tuple again, so it has to be a place, not a value made for the loop.
+    const place = (x: Expr): Expr | undefined => {
+      x = this.cx.rewrites.current(x);
+      if (x.kind === "ident" || x.kind === "this") return { ...x, id: nextId(ids) };
+      if (x.kind !== "member" || x.optional || this.calls.has(x)) return undefined;
+      const object = place(x.object);
+      return object && { ...x, id: nextId(ids), object };
+    };
+    // JavaScript's loop keeps the tuple it started with, and this one reads the variable on each
+    // pass, so a body giving the variable a new tuple is refused rather than read differently.
+    const root = this.cx.rewrites.current(s.right);
+    if (root.kind === "ident" && assignsOwn(s.body, root.name)) throw new CompileError("E0203", `cannot give '${root.name}' a new tuple inside a 'for...of' over it, which reads it on each pass; change its elements, or loop over a copy, as in 'const each = ${root.name};'`, at.start, at.end);
+    const from = (): Expr => place(s.right) ?? (() => { throw new CompileError("E0212", "a 'for...of' over a tuple reads it once per element, so it needs a name; give the value one first, as in 'const t = ...;'", at.start, at.end); })();
+    const preset = (t: Type): TypeNode => {
+      const made: TypeNode = { id: nextId(ids), kind: "ref", name: typing.show(t), args: [], ...at };
+      this.cx.tables.presetTypes.set(made, t);
+      return made;
+    };
+    const counter = (): Expr => ({ id: nextId(ids), kind: "ident", name: "tuple position", ...at });
+    const int = (n: usize): Expr => ({ id: nextId(ids), kind: "int", value: BigInt(n), ...at });
+    const member = (name: string): Expr => ({ id: nextId(ids), kind: "member", object: from(), name, optional: false, ...at });
+    let chosen: Expr = rest === undefined ? member(String(fixed.length - 1)) : { id: nextId(ids), kind: "index", object: member("..."), index: { id: nextId(ids), kind: "binary", op: "-", left: counter(), right: int(fixed.length), ...at }, optional: false, ...at };
+    for (let i = rest === undefined ? fixed.length - 2 : fixed.length - 1; i >= 0; i--) {
+      chosen = { id: nextId(ids), kind: "conditional", cond: { id: nextId(ids), kind: "binary", op: "===", left: counter(), right: int(i), ...at }, then: member(String(i)), else: chosen, ...at };
+    }
+    const left = s.left as Extract<Stmt, { kind: "let" }>;
+    const d = left.declarations[0]!;
+    const each: Stmt = { id: nextId(ids), kind: "let", keyword: left.keyword, declarations: [{ ...d, id: nextId(ids), type: preset(element), init: chosen }], start: left.start, end: left.end };
+    const init: Stmt = { id: nextId(ids), kind: "let", keyword: "let", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name: "tuple position", ...at }, type: preset("usize"), init: int(0), ...at }], ...at };
+    const test: Expr = { id: nextId(ids), kind: "binary", op: "<", left: counter(), right: member("length"), ...at };
+    const update: Expr = { id: nextId(ids), kind: "update", op: "++", prefix: false, operand: counter(), ...at };
+    const body: Stmt = { id: nextId(ids), kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
+    return this.cx.rewrites.replace(s, { id: 0, kind: "for", init, test, update, body: [each, body], start: s.start, end: s.end });
+  }
+
   loopPattern(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>) {
     if (pattern.rest) throw unsupported("rest patterns", pattern.rest);
     const named = (p: Pattern | undefined): Extract<Pattern, { kind: "ident" }> | undefined => {
@@ -3358,6 +3407,7 @@ class BodyChecker implements Context, Outer, Sight {
           this.scopes.pop();
           return;
         }
+        if (this.cx.typing.isTuple(object) && o?.kind === "object" && !o.match) return this.statement(this.tupleLoop(s, object as ObjectType));
         if (this.cx.typing.yieldsOf(object, true) !== undefined) throw new CompileError("E0119", "an async generator's values are awaited, so loop over it with 'for await'", s.right.start, s.right.end);
         if (o?.kind !== "array") throw new CompileError("E0119", `'for...of' needs an array, a Map, a Set, a string, a generator or an iterable class, not '${this.cx.typing.show(object)}'`, s.right.start, s.right.end);
         if (object !== through) this.coercions.set(s.right, object);

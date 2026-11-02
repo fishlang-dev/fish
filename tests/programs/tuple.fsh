@@ -454,3 +454,226 @@ function main() { g([1, 2, 3]); g(["a", "b"]); }
 // error: type 'i64' is not assignable to type '[string, i64]'
 function f(x: string | [string, i64][]): void { console.log(x); }
 function main() { f([1, 2]); }
+// case: tuple_readonly
+// expect: 1 x [ 1, 'x' ]
+// expect: [ 1, 'x' ] [ 1, 'x' ]
+// expect: 4 q
+// expect: [ 'z', 1 ]
+function f(p: readonly [i64, string]): void { console.log(p[0], p[1], p); }
+function pair<A, B>(t: readonly [A, B]): [B, A] { return [t[1], t[0]]; }
+function main(): void {
+  const t: [i64, string] = [1, "x"];
+  f(t);
+  const r: readonly [i64, string] = t;
+  let back: [i64, string] = r;
+  back[0] = 2;
+  console.log(r, t);
+  const q: readonly [i64, string] = [4, "q"];
+  const [a, b] = q;
+  console.log(a, b);
+  console.log(pair([1, "z"]));
+}
+// case: tuple_readonly_write
+// error: cannot assign to 'r[0]' because 'r' is a 'readonly [i64, string]', whose elements are read-only
+function main(): void { let r: readonly [i64, string] = [1, "x"]; r[0] = 2; }
+// case: tuple_readonly_deep
+// error: cannot assign to 'r[0].n' because 'r' is a 'readonly [C, string]', whose elements are read-only
+class C { constructor(public n: i64) {} }
+function main(): void { let r: readonly [C, string] = [new C(1), "x"]; r[0].n = 3; }
+// case: tuple_readonly_lent_mutably
+// error: '0' is read-only here, so it can't be lent mutably as '[i64, string]', which could change it
+function g(p: Mut<[i64, string]>): void { p[0] = 5; }
+function main(): void { let r: readonly [i64, string] = [1, "x"]; g(r); }
+// case: tuple_readonly_as_const
+// error: cannot assign to 'c[1]' because 'c' is a 'readonly [1, "a"]', whose elements are read-only
+function main(): void { let c = [1, "a"] as const; c[1] = "a"; }
+// case: tuple_readonly_iterable_entries
+// expect: Map(2) { 'a' => 1, 'b' => 2 }
+// expect: Map(1) { 'c' => 3 }
+// expect: 0
+// expect: a 2
+class Table<K, V> {
+  m: Map<K, V> = new Map();
+  constructor(entries?: Iterable<readonly [K, V]>) {
+    if (entries !== undefined) for (const [k, v] of entries) this.m.set(k, v);
+  }
+}
+function first<K, V>(xs: Iterable<readonly [K, V]>): K | null { for (const [k, _v] of xs) return k; return null; }
+function main(): void {
+  const pairs: [string, i64][] = [["a", 1], ["b", 2]];
+  console.log(new Table(pairs).m);
+  console.log(new Table(new Map<string, i64>([["c", 3]])).m);
+  console.log(new Table<string, i64>().m.size);
+  const ps: [i64, string][] = [[2, "b"]];
+  console.log(first(new Map([["a", 1]])), first(ps));
+}
+// case: tuple_length_literal
+// expect: 2 2 2 2 3
+type P = [i64, string];
+type L = P["length"];
+function count(t: readonly [i64, i64, i64]): 3 { return t.length; }
+function main(): void {
+  const x: L = 2;
+  const t: P = [1, "x"];
+  const n: 2 = t.length;
+  const u: usize = t.length;
+  const w: L = t.length;
+  console.log(x, n, u, w, count([1, 2, 3]));
+}
+// case: tuple_length_literal_optional
+// error: type 'usize' is not assignable to type '2'
+function main(): void { const t: [i64, string?] = [1]; const n: 2 = t.length; }
+// case: tuple_length_literal_wrong
+// error: type 'usize' is not assignable to type '3'
+function main(): void { const t: [i64, string] = [1, "a"]; const n: 3 = t.length; }
+// case: tuple_spread_args
+// expect: 1 x
+// expect: [ 'x', 1 ]
+// expect: 6 6 12
+// expect: 6
+// expect: 4 null
+// expect: 1 x 1 x
+// expect: 3
+// expect: 7 r
+// expect: 1 x
+class C { constructor(public n: i64) {} }
+function add(a: i64, b: string): void { console.log(a, b); }
+function gen<A, B>(a: A, b: B): [B, A] { return [b, a]; }
+function sum(...xs: i64[]): i64 { let s = 0; for (const x of xs) s += x; return s; }
+function opt(a: i64, b?: string): void { console.log(a, b); }
+class P { constructor(public a: i64, public b: string) {} show(x: i64, y: string): void { console.log(this.a, this.b, x, y); } }
+function own(a: C, b: C): void { console.log(a.n + b.n); }
+function main(): void {
+  const t: [i64, string] = [1, "x"];
+  add(...t);
+  console.log(gen(...t));
+  const n: [i64, i64, i64] = [1, 2, 3];
+  console.log(sum(...n), sum(0, ...n), sum(...n, ...n));
+  const r: [i64, ...i64[]] = [1, 2, 3];
+  console.log(sum(...r));
+  const o: [i64, string?] = [4];
+  opt(...o);
+  const p = new P(...t);
+  p.show(...t);
+  const cs: [C, C] = [new C(1), new C(2)];
+  own(...cs);
+  const ro: readonly [i64, string] = [7, "r"];
+  add(...ro);
+  const lent: Ref<[i64, string]> = t;
+  add(...lent);
+}
+// case: tuple_spread_moves
+// error: 'cs[0].n' can't be used here because 'cs[0]' was moved
+class C { constructor(public n: i64) {} }
+function own(a: C, b: C): void { console.log(a.n + b.n); }
+function main(): void { const cs: [C, C] = [new C(1), new C(2)]; own(...cs); console.log(cs[0].n); }
+// case: tuple_spread_unnamed
+// error: a tuple spreads into parameters from a variable, since each element reads it again; name it first, as in 'const t = pair(); f(...t)'
+function add(a: i64, b: string): void { console.log(a, b); }
+function pair(): [i64, string] { return [1, "x"]; }
+function main(): void { add(...pair()); }
+// case: tuple_spread_count
+// error: expected 1 argument, but got 2
+function add(a: i64): void { console.log(a); }
+function main(): void { const t: [i64, string] = [1, "x"]; add(...t); }
+// case: tuple_spread_type
+// error: argument of type 'string' is not assignable to parameter of type 'i64'
+function add(a: i64, b: i64): void { console.log(a + b); }
+function main(): void { const t: [i64, string] = [1, "x"]; add(...t); }
+// case: tuple_for_of
+// expect: 1
+// expect: 2
+// expect: 3
+// expect: 1
+// expect: a
+// expect: true
+// expect: 7
+// expect: 8
+// expect: 7
+// expect: 1
+// expect: r
+// expect: 9
+// expect: 10
+// expect: 1 1
+// expect: 2 1
+// expect: 9
+// expect: 9
+// expect: 5
+// expect: 6
+// expect: 4
+// expect: g
+// expect: 1 p
+// expect: 2 q
+// expect: 7
+class C { constructor(public n: i64) {} }
+class H { pair: [i64, i64] = [5, 6]; show(): void { for (const x of this.pair) console.log(x); } }
+function* gen(t: [string, string]): Generator<string> { for (const x of t) yield x; }
+function main(): void {
+  const t: [i64, i64, i64] = [1, 2, 3];
+  for (const x of t) console.log(x);
+  const m: [i64, string, boolean] = [1, "a", true];
+  for (const x of m) console.log(x);
+  const cs: [C, C] = [new C(7), new C(8)];
+  for (const c of cs) console.log(c.n);
+  console.log(cs[0].n);
+  const o: [i64, string?] = [1];
+  for (const x of o) console.log(x);
+  const r: [string, ...i64[]] = ["r", 9, 10];
+  for (const x of r) console.log(x);
+  outer: for (const a of t) {
+    for (const b of t) {
+      if (b === 2) continue outer;
+      if (a === 3) break outer;
+      console.log(a, b);
+    }
+  }
+  for (const x of t) { if (x === 2) continue; const x = 9; console.log(x); }
+  new H().show();
+  for (const s of gen(["4", "g"])) console.log(s);
+  const pairs: [[i64, string], [i64, string]] = [[1, "p"], [2, "q"]];
+  for (const [k, v] of pairs) console.log(k, v);
+  const ro: readonly [i64, i64] = [3, 4];
+  let sum = 0;
+  for (const x of ro) sum += x;
+  console.log(sum);
+}
+// case: tuple_for_of_comptime
+// expect: 6
+function total(t: [i64, i64, i64]): i64 { let s = 0; for (const x of t) s += x; return s; }
+const T = comptime total([1, 2, 3]);
+function main(): void { console.log(T); }
+// case: tuple_for_of_mixed_owned
+// error: 'for...of' loops over a tuple whose elements differ in type and don't all copy are not supported yet
+class C { constructor(public n: i64) {} }
+function main(): void { const t: [C, string] = [new C(1), "a"]; for (const x of t) console.log(x); }
+// case: tuple_for_of_unnamed
+// error: a 'for...of' over a tuple reads it once per element, so it needs a name; give the value one first, as in 'const t = ...;'
+function pair(): [i64, i64] { return [1, 2]; }
+function main(): void { for (const x of pair()) console.log(x); }
+// case: tuple_for_of_borrows
+// error: cannot give 'cs' a new tuple inside a 'for...of' over it, which reads it on each pass
+class C { constructor(public n: i64) {} }
+function main(): void { let cs: [C, C] = [new C(1), new C(2)]; for (const c of cs) { cs = [new C(3), new C(4)]; console.log(c.n); } }
+// case: tuple_spread_member
+// error: a tuple spreads into parameters from a variable, since each element reads it again; name it first
+class O { t: [i64, string] = [1, "x"]; }
+function add(a: i64, b: string): void { console.log(a, b); }
+function main(): void { const o = new O(); add(...o.t); }
+// case: tuple_readonly_pairs_iterable
+// expect: a 1
+// expect: a b
+function first<K, V>(xs: Iterable<readonly [K, V]>): K | null { for (const [k, _v] of xs) return k; return null; }
+function f(xs: Iterable<readonly [string, i64]>): void { for (const [k, v] of xs) console.log(k, v); }
+function main(): void {
+  const ps: (readonly [string, i64])[] = [["a", 1]];
+  f(ps.clone());
+  console.log(first(ps), first([["b", 2] as const]));
+}
+// case: tuple_for_of_reassigned
+// error: cannot give 't' a new tuple inside a 'for...of' over it, which reads it on each pass
+function main(): void { let t: [i64, i64, i64] = [1, 2, 3]; for (const x of t) { t = [10, 20, 30]; console.log(x); } }
+// case: tuple_for_of_element_written
+// expect: 1
+// expect: 5
+// expect: 3
+function main(): void { let t: [i64, i64, i64] = [1, 2, 3]; for (const x of t) { t[1] = 5; console.log(x); } }

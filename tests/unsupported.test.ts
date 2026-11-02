@@ -314,3 +314,13 @@ test("a default on an interface-typed parameter", () => {
     message: "defaults on parameters of type 'Shape' are not supported yet", start, end: src.indexOf("): f64 {", start),
   }));
 });
+
+// A loop over a tuple lends elements of one type that doesn't copy, but a union of references
+// to differing types can't be held, so it is refused at the tuple.
+test("for...of over a tuple of differing owned types", () => {
+  const src = "class C {}\nfunction main() { const t: [C, string] = [new C(), \"a\"]; for (const x of t) console.log(x); }";
+  const start = src.indexOf("t) console");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "'for...of' loops over a tuple whose elements differ in type and don't all copy are not supported yet", start, end: start + 1,
+  }));
+});

@@ -696,3 +696,16 @@ test("an import whose missing names wait on different features waits on each, an
     expect(survey(b!).builtins!.map((x) => [x.module, x.equivalent?.name])).toEqual([["buffer", "Typed arrays and DataView"], ["crypto.randomInt", undefined]]);
   });
 });
+
+test("a spread argument is a guided rewrite unless it spreads a name the file types as a tuple", () => {
+  expect(counts([
+    "function f(a: number, b: string) {}",
+    "function g(t: readonly [number, string], xs: number[]) {",
+    "  f(...t);",
+    "  const u: [number, string] = [1, \"a\"];",
+    "  f(...u);",
+    "  Math.max(...xs);",
+    "}",
+    "",
+  ].join("\n"))).toEqual({ spread: 1 });
+});

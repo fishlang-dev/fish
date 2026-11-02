@@ -200,6 +200,7 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
   if (node.kind === "ref" && node.name === "AsyncGenerator" && node.args.length >= 1 && typing.yieldsOf(arg, true) !== undefined) return infer(tables, node.args[0]!, typing.yieldsOf(arg, true)!, names, bindings, at);
   // `FixedArray<T, N>` against a fixed array matches its element type.
   if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && a?.kind === "fixed") return infer(tables, node.args[0]!, a.element, names, bindings, at);
+  if (node.kind === "operator" && node.op === "readonly" && node.type.kind === "tuple") return infer(tables, node.type, arg, names, bindings, at);
   // `[A, B]` against a tuple of its length matches element by element.
   // An optional element matches what it holds when there, and a rest element the tuple's array.
   const fixed = node.kind === "tuple" ? node.elements.filter((n) => !n.rest) : [];

@@ -1151,6 +1151,7 @@ export class Expressions implements Union {
   // Checks a call: what it returns, and how a message names what it calls. A method called in
   // an optional chain gives an Option.
   private call(this: Mut<this>, e: Call): { type: Type; what: string } {
+    e = this.spreadTuples(e);
     const variant = this.promiseVariants.get(e);
     if (variant) {
       const nothing = this.typing.lower(this.ctx.resolveType(variant.typeArgs[0]!)) === "void";
@@ -1768,7 +1769,8 @@ export class Expressions implements Union {
       if (a.kind !== "arrow" && known && known[i] !== undefined) this.expect(a, target.js ? this.typing.jsTakes(known[i]!) : known[i]!);
       if (a.kind === "arrow" && known && target.js && known[i] !== undefined) this.expect(a, this.typing.jsTakes(known[i]!));
       // A literal for a tuple parameter is a tuple of its parts, in the parameter's shape.
-      const node = target.params[i]?.type;
+      const written = target.params[i]?.type;
+      const node = written?.kind === "operator" && written.op === "readonly" ? written.type : written;
       if (!known && (a.kind === "array" || this.tupleLiterals.has(a)) && node?.kind === "tuple") {
         this.ctx.exprsState.shaped.add(a);
         if (node.elements.some((n) => n.optional || n.rest)) this.ctx.exprsState.shapedBy.set(a, node);
@@ -2336,7 +2338,7 @@ export class Expressions implements Union {
     if (x.kind === "array" && x.elements.length === 0) return this.typing.tupleType([]);
     if (x.kind === "array" && x.elements.every((y) => y !== undefined && y.kind !== "spread")) {
       const parts = (x.elements as Expr[]).map((y) => this.constType(y));
-      return parts.every((p) => this.constWide(p) === this.constWide(parts[0]!)) ? this.typing.arrayType(this.constJoin(parts)) : this.typing.tupleType(parts);
+      return parts.every((p) => this.constWide(p) === this.constWide(parts[0]!)) ? this.typing.arrayType(this.constJoin(parts)) : this.typing.tupleType(parts, undefined, undefined, true);
     }
     const props = x.kind === "object" ? x.props.filter((p): p is Extract<ObjectProp, { kind: "property" }> => p.kind === "property" && typeof p.key === "string") : [];
     if (x.kind === "object" && props.length === x.props.length) return this.typing.objectType(props.map((p) => ({ name: p.key as string, type: this.constType(p.value), readonly: true })));
@@ -2958,10 +2960,44 @@ export class Expressions implements Union {
     return made;
   }
 
+  // `f(...t)` over a tuple named by a variable passes its elements, as `f(t[0], t[1])` would,
+  // a rest tuple's array spreading after them. Each element reads the variable again, so a
+  // tuple made for the call has to be named first.
+  private spreadTuples<T extends Extract<Expr, { kind: "call" | "new" }>>(this: Mut<this>, e: T): T {
+    const args = e.args ?? [];
+    const tuples = args.map((a) => (a.kind === "spread" ? this.spreadTuple(a.value) : undefined));
+    if (tuples.every((t) => t === undefined)) return e;
+    const parts = args.flatMap((a, i): Expr[] => {
+      const t = tuples[i];
+      if (t === undefined || a.kind !== "spread") return [a];
+      const source = this.rewrites.current(a.value) as Extract<Expr, { kind: "ident" }>;
+      const at = { start: a.start, end: a.end };
+      const element = (name: string): Expr => ({ id: nextId(this.ids), kind: "member", object: { ...source, id: nextId(this.ids) }, name, optional: false, ...at });
+      const fixed = this.typing.elementsOf(t).map((_, n) => element(String(n)));
+      return this.typing.rec(t).rest === undefined ? fixed : [...fixed, { id: nextId(this.ids), kind: "spread", value: element("..."), ...at }];
+    });
+    return this.rewrites.replace(e, { ...e, args: parts });
+  }
+
+  // The tuple a spread argument's variable holds, if it holds one.
+  private spreadTuple(this: Mut<this>, source: Expr): ObjectType | undefined {
+    source = this.rewrites.current(source);
+    if (source.kind !== "ident") return undefined;
+    const t = this.value(source);
+    this.ctx.exprsState.once.add(source);
+    const held = this.typing.lower(this.isRefType(t) ? this.typing.rec(t).to : t);
+    return this.typing.isTuple(held) && !this.typing.rec(held as ObjectType).match ? (held as ObjectType) : undefined;
+  }
+
   // A spread argument fills only a rest parameter, since an array's length isn't known while compiling.
-  private refuseSpread(list: Expr[]) {
+  private refuseSpread(this: Mut<this>, list: Expr[]) {
     const spread = list.find((a) => a.kind === "spread");
-    if (spread) throw new CompileError("E0408", "a spread argument fills only a rest parameter, as in 'function f(...xs: T[])', since an array's length isn't known while compiling", spread.start, spread.end);
+    if (spread?.kind !== "spread") return;
+    // A tuple reached any other way than by a variable would be read again for each element.
+    const t = this.value(spread.value);
+    const held = this.typing.lower(this.isRefType(t) ? this.typing.rec(t).to : t);
+    if (this.typing.isTuple(held)) throw new CompileError("E0408", "a tuple spreads into parameters from a variable, since each element reads it again; name it first, as in 'const t = pair(); f(...t)'", spread.start, spread.end);
+    throw new CompileError("E0408", "a spread argument fills only a rest parameter, as in 'function f(...xs: T[])', since an array's length isn't known while compiling; a tuple spreads into parameters from a variable, as in 'const t = pair(); f(...t)'", spread.start, spread.end);
   }
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
@@ -5350,6 +5386,8 @@ export class Expressions implements Union {
         this.ctx.noteThis(e);
         return this.self.type;
       case "new": {
+        const spread = this.spreadTuples(e);
+        if (spread !== e) return this.typeOf(spread);
         let list = e.args ?? [];
         if (e.callee.kind === "ident" && INTERIORS.has(e.callee.name) && !this.ctx.lookup(e.callee.name) && !this.classes.has(e.callee.name)) {
           return this.interiorNew(e, e.callee.name as InteriorRecord["which"], list);
@@ -5914,6 +5952,12 @@ export class Expressions implements Union {
   coerce(this: Mut<this>, e: Expr, type: Type, to: Type, message: string) {
     e = this.rewrites.current(e);
     const tr = this.recOf(to);
+    // A tuple's length is a 'usize', and also the literal of its count where that is known, as
+    // in 'const n: 2 = t.length'.
+    if (tr?.kind === "literal" && this.tupleLength(e) === to) {
+      this.types.set(e, to);
+      return;
+    }
     // A reference that changes its value's form points at a copy in a slot of the function,
     // which an async function loses each time it stops.
     if (this.ctx.async && tr?.kind === "ref" && !this.isRefType(type) && this.typing.lower(type) !== this.typing.lower(tr.to) && this.typing.fits(type, tr.to)) {
@@ -7000,6 +7044,14 @@ export class Expressions implements Union {
     }
   }
 
+  // The literal type of `t.length` on a tuple whose count is known, if `e` is one.
+  private tupleLength(this: Mut<this>, e: Expr): Type | undefined {
+    if (e.kind !== "member" || e.name !== "length" || e.optional) return undefined;
+    const t = this.types.get(e.object);
+    const held = t !== undefined && this.isRefType(t) ? this.typing.rec(t).to : t;
+    return held !== undefined && this.typing.isTuple(held) ? this.typing.tupleLength(held as ObjectType) : undefined;
+  }
+
   // A readonly field can't change once constructed, nor can anything inside it. Only its own
   // class's constructor may assign it, through `this`.
   private readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
@@ -7011,6 +7063,7 @@ export class Expressions implements Union {
     const locked = this.typing.field(object as Exclude<Type, string>, e.name)?.readonly || (this.throughMutable(e.object) && this.concreteField(e)?.readonly);
     if (typeof object === "string" || !object || !locked) return;
     if (e === target && e.object.kind === "this" && this.self?.constructor && this.typing.rec(this.self.type).fields.some((f) => f.name === e.name)) return;
+    if (this.typing.isTuple(object)) throw new CompileError("E0208", `cannot ${action} '${this.placeText(target)}' because '${this.placeText(e.object)}' is a '${this.typing.show(object)}', whose elements are read-only`, target.start, target.end);
     const what = e === target ? `'${e.name}' because it is` : `'${this.placeText(target)}' because '${e.name}' is`;
     throw new CompileError("E0208", `cannot ${action} ${what} a read-only property`, target.start, target.end);
   }

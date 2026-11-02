@@ -133,6 +133,7 @@ export class TypeFunctions {
     if (r?.kind === "object" && r.tuple) {
       if (isNumeric(k)) return this.typing.unionType([...this.typing.elementsOf(t as ObjectType), ...(r.rest === undefined ? [] : [r.rest])]);
       const kr = this.recOf(k);
+      if (kr?.kind === "literal" && kr.value === "length") return this.typing.tupleLength(t as ObjectType);
       const positions = (kr?.kind === "union" ? kr.members : [k]).map((m) => this.recOf(m));
       if (positions.every((m) => m?.kind === "literal" && typeof m.value === "bigint")) {
         const elements = this.typing.elementsOf(t as ObjectType);
