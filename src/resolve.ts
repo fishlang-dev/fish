@@ -8,6 +8,7 @@ import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
+import { symbolKey } from "./keys.ts";
 import { byteSize } from "./layout.ts";
 import { openParam, standIn, TypeFunctions, UTILITIES, type TypeFunctionsHost } from "./typefns.ts";
 import { mutates, owns, withoutUndefined } from "./classes.ts";
@@ -704,7 +705,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   private memberOf(this: Mut<this>, i: Interface, t: InterfaceType, add: (name: string, at: Span) => void) {
     return (m: TypeMember) => {
       if (m.kind === "method") {
-        if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+        if (typeof m.name !== "string") throw symbolKey(m.name);
         if (m.optional) throw unsupported("optional methods", m);
         if (!m.returns) throw new CompileError("E0104", `method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
         add(m.name, m);
@@ -956,7 +957,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
 
   private member(this: Mut<this>, m: TypeMember): Field {
     if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
-    if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+    if (typeof m.name !== "string") throw symbolKey(m.name);
     if (!m.type) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An object may leave out an optional property, which is then empty; one spelled
     // `T | undefined` may be left out too, and printing and JSON leave it out while empty.

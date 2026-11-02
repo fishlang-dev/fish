@@ -38,7 +38,7 @@ const MEMBERS: [string, string, string][] = [
   ["{ new (): i64 }", "construct signatures", "new (): i64"],
   ["{ [k: string]: i64 }", "index signatures", "[k: string]: i64"],
   ["{ get x(): i64 }", "accessors in object types", "get x(): i64"],
-  ["{ [k]: i64 }", "computed property names", "k"],
+  ["{ [Symbol.iterator]: i64 }", "'[Symbol.iterator]' members", "Symbol.iterator"],
 ];
 
 // Each kind of type `&` can't combine yet, rejected at that side.
@@ -80,6 +80,8 @@ const CLASSES: [string, string, string][] = [
   ["class A { static {} }", "static blocks", "static {}"],
   ["class A<T> { static get n(): i64 { return 1 } }\nconst a = new A<i64>()", "static accessors in generic classes", "static get n(): i64 { return 1 }"],
   ["class A { *g() {} }", "generator methods", "*g() {}"],
+  ["class A { *[Symbol.iterator]() {} }", "'[Symbol.iterator]' members", "Symbol.iterator"],
+  ["class A { [Symbol.iterator]() {} }", "'[Symbol.iterator]' members", "Symbol.iterator"],
 ];
 
 for (const [decl, what, part] of CLASSES) {
@@ -139,7 +141,7 @@ for (const [expr, what] of EXPRESSIONS) {
 const PROPERTIES: [string, string, string][] = [
   ["{ f() {} }", "methods in object literals", "f() {}"],
   ["{ get x() { return 1 } }", "accessors in object literals", "get x() { return 1 }"],
-  ["{ [k]: 1 }", "computed property names", "k"],
+  ["{ [Symbol.iterator]: 1 }", "'[Symbol.iterator]' members", "Symbol.iterator"],
 ];
 
 for (const [expr, what, part] of PROPERTIES) {

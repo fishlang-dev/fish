@@ -97,6 +97,10 @@ export type Tables = {
   // The names a loop's pattern binds, made as declarations of the parts; a generic body checked
   // again for another instance meets them already made.
   loopParts: WeakNodeSet<Declarator>;
+  // The name each local const holding a number literal gives as a computed key, which its type,
+  // a plain number type, doesn't say; and the names top-level consts and enums give.
+  numberKeys: Map<LocalId, string>;
+  topKeys?: (e: Expr) => string;
   // The arrows nested function declarations became, with their names; they lend what they capture
   // per call.
   nestedFunctions: WeakNodeMap<Expr, string>;
@@ -327,6 +331,7 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     generated,
     declarations: new WeakNodeSet<Expr | Stmt | Param | ObjectProp>(),
     loopParts: new WeakNodeSet<Declarator>(),
+    numberKeys: new Map<LocalId, string>(),
     nestedFunctions: new WeakNodeMap<Expr, string>(),
     nestedBindings: new Set<LocalId>(),
     liftedFunctions: new WeakNodeMap<Stmt | Expr, { name: string; fn: Declared & { body: Stmt[] } }>(),

@@ -3,7 +3,7 @@
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
 import type { Id } from "./ids.ts";
-import type { ClassMember, Declarator, Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.ts";
+import type { ClassMember, Declarator, Expr, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { childrenOfClassMember, childrenOfClassNode, childrenOfDeclarator, childrenOfEnumMember, childrenOfExpr, childrenOfFunc, childrenOfInterface, childrenOfJsName, childrenOfMatchArm, childrenOfObjectProp, childrenOfParam, childrenOfPattern, childrenOfPatternProp, childrenOfSpecifier, childrenOfStmt, childrenOfStmts, childrenOfSwitchCase, childrenOfTupleElement, childrenOfTypeAlias, childrenOfTypeMember, childrenOfTypeNode, childrenOfTypeParam, type Visitor } from "./walk.ts";
 
 export { nextId, type Id, type Ids } from "./ids.ts";
@@ -244,7 +244,7 @@ export class WeakNodeSet<K extends Id> {
 }
 
 // The kinds of node lowering replaces.
-type Replacement = Expr | Stmt | Declarator | Param | Pattern | TypeNode | ObjectProp | ClassMember;
+type Replacement = Expr | Stmt | Declarator | Param | Pattern | TypeNode | ObjectProp | ClassMember | TypeMember | PatternProp;
 
 // The nodes lowering replaced, each under the id of the node it replaced, which the replacement
 // takes, so every table keyed by node reads the same entry for either. A tree reads a replacement

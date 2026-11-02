@@ -99,6 +99,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({});
   expect(counts("\"use strict\";\nsetup();\n")).toEqual({ G7: 1 });
   expect(counts("for (const [k, v] of m) {}\nfor (const { x, y: z } of ps) {}\nfor (const [a = 1] of q) {}\n")).toEqual({ destructuring: 1 });
+  expect(counts("const { [K]: a, [E.B]: b, [\"c\"]: c } = o;\nfor (const { [K]: x } of ps) {}\nconst { [f()]: d } = o;\nconst { [Symbol.iterator]: it } = o;\n")).toEqual({ destructuring: 2 });
   expect(counts("function f() { enum E { A } class C {} }\n")).toEqual({});
   expect(counts("function f(n: number) { class C { m() { return n; } } class D { m(k: number) { return k; } } }\n")).toEqual({ localCaptures: 1 });
   expect(counts("const s = f.call(o, 1);\nconst p = Promise.all([]);\nconst q = Promise.any([]);\n")).toEqual({ G9: 1 });

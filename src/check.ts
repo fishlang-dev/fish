@@ -25,6 +25,7 @@ import { lowerDefaults, writtenName } from "./defaults.ts";
 import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type InstanceMaker, type Bound } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
+import { localKeys, lowerKeys, numberKey, topKeys } from "./keys.ts";
 import { lowerOverloads } from "./overloads.ts";
 import { checkMoves } from "./moves.ts";
 import { NATIVE } from "./native.ts";
@@ -196,7 +197,7 @@ function patternText(p: Pattern): string {
   if (p.kind === "ident") return p.name;
   if (p.kind === "default") return patternText(p.target);
   if (p.kind === "object") {
-    const props = p.props.map((q) => (q.value.kind === "ident" && q.value.name === q.key ? q.value.name : `${String(q.key)}: ${patternText(q.value)}`));
+    const props = p.props.map((q) => (q.value.kind === "ident" && q.value.name === q.key ? q.value.name : `${typeof q.key === "string" ? q.key : "[]"}: ${patternText(q.value)}`));
     return `{ ${[...props, ...rest(p.rest)].join(", ")} }`;
   }
   if (p.kind === "array") return `[${[...p.elements.map((e) => (e ? patternText(e) : "")), ...rest(p.rest)].join(", ")}]`;
@@ -561,7 +562,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       return false;
     });
     this.written = lowerOverloads(this.ids, this.written);
+    localKeys(this.written);
     this.written = [...this.written, ...hoistLocals(this.compilation, this.written)];
+    lowerKeys(this.written);
+    this.tables.topKeys = topKeys(this.written);
     holdsNode("stmt", this.written, (n) => {
       if (n.kind === "get" && typeof (n as { name?: unknown; key?: unknown }).name === "string") this.getterNames.add((n as { name: string }).name);
       if (n.kind === "get" && typeof (n as { key?: unknown }).key === "string") this.getterNames.add((n as { key: string }).key);
@@ -2436,11 +2440,11 @@ class BodyChecker implements Context, Outer, Sight {
       }
       const taken = new Set<string>();
       for (const p of pattern.props) {
-        if (typeof p.key !== "string") throw unsupported("computed keys in destructuring patterns", p);
-        const found = members.map((m) => this.cx.typing.field(m as ClassType | ObjectType, p.key as string));
-        if (found.some((f) => !f)) throw new CompileError("E0502", `property '${p.key}' does not exist on type '${this.cx.typing.show(whole)}'`, p.start, p.end);
-        taken.add(p.key);
-        part(p.value, { id: nextId(this.cx.ids), kind: "member", object: from(p), name: p.key, optional: false, start: p.start, end: p.end }, this.cx.typing.unionType(found.map((f) => f!.type)));
+        const key = typeof p.key === "string" ? p.key : this.exprs().knownKey(p.key);
+        const found = members.map((m) => this.cx.typing.field(m as ClassType | ObjectType, key));
+        if (found.some((f) => !f)) throw new CompileError("E0502", `property '${key}' does not exist on type '${this.cx.typing.show(whole)}'`, p.start, p.end);
+        taken.add(key);
+        part(p.value, { id: nextId(this.cx.ids), kind: "member", object: from(p), name: key, optional: false, start: p.start, end: p.end }, this.cx.typing.unionType(found.map((f) => f!.type)));
       }
       if (pattern.rest && w?.kind === "union") throw unsupported("rest patterns over a union of objects", pattern.rest);
       // The rest is an object of the fields the pattern didn't name, taken over.
@@ -2527,8 +2531,7 @@ class BodyChecker implements Context, Outer, Sight {
         return n ? [[n, (from: Expr): Expr => ({ id: nextId(this.cx.ids), kind: "index", object: from, index: { id: nextId(this.cx.ids), kind: "int", value: BigInt(i), start: n.start, end: n.end }, optional: false, start: n.start, end: n.end })]] : [];
       })
       : pattern.props.map((p) => {
-        if (typeof p.key !== "string") throw unsupported("computed keys in destructuring patterns", p);
-        const key = p.key;
+        const key = typeof p.key === "string" ? p.key : this.exprs().knownKey(p.key);
         return [named(p.value)!, (from: Expr): Expr => ({ id: nextId(this.cx.ids), kind: "member", object: from, name: key, optional: false, start: p.start, end: p.end })];
       });
     const held = pattern.kind === "array" ? `[${pattern.elements.map((p) => (p?.kind === "ident" ? p.name : "")).join(", ")}]` : `{ ${parts.map(([n]) => n.name).join(", ")} }`;
@@ -2823,6 +2826,8 @@ class BodyChecker implements Context, Outer, Sight {
         const describes = annotated && (this.cx.isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
         this.declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
         if (s.keyword === "let" && !annotated && type === "i64" && this.exprs().literalOnly(d.init, false)) this.cx.candidates.set(this.locals.get(s)!, s);
+        const number = s.keyword === "const" ? numberKey(d.init) : undefined;
+        if (number !== undefined) this.cx.tables.numberKeys.set(this.locals.get(s)!, number);
         // A nested function's declaration, met as this `const` again when a body is checked anew.
         if (this.cx.nestedFunctions.has(d.init)) this.cx.nestedBindings.add(this.locals.get(s)!);
         return;
