@@ -2228,14 +2228,16 @@ export class Expressions implements Union {
     if (typed && (callee.name === "subarray" || callee.name === "set")) this.ctx.exprsState.once.add(callee.object);
     // `subarray` is a copy, as `slice` is: a typed array owns its elements, so a write to it
     // doesn't reach the array it came from.
-    if (typed && callee.name === "subarray") return this.call(this.become(e, { ...e, callee: { ...callee, id: nextId(this.ids), name: "slice" } }) as Call);
+    // Its positions, like set's offset, may be an `i64` or a `usize`, as JavaScript code holding
+    // positions in either ports as written.
+    if (typed && callee.name === "subarray") return this.call(this.become(e, { ...e, callee: { ...callee, id: nextId(this.ids), name: "slice" }, args: e.args.map((a) => this.arrayLength(a, false)) }) as Call);
     // `set(source, offset?)` copies the source's elements in at the offset.
     if (typed && callee.name === "set") {
       if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", "'set' takes the array to copy in, and an optional offset", e.start, e.end);
       const at = { start: e.start, end: e.end };
       const [source, offset] = e.args as [Expr, Expr | undefined];
       this.expect(source, array);
-      return this.call(this.become(e, this.typedCall(`array typed set ${TYPED_ARRAYS[typed]}`, [callee.object, source, offset ?? { id: nextId(this.ids), kind: "int", value: 0n, ...at }, { id: nextId(this.ids), kind: "int", value: BigInt(typedSize(typed)), ...at }], at)) as Call);
+      return this.call(this.become(e, this.typedCall(`array typed set ${TYPED_ARRAYS[typed]}`, [callee.object, source, offset ? this.arrayLength(offset, false) : { id: nextId(this.ids), kind: "int", value: 0n, ...at }, { id: nextId(this.ids), kind: "int", value: BigInt(typedSize(typed)), ...at }], at)) as Call);
     }
     if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, ARRAY_METHODS)}`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
@@ -2925,7 +2927,7 @@ export class Expressions implements Union {
     if (this.typing.typedName(held) === "ArrayBuffer" && name !== "ArrayBuffer") {
       const int = (value: bigint): Expr => ({ id: nextId(this.ids), kind: "int", value, ...at });
       const size = BigInt(typedSize(name));
-      return this.typedAs(e, this.typedCall(`array from buffer ${TYPED_ARRAYS[name]}`, [source, rest[0] ?? int(0n), rest[1] ?? int(-1n), int(size), { id: nextId(this.ids), kind: "string", value: name, ...at }], at), typed);
+      return this.typedAs(e, this.typedCall(`array from buffer ${TYPED_ARRAYS[name]}`, [source, rest[0] ? this.arrayLength(rest[0], false) : int(0n), rest[1] ? this.arrayLength(rest[1], false) : int(-1n), int(size), { id: nextId(this.ids), kind: "string", value: name, ...at }], at), typed);
     }
     if (this.isArray(held) && rest.length === 0 && name !== "ArrayBuffer") {
       const element = this.typing.lower(this.typing.rec(held).element);

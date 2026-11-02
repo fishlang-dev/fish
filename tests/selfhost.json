@@ -57,7 +57,7 @@
     "stdcache.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
     "suggest.ts": "operator '*' can't mix 'usize' and 'number'; convert one side with 'as', like 'x as usize'",
     "survey.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
-    "tar.ts": "argument of type 'usize' is not assignable to parameter of type 'i64'; convert it with 'as i64'",
+    "tar.ts": "operator '<=' can't mix 'i64' and 'usize'; convert one side with 'as', like 'x as i64'",
     "target.ts": "cannot find name 'process'",
     "tests.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",
     "typefns.ts": "'node:zlib' is a Node module Fish's std doesn't have yet",

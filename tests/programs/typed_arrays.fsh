@@ -185,3 +185,14 @@ function main() {
   const b = Uint8Array.from([1, 2]);
   console.log(ArrayBuffer.isView(b));
 }
+// case: typed_array_usize_positions
+// expect: Uint8Array(4) [ 0, 104, 105, 0 ] Uint8Array(2) [ 104, 105 ] Uint8Array(2) [ 2, 3 ] Uint8Array(1) [ 0 ]
+// Positions may be an i64 or a usize, as the compiler's own byte handling holds them.
+function main() {
+  const at: usize = 1;
+  const n: usize = 2;
+  let h = new Uint8Array(4);
+  h.set(new TextEncoder().encode("hi"), at);
+  const raw: ArrayBuffer = [1, 2, 3, 4];
+  console.log(h, h.subarray(at, at + n), new Uint8Array(raw, at, n), h.subarray(-1));
+}
