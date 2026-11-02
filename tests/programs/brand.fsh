@@ -524,3 +524,78 @@ function main() {
 }
 // expect: 1
 // expect: [ 1 ] { id: 1, n: 2 }
+// case: brand_inferred_kept
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+function app<T>(x: T, f: (v: T) => void) {
+  f(x)
+}
+
+function mk<T>(x: T) {
+  return { v: x }
+}
+
+async function main(): Promise<void> throws Error {
+  app<UserId>(1 as UserId, (v) => {
+    const o: UserId = v
+    console.log(o)
+  })
+  const p = new Promise<UserId>((res) => res(2 as UserId))
+  const a: UserId = await p
+  const r = mk<UserId>(3 as UserId)
+  const b: UserId = r.v
+  const { promise, resolve } = Promise.withResolvers<UserId>()
+  resolve(4 as UserId)
+  const c: UserId = await promise
+  console.log(a, b, c)
+}
+// expect: 1
+// expect: 2 3 4
+// case: brand_contextual_arrow_other
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+function app<T>(x: T, f: (v: T) => void) {
+  f(x)
+}
+
+function main() {
+  app<UserId>(1 as UserId, (v) => {
+    const o: OrderId = v
+  })
+}
+// error: 10:24: error[E0101]: type 'Brand<usize, "UserId">' is not assignable to type 'Brand<usize, "OrderId">'
+// case: brand_new_promise_other
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+async function main() {
+  const p = new Promise<UserId>((res) => res(1 as UserId))
+  const o: OrderId = await p
+}
+// error: 6:22: error[E0101]: type 'Brand<usize, "UserId">' is not assignable to type 'Brand<usize, "OrderId">'
+// case: brand_inferred_return_other
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+function mk<T>(x: T) {
+  return { v: x }
+}
+
+function main() {
+  const r = mk<UserId>(1 as UserId)
+  const o: OrderId = r.v
+}
+// error: 10:22: error[E0101]: type 'Brand<usize, "UserId">' is not assignable to type 'Brand<usize, "OrderId">'
+// case: brand_resolvers_other
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+async function main(): Promise<void> throws Error {
+  const { promise, resolve } = Promise.withResolvers<UserId>()
+  resolve(1 as UserId)
+  const v = await promise
+  const o: OrderId = v
+}
+// error: 8:22: error[E0101]: type 'Brand<usize, "UserId">' is not assignable to type 'Brand<usize, "OrderId">'

@@ -1540,7 +1540,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       throw new CompileError("E0104", `'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
     }
     this.checkBody(instance);
-    return instance.returns;
+    // What it was inferred to give, with the brands lowering left out of the compiled type.
+    return instance.branded?.returns ?? instance.returns;
   }
 
   // The check of a generic body as written, before an instance's: a generic function's

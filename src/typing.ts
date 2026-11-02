@@ -920,8 +920,13 @@ export class Typing {
   // Whether two types are one once lowered, except where `to` holds a pattern that lowering
   // would make a plain string: then fitting decides, part by part.
   sameLowered(this: Mut<this>, from: Type, to: Type): boolean {
-    const kept = (t: Type) => this.holdsPattern(t) || this.holdsBrand(t);
-    return this.lower(from) === this.lower(to) && (!kept(to) || kept(from) && this.shapeKey(from) === this.shapeKey(to));
+    if (this.lower(from) !== this.lower(to)) return false;
+    if (this.holdsPattern(to)) return this.holdsPattern(from) && this.shapeKey(from) === this.shapeKey(to);
+    if (!this.holdsBrand(to)) return true;
+    // Brands compare once type parameters stand for what they are, where that keeps them.
+    const target = this.lowerKeepingBrands(to);
+    if (this.holdsBrand(target)) return this.lowerKeepingBrands(from) === target;
+    return this.holdsBrand(from) && this.shapeKey(from) === this.shapeKey(to);
   }
 
   private interiors = new Map<string, InteriorType>();
@@ -1999,6 +2004,9 @@ export class Typing {
     if (r.kind === "object" && r.tuple && !r.match) return this.retuple(t as ObjectType, kept);
     if (r.kind === "object" && !r.match) return this.objectType(r.fields.map(({ optional: _, ...f }) => ({ ...f, type: kept(f.type) })));
     if (r.kind === "class" && r.generic) return r.generic.args.some((a) => kept(a) !== a) ? this.instanceClass(t as ClassType, r.generic.args.map(kept)) : t;
+    if (r.kind === "block") return this.blockType(r.which, kept(r.of));
+    if (r.kind === "interior") return this.interiorType(r.which, kept(r.of));
+    if (r.kind === "shared") return this.sharedType(kept(r.of), r.which);
     return this.lower(t);
   }
 

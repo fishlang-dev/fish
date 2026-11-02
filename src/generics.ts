@@ -374,7 +374,7 @@ export class Instancing {
     // Inferred from a literal, a type parameter types the arrow as its base type; written, as the
     // instance has it, so a callable the arrow is given fits the instance's own.
     const explicit = typeArgs.length === params.length;
-    const scope = new Map([...(f.scope ?? []), ...this.explicitPlaceholders(f), ...[...bindings].map(([n, t]): [string, Type] => [n, explicit ? this.typing.lower(t) : this.typing.widenLet(this.typing.lower(t))])]);
+    const scope = new Map([...(f.scope ?? []), ...this.explicitPlaceholders(f), ...[...bindings].map(([n, t]): [string, Type] => [n, explicit ? this.typing.lowerKeepingBrands(t) : this.typing.widenLet(this.typing.lowerKeepingBrands(t))])]);
     const resolved = this.host.withScope(scope, () => this.host.resolveType(written));
     const t = typeof resolved === "string" ? undefined : this.typing.rec(resolved);
     if (t?.kind !== "function") return undefined;
@@ -594,7 +594,7 @@ export class Instancing {
     // A type argument holding a pattern keeps it, so the instance's parameters still ask for it;
     // one holding no type parameter keeps how its fields were spelled, which printing and JSON
     // read.
-    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, this.typing.holdsPattern(t) || this.host.instancingState.concreteness.concrete(t) ? t : this.typing.lower(t)]));
+    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, this.typing.holdsPattern(t) || this.host.instancingState.concreteness.concrete(t) ? t : this.typing.lowerKeepingBrands(t)]));
     // Every instance of the calling body shares the call's node, so each call resets it.
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) this.host.instancingState.sites.set(at, own);
     else this.host.instancingState.sites.delete(at);
