@@ -4559,6 +4559,77 @@ export function extname(path: string): string {
   if (startDot === -1 || end === -1 || preDotState === 0 || (preDotState === 1 && startDot === end - 1 && startDot === startPart + 1)) return "";
   return path.slice(startDot, end);
 }
+
+export function isAbsolute(path: string): boolean {
+  return at(path, 0) === 47;
+}
+
+export type ParsedPath = { root: string; dir: string; base: string; ext: string; name: string };
+
+export function parse(path: string): ParsedPath {
+  let root = "";
+  let dir = "";
+  let base = "";
+  let ext = "";
+  let name = "";
+  if (size(path) === 0) return { root, dir, base, ext, name };
+  const absolute = at(path, 0) === 47;
+  if (absolute) root = "/";
+  let startDot: i64 = -1;
+  let startPart: i64 = 0;
+  let end: i64 = -1;
+  let matchedSlash = true;
+  let preDotState: i64 = 0;
+  for (let i: i64 = size(path) - 1; i >= (absolute ? 1 : 0); --i) {
+    const code = at(path, i);
+    if (code === 47) {
+      if (!matchedSlash) {
+        startPart = i + 1;
+        break;
+      }
+      continue;
+    }
+    if (end === -1) {
+      matchedSlash = false;
+      end = i + 1;
+    }
+    if (code === 46) {
+      if (startDot === -1) startDot = i;
+      else if (preDotState !== 1) preDotState = 1;
+    } else if (startDot !== -1) {
+      preDotState = -1;
+    }
+  }
+  if (end !== -1) {
+    const start = startPart === 0 && absolute ? 1 : startPart;
+    base = path.slice(start, end);
+    if (startDot === -1 || preDotState === 0 || (preDotState === 1 && startDot === end - 1 && startDot === startPart + 1)) {
+      name = base;
+    } else {
+      name = path.slice(start, startDot);
+      ext = path.slice(startDot, end);
+    }
+  }
+  if (startPart > 0) dir = path.slice(0, startPart - 1);
+  else if (absolute) dir = "/";
+  return { root, dir, base, ext, name };
+}
+
+export type FormatInputPathObject = { root?: string; dir?: string; base?: string; ext?: string; name?: string };
+
+// Node's precedence: dir over root, base over name and ext, and an ext given without its dot gets one.
+export function format(pathObject: FormatInputPathObject): string {
+  const root = pathObject.root ?? "";
+  const given = pathObject.dir ?? "";
+  const dir = size(given) > 0 ? given : root;
+  let base = pathObject.base ?? "";
+  if (size(base) === 0) {
+    const ext = pathObject.ext ?? "";
+    base = (pathObject.name ?? "") + (size(ext) === 0 || at(ext, 0) === 46 ? ext : "." + ext);
+  }
+  if (size(dir) === 0) return base;
+  return dir === root ? dir + base : dir + "/" + base;
+}
 `,
   // Files read and written on the runtime's blocking pool. A call naming an encoding, as
   // readFile(path, "utf8"), is linked to readFileText, which gives a string.
