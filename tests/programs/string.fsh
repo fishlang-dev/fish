@@ -1188,8 +1188,8 @@ function main(): void { const xs = ["a", "b"]; console.log("".concat(...xs)); }
 // error: type '"a"' is not assignable to type 'u16'
 function main(): void { console.log(String.fromCharCode("a")); }
 // case: string_static_unknown
-// error: 'String' has no 'raw' yet; it has 'fromCharCode' and 'fromCodePoint'
-function main(): void { console.log(String.raw("a")); }
+// error: 'String' has no 'nope' yet; it has 'fromCharCode', 'fromCodePoint' and 'raw'
+function main(): void { console.log(String.nope("a")); }
 // case: string_statics_shadowed
 // error: 'i64' has no method 'fromCharCode'
 const String: i64 = 5;

@@ -14,8 +14,9 @@ export type Token = {
   newlineBefore: boolean;
   // On `/` and `/=`: the template substitutions open there, for rescanning it as a regex.
   substitutions?: usize[];
-  // On a template piece: its text as written, escapes undecoded.
+  // On a template piece: its text as written, escapes undecoded, and its first invalid escape.
   raw?: string;
+  invalid?: CompileError;
 };
 
 // Matches punctuation and keywords, never a literal with the same text.
@@ -106,23 +107,32 @@ function escape(src: string, i: usize): [string, usize] {
   return [String.fromCodePoint(code as u32), end];
 }
 
-// The decoded text of a template piece starting at `from`, where it ends, and whether a
-// substitution follows.
+// The decoded text of a template piece starting at `from`, where it ends, whether a
+// substitution follows, and the first invalid escape in it, which only `String.raw` allows, since
+// it reads the text as written.
 /** @throws {CompileError} */
-function template(src: string, from: usize): [string, usize, boolean] {
+function template(src: string, from: usize): [string, usize, boolean, CompileError | undefined] {
   let value = "";
   let i = from;
+  let invalid: CompileError | undefined = undefined;
   // Where the text not yet added to `value` starts, so plain runs are added in one piece.
   let run = i;
   for (;;) {
-    if (i >= src.length) throw new CompileError("E0002", "unterminated template literal", i);
+    if (i >= src.length) throw invalid ?? new CompileError("E0002", "unterminated template literal", i);
     const c = src.charAt(i as i64);
-    if (c === "`") return [value + src.slice(run as i64, i as i64), i + 1, false];
-    if (c === "$" && src.charAt((i + 1) as i64) === "{") return [value + src.slice(run as i64, i as i64), i + 2, true];
+    if (c === "`") return [value + src.slice(run as i64, i as i64), i + 1, false, invalid];
+    if (c === "$" && src.charAt((i + 1) as i64) === "{") return [value + src.slice(run as i64, i as i64), i + 2, true, invalid];
     if (c === "\\") {
-      const [escaped, end] = escape(src, i);
-      value += src.slice(run as i64, i as i64) + escaped;
-      i = end;
+      value += src.slice(run as i64, i as i64);
+      try {
+        const [escaped, end] = escape(src, i);
+        value += escaped;
+        i = end;
+      } catch (e) {
+        if (!(e instanceof CompileError)) throw e;
+        if (invalid === undefined) invalid = e;
+        i += 2;
+      }
       run = i;
     } else if (c === "\r") {
       // JavaScript reads a template's CR and CRLF as LF.
@@ -296,7 +306,7 @@ export class Lexer {
   /** @throws {CompileError} */
   templatePiece(this: Mut<this>, opens: boolean): Token {
     const start = this.i;
-    const [value, end, more] = template(this.src, start + 1);
+    const [value, end, more, invalid] = template(this.src, start + 1);
     this.i = end;
     // The raw text, too, has its line endings read as LF, as JavaScript reads them.
     const raw = this.src.slice((start + 1) as i64, (end - (more ? 2 : 1)) as i64).replaceAll("\r\n", "\n").replaceAll("\r", "\n");
@@ -306,7 +316,7 @@ export class Lexer {
     else if (more) kind = "templateMiddle";
     if (opens && more) this.substitutions.push(0);
     if (!opens && !more) this.substitutions.pop();
-    return { ...this.token(kind, value, start), raw };
+    return { ...this.token(kind, value, start), raw, invalid };
   }
 
   /** @throws {CompileError} */

@@ -119,6 +119,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("declare let d: number;\ndeclare global { var g: number; }\ndeclare module \"m\" { export const x: number; }\n")).toEqual({ namespaces: 2, R7: 2 });
   expect(counts("abstract class A { abstract x: number; abstract m(): void; abstract get g(): number; }\n")).toEqual({ classForms: 1 });
   expect(counts("function main(): void {}\nmain();\nmain().catch(report);\n")).toEqual({});
+  expect(counts("const a = String.raw`\\d+${x}`;\nconst b = sql`select ${x}`;\nconst c = String.raw({ raw: [\"a\"] });\n")).toEqual({ tagged: 1 });
 });
 
 test("each file names the planned features it waits on", () => {
