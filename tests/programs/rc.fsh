@@ -82,7 +82,7 @@ function main() {
   console.log(leaves.length, leaves[1]!.name);
 }
 // case: rc_reentrant_update
-// panic: this lock is already held by an `update` running here
+// panic: this Rc's value is already being changed by an `update` running here; use the value its callback is given
 function main() {
   const a = new Rc({ n: 1 });
   const b = a.clone();
@@ -90,7 +90,7 @@ function main() {
   console.log(got);
 }
 // case: rc_unknown_method
-// error: 'Rc' has no method 'set'; read its fields, change it with 'update', share it again with 'clone', or reach it weakly with 'downgrade'
+// error: 'Rc' has no method 'set'; read its fields, change it with 'update', read it in place with 'read', share it again with 'clone', or reach it weakly with 'downgrade'
 function main() {
   const r = new Rc(1);
   r.set(2);
@@ -299,4 +299,109 @@ function look(c: Ref<Cell<string>>, r: Rc<Node>) {
 function main() {
   const r = new Rc(new Node());
   look(r.label, r.clone());
+}
+// case: rc_back_references
+// expect: a sees root, parent root, 2 kids
+// expect: a sees root, parent root, 2 kids
+// expect: b sees root, parent root, 2 kids
+// expect: b sees root, parent root, 2 kids
+// expect: 4 parent root
+// expect: root 2
+class Parent {
+  name: string;
+  told: Cell<i64> = new Cell(0);
+  kids: Rc<Child>[] = [];
+  constructor(name: string) { this.name = name; }
+  label(): string { return "parent " + this.name; }
+  visit(times: i64) {
+    for (const k of this.kids) for (let i = 0; i < times; i++) k.poke();
+  }
+}
+
+class Child {
+  name: string;
+  parent: Weak<Parent>;
+  constructor(name: string, parent: Weak<Parent>) {
+    this.name = name;
+    this.parent = parent;
+  }
+  poke() {
+    const p = this.parent.upgrade();
+    if (p === null) return;
+    console.log(`${this.name} sees ${p.name}, ${p.label()}, ${p.read((v) => v.kids.length)} kids`);
+    p.told.set(p.told.get() + 1);
+  }
+}
+
+function main() {
+  const root = new Rc(new Parent("root"));
+  root.update((p) => p.kids.push(new Rc(new Child("a", root.downgrade()))));
+  root.update((p) => p.kids.push(new Rc(new Child("b", root.downgrade()))));
+  root.visit(2);
+  console.log(root.told.get(), root.label());
+  root.update((p) => p.kids[0]!.update((c) => console.log(root.name, root.kids.length)));
+}
+// case: rc_update_under_read
+// panic: this Rc's value is being read by a `read` or a method running here, so `update` can't change it until that returns
+class Parent {
+  hits: i64 = 0;
+  kid: Rc<Child>;
+  constructor(kid: Rc<Child>) { this.kid = kid; }
+  visit() { this.kid.poke(); }
+}
+
+class Child {
+  parent: Weak<Parent> = new Weak<Parent>();
+  poke() {
+    const p = this.parent.upgrade();
+    if (p !== null) p.update((v) => v.hits++);
+  }
+}
+
+function main() {
+  const kid = new Rc(new Child());
+  const root = new Rc(new Parent(kid.clone()));
+  kid.update((c) => { c.parent = root.downgrade(); });
+  root.visit();
+}
+// case: rc_read_under_update
+// panic: this Rc's value is being changed by an `update` running here, so it can't be read until that returns
+class Counter {
+  n: i64 = 0;
+  get(): i64 { return this.n; }
+}
+
+function main() {
+  const c = new Rc(new Counter());
+  const d = c.clone();
+  c.update((v) => { v.n = d.get() + 1; });
+}
+// case: rc_mut_method
+// error: 'bump' changes its object, so on an Rc it runs inside 'update', as in 'c.update((v) => v.bump(...))'
+class Counter {
+  n: i64 = 0;
+  bump(this: Mut<this>) { this.n++; }
+}
+
+function main() {
+  const c = new Rc(new Counter());
+  c.bump();
+}
+// case: rc_cell_write_in_update
+// error: cannot assign to 'v.seen' inside 'update': 'v.seen' is borrowed where it lives, outside 'update', so it changes only through its own methods
+function main() {
+  const r = new Rc({ hits: 0, seen: new Cell(0) });
+  r.update((v) => {
+    v.hits++;
+    v.seen = new Cell(5);
+  });
+}
+// case: rc_await_in_update
+// error: an Rc's 'update' callback can't 'await': the value stays marked as changed until the callback returns
+async function main() {
+  const r = new Rc({ n: 0 });
+  r.update((v) => {
+    await yieldNow();
+    v.n++;
+  });
 }

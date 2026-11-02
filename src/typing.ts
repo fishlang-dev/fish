@@ -1782,6 +1782,8 @@ export class Typing {
   // of those changing a shared value, whose interior-mutable parts others borrow unlocked.
   lockCallbacks = new TypeMap<FunctionType, string>();
   sharedCallbacks = new TypeSet<FunctionType>();
+  // Those of an Rc's `update` and `read`, which only this thread runs.
+  rcCallbacks = new TypeSet<FunctionType>();
 
   // A type parameter as an instance sees it: standing for `concrete`, which has no type
   // parameter in it.

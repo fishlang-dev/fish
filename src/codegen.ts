@@ -995,6 +995,17 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
   }
 
+  // Marks an Rc's value read or changed for a callback, panicking where the two would overlap.
+  function borrowRc(word: string, at: Span, reading: boolean) {
+    const [taken, changing, read] = [temp(), temp(), temp()];
+    emit(`${taken} = call i32 @fsh_rt_rc_${reading ? "read" : "write"}(ptr ${word})`);
+    emit(`${changing} = icmp eq i32 ${taken}, 1`);
+    panicIf(changing, reading ? "this Rc's value is being changed by an `update` running here, so it can't be read until that returns" : "this Rc's value is already being changed by an `update` running here; use the value its callback is given", at);
+    if (reading) return;
+    emit(`${read} = icmp eq i32 ${taken}, 2`);
+    panicIf(read, "this Rc's value is being read by a `read` or a method running here, so `update` can't change it until that returns", at);
+  }
+
   // 'AbortSignal.any's handles and their count: a literal's, lent one by one, in a stack array,
   // and otherwise the borrowed array's own buffer.
   function signalList(list: Expr): string {
@@ -2646,7 +2657,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // `update`: the callback runs with a pointer to what the Lock holds, between taking and
   // releasing its word; an RwLock's `read` or `update` takes its word's read or write side.
   // The callback's captures are made before the lock is taken.
-  function lockUpdate(e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string): string | undefined {
+  function lockUpdate(e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string, rc = false): string | undefined {
     const callback = e.args[0]!;
     // The callback's value lives in a slot it is called through; what it leaves of its captures
     // is dropped after it, as at any closure's call.
@@ -2655,12 +2666,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store ${llvm(made)} ${owned(callback)}, ptr ${env}`);
     const leftovers = needsDrop(made) ? () => dispose(unstash(env, made), made) : undefined;
     const reading = e.callee.kind === "member" && e.callee.name === "read";
-    takeLock(at, e, typing.rec(t).which === "Lock" ? "fsh_rt_lock" : reading ? "fsh_rt_read_lock" : "fsh_rt_write_lock");
+    if (rc) borrowRc(at, e, reading);
+    else takeLock(at, e, typing.rec(t).which === "Lock" ? "fsh_rt_lock" : reading ? "fsh_rt_read_lock" : "fsh_rt_write_lock");
     const inside = temp();
     emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = callOf(callback)!;
     const result = invoke(target, env, bodyOf(target).params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
-    emit(`call void @${reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
+    emit(`call void @${rc ? (reading ? "fsh_rt_rc_read_end" : "fsh_rt_rc_write_end") : reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
     if (result && !types.has(e) && needsDrop(target.returns)) pending.push({ v: result, type: target.returns });
     return result;
   }
@@ -6950,13 +6962,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       if (e.callee.kind === "member" && e.callee.name !== "clone" && recOf(referent(valueType(e.callee.object)))?.kind === "block") return blockCall(e, e.callee);
       if (dynCalls.has(e)) return dynCall(e, e.callee);
       if (e.callee.kind === "member" && (e.callee.name === "downgrade" || e.callee.name === "upgrade") && recOf(referent(valueType(e.callee.object)))?.kind === "shared") return countedCall(e, e.callee);
-      if (e.callee.kind === "member" && e.callee.name === "update" && recOf(referent(valueType(e.callee.object)))?.kind === "shared") {
+      if (e.callee.kind === "member" && (e.callee.name === "update" || e.callee.name === "read") && recOf(referent(valueType(e.callee.object)))?.kind === "shared") {
         const t = referent(valueType(e.callee.object)) as SharedType;
         const block = temp();
         emit(`${block} = load ptr, ptr ${receiver(e.callee.object)}`);
         const lock = temp();
         emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
-        return lockUpdate(e, typing.interiorType("Lock", typing.rec(t).of), lock);
+        return lockUpdate(e, typing.interiorType("Lock", typing.rec(t).of), lock, typing.rec(t).which === "Rc");
       }
       // `BigInt(x)`: a new bigint of an integer, extended to 128 bits by its sign.
       if (e.callee.kind === "ident" && e.callee.name === "BigInt" && !calls.has(e)) {
@@ -7461,13 +7473,20 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   // A shared value's plain field, copied out while its lock is held.
+  // An Rc's field is copied without its word: only this thread reaches it, and between two of its
+  // steps an `update` running here has left the value whole.
   function copyOut(e: Extract<Expr, { kind: "member" }>): string {
     const [block, t, at] = sharedField(e);
+    const type = types.get(e)!;
+    if (typing.rec(t).which === "Rc") {
+      const read = temp();
+      emit(`${read} = load ${llvm(type)}, ptr ${at}`);
+      return copied(read, type);
+    }
     const lock = temp();
     emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
     takeLock(lock, e);
     const read = temp();
-    const type = types.get(e)!;
     emit(`${read} = load ${llvm(type)}, ptr ${at}`);
     const copy = copied(read, type);
     emit(`call void @fsh_rt_unlock(ptr ${lock})`);

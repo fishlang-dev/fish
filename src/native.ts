@@ -4733,6 +4733,29 @@ void fsh_rt_weak_release(int64_t *block) {
   if (block && --block[1] == 0) fsh_rt_free(block);
 }
 
+// An Rc's word counts the reads running on its value, or is -1 while an update changes it.
+// Reads nest; a read under an update, or an update under either, is refused with 1 or 2, which
+// the caller turns into a panic, as RefCell's borrow flag does.
+int32_t fsh_rt_rc_read(int32_t *word) {
+  if (*word < 0) return 1;
+  ++*word;
+  return 0;
+}
+
+void fsh_rt_rc_read_end(int32_t *word) {
+  --*word;
+}
+
+int32_t fsh_rt_rc_write(int32_t *word) {
+  if (*word != 0) return *word < 0 ? 1 : 2;
+  *word = -1;
+  return 0;
+}
+
+void fsh_rt_rc_write_end(int32_t *word) {
+  *word = 0;
+}
+
 // The block with a new strong count while its value is alive, or null.
 void *fsh_rt_rc_upgrade(int64_t *block) {
   if (!block || block[0] == 0) return 0;
