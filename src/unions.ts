@@ -112,9 +112,18 @@ export function intoMember(typing: Typing, target: Expr, types: NodeMap<Expr, Ty
 }
 
 // A field every member of a union has, read without narrowing first: its type is the union
-// of the members' field types. This is how a discriminant like `x.kind` is read.
+// of the members' field types. This is how a discriminant like `x.kind` is read. A member that
+// holds the union again is read through the type its block holds.
 export function unionField(typing: Typing, union: UnionType, name: string, at: Span): Type | undefined {
-  const found = typing.rec(union).members.map((m) => (typeof m === "string" ? undefined : typing.field(m, name)));
+  const found = typing.rec(union).members.map((m) => {
+    const held = typing.unfold(m);
+    if (typeof held === "string") return undefined;
+    if (held !== m && typing.rec(held).kind === "union") {
+      const inner = unionField(typing, held as UnionType, name, at);
+      return inner === undefined ? undefined : { name, type: inner };
+    }
+    return typing.field(held, name);
+  });
   if (found.some((f) => !f || (f.access ?? "public") !== "public")) return undefined;
   return typing.unionType(found.map((f) => f!.type));
 }

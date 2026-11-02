@@ -1,7 +1,7 @@
 import { nextId, type Ids } from "./nodes.ts";
 import type { Expr, Pattern } from "./parser.ts";
 import { unsupported } from "./unsupported.ts";
-import type { ClassType, Field, LiteralType, ObjectType, ParamType, Type, VariantType, Typing } from "./typing.ts";
+import type { ClassType, Field, LiteralType, ObjectType, ParamType, RecursiveType, Type, VariantType, Typing } from "./typing.ts";
 
 // What `match` knows about patterns apart from checking expressions: what each pattern tests,
 // the names they bind, and which values of the matched type no arm covers.
@@ -30,8 +30,9 @@ export type PatternInfo = { type: Type } & PatternTest;
 export type LiteralValue = string | bigint | boolean | f64 | null;
 
 // What an object pattern can take apart: an object, an instance, or a type parameter bounded by
-// an object type or an interface, as a parameter typed with one is.
-export type Shape = ObjectType | ClassType | ParamType;
+// an object type or an interface, as a parameter typed with one is, or a union's member holding
+// the union again, whose fields are in its block.
+export type Shape = ObjectType | ClassType | ParamType | RecursiveType;
 
 // A pattern's information with each type it holds as an instance sees it.
 export function lowerPattern(typing: Typing, info: PatternInfo): PatternInfo {
@@ -112,6 +113,8 @@ function cases(typing: Typing, t: Type): Case[] {
     if (r.kind === "literal") return [{ kind: "literal", type: m as LiteralType }];
     if (r.kind === "variant") return [{ kind: "variant", variant: m as VariantType }];
     if (r.kind === "object" || r.kind === "class" || (r.kind === "param" && (typing.recOf(r.bound)?.kind === "object" || typing.recOf(r.bound)?.kind === "interface"))) return [{ kind: "object", type: m as Shape }];
+    const boxed = r.kind === "recursive" ? typing.recOf(r.of)?.kind : undefined;
+    if (boxed === "object" || boxed === "class") return [{ kind: "object", type: m as Shape }];
     return [{ kind: "open", type: m }];
   });
 }
@@ -128,7 +131,14 @@ export function uncovered(typing: Typing, ids: Ids, rows: Row[], types: Type[], 
   if (types.length === 0) return rows.length === 0 ? [] : undefined;
   const [type, ...rest] = types as [Type, ...Type[]];
   const expanded = rows.flatMap((row) => alternatives(row[0]!, info).map((p) => [p, ...row.slice(1)]));
-  for (const c of cases(typing, type)) {
+  const all = cases(typing, type);
+  // A member holding the union again splits into fields of the union, without end; where no row
+  // takes the column apart, every value of it is covered alike, so it needs no split.
+  if (expanded.every((row) => info(row[0]!).kind === "any") && all.some((c) => c.kind === "object" && typing.rec(c.type).kind === "recursive")) {
+    const missing = uncovered(typing, ids, expanded.map((row) => row.slice(1)), rest, recorded);
+    return missing && ["_", ...missing];
+  }
+  for (const c of all) {
     const fields = fieldTypes(typing, c);
     const kept: Row[] = [];
     for (const [p, ...tail] of expanded) {
@@ -184,6 +194,7 @@ function specialize(typing: Typing, ids: Ids, p: Pattern, c: Case, arity: usize,
 // included.
 export function objectFields(typing: Typing, t: Shape): Field[] {
   const r = typing.rec(t);
+  if (r.kind === "recursive") return typing.recOf(r.of)?.kind === "object" || typing.recOf(r.of)?.kind === "class" ? objectFields(typing, r.of as Shape) : [];
   if (r.kind === "param" || r.kind === "object") return typing.fieldsOf(t);
   return [...(r.base ? objectFields(typing, r.base) : []), ...r.fields].filter((f) => (f.access ?? "public") === "public");
 }

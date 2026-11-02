@@ -3613,6 +3613,11 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   function fieldOf(v: string, holder: Type, key: string, type: Type): string {
     const held = typing.rec(holder as Exclude<Type, string>);
     if (held.kind === "union") return unionField(v, holder as Exclude<Type, string> as UnionType, key, type);
+    if (held.kind === "recursive") {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(held.of)}, ptr ${v}`);
+      return fieldOf(loaded, held.of, key, type);
+    }
     const shape = holder as ObjectType | ClassType;
     const read = temp();
     emit(`${read} = extractvalue ${llvm(shape)} ${v}, ${typing.fieldPath(shape, key).join(", ")}`);
@@ -9620,9 +9625,10 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const holder = stored(target.object);
     const object = typing.unfold(referent(holder)) as ObjectType | ClassType;
     // Through a reference, the field is inside what it points to, and in a recursive type's
-    // block, inside the block.
+    // block, inside the block. A reference to a recursive member, as a narrowed `Mut` gives,
+    // points at the place holding the block, not at the block.
     let base = isRef(holder) ? evaluate(target.object) : address(target.object);
-    if (recOf(holder)?.kind === "recursive") {
+    if (recOf(referent(holder))?.kind === "recursive") {
       const block = temp();
       emit(`${block} = load ptr, ptr ${base}`);
       base = block;
@@ -9649,7 +9655,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       // A field narrowed to several members is read as a copy, laid out as the narrower union.
       if (current.narrowedFields?.has(e) && !inPayload(e)) return false;
       // A string's or an array's `length` is computed, not a field.
-      const object = types.has(e.object) ? referent(types.get(e.object)!) : undefined;
+      // A recursive member's fields live in its block, which is a place too.
+      const object = types.has(e.object) ? typing.unfold(referent(types.get(e.object)!)) : undefined;
       // A shared value's interior-mutable field lives in its block, wherever the handle is.
       const kind = recOf(object)?.kind;
       if (kind === "shared") return !current.copiesOut.has(e);

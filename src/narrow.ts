@@ -127,7 +127,9 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     if (subject.kind === "member") {
       return split(subject.object, (m) => {
         if (m === "null" && subject.optional) return "no";
-        const kind = typeof m === "string" ? undefined : typing.fieldsOf(m).find((f) => f.name === subject.name)?.type;
+        // A member holding the union again has the fields of the type its block holds.
+        const held = typing.unfold(m);
+        const kind = typeof held === "string" ? undefined : typing.fieldsOf(held).find((f) => f.name === subject.name)?.type;
         if (kind && is(kind, value)) return "yes";
         const r = kind === undefined || typeof kind === "string" ? undefined : typing.rec(kind);
         // A `kind` that is one of several literals is that literal only when it is among them.

@@ -460,3 +460,176 @@ function main(): void {
   if (s.kind === "let") console.log(s.decls.length, s.decls[1]!.start)
 }
 // expect: 2 2
+// case: recursive_named_members
+// A union of named members that refer back to it reads their shared fields, a field typed differently per member as the union of them.
+// expect: call
+// expect: 14
+// expect: member
+// expect: ident
+// expect: 2
+// expect: s
+// expect: 4
+// expect: if
+// expect: if(call) { expr } else member
+type Ident = { kind: "ident"; name: string; start: i64 };
+type Member = { kind: "member"; object: Expr; prop: string; start: i64 };
+type Call = { kind: "call"; callee: Expr; args: Expr[]; start: i64 };
+type Num = { kind: "num"; value: i64; start: string };
+type Expr = Ident | Member | Call | Num;
+type ExprStmt = { kind: "expr"; expr: Expr };
+type If = { kind: "if"; cond: Expr; then: Stmt; else?: Stmt };
+type Block = { kind: "block"; body: Stmt[] };
+type Stmt = ExprStmt | If | Block;
+
+function count(e: Expr): i64 {
+  if (e.kind === "member") return 1 + count(e.object);
+  if (e.kind === "call") {
+    let n = 1 + count(e.callee);
+    for (const a of e.args) n += a.kind === "num" ? 10 : 1;
+    return n;
+  }
+  return 1;
+}
+
+function kinds(s: Stmt): string {
+  if (s.kind === "if") {
+    const e = s.else;
+    const tail = e === undefined ? "" : " else " + kinds(e);
+    return "if(" + s.cond.kind + ") " + kinds(s.then) + tail;
+  }
+  if (s.kind === "block") {
+    let out = "{";
+    for (const t of s.body) out += " " + t.kind;
+    return out + " }";
+  }
+  return s.expr.kind;
+}
+
+function main() {
+  const x: Expr = { kind: "ident", name: "x", start: 0 };
+  const m: Expr = { kind: "member", object: x.clone(), prop: "y", start: 1 };
+  const c: Expr = { kind: "call", callee: m.clone(), args: [{ kind: "num", value: 3, start: "s" }, { kind: "ident", name: "z", start: 4 }], start: 2 };
+  console.log(c.kind);
+  console.log(count(c.clone()));
+  if (c.kind === "call") console.log(c.callee.kind);
+  if (c.kind === "call") { const f = c.callee.clone(); if (f.kind === "member") console.log(f.object.kind); }
+  const st = c.start;
+  console.log(st);
+  if (c.kind === "call") for (const a of c.args) console.log(a.start);
+  const s: Stmt = { kind: "if", cond: c.clone(), then: { kind: "block", body: [{ kind: "expr", expr: x.clone() }] }, else: { kind: "expr", expr: m.clone() } };
+  console.log(s.kind);
+  console.log(kinds(s));
+}
+// case: recursive_named_members_nested
+// expect: add
+// expect: neg
+// expect: -3
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; r: Expr };
+type Neg = { kind: "neg"; of: Expr };
+type Compound = Add | Neg;
+type Expr = Lit | Compound;
+function ev(e: Expr): i64 {
+  if (e.kind === "lit") return e.v;
+  if (e.kind === "add") return ev(e.l) + ev(e.r);
+  if (e.kind === "neg") return -ev(e.of);
+  return 0;
+}
+function main() {
+  const e: Expr = { kind: "add", l: { kind: "lit", v: 2 }, r: { kind: "neg", of: { kind: "lit", v: 5 } } };
+  console.log(e.kind);
+  const n: Expr = { kind: "neg", of: { kind: "lit", v: 1 } };
+  console.log(n.kind);
+  console.log(ev(e));
+}
+// case: recursive_named_member_write_through_mut
+// A field written through a Mut narrowed to a member that holds the union again lands in its block.
+// expect: in 102
+// expect: 102
+// expect: 102
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; v: i64 };
+type Expr = Lit | Add;
+function bump(e: Mut<Expr>) { if (e.kind === "add") { e.v = e.v + 100; console.log("in", e.v); } }
+function main() { let e: Expr = { kind: "add", l: { kind: "lit", v: 1 }, v: 2 }; bump(e); if (e.kind === "add") console.log(e.v); console.log(e.v); }
+// case: recursive_option_write_through_mut
+// expect: in 101
+// expect: 101
+type Cons = { v: i64; next: L };
+type L = Cons | null;
+function bump(l: Mut<L>) { if (l !== null) { l.v = l.v + 100; console.log("in", l.v); } }
+function main() { let l: L = { v: 1, next: { v: 2, next: null } }; bump(l); if (l !== null) console.log(l.v); }
+// case: recursive_named_member_lend_field
+// A field of such a member is lent where it lives, and assigned whole.
+// expect: 13 7
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; v: i64 };
+type Expr = Lit | Add;
+function inc(n: Mut<i64>) { n = n + 1; }
+function bump(e: Mut<Expr>) {
+  if (e.kind === "add") { e.v += 10; inc(e.v); e.l = { kind: "lit", v: 7 }; }
+}
+function main() {
+  let e: Expr = { kind: "add", l: { kind: "lit", v: 1 }, v: 2 };
+  bump(e);
+  if (e.kind === "add") { const l = e.l; console.log(e.v, l.v); }
+}
+// case: recursive_named_member_match
+// expect: 6
+// expect: add of lit 2
+// expect: lit 9
+// expect: add
+// expect: 11
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; r: Expr };
+type Expr = Lit | Add;
+function ev(e: Expr): i64 {
+  return match (e) {
+    case { kind: "lit", v } => v,
+    case { kind: "add", l, r } => ev(l.clone()) + ev(r.clone()),
+  };
+}
+function main() { const e: Expr = { kind: "add", l: { kind: "lit", v: 2 }, r: { kind: "lit", v: 4 } }; console.log(ev(e.clone())); console.log(show(e.clone())); console.log(show({ kind: "lit", v: 9 })); console.log(show({ kind: "add", l: e, r: { kind: "lit", v: 1 } })); console.log(owned()); }
+function show(e: Expr): string {
+  return match (e) {
+    case { kind: "add", l: { kind: "lit", v } } => `add of lit ${v}`,
+    case { kind: "add" } => "add",
+    case { v } => `lit ${v}`,
+  };
+}
+function owned(): i64 {
+  const e: Expr = { kind: "add", l: { kind: "lit", v: 5 }, r: { kind: "lit", v: 6 } };
+  return match (e) {
+    case { kind: "add", l, r } => ev(l.clone()) + ev(r.clone()),
+    case { kind: "lit", v } => v,
+  };
+}
+// case: recursive_named_member_match_uncovered
+// error: this match doesn't cover { kind: "add", l: { kind: "add" } }
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; r: Expr };
+type Expr = Lit | Add;
+function f(e: Expr): i64 {
+  return match (e) {
+    case { kind: "add", l: { kind: "lit" } } => 1,
+    case { kind: "lit" } => 2,
+  };
+}
+function main() { console.log(f({ kind: "lit", v: 1 })); }
+// case: recursive_named_member_field_path_narrowing
+// A field path narrows through a member holding the union again, for reads and writes.
+// expect: 14 52
+// expect: 3 3
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; v: i64 };
+type Expr = Lit | Add;
+function main1() {
+  let e: Expr = { kind: "add", l: { kind: "add", l: { kind: "lit", v: 1 }, v: 2 }, v: 3 };
+  if (e.kind === "add") { if (e.l.kind === "add") { e.l.v = 50; e.l.v += 1; e.l.v++; } }
+  if (e.kind === "add") { e.v++; e.v += 10; }
+  if (e.kind === "add") { const a = e.l; console.log(e.v, a.v); }
+}
+function rd(e: Ref<Expr>): i64 { if (e.kind === "add") { if (e.l.kind === "add") return e.l.v + e.l.l.v; return e.l.v; } return e.v; }
+function ow(e: Expr): i64 { if (e.kind === "add") { if (e.l.kind === "add") return e.l.v + e.l.l.v; return e.l.v; } return e.v; }
+function main2() { const e: Expr = { kind: "add", l: { kind: "add", l: { kind: "lit", v: 1 }, v: 2 }, v: 3 }; console.log(rd(e), ow(e)); }
+function main() { main1(); main2(); }

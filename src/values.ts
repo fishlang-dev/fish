@@ -1094,7 +1094,8 @@ export class Expressions implements Union {
         const shapes = members.filter((m): m is Shape => {
           const r = this.recOf(m);
           const bound = r?.kind === "param" ? this.recOf(r.bound) : undefined;
-          if (!(r?.kind === "object" || r?.kind === "class" || bound?.kind === "object" || bound?.kind === "interface")) return false;
+          const boxed = r?.kind === "recursive" ? this.recOf(r.of) : undefined;
+          if (!(r?.kind === "object" || r?.kind === "class" || bound?.kind === "object" || bound?.kind === "interface" || boxed?.kind === "object" || boxed?.kind === "class")) return false;
           return p.props.every((prop, i) => {
             const field = objectFields(this.typing, m as Shape).find((f) => f.name === keys[i]);
             const r = field ? this.recOf(field.type) : undefined;
