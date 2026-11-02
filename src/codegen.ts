@@ -2810,7 +2810,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // `for...of` over a generator: each `next()` gives the variable its value, until it finishes.
   // The loop owns a generator it was given, and drops it once the loop ends however it ends; one
   // it borrows through a `Mut` stays with its owner.
-  function generatorLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type, right = s.right) {
+  function generatorLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type, right: Expr = s.right) {
     const local = resolved(s.left as Stmt);
     const generator = referent(iterated) as GeneratorType;
     scopes.push([]);
