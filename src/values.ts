@@ -2145,7 +2145,7 @@ export class Expressions implements Union {
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
-    if (["at", "find", "findLast", "filter", "slice", "concat", "fill", "entries", "values"].includes(callee.name) || ((callee.name === "reduce" || callee.name === "reduceRight") && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
+    if (["at", "find", "findLast", "filter", "slice", "concat", "fill", "entries", "values", ...COPYING_METHODS].includes(callee.name) || ((callee.name === "reduce" || callee.name === "reduceRight") && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
     if (callee.name === "flat" && this.isArray(this.typing.lower(this.typing.rec(array).element))) this.clonable(this.typing.rec(this.typing.lower(this.typing.rec(array).element) as ArrayType).element, callee, "flat");
     // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
@@ -2167,7 +2167,8 @@ export class Expressions implements Union {
     if (this.isRefType(held)) this.coercions.set(callee.object, array);
     if (CALLBACK_METHODS.has(callee.name)) return this.callbackCall(e, callee, array);
     if (READING_METHODS.has(callee.name)) return this.readingCall(e, callee, array);
-    if (callee.name === "sort") return this.sortCall(e, callee, array);
+    if (callee.name === "sort" || callee.name === "toSorted") return this.sortCall(e, callee, array);
+    if (COPYING_METHODS.has(callee.name)) return this.copyingCall(e, callee, array);
     // `at(i)`: a clone of the element at a position counted from either end, or nothing.
     if (callee.name === "at") {
       if (e.args.length !== 1) throw new CompileError("E0504", "'at' takes a position, like 'at(-1)' for the last element", e.start, e.end);
@@ -2240,31 +2241,34 @@ export class Expressions implements Union {
   // `sort()` orders numbers numerically and strings by UTF-16 code units; `sort(compare)` by
   // the sign of what the comparator gives for two elements. Stable, and in place, so it gives
   // nothing.
+  // `toSorted` checks as `sort` does, and gives the sorted copy.
   private sortCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
-    if (e.args.length > 1) throw new CompileError("E0506", "'sort' takes an optional comparator like '(a, b) => a - b'", e.start, e.end);
-    if (!this.place(callee.object)) throw new CompileError("E0212", "'sort' sorts its array in place, so call it on a variable or a field", callee.start, callee.end);
-    this.changeable(callee.object, "sort");
-    const what = "'sort', which sorts its array in place,";
+    const name = callee.name;
+    const copying = name === "toSorted";
+    if (e.args.length > 1) throw new CompileError("E0506", `'${name}' takes an optional comparator like '(a, b) => a - b'`, e.start, e.end);
+    if (!copying && !this.place(callee.object)) throw new CompileError("E0212", "'sort' sorts its array in place, so call it on a variable or a field", callee.start, callee.end);
+    if (!copying) this.changeable(callee.object, "sort");
+    const gives: { type: Type; what: string } = { type: copying ? array : "void", what: copying ? "'toSorted'" : "'sort', which sorts its array in place," };
     let compare = e.args[0];
     if (!compare) {
       const element = this.typing.lower(this.typing.rec(array).element);
       if (!isNumeric(element) && element !== "string") {
-        throw new CompileError("E0506", `'sort()' without a comparator orders numbers and strings, not '${this.typing.show(this.typing.rec(array).element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
+        throw new CompileError("E0506", `'${name}()' without a comparator orders numbers and strings, not '${this.typing.show(this.typing.rec(array).element)}'; give a comparator like '(a, b) => a.n - b.n'`, callee.start, callee.end);
       }
-      return { type: "void", what };
+      return gives;
     }
     compare = this.namedFunction(compare);
-    if (compare.kind !== "arrow") throw new CompileError("E0506", "'sort' takes a comparator written in place, like '(a, b) => a - b', or a function by name", compare.start, compare.end);
-    if (compare.params.length > 2) throw new CompileError("E0506", "'sort' passes its comparator two elements", compare.params[2]!.start, compare.params[2]!.end);
+    if (compare.kind !== "arrow") throw new CompileError("E0506", `'${name}' takes a comparator written in place, like '(a, b) => a - b', or a function by name`, compare.start, compare.end);
+    if (compare.params.length > 2) throw new CompileError("E0506", `'${name}' passes its comparator two elements`, compare.params[2]!.start, compare.params[2]!.end);
     const held = this.typing.rec(array).element;
     const element = this.typing.isCopy(held) ? held : this.typing.refType(held, false);
     this.expect(compare, this.typing.functionType(["a", "b"], [element, element], "void"));
     const called = this.value(compare);
     const c = this.recOf(called);
-    if (c?.kind !== "closure") throw new CompileError("E0506", "'sort' takes a comparator like '(a, b) => a - b'", compare.start, compare.end);
-    this.runsOften(called as ClosureType, "sort", "its comparator many times", compare);
+    if (c?.kind !== "closure") throw new CompileError("E0506", `'${name}' takes a comparator like '(a, b) => a - b'`, compare.start, compare.end);
+    this.runsOften(called as ClosureType, name, "its comparator many times", compare);
     c.params.forEach((p, i) => {
-      this.passedExactly("sort", element, p, compare.params[i], compare);
+      this.passedExactly(name, element, p, compare.params[i], compare);
     });
     const order = this.typing.lower(c.returns);
     if (isInteger(order) && !INTEGERS[order].signed) {
@@ -2273,7 +2277,27 @@ export class Expressions implements Union {
     if (!isNumeric(order)) {
       throw new CompileError("E0506", `a comparator gives a number: negative when 'a' comes first, positive when 'b' does, zero to keep their order; this one gives '${this.typing.show(c.returns)}'`, compare.start, compare.end);
     }
-    return { type: "void", what };
+    return gives;
+  }
+
+  // `toReversed()`, `toSpliced(start?, count?, ...items)` and `with(i, v)` give a copy of the
+  // array changed as `reverse`, `splice` and a write at `i` change theirs; values given move in.
+  private copyingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    const name = callee.name;
+    const element = this.typing.rec(array).element;
+    const counts: Record<string, [usize, usize, string]> = {
+      toReversed: [0, 0, "no arguments"], toSpliced: [0, Infinity, "an optional start, an optional count to remove and the values to put in their place"],
+      with: [2, 2, "a position, like 'with(-1, x)' for the last element, and the value to put there"],
+    };
+    const [least, most, takes] = counts[name]!;
+    if (e.args.length < least || e.args.length > most) throw new CompileError("E0504", `'${name}' takes ${takes}`, e.start, e.end);
+    e.args.forEach((a, i) => {
+      const target = i === 0 || (i === 1 && name === "toSpliced") ? "i64" : element;
+      this.expect(a, target);
+      const given = this.value(a);
+      this.coerce(a, given, target, `argument of type '${this.typing.show(given)}' is not assignable to parameter of type '${this.typing.show(target)}'`);
+    });
+    return { type: array, what: `'${name}'` };
   }
 
   // `shift` moves the first element out; `unshift` moves values in at the front; `splice`
@@ -7255,6 +7279,8 @@ const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex", "fin
 // The methods that read an array's elements by value.
 const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "slice", "concat", "flat"]);
 // The methods that change an array in place, beside push, pop and sort.
+// The methods giving a changed copy of the array, leaving it as it is.
+const COPYING_METHODS = new Set(["toReversed", "toSorted", "toSpliced", "with"]);
 const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
 // The methods giving an iterator over an array, as generators in the prelude.
 const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
@@ -7267,7 +7293,7 @@ const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "
 const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
 const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
-const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
+const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...COPYING_METHODS, ...CHANGING_METHODS]);
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
 export function indexText(e: Expr): string {

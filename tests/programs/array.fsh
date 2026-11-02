@@ -1175,3 +1175,71 @@ function main() { const xs: string[] = []; console.log(xs.reduceRight((a, x) => 
 // case: array_find_last_truthy
 // error: 'findLast''s callback has to give a 'boolean'
 function main() { const xs = [1]; xs.findLast((x) => x); }
+// case: array_copying
+// expect: 2,1,3 1,2,3 3,2,1 3,1,2
+// expect: 3,1,2 3 3,7,8,2 9,3,1,2 3,1,2
+// expect: 5,1,2 3,1,6 3,1,2
+// expect: a1,b2,c3 c3,x9,y8,b2 c3,z0,b2 b2,a1,c3 c3,a1,b2
+// expect: 99 2 2 1
+// expect: 1,2 2
+// toReversed, toSorted, toSpliced and with give a changed copy and leave the array as it was,
+// on a constant too. The copy owns clones, so changing it leaves the original's instances alone,
+// and values given move in.
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() {
+  const xs = [3, 1, 2];
+  console.log(xs.toReversed().join(), xs.toSorted().join(), xs.toSorted((a, b) => b - a).join(), xs.join());
+  console.log(xs.toSpliced().join(), xs.toSpliced(1).join(), xs.toSpliced(-2, 1, 7, 8).join(), xs.toSpliced(0, -1, 9).join(), xs.join());
+  console.log(xs.with(0, 5).join(), xs.with(-1, 6).join(), xs.join());
+  const ws = ["c" + 3, "a" + 1, "b" + 2];
+  const sorted = ws.toSorted();
+  const spliced = ws.toSpliced(1, 1, "x" + 9, "y" + 8);
+  const replaced = ws.with(1, "z" + 0);
+  console.log(sorted.join(), spliced.join(), replaced.join(), ws.toReversed().join(), ws.join());
+  ws.toSpliced(0, 1);
+  ws.with(0, "q" + 1);
+  const ps = [new P(2), new P(1)];
+  let qs = ps.toSorted((a, b) => a.n - b.n);
+  qs[0].n = 99;
+  console.log(qs[0].n, qs[1].n, ps[0].n, ps[1].n);
+  console.log([2, 1].toSorted().join(), [1, 2].with(1, 3).length);
+}
+// case: array_with_outside
+// panic: index out of bounds: the len is 2 but the index is -3
+function main() { const ws = ["a" + 1, "b"]; console.log(ws.with(-3, "c" + 1).length); }
+// case: array_with_past_end
+// panic: index out of bounds: the len is 2 but the index is 2
+function main() { const ws = ["a" + 1, "b"]; console.log(ws.with(2, "c" + 1).length); }
+// case: array_to_sorted_panic
+// panic: attempt to divide by zero
+// A comparator panicking drops the copy being sorted, and the original stays whole.
+class P { n: i64; name: string; constructor(n: i64, name: string) { this.n = n; this.name = name; } }
+function main() {
+  const qs = [new P(3, "c" + 3), new P(1, "a" + 1), new P(2, "b" + 2), new P(4, "d" + 4)];
+  const rs = qs.toSorted((a, b) => {
+    const z = 10 / (a.n === 4 || b.n === 4 ? 0 : 1);
+    return a.n - b.n;
+  });
+  console.log(rs.length);
+}
+// case: array_to_spliced_argument_panics
+// panic: attempt to divide by zero
+// A panicking argument drops the copy and the values given before it.
+function main() {
+  const ws = ["a" + 1, "b" + 2];
+  let zero = 0;
+  console.log(ws.toSpliced(0, 1, "c" + 3, "d" + (1 / zero)).length);
+}
+// case: array_with_handle
+// error: 'with' gives clones of the array's elements, and can't clone a JoinHandle
+async function main() {
+  const hs = [spawn(async () => 1)];
+  const gs = hs.with(0, spawn(async () => 2));
+}
+// case: array_to_sorted_objects
+// error: 'toSorted()' without a comparator orders numbers and strings
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() { const ps = [new P(1)]; ps.toSorted(); }
+// case: array_with_arguments
+// error: 'with' takes a position, like 'with(-1, x)' for the last element, and the value to put there
+function main() { const xs = [1]; xs.with(0); }
