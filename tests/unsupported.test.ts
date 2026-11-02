@@ -80,8 +80,8 @@ const CLASSES: [string, string, string][] = [
   ["class A { [k: string]: i64 }", "index signatures", "[k: string]: i64"],
   ["class A { static {} }", "static blocks", "static {}"],
   ["class A<T> { static get n(): i64 { return 1 } }\nconst a = new A<i64>()", "static accessors in generic classes", "static get n(): i64 { return 1 }"],
-  ["class A { *[Symbol.iterator]() {} }", "'[Symbol.iterator]' members", "Symbol.iterator"],
-  ["class A { [Symbol.iterator]() {} }", "'[Symbol.iterator]' members", "Symbol.iterator"],
+  ["class A { [Symbol.iterator] = 1 }", "'[Symbol.iterator]' members", "Symbol.iterator"],
+  ["class A { *[Symbol.asyncIterator]() {} }", "'[Symbol.asyncIterator]' members", "Symbol.asyncIterator"],
 ];
 
 for (const [decl, what, part] of CLASSES) {

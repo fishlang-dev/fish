@@ -343,7 +343,7 @@ function main() {
 // error: 'Array.from({ length: n })' alone would hold n undefined values, which Fish has no way to make; give it a function, as in 'Array.from({ length: n }, (_, i) => i)'
 function main() { console.log(Array.from({ length: 3 }).length); }
 // case: array_constructor_number
-// error: 'Array.from' makes an array from an array, a string, a generator or '{ length: n }', not 'i64'
+// error: 'Array.from' makes an array from an array, a string, a generator, an iterable class or '{ length: n }', not 'i64'
 function main() { console.log(Array.from(5).length); }
 // case: array_constructor_one
 // error: 'new Array(x)' of one value that isn't a length makes '[x]'; write 'Array.of(x)' or '[x]'

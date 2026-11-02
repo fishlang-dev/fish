@@ -12,11 +12,11 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { ITERATOR, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
-import { knownKey, unknownKey } from "./keys.ts";
+import { isIteratorKey, knownKey, unknownKey } from "./keys.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
@@ -1167,6 +1167,9 @@ export class Expressions implements Union {
   }
 
   private callee(this: Mut<this>, e: Call): { type: Type; what: string } {
+    // `c[Symbol.iterator]()` calls the method that key names.
+    const key = this.rewrites.current(e.callee);
+    if (key.kind === "index" && isIteratorKey(key.index)) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.replace(key, { id: 0, kind: "member", object: key.object, name: ITERATOR, optional: key.optional, start: key.start, end: key.end }) });
     // `t[0](x)` calls a tuple's element, as a field holding a callable is called.
     this.untuple(e.callee);
     if (this.rewrites.current(e.callee) !== e.callee) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.current(e.callee) });
@@ -2786,10 +2789,12 @@ export class Expressions implements Union {
     } else {
       const t = this.value(source);
       const held = this.isRefType(t) ? this.typing.rec(t).to : t;
+      if (this.typing.iterableElement(held) !== undefined) throw unsupported("'Array.from' over an 'Iterable' parameter", source);
       if (this.isArray(held)) made = f ? source : { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
       else if (stringLike(this.typing, held)) made = prelude("array chars", [source]);
       else if (this.typing.yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
-      else throw new CompileError("E0119", `'Array.from' makes an array from an array, a string, a generator or '{ length: n }', not '${this.typing.show(t)}'`, source.start, source.end);
+      else if (this.iteratorCall(source, held)) made = prelude("array collect", [this.iteratorCall(source, held)!]);
+      else throw new CompileError("E0119", `'Array.from' makes an array from an array, a string, a generator, an iterable class or '{ length: n }', not '${this.typing.show(t)}'`, source.start, source.end);
     }
     if (f) made = { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
     return this.call(this.rewrites.replace(e, { ...made, start: e.start, end: e.end }) as Call);
@@ -2898,10 +2903,12 @@ export class Expressions implements Union {
     const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: nextId(this.ids), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
     let from: Expr | undefined;
     if (this.dictOf(held)) throw this.notIterable(source);
+    if (this.typing.iterableElement(held) !== undefined) throw unsupported("spreads of an 'Iterable' parameter", source);
     if (stringLike(this.typing, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array chars", ...at }, [source]);
     else if (this.typing.yieldsOf(held) !== undefined) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [source]);
+    else if (this.iteratorCall(source, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [this.iteratorCall(source, held)!]);
     else if (this.recOf(held)?.kind === "map") from = made({ id: nextId(this.ids), kind: "member", object: source, name: this.typing.rec(held as MapType).set ? "values" : "entries", optional: false, ...at });
-    else if (!this.isArray(held)) throw new CompileError("E0119", `'...' spreads an array, a string, a generator, a Map or a Set, not '${this.typing.show(t)}'`, source.start, source.end);
+    else if (!this.isArray(held)) throw new CompileError("E0119", `'...' spreads an array, a string, a generator, a Map, a Set or an iterable class, not '${this.typing.show(t)}'`, source.start, source.end);
     if (from) {
       this.ctx.exprsState.once.add(source);
       x = this.rewrites.replace(x, { ...x, value: from });
@@ -4692,6 +4699,18 @@ export class Expressions implements Union {
     this.coerce(key, t, "string", `a dictionary's keys are strings, not '${this.typing.show(t)}'`);
     this.ctx.exprsState.once.add(key);
     return key;
+  }
+
+  // `source[Symbol.iterator]()`, when `held` is a class with that method: what iterating it runs.
+  iteratorCall(this: Mut<this>, source: Expr, held: Type): Expr | undefined {
+    const t = this.typing.lower(held);
+    const r = this.recOf(t);
+    // A parameter of an interface declaring the method has it in every instance.
+    const bound = r?.kind === "param" && this.typing.iterableElement(t) === undefined ? this.recOf(r.bound) : undefined;
+    const has = r?.kind === "class" ? inherited(this.arenas, this.ctx.classOf(t as ClassType), "methods", ITERATOR) !== undefined : bound?.kind === "interface" && bound.methods.some((m) => m.name === ITERATOR);
+    if (!has) return undefined;
+    const at = { start: source.start, end: source.end };
+    return { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: ITERATOR, optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
   }
 
   // A dictionary isn't iterable, as a plain object isn't in JavaScript.

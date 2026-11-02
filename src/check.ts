@@ -133,6 +133,10 @@ export type Instance = {
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
   frame?: { locals: Map<LocalId, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
+  // Each `for...of` over an `Iterable<T>` parameter standing for a class here, and the
+  // `[Symbol.iterator]()` call it loops over instead. It isn't written into the body, which every
+  // instance shares.
+  iterators?: NodeMap<Stmt, Expr>;
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -287,7 +291,7 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
     const s = node as Stmt;
     if (of === "stmt" && s.kind === "forOf") {
       loops.set(s, fields.length);
-      const kept = iterated(instance, s.right);
+      const kept = iterated(instance, instance.iterators?.get(s) ?? s.right);
       const ref = typeof kept === "string" ? undefined : typing.rec(kept);
       const held = ref?.kind === "ref" ? ref.to : kept;
       const h = typeof held === "string" ? undefined : typing.rec(held);
@@ -1250,7 +1254,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         if (type) (instance.spelled ??= new NodeMap()).set(x, type);
       }
     }
-    for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, this.typing.lower(t)));
+    // A generator a member of a class made from a type parameter gives is the one its counterpart
+    // gives, which is the one compiled.
+    const made = new TypeMap<Type, Type>();
+    instance.calls.forEach((target) => {
+      const [from, to] = [this.arenas.instanceOf(target), this.counterpart(this.arenas.instanceOf(target))];
+      if (from.generator && to.generator && from.generator !== to.generator) made.set(from.generator, to.generator);
+    });
+    const lowered = (t: Type) => (made.size > 0 ? this.typing.replaced(this.typing.lower(t), made) : this.typing.lower(t));
+    for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lowered(t)));
     // A pipe's topic written in as a field read would run a getter once for each `%`.
     for (const e of instance.types.keys()) {
       if (e.kind !== "member" || !this.substituted.has(e)) continue;
@@ -1263,7 +1275,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     instance.caught.forEach((t, s) => instance.caught.set(s, this.typing.lower(t)));
     instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: this.typing.lower(p.type) }));
     if (instance.throws) instance.throws = this.typing.lower(instance.throws);
-    for (const local of new Set(instance.locals.values())) this.arenas.localOf(local).type = this.typing.lower(this.arenas.localOf(local).type);
+    for (const local of new Set(instance.locals.values())) this.arenas.localOf(local).type = lowered(this.arenas.localOf(local).type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, this.counterpart(this.arenas.instanceOf(target)).id));
     instance.returns = this.typing.lower(instance.returns);
   }
@@ -2912,7 +2924,25 @@ class BodyChecker implements Context, Outer, Sight {
         if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
         if (d.type) throw new CompileError("E0004", "a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
         const through = this.exprs().value(s.right);
-        const object = this.cx.isRef(through) ? this.cx.typing.rec(through).to : through;
+        const referred = this.cx.isRef(through) ? this.cx.typing.rec(through).to : through;
+        // An `Iterable<T>` parameter is looped over as what it stands for in an instance; at its
+        // definition, it gives its `T`s.
+        const element = this.cx.typing.iterableElement(referred);
+        const object = element === undefined ? referred : this.cx.typing.lower(referred);
+        const call = element === undefined ? undefined : this.exprs().iteratorCall(s.right, object);
+        if (call) {
+          (this.instance.iterators ??= new NodeMap()).set(s, call);
+          const made = this.exprs().value(call);
+          const error = this.cx.typing.generatorThrows(made);
+          if (error) this.raise(call, error, "this generator");
+        }
+        if (element !== undefined && (object === referred || call)) {
+          this.scopes.push(new Map());
+          this.declare(d.target.name, call ? this.cx.typing.yieldsOf(this.types.get(call)!)! : element, left.keyword === "let", false, left);
+          this.within({ stmt: s, kind: "loop" }, () => this.scoped(s.body));
+          this.scopes.pop();
+          return;
+        }
         const o = this.cx.recOf(object);
         // std's ServerWebSocket gives the messages its client sends.
         if (s.await && o?.kind === "class" && o.name === "ServerWebSocket" && this.classOf(object as ClassType).node.start >= STD_BASE) {
@@ -2924,6 +2954,9 @@ class BodyChecker implements Context, Outer, Sight {
           this.awaitLoop(s, d.target.name, left.keyword === "let", through, object);
           return;
         }
+        // A class with a `[Symbol.iterator]` method is looped over through what it gives.
+        const iterator = this.exprs().iteratorCall(s.right, object);
+        if (iterator) return this.statement(this.cx.rewrites.replace(s, { ...s, right: iterator }));
         // A loop borrows what it reads from as long as it runs, so it can't read a part of a
         // value made for the statement, which is gone before the first pass.
         // A reference reaches a value living elsewhere, wherever it came from.
@@ -2977,7 +3010,7 @@ class BodyChecker implements Context, Outer, Sight {
           return;
         }
         if (this.cx.typing.yieldsOf(object, true) !== undefined) throw new CompileError("E0119", "an async generator's values are awaited, so loop over it with 'for await'", s.right.start, s.right.end);
-        if (o?.kind !== "array") throw new CompileError("E0119", `'for...of' needs an array, a Map, a Set, a string or a generator, not '${this.cx.typing.show(object)}'`, s.right.start, s.right.end);
+        if (o?.kind !== "array") throw new CompileError("E0119", `'for...of' needs an array, a Map, a Set, a string, a generator or an iterable class, not '${this.cx.typing.show(object)}'`, s.right.start, s.right.end);
         if (object !== through) this.coercions.set(s.right, object);
         this.scopes.push(new Map());
         this.declare(d.target.name, this.cx.typing.isCopy(o.element) ? o.element : this.cx.typing.refType(o.element, false), left.keyword === "let", false, left);

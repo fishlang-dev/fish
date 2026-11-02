@@ -305,6 +305,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const each = localAt(s.left as Stmt)!;
         // A string's loop holds a reference of its own, so its variable stays free to change.
         const text = (coercions.get(s.right) ?? types.get(s.right)) === "string";
+        // An `Iterable<T>` parameter's loop gives owned values, through the `[Symbol.iterator]()`
+        // call it makes of a class, or at the definition, where nothing says what it stands for.
+        const owning = text || s.await || instance.iterators?.has(s) === true || (taken !== undefined && typing.iterableElement(taken) !== undefined && typing.lower(taken) === taken);
         if (place !== undefined && state && !text) {
           free(place, s.right, "lend");
           state.loans.set(s.right.start, { place, mutable: false, start: s.right.start, end: s.right.end, holders: new Set(), call: "the loop", loop: true });
@@ -330,7 +333,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         loop(s, () => ({ id: nextId(ids), kind: "bool", value: false, start: s.start, end: s.start }), () => {
           // Each pass gives a string's variable a new string, and a Channel's the value it
           // received, which it owns.
-          if (text || s.await) revive(String(each.id));
+          if (owning) revive(String(each.id));
           statements(s.body);
         });
         state?.loans.delete(s.right.start);

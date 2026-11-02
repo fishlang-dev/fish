@@ -553,8 +553,14 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       }
       return apply(args, t, t.args);
     }
+    // TypeScript's iterator types, unless the program declares its own of the name: an iterator is
+    // what a generator is, and an iterable anything `for...of` reads.
+    if (ITERATORS.includes(t.name)) {
+      if (args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it gives, like '${t.name}<i64>'`, t.start, t.end);
+      return t.name === "Iterable" ? this.typing.iterableInterface(args[0]!) : this.typing.generatorInterface(args[0]!);
+    }
     if (t.name === "this") throw new CompileError("E0105", "'this' as a type is supported only in a class's instance methods: in the return type, where it is the receiver's own class, and in parameter types, where it is the class that declares the method", t.start, t.end);
-    throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
+    throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...ITERATORS, ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
   }
 
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
@@ -1197,6 +1203,8 @@ export function collection(typing: Typing, key: Type, value: Type, set: boolean,
   unboxedClosure(typing, value, at);
   return typing.mapType(key, typing.stored(typing.heldArgument(value)), set, dict);
 }
+
+const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
 const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
