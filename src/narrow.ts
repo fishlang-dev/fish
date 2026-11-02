@@ -16,6 +16,9 @@ export const bindingKey = (id: LocalId): string => String(id);
 // Whether a key is a field path's, or `this` as the root of some, rather than a binding's.
 export const isPath = (key: string): boolean => !/^\d+$/.test(key);
 export type Guard = { yes: Facts; no: Facts };
+// That a check found an interface's optional method on a value is kept under a key below the
+// value's, so a change to the value forgets it. The type stored there only marks it.
+export const presentKey = (root: string, name: string): string => `${root}.${name}()`;
 
 // What `typeof` says for a value of each type. Every sized number is "number", as in
 // TypeScript, and every object and instance "object".
@@ -84,6 +87,13 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
   if (e.kind === "unary" && e.op === "!") {
     const inner = of(e.operand);
     return { yes: inner.no, no: inner.yes };
+  }
+  const presence = tables.presenceTests.get(e);
+  if (presence) {
+    const root = path(presence.object);
+    if (root === undefined) return nothing;
+    const there: Facts = new Map([[presentKey(root, presence.name), "boolean"]]);
+    return presence.when ? { yes: there, no: new Map() } : { yes: new Map(), no: there };
   }
   const keyed = tables.keyTests.get(e);
   if (keyed && e.kind === "binary") return split(e.right, (m) => keyed.get(m) ?? "both", true);
