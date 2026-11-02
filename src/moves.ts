@@ -1044,7 +1044,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           lend(key(s)!, mutable, s, holder);
           inherit(holder, s);
           if (throughUnion(s)) temporary(holder, s);
-        } else temporary(holder, s);
+        } else if (!typing.holdsRef(t)) throw outlived(s, `'${holder.name}'`);
+        else temporary(holder, s);
       }
       return;
     }

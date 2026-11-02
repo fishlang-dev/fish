@@ -1063,3 +1063,43 @@ function main() {
 }
 // expect: a
 // expect: 2
+// case: generator_method_temporary_receiver_loop
+class Bag {
+  items: string[] = [];
+  constructor(s: string) { this.items.push(s); }
+  *each(): Generator<string> { for (const s of this.items) yield s; }
+}
+function main() {
+  for (const s of new Bag("a" + 1).each()) console.log(s);
+}
+// error: 7:19: error[E0204]: 'for...of' would keep borrowing this temporary
+// case: generator_method_temporary_receiver_held
+class Bag {
+  items: string[] = [];
+  constructor(s: string) { this.items.push(s); }
+  *each(): Generator<string> { for (const s of this.items) yield s; }
+}
+function main() {
+  let g = new Bag("a" + 1).each();
+  const r = g.next();
+  if (r.done === false) console.log(r.value);
+}
+// error: 7:11: error[E0204]: 'g' would keep borrowing this temporary
+// case: generator_method_temporary_receiver_used_in_statement
+class Bag {
+  items: string[] = [];
+  constructor(s: string) { this.items.push(s); }
+  *each(): Generator<string> { for (const s of this.items) yield s; }
+  *eat(this: Own<this>): Generator<string> { for (const s of this.items) yield s + "#"; }
+}
+function mk(): Bag { return new Bag("a" + 1); }
+function main() {
+  console.log(mk().each().toArray());
+  for (const s of new Bag("b" + 2).eat()) console.log(s);
+  let g = new Bag("c" + 3).eat();
+  const r = g.next();
+  if (r.done === false) console.log(r.value);
+}
+// expect: [ 'a1' ]
+// expect: b2#
+// expect: c3#

@@ -625,3 +625,13 @@ async function main() {
 async function* one(): AsyncGenerator<i64, void, i64> { yield 1; }
 
 async function main() {}
+// case: async_generator_method_temporary_receiver
+class Bag {
+  items: string[] = [];
+  constructor(s: string) { this.items.push(s); }
+  async *each(): AsyncGenerator<string> { for (const s of this.items) yield s; }
+}
+async function main() {
+  for await (const s of new Bag("a" + 1).each()) console.log(s);
+}
+// error: 7:25: error[E0204]: 'for...of' would keep borrowing this temporary
