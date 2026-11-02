@@ -36,7 +36,8 @@ const MEMBERS: [string, string, string][] = [
   ["{ f(): i64 }", "methods in object types", "f(): i64"],
   ["{ (): i64 }", "call signatures", "(): i64"],
   ["{ new (): i64 }", "construct signatures", "new (): i64"],
-  ["{ [k: string]: i64 }", "index signatures", "[k: string]: i64"],
+  ["{ readonly [k: string]: i64 }", "readonly index signatures", "readonly [k: string]: i64"],
+  ["{ a: i64; [k: string]: i64 }", "index signatures beside other members", "[k: string]: i64"],
   ["{ get x(): i64 }", "accessors in object types", "get x(): i64"],
   ["{ [Symbol.iterator]: i64 }", "'[Symbol.iterator]' members", "Symbol.iterator"],
 ];

@@ -748,11 +748,6 @@ function main() {
   let u: Readonly<User> = { id: 1, name: "a" };
   u.name = "b";
 }
-// case: types_record_string
-// error: 'Record<string, i64>' is a dictionary whose keys are only known at run time, which needs a Map type
-// Record with string keys needs a Map type Fish doesn't have yet.
-type Scores = Record<string, i64>;
-function main() {}
 // case: types_refs
 // mode: parse
 function f(a: Map<string, Array<i64>>, b: A.B.C<D<E>>): Promise<void> {

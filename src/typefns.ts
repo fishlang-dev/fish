@@ -1,4 +1,5 @@
 import { CompileError } from "./diag.ts";
+import { collection } from "./resolve.ts";
 import type { Span } from "./parser.ts";
 import { TypeSet, isNumeric, type ClassType, type Field, type Hole, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 
@@ -191,11 +192,10 @@ export class TypeFunctions {
     }
   }
 
-  // `Record<K, V>`: an object type with a field of type V for each key K names.
+  // `Record<K, V>`: an object type with a field of type V for each key K names, or a dictionary
+  // when K is `string`.
   private recordType(this: Mut<this>, [k, v]: Type[], at: Span, [keyAt]: Span[]): Type {
-    if (k === "string") {
-      throw new CompileError("E0114", `'Record<string, ${this.typing.show(v!)}>' is a dictionary whose keys are only known at run time, which needs a Map type Fish doesn't have yet; write its keys, like 'Record<"a" | "b", ${this.typing.show(v!)}>'`, at.start, at.end);
-    }
+    if (k === "string") return collection(this.typing, "string", v!, false, at, true);
     return this.typing.objectType(this.keysOf(k!, "'Record'", keyAt!).map((name) => ({ name, type: v! })));
   }
 

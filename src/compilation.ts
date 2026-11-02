@@ -129,6 +129,9 @@ export type Tables = {
   // The array literals `Object.keys`, `values` and `entries` calls became, with which it was and the
   // object it reads, so a generic body's next instance types the literal as the call did.
   objectReads: WeakNodeMap<Expr, { name: "keys" | "values" | "entries"; object: Expr }>;
+  // The Map method calls a dictionary's reads, writes, deletes and key tests became, the only
+  // method calls a dictionary takes. A generic body's next instance meets them already made.
+  dictCalls: WeakNodeSet<Expr>;
   // `new Array(n).fill(x)` calls, rewritten into calls of the prelude's `array filled`.
   fills: WeakNodeSet<Expr>;
   filling: WeakNodeSet<Expr>;
@@ -343,6 +346,7 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     substituted: new WeakNodeSet<Expr>(),
     ofElements: new WeakNodeMap<Expr, TypeNode>(),
     objectReads: new WeakNodeMap<Expr, { name: "keys" | "values" | "entries"; object: Expr }>(),
+    dictCalls: new WeakNodeSet<Expr>(),
     fills: new WeakNodeSet<Expr>(),
     filling: new WeakNodeSet<Expr>(),
     packed: new WeakNodeSet<Expr>(),

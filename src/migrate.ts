@@ -44,7 +44,7 @@ export const MARKER = "/* fish: review */";
 export const REJECTS: Record<string, string> = {
   R1: "eval and new Function run code made while the program runs, and a native binary has no compiler for it; write the code itself, or choose among functions with a Map or a switch",
   R2: "prototype edits and Object.defineProperty change a type after it is declared, and Fish types have fixed layouts; declare the field or method on the class, or wrap the value",
-  R3: "delete removes a field, and Fish objects have fixed layouts; make the field an Option and set it to null, or keep the entries in a Map",
+  R3: "delete removes a field, and Fish objects have fixed layouts; make the field an Option and set it to null, or keep the entries in a dictionary, '{ [k: string]: T }', or a Map",
   R5: "the arguments object isn't in Fish; take the arguments as a rest parameter, as in '...args: T[]'",
   R6: "Symbol is runtime reflection, which Fish doesn't have; use a string or an enum for a key, and an interface for a protocol",
   R7: "declaration merging and module augmentation reopen a type after it is declared, and Fish types are closed; give everything in one declaration, or a new name",
@@ -97,7 +97,7 @@ export type Imported = (specifier: string) => "rename" | "ambiguous" | undefined
 export function migrations(parsed: Parsed, src: string, fsh: Imported = () => "rename"): Hit[] {
   const nodes = everyNode(parsed.program);
   const file = fileOf(parsed.program, nodes, src, parsed.tokens);
-  const hits = [...rejects(parsed.program, nodes), ...autoFixes(parsed.program, file, fsh), ...guided(parsed.program, file), ...markers(src, parsed.comments)];
+  const hits = [...rejects(parsed.program, nodes, dictionaries(file)), ...autoFixes(parsed.program, file, fsh), ...guided(parsed.program, file), ...markers(src, parsed.comments)];
   for (const h of hits) {
     if (!h.edits?.some((e) => parsed.comments.some((c) => c.start >= e.start && c.end <= e.end))) continue;
     delete h.edits;
@@ -112,7 +112,8 @@ export function surveyHits(program: unknown[]): Hit[] {
   const nodes = everyNode(program);
   const ambient = new Set(nodes.filter((n) => n.kind === "declare").flatMap((n) => everyNode([n.body])));
   // The guided rules read no text or tokens.
-  const hits = [...rejects(program, nodes), ...guided(program, fileOf(program, nodes, "", []))];
+  const file = fileOf(program, nodes, "", []);
+  const hits = [...rejects(program, nodes, dictionaries(file)), ...guided(program, file)];
   const at = (rule: string, n: Node) => hits.push({ rule, action: "auto", start: n.start, end: n.end });
   for (const n of nodes) {
     if (n.kind === "let" && n.keyword === "var" && !ambient.has(n)) at("A1", n);
@@ -126,7 +127,7 @@ const fileOf = (program: unknown[], nodes: Node[], src: string, tokens: Token[])
 
 // The reject rules' hits in a file's tree, in no particular order. The walk keeps its own stack,
 // so a deeply nested file can't overflow the call stack.
-export function rejects(program: unknown[], nodes: Node[] = everyNode(program)): Hit[] {
+export function rejects(program: unknown[], nodes: Node[] = everyNode(program), dictionary: (o: unknown) => boolean = () => false): Hit[] {
   const declared = bindings(nodes);
   // A class with its own member named `prototype` reads it as a field, not the JS prototype.
   const ownPrototype = new Set(nodes.flatMap((n) => (n.kind === "class" && typeof n.name === "string" && (n.members as Node[]).some((m) => OWN_MEMBERS.has(m.kind) && m.name === "prototype") ? [n.name] : [])));
@@ -140,7 +141,7 @@ export function rejects(program: unknown[], nodes: Node[] = everyNode(program)):
     if (n.kind === "call" && isNode(callee) && callee.kind === "member" && named(callee.object, "Object") && ["defineProperty", "defineProperties", "setPrototypeOf"].includes(callee.name as string)) {
       hit("R2", callee.end - String(callee.name).length, callee.end);
     }
-    if (n.kind === "unary" && n.op === "delete") hit("R3", n.start, n.end);
+    if (n.kind === "unary" && n.op === "delete" && !(isNode(n.operand) && (n.operand.kind === "index" || n.operand.kind === "member") && dictionary(n.operand.object))) hit("R3", n.start, n.end);
     const use = n.kind === "ident" || n.kind === "shorthand" || n.kind === "ref" ? (n.name as string) : undefined;
     if (use === "arguments" && n.kind !== "ref" && !declared.has(use)) hit("R5", n.start, n.end);
     if (use === "Symbol" && !declared.has(use)) hit("R6", n.start, n.end);
@@ -791,7 +792,7 @@ const GUIDES: Record<string, string> = {
   G3: "this 'number' counts or indexes, and a Fish 'number' is a float; make it 'i64', or 'usize' for an index",
   G4: "this class extends one that is also used as a type, so a subclass stands in for its base, which Fish's embedded bases don't allow; extract an interface for what they share, and hold the base as a field",
   G5: "'instanceof' tests a class that others extend, and Fish has no subclass checks at run time; 'match' on an interface or an enum instead",
-  G6: "indexing with a string key, or testing one with 'in' that isn't written as a literal, reads the object as a dictionary, which a Fish object isn't; use a 'Map<string, T>'",
+  G6: "indexing with a string key, or testing one with 'in' that isn't written as a literal, reads the object as a dictionary, which a Fish object isn't; declare it as one, '{ [k: string]: T }' or 'Record<string, T>', or use a 'Map<string, T>'",
   G7: "top-level code runs when the module loads, which Fish doesn't do; move it into 'main()', or into a 'Lazy<T>' for a value made once",
   G8: "parsing gives an 'Option' in Fish rather than NaN; 'match' on the parsed 'Option' instead of checking 'isNaN'",
   G9: "'.call', '.apply' and '.bind' choose a function's 'this' at run time; pass the receiver as an argument, or use a closure",
@@ -815,6 +816,7 @@ function guided(program: unknown[], f: File): Hit[] {
     if (isNode(top) && top.kind === "expr" && !(isNode(top.expr) && top.expr.kind === "string") && !callsMain(top.expr)) hit("G7", top.start, top.end);
   }
   const scopes = scopesOf(f);
+  const dictionary = dictionaries(f);
   const extended = new Set(f.nodes.flatMap((c) => (c.kind === "class" && baseName(c) ? [baseName(c)!] : [])));
   const typed = new Set(f.nodes.flatMap((n) => (n.kind === "ref" && f.up.get(n)?.key !== "implements" ? [n.name as string] : [])));
   // What a name used as an index or given to `isNaN` holds, read from the binding it resolves to.
@@ -834,8 +836,8 @@ function guided(program: unknown[], f: File): Hit[] {
     if (n.kind === "ref" && n.name === "any") hit("G1", n.start, n.end);
     if (n.kind === "class" && baseName(n) && typed.has(baseName(n)!)) hit("G4", n.start, n.end);
     if (n.kind === "binary" && n.op === "instanceof" && isNode(n.right) && n.right.kind === "ident" && extended.has(n.right.name as string)) hit("G5", n.start, n.end);
-    if (n.kind === "index" && isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template" || (n.index.kind === "ident" && stringy(n.index)))) hit("G6", n.start, n.end);
-    if (n.kind === "binary" && n.op === "in" && isNode(n.left) && !["string", "privateName"].includes(n.left.kind as string)) hit("G6", n.start, n.end);
+    if (n.kind === "index" && isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template" || (n.index.kind === "ident" && stringy(n.index))) && !dictionary(n.object)) hit("G6", n.start, n.end);
+    if (n.kind === "binary" && n.op === "in" && isNode(n.left) && !["string", "privateName"].includes(n.left.kind as string) && !dictionary(n.right)) hit("G6", n.start, n.end);
     // A call signature in an interface is a `call` too, without arguments.
     if (n.kind !== "call" || !Array.isArray(n.args)) continue;
     const callee = n.callee as Node;
@@ -886,6 +888,37 @@ function scopesOf(f: File): Map<object, Map<string, Binding>> {
     if (isFunction(n) && n.body !== undefined) for (const p of n.params as Param[]) for (const x of everyNode([p.pattern])) if (x.kind === "ident") bind(n, x.name as string, { kind: "param", param: p, fn: n });
   }
   return scopes;
+}
+
+// Whether an expression is a dictionary, as far as its syntax tells: a name declared with
+// `{ [k: string]: V }`, `Record<string, V>` or a type alias of the file naming one, or a field of
+// `this` its class declares so. Fish reads, writes, deletes and tests its keys.
+function dictionaries(f: File): (o: unknown) => boolean {
+  const scopes = scopesOf(f);
+  const aliases = new Set<string>();
+  const dict = (t: unknown): boolean => {
+    if (!isNode(t)) return false;
+    const [index] = t.kind === "object" ? (t.members as Node[]) : [];
+    if (index?.kind === "index" && (t.members as Node[]).length === 1) return !index.readonly && typeName((index.params as Param[])[0]?.type, "string");
+    return t.kind === "ref" && ((t.name === "Record" && (t.args as Node[]).length === 2 && typeName((t.args as Node[])[0], "string")) || aliases.has(t.name as string));
+  };
+  for (const n of f.nodes) if (n.kind === "typeAlias" && (n.typeParams as Node[]).length === 0 && dict(n.type)) aliases.add(n.name as string);
+  const fields = new Map<object, Set<string>>();
+  for (const n of f.nodes) {
+    if (n.kind !== "class") continue;
+    fields.set(n, new Set((n.members as Node[]).flatMap((m) => (m.kind === "field" && typeof m.name === "string" && dict(m.type) ? [m.name] : []))));
+  }
+  const classOf = (n: Node): object | undefined => {
+    for (let at = f.up.get(n); at; at = f.up.get(at.holder)) if ((at.holder as Node).kind === "class") return at.holder;
+    return undefined;
+  };
+  return (o) => {
+    if (!isNode(o)) return false;
+    if (o.kind === "member") return isNode(o.object) && o.object.kind === "this" && (fields.get(classOf(o) ?? {})?.has(o.name as string) ?? false);
+    if (o.kind !== "ident") return false;
+    const b = resolve(f, scopes, o);
+    return b?.kind === "param" ? dict(b.param.type) : b?.kind === "let" ? dict(b.declarator.type) : false;
+  };
 }
 
 // The binding a name's use resolves to: the innermost scope holding it that binds the name.

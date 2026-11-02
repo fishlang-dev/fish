@@ -1018,6 +1018,56 @@ void *fsh_rt_map_at(fsh_map *m, int64_t i) {
   return fsh_map_entry(m, i);
 }
 
+// A dictionary's entries in the order JavaScript gives an object's keys: those that are array
+// indexes ascending, then the rest as they were made, then the removed ones. The table keeps
+// insertion order; this order is the caller's, read while it reads the entries, then freed.
+typedef struct {
+  uint64_t n;
+  int64_t i;
+} fsh_dict_index;
+
+static int fsh_dict_index_cmp(const void *a, const void *b) {
+  uint64_t x = ((const fsh_dict_index *)a)->n, y = ((const fsh_dict_index *)b)->n;
+  return x < y ? -1 : x > y;
+}
+
+// Whether a key is an array index: a canonical decimal integer below 2^32 - 1.
+static int fsh_dict_numeric(fsh_str *s, uint64_t *n) {
+  if (s->length == 0 || s->length > 10 || (s->length > 1 && s->bytes[0] == '0')) return 0;
+  uint64_t v = 0;
+  for (int64_t i = 0; i < s->length; i++) {
+    if (s->bytes[i] < '0' || s->bytes[i] > '9') return 0;
+    v = v * 10 + (uint64_t)(s->bytes[i] - '0');
+  }
+  *n = v;
+  return v < 4294967295ull;
+}
+
+int64_t *fsh_rt_dict_order(fsh_map *m) {
+  int64_t *order = fsh_rt_alloc((m->used + 1) * sizeof(int64_t));
+  fsh_dict_index *numbers = fsh_rt_alloc((m->used + 1) * sizeof(fsh_dict_index));
+  int64_t count = 0, at = 0;
+  for (int64_t i = 0; i < m->used; i++) {
+    uint8_t *e = m->entries + i * m->size;
+    uint64_t n;
+    if (((fsh_entry *)e)->state == 1 && fsh_dict_numeric(*(fsh_str **)(e + m->key_at), &n)) numbers[count++] = (fsh_dict_index){n, i};
+  }
+  qsort(numbers, (size_t)count, sizeof(fsh_dict_index), fsh_dict_index_cmp);
+  for (int64_t i = 0; i < count; i++) order[at++] = numbers[i].i;
+  for (int64_t i = 0; i < m->used; i++) {
+    uint8_t *e = m->entries + i * m->size;
+    uint64_t n;
+    if (((fsh_entry *)e)->state == 1 && !fsh_dict_numeric(*(fsh_str **)(e + m->key_at), &n)) order[at++] = i;
+  }
+  for (int64_t i = 0; i < m->used; i++) if (((fsh_entry *)(m->entries + i * m->size))->state != 1) order[at++] = i;
+  fsh_rt_free(numbers);
+  return order;
+}
+
+void *fsh_rt_dict_at(fsh_map *m, int64_t *order, int64_t i) {
+  return fsh_map_entry(m, order[i]);
+}
+
 int64_t fsh_rt_map_used(fsh_map *m) {
   return m->used;
 }
@@ -3063,8 +3113,9 @@ typedef struct fsh_insp {
   // OBJECT: a class's name, or empty; VARIANT: the member's name.
   char *text;
   int64_t length;
-  // The fields' keys, for an OBJECT.
+  // The fields' keys, for an OBJECT, and their lengths, as a dictionary's key may hold a NUL.
   char **keys;
+  int64_t *lengths;
   // The parts: fields, elements, members, a Map's keys and values in turn, a member's values.
   struct fsh_insp **items;
   int64_t count, room;
@@ -3087,29 +3138,39 @@ static fsh_insp *fsh_insp_new(int32_t kind, const char *text, int64_t length) {
   return v;
 }
 
-static void fsh_insp_add(fsh_insp *v, fsh_insp *item, const char *key) {
+static void fsh_insp_add_n(fsh_insp *v, fsh_insp *item, const char *key, int64_t n) {
   if (v->count == v->room) {
     int64_t room = v->room ? v->room * 2 : 4;
     fsh_insp **items = fsh_rt_alloc(room * sizeof(fsh_insp *));
     char **keys = fsh_rt_alloc(room * sizeof(char *));
+    int64_t *lengths = fsh_rt_alloc(room * sizeof(int64_t));
     if (v->count) {
       memcpy(items, v->items, v->count * sizeof(fsh_insp *));
       memcpy(keys, v->keys, v->count * sizeof(char *));
+      memcpy(lengths, v->lengths, v->count * sizeof(int64_t));
     }
     fsh_rt_free(v->items);
     fsh_rt_free(v->keys);
+    fsh_rt_free(v->lengths);
     v->items = items;
     v->keys = keys;
+    v->lengths = lengths;
     v->room = room;
   }
   v->items[v->count] = item;
   v->keys[v->count] = NULL;
+  v->lengths[v->count] = 0;
   if (key) {
-    size_t n = strlen(key);
     v->keys[v->count] = fsh_rt_alloc(n + 1);
-    memcpy(v->keys[v->count], key, n + 1);
+    memcpy(v->keys[v->count], key, n);
+    v->keys[v->count][n] = 0;
+    v->lengths[v->count] = n;
   }
   v->count++;
+}
+
+static void fsh_insp_add(fsh_insp *v, fsh_insp *item, const char *key) {
+  fsh_insp_add_n(v, item, key, key ? (int64_t)strlen(key) : 0);
 }
 
 static void fsh_insp_free(fsh_insp *v) {
@@ -3119,6 +3180,7 @@ static void fsh_insp_free(fsh_insp *v) {
   }
   fsh_rt_free(v->items);
   fsh_rt_free(v->keys);
+  fsh_rt_free(v->lengths);
   fsh_rt_free(v->text);
   fsh_rt_free(v->cut);
   fsh_rt_free(v);
@@ -3196,6 +3258,11 @@ fsh_insp *fsh_rt_insp_object(const char *name) {
 
 void fsh_rt_insp_field(fsh_insp *object, const char *key, fsh_insp *value) {
   fsh_insp_add(object, value, key);
+}
+
+// A dictionary's entry, its key known only at run time.
+void fsh_rt_insp_entry(fsh_insp *object, fsh_str *key, fsh_insp *value) {
+  fsh_insp_add_n(object, value, key->bytes, key->length);
 }
 
 fsh_insp *fsh_rt_insp_list(int32_t kind, int64_t size) {
@@ -3666,8 +3733,11 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     fsh_sb b = {0};
     const char *key = v->keys[i];
     // An Error's '[cause]' and '[errors]' are written as Node writes keys it shows itself.
-    if (fsh_insp_identifier(key) || (v->error && key[0] == '[')) fsh_sb_str(&b, key);
-    else fsh_insp_quote(&b, key, strlen(key));
+    int64_t length = v->lengths[i];
+    // An own key named __proto__ is bracketed, as Node writes it apart from the prototype.
+    if (length == 9 && strcmp(key, "__proto__") == 0) fsh_sb_str(&b, "['__proto__']");
+    else if ((fsh_insp_identifier(key) && (int64_t)strlen(key) == length) || (v->error && key[0] == '[')) fsh_sb_str(&b, key);
+    else fsh_insp_quote(&b, key, length);
     fsh_sb_str(&b, ": ");
     fsh_sb_str(&b, x);
     fsh_rt_free(x);

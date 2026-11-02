@@ -1402,6 +1402,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // Runs the body for each live entry of a map, in insertion order, with a pointer to it.
   function entriesLoop(t: MapType, map: string, each: (entry: string) => void) {
     const [used, index] = [temp(), alloca("i64")];
+    const order = dictOrder(t, map);
     emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
     emit(`store i64 0, ptr ${index}`);
     const [head, body, live, next, done] = [label(), label(), label(), label(), label()];
@@ -1413,7 +1414,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`br i1 ${more}, label %${body}, label %${done}`);
     startBlock(body);
     const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${at} = ${entryAt(map, order, i)}`);
     emit(`${state} = load i64, ptr ${at}`);
     emit(`${alive} = icmp eq i64 ${state}, 1`);
     emit(`br i1 ${alive}, label %${live}, label %${next}`);
@@ -1426,6 +1427,20 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store i64 ${after}, ptr ${index}`);
     emit(`br label %${head}`);
     startBlock(done);
+    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
+  }
+
+  // A dictionary's entries are read in the order JavaScript gives an object's keys, which the
+  // runtime works out for each read of them all; a Map's in the order they were made.
+  function dictOrder(t: MapType, map: string): string | undefined {
+    if (!typing.rec(t).dict) return undefined;
+    const order = temp();
+    emit(`${order} = call ptr @fsh_rt_dict_order(ptr ${map})`);
+    return order;
+  }
+
+  function entryAt(map: string, order: string | undefined, i: string): string {
+    return order ? `call ptr @fsh_rt_dict_at(ptr ${map}, ptr ${order}, i64 ${i})` : `call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`;
   }
 
   // `keys()`, `values()` and `entries()`: arrays of clones, in insertion order. A Set's values
@@ -4374,7 +4389,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       startBlock(end);
       return;
     }
-    if (r.kind === "map") return raw(r.set ? "[object Set]" : "[object Map]");
+    if (r.kind === "map") return raw(r.set ? "[object Set]" : r.dict ? "[object Object]" : "[object Map]");
     if (r.kind === "regex") return raw(`/${r.source}/${r.flags}`);
     if (r.kind !== "array" && r.kind !== "fixed" && r.kind !== "ref" && r.kind !== "recursive" && !(r.kind === "object" && typing.isTuple(t))) return raw("[object Object]");
     let name = stringers.get(t);
@@ -4715,6 +4730,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length})`);
       return node;
     }
+    if (r.kind === "map" && r.dict) return inspectEntries(v, t as MapType, t, "0", true);
     if (r.kind === "map") {
       const size = temp();
       emit(`${size} = call i64 @fsh_rt_map_size(ptr ${v})`);
@@ -4791,11 +4807,16 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   // A Map's or Set's live entries in order, its first 100, and how many it has.
-  function inspectEntries(map: string, t: MapType, written: Type, depth: string): string {
+  // A dictionary's entries are an object's fields, each value left blank past the depth as a
+  // field's is, and are all printed, as an object's are.
+  function inspectEntries(map: string, t: MapType, written: Type, depth: string, shell = false): string {
     const entry = entryType(t);
+    const dict = typing.rec(t).dict;
     const [size, node] = [temp(), temp()];
     emit(`${size} = call i64 @fsh_rt_map_size(ptr ${map})`);
-    emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${typing.rec(t).set ? 5 : 4}, i64 ${size})`);
+    if (dict) emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString("")})`);
+    else emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${typing.rec(t).set ? 5 : 4}, i64 ${size})`);
+    const order = dictOrder(t, map);
     const [counter, taken] = [alloca("i64"), alloca("i64")];
     emit(`store i64 0, ptr ${counter}`);
     emit(`store i64 0, ptr ${taken}`);
@@ -4808,13 +4829,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     // Node prints the first 100 entries, so the rest aren't built.
     const [shown, room, going] = [temp(), temp(), temp()];
     emit(`${shown} = load i64, ptr ${taken}`);
-    emit(`${room} = icmp slt i64 ${shown}, 100`);
+    emit(`${room} = icmp slt i64 ${shown}, ${dict ? "9223372036854775807" : "100"}`);
     emit(`${more} = icmp slt i64 ${i}, ${used}`);
     emit(`${going} = and i1 ${more}, ${room}`);
     emit(`br i1 ${going}, label %${live}, label %${end}`);
     startBlock(live);
     const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${at} = ${entryAt(map, order, i)}`);
     emit(`${state} = load i64, ptr ${at}`);
     emit(`${alive} = icmp eq i64 ${state}, 1`);
     emit(`br i1 ${alive}, label %${loop}, label %${next}`);
@@ -4825,8 +4846,17 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const [keyAt, key] = [temp(), temp()];
     emit(`${keyAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
     emit(`${key} = load ${llvm(typing.lower(typing.rec(t).key))}, ptr ${keyAt}`);
-    emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(key, typing.rec(t).key, depth)})`);
-    if (!typing.rec(t).set) {
+    if (dict) {
+      const x = temp();
+      if (shell) emit(`${x} = call ptr @fsh_rt_insp_text(ptr ${cString("")})`);
+      else {
+        const valueAt = temp();
+        emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+        emit(`${x} = load ${llvm(typing.lower(typing.rec(t).value))}, ptr ${valueAt}`);
+      }
+      emit(`call void @fsh_rt_insp_entry(ptr ${node}, ptr ${key}, ptr ${shell ? x : inspectTree(x, written, depth)})`);
+    } else emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(key, typing.rec(t).key, depth)})`);
+    if (!typing.rec(t).set && !dict) {
       const [valueAt, x] = [temp(), temp()];
       emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
       emit(`${x} = load ${llvm(typing.lower(typing.rec(t).value))}, ptr ${valueAt}`);
@@ -4839,6 +4869,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store i64 ${step}, ptr ${counter}`);
     emit(`br label %${test}`);
     startBlock(end);
+    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
     return node;
   }
 
@@ -5401,6 +5432,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   function jsonEntries(w: string, map: string, t: MapType, written: Type) {
     const entry = entryType(t);
     jsonRaw(w, "{");
+    const order = dictOrder(t, map);
     const [counter, wrote] = [alloca("i64"), alloca("i1")];
     emit(`store i64 0, ptr ${counter}`);
     emit(`store i1 false, ptr ${wrote}`);
@@ -5414,7 +5446,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`br i1 ${more}, label %${live}, label %${end}`);
     startBlock(live);
     const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${at} = ${entryAt(map, order, i)}`);
     emit(`${state} = load i64, ptr ${at}`);
     emit(`${alive} = icmp eq i64 ${state}, 1`);
     emit(`br i1 ${alive}, label %${loop}, label %${next}`);
@@ -5442,6 +5474,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store i64 ${step}, ptr ${counter}`);
     emit(`br label %${test}`);
     startBlock(end);
+    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
     jsonRaw(w, "}");
   }
 
