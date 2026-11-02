@@ -709,7 +709,7 @@ function ownership(f: File, n: Node, declared: Map<string, boolean>, changedPara
 }
 
 // A7: a method changing its object's fields takes `this: Mut<this>`, marked for review, as the
-// first parameter.
+// first parameter. A `this` return type becomes `Mut<this>`, lending the object on to chain.
 function receiver(f: File, n: Node): Hit | undefined {
   const params = n.params as Param[];
   const from = ((n.typeParams ?? []) as Node[]).at(-1)?.end ?? (isNode(n.name) ? n.name.end : (((n.decorators ?? []) as Node[]).at(-1)?.end ?? n.start));
@@ -719,7 +719,9 @@ function receiver(f: File, n: Node): Hit | undefined {
   if (!open) return undefined;
   const at = params[0]?.start ?? open.end;
   const added = `this: Mut<this> ${MARKER}${params.length > 0 ? ", " : ""}`;
-  return { rule: "A7", action: "auto", start: n.start, end: open.end, message: "the method changes its object's fields, so it takes 'this: Mut<this>'; the marker asks you to confirm it", edits: [{ start: at, end: at, text: added }] };
+  const returned = isNode(n.returnType) && n.returnType.kind === "ref" && n.returnType.name === "this" && (n.returnType.args as unknown[]).length === 0 ? n.returnType : undefined;
+  const lent = returned ? [{ start: returned.start, end: returned.end, text: "Mut<this>" }] : [];
+  return { rule: "A7", action: "auto", start: n.start, end: open.end, message: `the method changes its object's fields, so it takes 'this: Mut<this>'${returned ? " and returns 'Mut<this>'" : ""}; the marker asks you to confirm it`, edits: [{ start: at, end: at, text: added }, ...lent] };
 }
 
 // A4: a top-level `let` holding an integer, bound nowhere else and not exported, that is updated

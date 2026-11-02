@@ -161,6 +161,11 @@ test("A7 gives a method changing its fields a Mut receiver, marked for review", 
   for (const kept of ["  read(): number {", "  static make() {", "  later() {", "  given(this: Mut<this>) {"]) expect(out).toContain(kept);
 });
 
+test("A7 lends a chaining method's this return type as Mut<this>", () => {
+  const out = fixed("class B {\n  n = 0;\n  add(x: number): this {\n    this.n += x;\n    return this;\n  }\n}\n");
+  expect(out).toContain("  add(this: Mut<this> /* fish: review */, x: number): Mut<this> {\n");
+});
+
 test("a review marker left in the file is reported as guided until it is removed", () => {
   const src = "function f(p: Ref<Thing> /* fish: review */, q: Mut<Thing> /* fish: review */) {\n  q.x = p.x;\n}\nclass C {\n  m(this: Mut<this> /* fish: review */) {}\n}\n// /* fish: review */\nconst s = \"/* fish: review */\";\n";
   expect(found(src)).toEqual(["guided A5 /* fish: review */", "guided A6 /* fish: review */", "guided A6 /* fish: review */"]);
