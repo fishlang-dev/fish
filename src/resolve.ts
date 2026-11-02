@@ -61,8 +61,6 @@ export function storable(typing: Typing, written: Type, at: Span): Type {
     throw new CompileError("E0115", `a field can't have the interface type '${r.name}'; use a type parameter instead`, at.start, at.end);
   }
   if (r?.kind === "closure") throw unsupported("functions stored in fields", at);
-  // A reference or nothing is only a variable's, a parameter's or a result's.
-  if (typing.holdsPart(type, (t) => typing.optionRef(t) !== undefined)) throw unsupported("unions holding references", at);
   return type;
 }
 
@@ -636,7 +634,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // The one union holding a reference is a reference or nothing, `Ref<T> | null`, as Rust's
   // `Option<&T>` is.
   private union(this: Mut<this>, nodes: TypeNode[]): Type {
-    const option = nodes.filter((n) => !(n.kind === "ref" && n.name === "null" && n.args.length === 0)).length === 1;
+    const option = nodes.filter((n) => !(n.kind === "ref" && (n.name === "null" || n.name === "undefined") && n.args.length === 0)).length === 1;
     return this.typing.unionType(nodes.map((n) => this.unionMember(n, option)));
   }
 

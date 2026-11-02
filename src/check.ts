@@ -2342,7 +2342,7 @@ class BodyChecker implements Context, Outer, Sight {
   }
   // The key a field path narrows under: its root's id or `this`, then its fields as a change to
   // them is shown. Only plain fields of objects and classes make one, read through no getter or
-  // `?.`, holding no reference, below a root no closure changes.
+  // `?.`, below a root no closure changes.
   pathKey(this: Mut<this>, written: Expr): string | undefined {
     const e = this.cx.rewrites.current(written);
     if (e.kind === "this") return this.closureChanged.has("this") ? undefined : "this";
@@ -2362,7 +2362,7 @@ class BodyChecker implements Context, Outer, Sight {
     const kind = this.cx.recOf(bound)?.kind;
     if (kind !== "object" && kind !== "class") return undefined;
     const field = this.cx.typing.field(bound as Exclude<Type, string>, e.name);
-    if (!field || this.cx.typing.holdsRef(field.type)) return undefined;
+    if (!field) return undefined;
     const root = this.pathKey(e.object);
     return root === undefined ? undefined : `${root}${/^\d+$/.test(e.name) ? `[${e.name}]` : `.${shownName(e.name)}`}`;
   }

@@ -6462,7 +6462,6 @@ export class Expressions implements Union {
       return { ...field, type: own };
     }
     if (typeof field.type !== "string" && this.typing.rec(field.type).kind === "closure") throw unsupported("functions stored in objects", p);
-    if (this.typing.optionRef(field.type)) throw unsupported("unions holding references", p);
     return field;
   }
 
