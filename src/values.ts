@@ -24,7 +24,7 @@ import { holesOf, quoted, type Category } from "./quote.ts";
 import { holdsNull } from "./defaults.ts";
 import { bodyOf, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
-import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
+import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 import { forEachChild, nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
 import { rebuiltExpr } from "./rebuild.ts";
@@ -144,6 +144,8 @@ export type Context = {
   // A field's type where a check narrowed its path, noting the read; and a change at a path
   // inside a binding or `this`, which forgets what was known below it.
   narrowedField(e: Expr): Type | undefined;
+  // Whether a check proved an interface's optional method there on a value.
+  present(object: Expr, name: string): boolean;
   changesPath(root: Local | "this", path: string, action: string, at: Expr): void;
   // The instance being checked.
   instance: Instance;
@@ -357,6 +359,7 @@ export class Expressions implements Union {
     this.integerCalls = this.ctx.tables.integerCalls;
     this.dynCalls = this.ctx.tables.dynCalls;
     this.optionalCalls = this.ctx.tables.optionalCalls;
+    this.presenceTests = this.ctx.tables.presenceTests;
     this.dynMembers = this.ctx.tables.dynMembers;
     this.boxedMembers = this.ctx.tables.boxedMembers;
     this.madeArrows = this.ctx.tables.madeArrows;
@@ -451,6 +454,7 @@ export class Expressions implements Union {
   private integerCalls: Tables["integerCalls"];
   private dynCalls: Tables["dynCalls"];
   private optionalCalls: Tables["optionalCalls"];
+  private presenceTests: Tables["presenceTests"];
   private dynMembers: Tables["dynMembers"];
   private boxedMembers: Tables["boxedMembers"];
   private madeArrows: Tables["madeArrows"];
@@ -4607,7 +4611,7 @@ export class Expressions implements Union {
     const stored = r.kind === "param" ? r.concrete : undefined;
     this.omittableCall(e, callee, found, r.name);
     // An instance whose type leaves an optional method out never calls it.
-    const absent = found.omittable === true && stored !== undefined && (this.recOf(stored)?.kind !== "class" || !inherited(this.arenas, this.ctx.classOf(stored as ClassType), "methods", callee.name));
+    const absent = found.omittable === true && this.lacks(stored, callee.name);
     if (absent) (this.ctx.instance.absent ??= new NodeSet()).add(e);
     // A generic method's call infers its types, then in an instance runs the concrete method's.
     if (found.generic) {
@@ -4631,11 +4635,44 @@ export class Expressions implements Union {
     return { type: promised !== undefined ? this.typing.lentPromise(promised) : found.returns, what: `'${callee.name}'` };
   }
 
+  // Whether an instance's concrete type for a type parameter leaves out a method: an object,
+  // or a class without it.
+  private lacks(stored: Type | undefined, name: string): boolean {
+    return stored !== undefined && (this.recOf(stored)?.kind !== "class" || !inherited(this.arenas, this.ctx.classOf(stored as ClassType), "methods", name));
+  }
+
+  // `h.m !== undefined`, `h.m === null` or `typeof h.m === "function"` on an interface's optional
+  // method tests whether the value's type has it; read any other way, a method is called.
+  private presence(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): boolean {
+    if (e.op !== "===" && e.op !== "!==") return false;
+    const test = typeofTest(e);
+    const empty = (x: Expr) => isEmpty(x, this.locals as NodeMap<Expr, LocalId>);
+    const named = test?.name.kind === "string" ? test.name.value : undefined;
+    if (test && named !== "function" && named !== "undefined") return false;
+    if (!test && !empty(e.left) && !empty(e.right)) return false;
+    const member = this.rewrites.current(test ? test.operand : empty(e.right) ? e.left : e.right);
+    if (member.kind !== "member" || member.optional || this.chained(member.object)) return false;
+    const object = this.value(member.object);
+    const r = this.recOf(object);
+    const t = this.typing.unfold(r?.kind === "ref" ? r.to : this.plainOf(object));
+    const held = this.recOf(t);
+    const trait = this.recOf(held?.kind === "dyn" ? held.of : held?.kind === "param" ? held.bound : t);
+    const m = trait?.kind === "interface" ? trait.methods.find((x) => x.name === member.name) : undefined;
+    if (!m?.omittable) {
+      this.ctx.exprsState.once.add(member.object);
+      return false;
+    }
+    const when = test ? (e.op === "===") === (named === "function") : e.op === "!==";
+    this.presenceTests.set(e, { object: member.object, name: member.name, when });
+    if (held?.kind === "param" && this.lacks(held.concrete, member.name)) (this.ctx.instance.absent ??= new NodeSet()).add(e);
+    return true;
+  }
+
   // `h.m?.()` calls only an optional method, which a plain call may call only where a check
   // found it there.
   private omittableCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, m: Method, shown: string) {
     if (!e.optional) {
-      if (m.omittable) throw new CompileError("E0108", `'${m.name}' may be missing, since '${shown}' declares it optional; call it as '${this.placeText(callee)}?.()'`, callee.start, callee.end);
+      if (m.omittable && !this.ctx.present(callee.object, m.name)) throw new CompileError("E0108", `'${m.name}' may be missing, since '${shown}' declares it optional; call it as '${this.placeText(callee)}?.()', or check '${this.placeText(callee)} !== undefined' first`, callee.start, callee.end);
       return;
     }
     if (!m.omittable) throw new CompileError("E0505", `'${m.name}' is always there in '${shown}', so it is called without '?.'`, e.start, e.end);
@@ -5617,6 +5654,7 @@ export class Expressions implements Union {
         return bothSides(this.typing, e, then, otherwise, (v, from, to, message) => this.coerce(v, from, to, message));
       }
       case "binary":
+        if (this.presence(e)) return "boolean";
         // Each instance of an isDeepStrictEqual checks its own operands' types.
         if (this.deepEqualities.has(e)) {
           for (const a of [e.left, e.right]) {

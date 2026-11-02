@@ -14,7 +14,7 @@ import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots } from "./flow.ts";
 import { declareEnum, type EnumInfo, type EnumInstance } from "./enums.ts";
-import { bindingKey, covers, either, guard, isPath, type Facts } from "./narrow.ts";
+import { bindingKey, covers, either, guard, isPath, presentKey, type Facts } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
@@ -2392,6 +2392,10 @@ class BodyChecker implements Context, Outer, Sight {
     const t = key === undefined ? undefined : this.facts.findLast((f) => f.has(key))?.get(key);
     if (t !== undefined) this.narrowReads.push({ local: key!, at: e });
     return t;
+  }
+  present(this: Mut<this>, object: Expr, name: string): boolean {
+    const root = this.pathKey(object);
+    return root !== undefined && this.facts.some((f) => f.has(presentKey(root, name)));
   }
   // A change at `path` inside a binding or `this` forgets what was known of the field paths it
   // reaches, below an element all of the array's. Lending a path as the one member a check

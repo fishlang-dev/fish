@@ -139,3 +139,104 @@ function main(): void {
   console.log(o.n);
   console.log(grow(c));
 }
+// case: optionalmethods_presence
+// expect: closed a
+// expect: no onClose
+// expect: 5
+// expect: 0
+// expect: true false
+// expect: hi a
+// expect: none
+// expect: false true
+interface Handler {
+  onClose?(): void;
+  size?(by: i64): i64;
+  greet?(s: string): string;
+}
+class A implements Handler {
+  onClose(): void { console.log("closed a"); }
+  size(by: i64): i64 { return by + 3; }
+  greet(s: string): string { return s + " a"; }
+}
+class B implements Handler {}
+function close(h: Handler): void {
+  if (h.onClose !== undefined) h.onClose();
+  else console.log("no onClose");
+}
+function size(h: Handler): i64 {
+  if (h.size === undefined) return 0;
+  return h.size(2);
+}
+function has(h: Handler): boolean { return typeof h.greet === "function"; }
+function greet(h: Handler): string { return typeof h.greet !== "function" ? "none" : h.greet("hi" + ""); }
+function lacks(h: Handler): boolean { return h.size === null || !(h.onClose !== null && h.greet !== undefined); }
+function main(): void {
+  close(new A());
+  close(new B());
+  console.log(size(new A()));
+  console.log(size(new B()));
+  console.log(has(new A()), has(new B()));
+  console.log(greet(new A()));
+  console.log(greet(new B()));
+  console.log(lacks(new A()), lacks(new B()));
+}
+// case: optionalmethods_dyn_presence
+// expect: closed a
+// expect: no onClose
+// expect: 5
+// expect: 0
+// expect: true false
+interface Handler {
+  onClose?(): void;
+  size?(by: i64): i64;
+}
+class A implements Handler {
+  onClose(): void { console.log("closed a"); }
+  size(by: i64): i64 { return by + 3; }
+}
+class B implements Handler {}
+function main(): void {
+  const hs: Dyn<Handler>[] = [new A(), new B()];
+  for (const h of hs) {
+    if (h.onClose !== undefined) h.onClose();
+    else console.log("no onClose");
+  }
+  for (const h of hs) console.log(h.size !== undefined && h.size(2) > 0 ? h.size(2) : 0);
+  const a: Dyn<Handler> = new A();
+  const b: Dyn<Handler> = new B();
+  console.log(typeof a.size === "function", typeof b.size === "function");
+}
+// case: optionalmethods_this_field
+// expect: closed
+// expect: done
+interface Handler { onClose?(): void }
+class A { onClose(): void { console.log("closed"); } }
+class Conn<H extends Handler> {
+  constructor(public h: H) {}
+  close(): void {
+    if (this.h.onClose !== undefined) this.h.onClose();
+    console.log("done");
+  }
+}
+function main(): void {
+  new Conn(new A()).close();
+}
+// case: optionalmethods_check_forgotten
+// error: 'onClose' may be missing, since 'Handler' declares it optional
+interface Handler { onClose?(): void }
+function f(h: Handler, other: Handler): void {
+  if (other.onClose !== undefined) h.onClose();
+}
+function main(): void {}
+// case: optionalmethods_check_reassigned
+// error: 'onClose' may be missing, since 'Handler' declares it optional
+interface Handler { onClose?(): void }
+class A { onClose(): void {} }
+class B {}
+function main(): void {
+  let d: Dyn<Handler> = new A();
+  if (d.onClose !== undefined) {
+    d = new B();
+    d.onClose();
+  }
+}

@@ -138,7 +138,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
     dynMembers, boxedMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
     fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, keyTests, typing, regex: regexTables,
-    joinCalls, integerCalls, optionalCalls, arenas,
+    joinCalls, integerCalls, optionalCalls, presenceTests, arenas,
   } = noted;
   const localOf = (id: LocalId): Local => arenas.localOf(id);
   const llvm = layoutOf(typing);
@@ -2624,6 +2624,19 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       return result;
     };
     return optionalCalls.has(e) ? slotted(e, fn, m.returns, called) : called();
+  }
+
+  // Whether an optional method is there: known for a type parameter's instance, and through a
+  // Dyn, whether its slot is filled.
+  function presence(e: Expr): string {
+    const { object, name, when } = presenceTests.get(e)!;
+    const t = referent(valueType(object));
+    if (recOf(t)?.kind !== "dyn") return String(current.absent?.has(e) ? !when : when);
+    const [, table] = opened(object, false);
+    const fn = vslot(table, typing.rec(typing.rec(t as DynType).of).methods.findIndex((m) => m.name === name));
+    const result = temp();
+    emit(`${result} = icmp ${when ? "ne" : "eq"} ptr ${fn}, null`);
+    return result;
   }
 
   // `d.m?.()` through a Dyn: the empty Option when the type left the method out, its slot empty.
@@ -9448,6 +9461,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         return result;
       }
       case "binary": {
+        if (presenceTests.has(e)) return presence(e);
         if (e.op === "&&" || e.op === "||") return logical(e.op, value(e.left), () => value(e.right));
         if (e.op === "??" && !typing.isOption(typing.lower(valueType(e.left)))) return owned(e.left);
         if (e.op === "??") return orElse(e);
