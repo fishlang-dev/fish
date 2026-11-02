@@ -311,9 +311,9 @@ function guidedIn(src: string): string[] {
 }
 const messageOf = (src: string, rule: string) => migrations(parseWithComments(src, { last: 0 }), src).find((h) => h.rule === rule)?.message;
 
-test("G1 reports any, suggesting a concrete type, a union or Json", () => {
+test("G1 reports any, suggesting a concrete type, a union, unknown or Json", () => {
   expect(guidedIn("function f(x: any): any[] {\n  return [x];\n}\n")).toEqual(["G1 any", "G1 any"]);
-  expect(messageOf("let x: any;\n", "G1")).toBe("'any' turns type checking off, which Fish doesn't do; choose a concrete type, a union, or the dynamic 'Json' value");
+  expect(messageOf("let x: any;\n", "G1")).toBe("'any' turns type checking off, which Fish doesn't do; choose a concrete type, a union, 'unknown' narrowed with 'typeof' or 'instanceof' before use, or the dynamic 'Json' value");
   expect(guidedIn("let x: unknown;\nconst any = 1;\n")).toEqual([]);
 });
 

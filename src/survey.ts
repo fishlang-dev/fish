@@ -38,7 +38,7 @@ const RULES: Rule[] = [
   { id: "R5", action: "reject", title: "the arguments object: use rest parameters" },
   { id: "R6", action: "reject", title: "Symbol: Fish has no runtime reflection" },
   { id: "R7", action: "reject", title: "declaration merging and module augmentation: Fish types are closed after they are declared" },
-  { id: "G1", action: "guided", title: "any: choose a concrete type, a union, or the dynamic Json value" },
+  { id: "G1", action: "guided", title: "any: choose a concrete type, a union, unknown narrowed before use, or the dynamic Json value" },
   { id: "G2", action: "guided", title: "a promise dropped un-awaited: add await, or spawn() it to run on its own" },
   { id: "G3", action: "guided", title: "a number used as a count or an index: make it i64, or usize for an index" },
   { id: "G4", action: "guided", title: "class extends with the base used as a type: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
