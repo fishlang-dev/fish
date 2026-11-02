@@ -507,3 +507,22 @@ function main(): void {
   const ps: [i64, string][] = [[2, "b"]];
   console.log(first(new Map([["a", 1]])), first(ps));
 }
+// case: tuple_length_literal
+// expect: 2 2 2 2 3
+type P = [i64, string];
+type L = P["length"];
+function count(t: readonly [i64, i64, i64]): 3 { return t.length; }
+function main(): void {
+  const x: L = 2;
+  const t: P = [1, "x"];
+  const n: 2 = t.length;
+  const u: usize = t.length;
+  const w: L = t.length;
+  console.log(x, n, u, w, count([1, 2, 3]));
+}
+// case: tuple_length_literal_optional
+// error: type 'usize' is not assignable to type '2'
+function main(): void { const t: [i64, string?] = [1]; const n: 2 = t.length; }
+// case: tuple_length_literal_wrong
+// error: type 'usize' is not assignable to type '3'
+function main(): void { const t: [i64, string] = [1, "a"]; const n: 3 = t.length; }

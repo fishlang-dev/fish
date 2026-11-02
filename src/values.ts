@@ -5945,6 +5945,12 @@ export class Expressions implements Union {
   coerce(this: Mut<this>, e: Expr, type: Type, to: Type, message: string) {
     e = this.rewrites.current(e);
     const tr = this.recOf(to);
+    // A tuple's length is a 'usize', and also the literal of its count where that is known, as
+    // in 'const n: 2 = t.length'.
+    if (tr?.kind === "literal" && this.tupleLength(e) === to) {
+      this.types.set(e, to);
+      return;
+    }
     // A reference that changes its value's form points at a copy in a slot of the function,
     // which an async function loses each time it stops.
     if (this.ctx.async && tr?.kind === "ref" && !this.isRefType(type) && this.typing.lower(type) !== this.typing.lower(tr.to) && this.typing.fits(type, tr.to)) {
@@ -7024,6 +7030,14 @@ export class Expressions implements Union {
       const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;
       throw new CompileError("E0207", `cannot ${action} ${what} is a constant`, target.start, target.end);
     }
+  }
+
+  // The literal type of `t.length` on a tuple whose count is known, if `e` is one.
+  private tupleLength(this: Mut<this>, e: Expr): Type | undefined {
+    if (e.kind !== "member" || e.name !== "length" || e.optional) return undefined;
+    const t = this.types.get(e.object);
+    const held = t !== undefined && this.isRefType(t) ? this.typing.rec(t).to : t;
+    return held !== undefined && this.typing.isTuple(held) ? this.typing.tupleLength(held as ObjectType) : undefined;
   }
 
   // A readonly field can't change once constructed, nor can anything inside it. Only its own

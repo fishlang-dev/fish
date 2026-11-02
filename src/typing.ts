@@ -2115,6 +2115,13 @@ export class Typing {
     return this.rec(t).fields[0]?.readonly === true;
   }
 
+  // `t.length` as a type: the count of a tuple with neither optional nor rest elements, which
+  // only then is known while compiling.
+  tupleLength(this: Mut<this>, t: ObjectType): Type {
+    const r = this.rec(t);
+    return r.required === undefined && r.rest === undefined && !r.match ? this.literalType(BigInt(r.fields.length)) : "usize";
+  }
+
   // A readonly tuple's writable twin; any other type as it is.
   writable(this: Mut<this>, t: Type): Type {
     if (!this.isTuple(t) || !this.readonlyTuple(t as ObjectType)) return t;
