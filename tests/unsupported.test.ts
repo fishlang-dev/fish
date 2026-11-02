@@ -246,3 +246,12 @@ test("a timer in a library's sync function is refused", () => {
   const src = "export function later(): void {\n  setTimeout(() => { console.log(\"x\"); }, 1);\n}";
   expect(() => checkSource(src, true)).toThrow("'setTimeout' can only be used inside an 'async' function here, where the runtime is running");
 });
+
+// `as const` names no type: only a literal can be asserted to its literal type.
+test("x as const", () => {
+  const src = "function main() {\n  const x = 1;\n  const y = x as const;\n}";
+  const start = src.indexOf("x as");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "a 'const' assertion can only be applied to an enum member, or a string, number, boolean, array or object literal", start, end: start + 1,
+  }));
+});
