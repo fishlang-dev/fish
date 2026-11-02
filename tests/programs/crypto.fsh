@@ -136,3 +136,23 @@ import { hash } from "node:crypto";
 function main() {
   console.log(hash("md5", "abc"));
 }
+// case: crypto_block_edges
+// expect: 55 c1c8bbdc22796e28c0e15163d20899b65621d65a 9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318
+// expect: 56 c2db330f6083854c99d4b5bfb6e8f29f201be699 b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a
+// expect: 63 03f09f5b158a7a8cdad920bddc29b81c18a551f5 7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34
+// expect: 64 0098ba824b5c16427bd7a1122a5a442a25ec644d ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb
+// expect: 65 11655326c708d70319be2610e8a57d9a5b959d3b 635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0
+// expect: 64 9c6d8ea88eaae0dda58c8f4a0f8e9a190edc28e4 ce3c639dcb9d8baae5d44c3b8b5e233faab4d1860e07489af5c84f213998bd79
+// expect: 65 349e9189de217e47242c1aaa2acfe9084d584f3f c2b9a0a013df029c7d812c5ac18388feef0194ee64fcc5f321d149c06137caa3
+// Messages around where the length no longer fits the last block, and HMAC keys of exactly one
+// block and one byte more, which is hashed; expected values are node:crypto's.
+function main() {
+  for (const n of [55, 56, 63, 64, 65]) {
+    const data: u8[] = new Array(n).fill(0x61 as u8);
+    console.log(n, crypto.sha1(data.clone()).toHex(), crypto.sha256(data).toHex());
+  }
+  for (const n of [64, 65]) {
+    const key: u8[] = new Array(n).fill(0xaa as u8);
+    console.log(n, crypto.hmac("sha1", key.clone(), "x").toHex(), crypto.hmac("sha256", key, "x").toHex());
+  }
+}
