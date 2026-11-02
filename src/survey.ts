@@ -97,7 +97,6 @@ const WEIGHTS: Record<Action, usize> = { reject: 10, guided: 3, auto: 0, unsuppo
 const GRADES: [string, f64][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
 
-// Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
 const memberOf = (n: unknown, object: string, names: string[]) => isNode(n) && n.kind === "member" && named(n.object, object) && names.includes(n.name as string);
 
 // Every TypeScript file under `dir`, skipping dependencies, hidden directories, declarations and
