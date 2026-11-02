@@ -1151,6 +1151,7 @@ export class Expressions implements Union {
   // Checks a call: what it returns, and how a message names what it calls. A method called in
   // an optional chain gives an Option.
   private call(this: Mut<this>, e: Call): { type: Type; what: string } {
+    e = this.spreadTuples(e);
     const variant = this.promiseVariants.get(e);
     if (variant) {
       const nothing = this.typing.lower(this.ctx.resolveType(variant.typeArgs[0]!)) === "void";
@@ -2959,10 +2960,39 @@ export class Expressions implements Union {
     return made;
   }
 
+  // `f(...t)` over a tuple named by a variable passes its elements, as `f(t[0], t[1])` would,
+  // a rest tuple's array spreading after them. Each element reads the variable again, so a
+  // tuple made for the call has to be named first.
+  private spreadTuples<T extends Extract<Expr, { kind: "call" | "new" }>>(this: Mut<this>, e: T): T {
+    const args = e.args ?? [];
+    const tuples = args.map((a) => (a.kind === "spread" ? this.spreadTuple(a.value) : undefined));
+    if (tuples.every((t) => t === undefined)) return e;
+    const parts = args.flatMap((a, i): Expr[] => {
+      const t = tuples[i];
+      if (t === undefined || a.kind !== "spread") return [a];
+      const source = this.rewrites.current(a.value) as Extract<Expr, { kind: "ident" }>;
+      const at = { start: a.start, end: a.end };
+      const element = (name: string): Expr => ({ id: nextId(this.ids), kind: "member", object: { ...source, id: nextId(this.ids) }, name, optional: false, ...at });
+      const fixed = this.typing.elementsOf(t).map((_, n) => element(String(n)));
+      return this.typing.rec(t).rest === undefined ? fixed : [...fixed, { id: nextId(this.ids), kind: "spread", value: element("..."), ...at }];
+    });
+    return this.rewrites.replace(e, { ...e, args: parts });
+  }
+
+  // The tuple a spread argument's variable holds, if it holds one.
+  private spreadTuple(this: Mut<this>, source: Expr): ObjectType | undefined {
+    source = this.rewrites.current(source);
+    if (source.kind !== "ident") return undefined;
+    const t = this.value(source);
+    this.ctx.exprsState.once.add(source);
+    const held = this.typing.lower(this.isRefType(t) ? this.typing.rec(t).to : t);
+    return this.typing.isTuple(held) && !this.typing.rec(held as ObjectType).match ? (held as ObjectType) : undefined;
+  }
+
   // A spread argument fills only a rest parameter, since an array's length isn't known while compiling.
   private refuseSpread(list: Expr[]) {
     const spread = list.find((a) => a.kind === "spread");
-    if (spread) throw new CompileError("E0408", "a spread argument fills only a rest parameter, as in 'function f(...xs: T[])', since an array's length isn't known while compiling", spread.start, spread.end);
+    if (spread) throw new CompileError("E0408", "a spread argument fills only a rest parameter, as in 'function f(...xs: T[])', since an array's length isn't known while compiling; a tuple spreads into parameters from a variable, as in 'const t = pair(); f(...t)'", spread.start, spread.end);
   }
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
@@ -5382,6 +5412,7 @@ export class Expressions implements Union {
         this.ctx.noteThis(e);
         return this.self.type;
       case "new": {
+        if (this.spreadTuples(e) !== e) return this.typeOf(this.spreadTuples(e));
         let list = e.args ?? [];
         if (e.callee.kind === "ident" && INTERIORS.has(e.callee.name) && !this.ctx.lookup(e.callee.name) && !this.classes.has(e.callee.name)) {
           return this.interiorNew(e, e.callee.name as InteriorRecord["which"], list);

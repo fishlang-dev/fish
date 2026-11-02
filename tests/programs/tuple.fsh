@@ -526,3 +526,57 @@ function main(): void { const t: [i64, string?] = [1]; const n: 2 = t.length; }
 // case: tuple_length_literal_wrong
 // error: type 'usize' is not assignable to type '3'
 function main(): void { const t: [i64, string] = [1, "a"]; const n: 3 = t.length; }
+// case: tuple_spread_args
+// expect: 1 x
+// expect: [ 'x', 1 ]
+// expect: 6 6 12
+// expect: 6
+// expect: 4 null
+// expect: 1 x 1 x
+// expect: 3
+// expect: 7 r
+// expect: 1 x
+class C { constructor(public n: i64) {} }
+function add(a: i64, b: string): void { console.log(a, b); }
+function gen<A, B>(a: A, b: B): [B, A] { return [b, a]; }
+function sum(...xs: i64[]): i64 { let s = 0; for (const x of xs) s += x; return s; }
+function opt(a: i64, b?: string): void { console.log(a, b); }
+class P { constructor(public a: i64, public b: string) {} show(x: i64, y: string): void { console.log(this.a, this.b, x, y); } }
+function own(a: C, b: C): void { console.log(a.n + b.n); }
+function main(): void {
+  const t: [i64, string] = [1, "x"];
+  add(...t);
+  console.log(gen(...t));
+  const n: [i64, i64, i64] = [1, 2, 3];
+  console.log(sum(...n), sum(0, ...n), sum(...n, ...n));
+  const r: [i64, ...i64[]] = [1, 2, 3];
+  console.log(sum(...r));
+  const o: [i64, string?] = [4];
+  opt(...o);
+  const p = new P(...t);
+  p.show(...t);
+  const cs: [C, C] = [new C(1), new C(2)];
+  own(...cs);
+  const ro: readonly [i64, string] = [7, "r"];
+  add(...ro);
+  const lent: Ref<[i64, string]> = t;
+  add(...lent);
+}
+// case: tuple_spread_moves
+// error: 'cs[0].n' can't be used here because 'cs[0]' was moved
+class C { constructor(public n: i64) {} }
+function own(a: C, b: C): void { console.log(a.n + b.n); }
+function main(): void { const cs: [C, C] = [new C(1), new C(2)]; own(...cs); console.log(cs[0].n); }
+// case: tuple_spread_unnamed
+// error: a tuple spreads into parameters from a variable, as in 'const t = pair(); f(...t)'
+function add(a: i64, b: string): void { console.log(a, b); }
+function pair(): [i64, string] { return [1, "x"]; }
+function main(): void { add(...pair()); }
+// case: tuple_spread_count
+// error: expected 1 argument, but got 2
+function add(a: i64): void { console.log(a); }
+function main(): void { const t: [i64, string] = [1, "x"]; add(...t); }
+// case: tuple_spread_type
+// error: argument of type 'string' is not assignable to parameter of type 'i64'
+function add(a: i64, b: i64): void { console.log(a + b); }
+function main(): void { const t: [i64, string] = [1, "x"]; add(...t); }
