@@ -19,7 +19,7 @@ import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { Registry, RegistryState, type RegistryHost } from "./registry.ts";
-import { addAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost, type Sight } from "./resolve.ts";
+import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost, type Sight } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
 import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type InstanceMaker, type Bound } from "./typing.ts";
@@ -620,8 +620,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           this.enums.set(e.name, declareEnum(this.compilation, e, (owner, member, init) => this.enumMemberValue(owner, member, init)));
           continue;
         }
-        if (s.kind === "typeAlias") {
+        const trait = s.kind === "typeAlias" ? traitAlias(this.ids, s) : undefined;
+        if (s.kind === "typeAlias" && !trait) {
           addAlias(aliases, s, this.classes, this.templates, this.interfaces, this.enums);
+          continue;
+        }
+        if (trait) {
+          typeName(trait.name, s, aliases, this.classes, this.templates, this.interfaces, this.enums);
+          this.interfaces.set(trait.name, trait);
           continue;
         }
         if (s.kind === "interface") {
@@ -2621,8 +2627,9 @@ class BodyChecker implements Context, Outer, Sight {
     const borrowed = this.cx.isRef(destructuring) && !global;
     const lowered = this.cx.typing.lower(this.cx.isRef(destructuring) ? this.cx.typing.rec(destructuring).to : destructuring);
     const l = this.cx.recOf(lowered);
-    // An object-typed parameter stands for any type with its fields, which its bound names.
-    const whole = l?.kind === "param" && l.bound && this.cx.typing.rec(l.bound).kind === "object" ? l.bound : lowered;
+    // An object-typed or interface-typed parameter stands for any type with its fields, which its
+    // bound names.
+    const whole = l?.kind === "param" && l.bound && ["object", "interface"].includes(this.cx.typing.rec(l.bound).kind) ? l.bound : lowered;
     const w = this.cx.recOf(whole);
     const parts: [Pattern, Expr, Type][] = [];
     // A part with a default: what the part holds, or the default when it is null.
@@ -2636,18 +2643,21 @@ class BodyChecker implements Context, Outer, Sight {
       // A union of objects, as `as const` rows give, is read field by field, each field the union
       // of its members', as a member read of it is.
       const members = w?.kind === "union" ? w.members : [whole];
-      if (!members.every((m) => this.cx.recOf(m)?.kind === "object" || this.cx.recOf(m)?.kind === "class")) {
+      if (!members.every((m) => this.cx.recOf(m)?.kind === "object" || this.cx.recOf(m)?.kind === "class" || (m === whole && this.cx.recOf(m)?.kind === "interface"))) {
         throw new CompileError("E0003", `'{ ... }' destructures an object or an instance, not '${this.cx.typing.show(destructuring)}'`, pattern.start, pattern.end);
       }
       const taken = new Set<string>();
       for (const p of pattern.props) {
         const key = typeof p.key === "string" ? p.key : this.exprs().knownKey(p.key);
         const found = members.map((m) => this.cx.typing.field(m as ClassType | ObjectType, key));
+        const method = w?.kind === "interface" && w.methods.some((m) => m.name === key);
+        if (method) throw new CompileError("E0003", `'{ ... }' can't take method '${key}' out of '${this.cx.typing.show(whole)}'; call it on the value, as in 'x.${key}()'`, p.start, p.end);
         if (found.some((f) => !f)) throw new CompileError("E0502", `property '${key}' does not exist on type '${this.cx.typing.show(whole)}'`, p.start, p.end);
         taken.add(key);
         part(p.value, { id: nextId(this.cx.ids), kind: "member", object: from(p), name: key, optional: false, start: p.start, end: p.end }, this.cx.typing.unionType(found.map((f) => f!.type)));
       }
       if (pattern.rest && w?.kind === "union") throw unsupported("rest patterns over a union of objects", pattern.rest);
+      if (pattern.rest && w?.kind === "interface") throw unsupported("rest patterns over an interface's fields", pattern.rest);
       // The rest is an object of the fields the pattern didn't name, taken over.
       if (pattern.rest && (w?.kind === "object" || w?.kind === "class")) {
         const fields = w.kind === "class" ? this.cx.typing.allFields(whole as ClassType) : w.fields;

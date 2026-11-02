@@ -93,7 +93,7 @@ export class TypeFunctions {
     }
     if (r?.kind === "param" && r.concrete) return this.fieldsOf(r.concrete, what, at);
     if (r?.kind === "interface") {
-      throw new CompileError("E0114", `${what} takes an object type or a class, not the interface '${this.typing.show(t)}', whose methods aren't values in Fish; write its fields as a 'type'`, at.start, at.end);
+      throw new CompileError("E0114", `${what} takes an object type or a class, not the interface '${this.typing.show(t)}', whose methods aren't values in Fish; any type with a method is an interface, so move its fields into a 'type' with no methods and use that`, at.start, at.end);
     }
     throw new CompileError("E0114", `${what} takes an object type or a class, not '${this.typing.show(t)}'`, at.start, at.end);
   }
