@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { newSession } from "../src/compilation.ts";
 import { buildAsync } from "../src/main.ts";
 import { NATIVE, tlsStub } from "../src/native.ts";
+import { STD_MODULES } from "../src/std.ts";
+import { CompileError } from "../src/diag.ts";
 import { findOpenSsl } from "../src/target.ts";
 
 // TLS between Fish and Bun, both ways, with the test-only certificates in tests/fixtures/tls.
@@ -95,6 +97,52 @@ async function main(): Promise<void> throws IoError {
   } finally {
     proc.kill();
     await proc.exited;
+  }
+});
+
+test("std's TLS helper is std's alone", async () => {
+  const file = join(tmp, "helper.fsh");
+  writeFileSync(file, `async function main(): Promise<void> throws IoError | AbortError {
+  const conn = await TcpStream.connect("127.0.0.1", 1, new AbortController().signal);
+  await __tlsClient(conn, "localhost", "", new AbortController().signal);
+}
+`);
+  const error = await buildAsync(session, file, join(tmp, "helper")).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(CompileError);
+  expect((error as CompileError).message).toStartWith("unknown function '__tlsClient'");
+});
+
+test("a stream already speaking TLS refuses to start it again, leaking nothing", async () => {
+  // Only std starts TLS, so a module standing in for std's own calls the helper a second time.
+  STD_MODULES["tls-twice"] = `export async function again(conn: Ref<TcpStream>, ca: string): Promise<void> throws IoError | AbortError {
+  await __tlsClient(conn, "localhost", ca, new AbortController().signal);
+}
+`;
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    tls: { cert: Bun.file(join(fixtures, "server.pem")), key: Bun.file(join(fixtures, "server-key.pem")) },
+    fetch: () => new Response("ok"),
+  });
+  try {
+    const binary = await build("twice", `import { readFileSync } from "node:fs";
+import { again } from "tls-twice";
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const ca = readFileSync(process.argv[2], "utf8");
+  const conn = await tls.connect("127.0.0.1", parseInt(process.argv[3]) ?? 0, { ca: ca, serverName: "localhost" });
+  try {
+    await again(conn, ca);
+    console.log("started twice");
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+`);
+    expect(await run(binary, [join(fixtures, "ca.pem"), String(server.port)])).toBe("the stream already speaks TLS\n");
+  } finally {
+    delete STD_MODULES["tls-twice"];
+    server.stop(true);
   }
 });
 

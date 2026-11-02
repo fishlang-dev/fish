@@ -70,18 +70,19 @@ test("one known sanitizer at a time, for a target clang has its runtime for", ()
 
 test("each definition in the IR is marked for the sanitizer, and an unsanitized build's left alone", () => {
   const ir = 'define internal void @"fsh.constants"() {\ndefine internal { i64, ptr } @"fsh.f"(ptr %p) uwtable personality ptr @__gcc_personality_v0 {\ndeclare void @free(ptr)\n  ; define x {';
-  expect(instrumented(ir, { ...HOST_TARGET, sanitize: "thread" })).toBe('define internal void @"fsh.constants"() sanitize_thread {\ndefine internal { i64, ptr } @"fsh.f"(ptr %p) sanitize_thread uwtable personality ptr @__gcc_personality_v0 {\ndeclare void @free(ptr)\n  ; define x {');
-  expect(instrumented(ir, { ...HOST_TARGET, sanitize: "address" })).toContain("sanitize_address uwtable personality");
+  expect(instrumented(ir, { ...HOST_TARGET, sanitize: "thread" })).toBe('define internal void @"fsh.constants"() sanitize_thread noinline {\ndefine internal { i64, ptr } @"fsh.f"(ptr %p) sanitize_thread noinline uwtable personality ptr @__gcc_personality_v0 {\ndeclare void @free(ptr)\n  ; define x {');
+  expect(instrumented(ir, { ...HOST_TARGET, sanitize: "address" })).toContain("sanitize_address noinline uwtable personality");
   expect(instrumented(ir, HOST_TARGET)).toBe(ir);
   // A symbol can hold a space, and so the word itself.
   const named = 'define internal i64 @"fsh.C.static uwtable"() uwtable personality ptr @__gcc_personality_v0 {';
-  expect(instrumented(named, { ...HOST_TARGET, sanitize: "address" })).toBe('define internal i64 @"fsh.C.static uwtable"() sanitize_address uwtable personality ptr @__gcc_personality_v0 {');
+  expect(instrumented(named, { ...HOST_TARGET, sanitize: "address" })).toBe('define internal i64 @"fsh.C.static uwtable"() sanitize_address noinline uwtable personality ptr @__gcc_personality_v0 {');
 });
 
-test("an instrumented runtime is cached apart from a plain one", () => {
+test("an instrumented runtime is cached apart from a plain one, a dev build's at -O1", () => {
   const [plain] = runtimeUnits("", false);
   const [address] = runtimeUnits("", false, false, { ...HOST_TARGET, compile: ["-fsanitize=address", "-fno-omit-frame-pointer"], sanitize: "address" });
-  expect(address!.args).toEqual(["-x", "c", "-", "-fsanitize=address", "-fno-omit-frame-pointer", ...plain!.args.slice(3)]);
+  expect(address!.args).toEqual(["-x", "c", "-", "-fsanitize=address", "-fno-omit-frame-pointer", ...plain!.args.slice(3).map((a) => (a === "-O0" ? "-O1" : a))]);
+  expect(plain!.args).toContain("-O0");
 });
 
 test("--sanitize refused where it can't apply", () => {
@@ -115,6 +116,43 @@ function main() {
   expect(err).toMatch(/READ of size 8 [^\n]*\n\s+#0 [^\n]* in fsh\.main [^\n]*main\.fsh:10/);
   expect(err).toMatch(/freed by thread T0 here:\n[^\n]*\n\s+#1 [^\n]* in fsh\.main [^\n]*main\.fsh:8/);
 });
+
+// Clang's -O0 code for AArch64 misread large aggregates passed to address-sanitized functions,
+// so fetch's init arrived empty and the request went out as a bare GET.
+test.skipIf(noAddress !== undefined)("an address-sanitized fetch sends the method, headers and body it was given", async () => {
+  let seen = "";
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      seen = `${req.method} ${new URL(req.url).pathname} ${req.headers.get("x-tag")} ${await req.text()}`;
+      return new Response("ok");
+    },
+  });
+  try {
+    await fetchUnder(server.port!);
+  } finally {
+    server.stop(true);
+  }
+  expect(seen).toBe("POST /up t1 yyyyyyyyyy");
+});
+
+async function fetchUnder(port: number) {
+  const dir = join(root, "fetch");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "main.fsh"), `async function main(): Promise<void> throws IoError | AbortError {
+  let headers = new Headers();
+  headers.set("x-tag", "t1");
+  const res = await fetch("http://127.0.0.1:${port}/up", { method: "POST", headers, body: "y".repeat(10) });
+  const text = await res.text();
+  console.log(res.status, text);
+}
+`);
+  const built = Bun.spawnSync(["bun", MAIN, "build", "main.fsh", "-o", "main", "--sanitize", "address"], { cwd: dir });
+  expect(built.stderr.toString()).toBe("");
+  const ran = Bun.spawn([join(dir, "main")], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  const [code, out, err] = await Promise.all([ran.exited, new Response(ran.stdout).text(), new Response(ran.stderr).text()]);
+  expect({ code, out, err }).toEqual({ code: 0, out: "200 ok\n", err: "" });
+}
 
 test.skipIf(noThread !== undefined)("the thread sanitizer reports two tasks racing on raw memory", () => {
   const src = `async function bump(address: usize): Promise<i64> {

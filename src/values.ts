@@ -1351,7 +1351,9 @@ export function expressions(ctx: Context) {
       return { type: value(e), what: "'isDeepStrictEqual'" };
     }
     if (target && (target as { macro?: boolean }).macro) throw new CompileError("E0503", `'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
-    if (!target) {
+    // The prelude holds std's TLS helper, so a program would otherwise reach it; only std calls it.
+    const stdOnly = callee.kind === "ident" && callee.name === "__tlsClient" && e.start < STD_BASE && stdModuleAt(files, e.start) === undefined;
+    if (!target || stdOnly) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError("E0401", `unknown function ${name}${callee.kind === "ident" ? didYouMean(callee.name, ctx.names(callee.start)) : ""}`, callee.start, callee.end);
     }

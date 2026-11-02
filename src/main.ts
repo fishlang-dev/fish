@@ -241,7 +241,7 @@ function parts(ir: string, instances: Instance[], release: boolean, target: Targ
   const bodies = instances.filter((i) => !i.body.foreign && !i.body.rust);
   const named = (std: boolean) => bodies.filter((i) => i.body.start >= STD_BASE === std).map(symbol);
   const { std, program } = split(ir, named(true), named(false));
-  return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", "-O0", "-funwind-tables"], stdin: std, inputs: [] }], program };
+  return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"], stdin: std, inputs: [] }], program };
 }
 
 // Builds the IR `ir`, of `instances`, into the executable `out`.
@@ -261,7 +261,7 @@ function linked(session: Session, ir: string, instances: Instance[], out: string
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
     const object = join(dir, "program.o");
-    timed(timings, "compile", () => clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", release ? "-O2" : "-O0", ...g], program));
+    timed(timings, "compile", () => clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", optimization(release, target), ...g], program));
     timed(timings, "link", () => {
       clang([...clangArgs(out, release, links, objects, shim, target, [object]), ...tls, ...g]);
       // On macOS the debug info stays in the object, deleted below; clang gathers it into a .dSYM
@@ -503,7 +503,7 @@ export function runtimeLinks(ir: string, target: Target): string[] {
 export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = HOST_TARGET, leaks = false): Unit[] {
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
-  const flags = [...target.compile, "-funwind-tables", "-pthread", release ? "-O2" : "-O0", ...(pic ? ["-fPIC"] : []), ...(js ? ["-I", ENGINE] : [])];
+  const flags = [...target.compile, "-funwind-tables", "-pthread", optimization(release, target), ...(pic ? ["-fPIC"] : []), ...(js ? ["-I", ENGINE] : [])];
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
   const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
   const source = [NATIVE, ...(js ? [JS_NATIVE] : []), ...(openssl === undefined ? [] : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
@@ -513,10 +513,17 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   return [runtime, ...engine];
 }
 
+// A build's optimization level. A sanitized dev build is optimized a little, as clang advises for
+// its sanitizers: at -O0, clang for AArch64 misreads large aggregates passed by value to an
+// address-sanitized function, so the program would quietly do something else.
+function optimization(release: boolean, target: Target): string {
+  return release ? "-O2" : target.sanitize ? "-O1" : "-O0";
+}
+
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
 // already, linked with `objects`.
 function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = HOST_TARGET, program: string[] = ["-x", "ir", "-"]): string[] {
-  return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, release ? "-O2" : "-O0", "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
+  return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
 }
 
 function fail(message: string): never {

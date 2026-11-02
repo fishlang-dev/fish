@@ -126,10 +126,12 @@ export function sanitizedTarget(target: Target, kinds: string[], host: string | 
 }
 
 // Clang's front end marks each function a sanitizer should instrument, and Fish's IR carries no
-// such marks, so each definition in `ir` is given one for `target`'s sanitizer.
+// such marks, so each definition in `ir` is given one for `target`'s sanitizer. Each is kept out of
+// line too: a function inlined into one with no debug info, such as a task's poll, loses its
+// lines, and a report would name no .fsh line for it.
 export function instrumented(ir: string, target: Target): string {
   if (!target.sanitize) return ir;
-  const attribute = target.sanitize === "address" ? "sanitize_address" : "sanitize_thread";
+  const attribute = `${target.sanitize === "address" ? "sanitize_address" : "sanitize_thread"} noinline`;
   return ir.replace(/^(define [^\n]*\))( uwtable| \{$)/gm, `$1 ${attribute}$2`);
 }
 

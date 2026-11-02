@@ -7689,6 +7689,8 @@ static int fsh_tls_host_name(const char *host) {
 // host name or an IP address, against the PEM certificates in ca, or the system's when ca is
 // empty, as Node's ca option does. Gives why it can't, or an empty string.
 fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+  // A second session would replace the first, leaking it and racing a read through a clone.
+  if (s->tls) return fsh_tls_said("the stream already speaks TLS");
   char *host = fsh_rt_str_cstring(name);
   if (!host || !host[0]) {
     fsh_rt_free(host);
