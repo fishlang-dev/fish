@@ -1454,8 +1454,6 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
-  // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`, as are
-  // `as`, `satisfies` and `unsafe { }`, which hand on their operand.
   // Whether an expression is a reference a call gave, or a choice between such references.
   function fromCall(e: Expr): boolean {
     e = unwrapped(e);
@@ -1473,6 +1471,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     }
   }
 
+  // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`, as are
+  // `as`, `satisfies` and `unsafe { }`, which hand on their operand.
   function unwrapped(e: Expr): Expr {
     return (e.kind === "nonNull" && typing.optionRef(types.get(e.expr))) || transparent(e) ? unwrapped((e as { expr: Expr }).expr) : e;
   }
