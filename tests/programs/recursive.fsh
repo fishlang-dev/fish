@@ -542,3 +542,77 @@ function main() {
   console.log(n.kind);
   console.log(ev(e));
 }
+// case: recursive_named_member_write_through_mut
+// A field written through a Mut narrowed to a member that holds the union again lands in its block.
+// expect: in 102
+// expect: 102
+// expect: 102
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; v: i64 };
+type Expr = Lit | Add;
+function bump(e: Mut<Expr>) { if (e.kind === "add") { e.v = e.v + 100; console.log("in", e.v); } }
+function main() { let e: Expr = { kind: "add", l: { kind: "lit", v: 1 }, v: 2 }; bump(e); if (e.kind === "add") console.log(e.v); console.log(e.v); }
+// case: recursive_option_write_through_mut
+// expect: in 101
+// expect: 101
+type Cons = { v: i64; next: L };
+type L = Cons | null;
+function bump(l: Mut<L>) { if (l !== null) { l.v = l.v + 100; console.log("in", l.v); } }
+function main() { let l: L = { v: 1, next: { v: 2, next: null } }; bump(l); if (l !== null) console.log(l.v); }
+// case: recursive_named_member_lend_field
+// A field of such a member is lent where it lives, and assigned whole.
+// expect: 13 7
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; v: i64 };
+type Expr = Lit | Add;
+function inc(n: Mut<i64>) { n = n + 1; }
+function bump(e: Mut<Expr>) {
+  if (e.kind === "add") { e.v += 10; inc(e.v); e.l = { kind: "lit", v: 7 }; }
+}
+function main() {
+  let e: Expr = { kind: "add", l: { kind: "lit", v: 1 }, v: 2 };
+  bump(e);
+  if (e.kind === "add") { const l = e.l; console.log(e.v, l.v); }
+}
+// case: recursive_named_member_match
+// expect: 6
+// expect: add of lit 2
+// expect: lit 9
+// expect: add
+// expect: 11
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; r: Expr };
+type Expr = Lit | Add;
+function ev(e: Expr): i64 {
+  return match (e) {
+    case { kind: "lit", v } => v,
+    case { kind: "add", l, r } => ev(l.clone()) + ev(r.clone()),
+  };
+}
+function main() { const e: Expr = { kind: "add", l: { kind: "lit", v: 2 }, r: { kind: "lit", v: 4 } }; console.log(ev(e.clone())); console.log(show(e.clone())); console.log(show({ kind: "lit", v: 9 })); console.log(show({ kind: "add", l: e, r: { kind: "lit", v: 1 } })); console.log(owned()); }
+function show(e: Expr): string {
+  return match (e) {
+    case { kind: "add", l: { kind: "lit", v } } => `add of lit ${v}`,
+    case { kind: "add" } => "add",
+    case { v } => `lit ${v}`,
+  };
+}
+function owned(): i64 {
+  const e: Expr = { kind: "add", l: { kind: "lit", v: 5 }, r: { kind: "lit", v: 6 } };
+  return match (e) {
+    case { kind: "add", l, r } => ev(l.clone()) + ev(r.clone()),
+    case { kind: "lit", v } => v,
+  };
+}
+// case: recursive_named_member_match_uncovered
+// error: this match doesn't cover { kind: "add", l: { kind: "add" } }
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; r: Expr };
+type Expr = Lit | Add;
+function f(e: Expr): i64 {
+  return match (e) {
+    case { kind: "add", l: { kind: "lit" } } => 1,
+    case { kind: "lit" } => 2,
+  };
+}
+function main() { console.log(f({ kind: "lit", v: 1 })); }
