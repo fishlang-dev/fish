@@ -73,7 +73,6 @@ const RULES: Rule[] = [
   { id: "collections", action: "unsupported", title: "WeakMap and WeakSet", feature: "WeakMap and WeakSet over Rc" },
   { id: "readonlyCollections", action: "unsupported", title: "ReadonlyMap and ReadonlySet (more utility types)", feature: "More utility types" },
   { id: "forAwaitArrays", action: "guided", title: "for await over an array of promises: Fish loops with for await over an async generator or a Channel, so await Promise.all(...) and loop over its result with for...of" },
-  { id: "numberKeys", action: "guided", title: "a Map or Set keyed by 'number': Fish hashes integers and strings, so give it an integer key such as i64" },
   { id: "dynamicRegex", action: "reject", title: "regexes built while the program runs: Fish compiles every regex while compiling" },
   { id: "regexStrings", action: "guided", title: "match, matchAll and search given a string, and next() on matchAll: Fish takes a regex literal there, and matchAll gives an array" },
   { id: "regexState", action: "guided", title: "exec or test on a g or y regex, and lastIndex: a Fish regex keeps no state; use matchAll, or drop the flag" },
@@ -98,8 +97,6 @@ const WEIGHTS: Record<Action, usize> = { reject: 10, guided: 3, auto: 0, unsuppo
 const GRADES: [string, f64][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
 
-// Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
-const numberKey = (args: unknown) => Array.isArray(args) && isNode(args[0]) && args[0].kind === "ref" && args[0].name === "number";
 const memberOf = (n: unknown, object: string, names: string[]) => isNode(n) && n.kind === "member" && named(n.object, object) && names.includes(n.name as string);
 
 // Every TypeScript file under `dir`, skipping dependencies, hidden directories, declarations and
@@ -413,7 +410,6 @@ function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, d
       break;
     case "new":
       if (["WeakMap", "WeakSet"].some((name) => named(n.callee, name))) push("collections");
-      if (["Map", "Set"].some((name) => named(n.callee, name)) && numberKey(n.typeArgs)) push("numberKeys");
       break;
     case "member":
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
@@ -438,7 +434,6 @@ function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, d
       if (n.name === "null" || n.name === "undefined") push("A2");
       if (["WeakMap", "WeakSet"].includes(n.name as string)) push("collections");
       if (["ReadonlyMap", "ReadonlySet"].includes(n.name as string)) push("readonlyCollections");
-      if (["Map", "Set"].includes(n.name as string) && numberKey(n.args)) push("numberKeys");
       break;
     case "let":
       letRules(n, ambient, head, push);
