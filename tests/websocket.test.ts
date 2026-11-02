@@ -347,6 +347,27 @@ test("protocol errors close the connection with RFC 6455's codes", async () => {
   }
 });
 
+test("pongs to a client that stops reading count against maxBuffered, closing with 1013", async () => {
+  const server = await start();
+  try {
+    const c = await rawClient(server.port, "/small");
+    c.sock.pause();
+    const ping = Buffer.concat([Buffer.from([0x89, 125 | 128, 1, 2, 3, 4]), Buffer.alloc(125, 7)]);
+    const batch = Buffer.concat(Array(2000).fill(ping));
+    for (let i = 0; i < 40; i++) {
+      c.sock.write(batch);
+      await Bun.sleep(5);
+    }
+    await Bun.sleep(300);
+    c.sock.resume();
+    const frames = await c.rest();
+    expect(frames.at(-1)).toEqual([8, "1013 send buffer full"]);
+    expect(frames.slice(0, -1).every(([opcode]) => opcode === 10)).toBe(true);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("another task sends through a sender, and sends after the close are dropped", async () => {
   const server = await start();
   try {

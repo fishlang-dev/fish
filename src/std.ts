@@ -1388,7 +1388,7 @@ function __staticType(path: string): string {
 // Extensions such as permessage-deflate and subprotocols are never agreed to.
 
 // A WebSocket route's limits. maxMessageSize is the most bytes one message may take, past which
-// the connection is closed with 1009; maxBuffered the most bytes sends may queue for a client
+// the connection is closed with 1009; maxBuffered the most bytes sends and pongs may queue for a client
 // that reads slowly, past which it is closed with 1013; idleTimeout how long the client may send
 // nothing before it is pinged, and as long again before it is dropped, in milliseconds, 0 for
 // never. The defaults are Bun's: 16 MiB, 16 MiB and two minutes.
@@ -1610,14 +1610,15 @@ function __wsClosing(code: i64, reason: string): u8[] {
   return out;
 }
 
-// Queues a frame and wakes the writer. Nothing is queued once a close has been, and data that
-// would take the queue past its limit closes the connection with 1013 instead.
+// Queues a frame and wakes the writer. Nothing is queued once a close has been, and any other
+// frame that would take the queue past its limit, pongs to a client that pings and never reads
+// included, closes the connection with 1013 instead.
 function __wsQueue(state: shared<__wsState>, opcode: i64, payload: u8[]) {
   const frame = __wsFrame(opcode, payload);
   const limit = state.maxBuffered;
   state.out.update((o) => {
     if (o.closing) return;
-    if (opcode < 8 && (o.bytes.length + frame.length) as i64 > limit) {
+    if (opcode !== 8 && (o.bytes.length + frame.length) as i64 > limit) {
       o.closing = true;
       for (const b of __wsFrame(8, __wsClosing(1013, "send buffer full"))) o.bytes.push(b);
     } else {
