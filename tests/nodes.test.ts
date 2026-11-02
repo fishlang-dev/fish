@@ -11,7 +11,7 @@ import { expandMacros } from "../src/macros.ts";
 import { analyze } from "../src/main.ts";
 import { flatten, load } from "../src/modules.ts";
 import type { Id } from "../src/ids.ts";
-import { NodeMap, NodeSet, Rewrites } from "../src/nodes.ts";
+import { NodeMap, NodeSet, renumber, Rewrites, shiftSpans } from "../src/nodes.ts";
 import { parse, type Expr, type Stmt } from "../src/parser.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
@@ -219,6 +219,55 @@ test("a node table reads one entry for a node and its replacement, and refuses a
   expect(new NodeSet<Expr>([node]).has(by)).toBe(true);
   expect(() => new NodeSet<{ id: number }>().has({ kind: "c" } as unknown as { id: number })).toThrow("has no id");
 });
+
+test("renumbering and moving spans refuse two different nodes under one id", () => {
+  const a: Expr = { id: 5, kind: "ident", name: "a", start: 0, end: 1 };
+  const copy: Expr = { ...a, start: 4, end: 5 };
+  const sum: Expr = { id: 6, kind: "binary", op: "+", left: a, right: copy, start: 0, end: 5 };
+  let last = 100;
+  expect(() => renumber("expr", structuredClone(sum), () => ++last)).toThrow("internal error: two nodes share id 5");
+  expect(() => shiftSpans("expr", structuredClone(sum), 10)).toThrow("internal error: two nodes share id 5");
+  const shared: Expr = { id: 6, kind: "binary", op: "+", left: a, right: a, start: 0, end: 5 };
+  const renumbered = renumber("expr", structuredClone(shared), () => ++last) as Extract<Expr, { kind: "binary" }>;
+  expect(renumbered.left.id).toBe(renumbered.right.id);
+});
+
+// Every node table's reads and writes checked against the node it holds under the id, as the
+// tables once checked themselves: one other than that node or its replacement is a clash.
+const clashes: string[] = [];
+function noting<F extends (this: object, node: Id, ...rest: never[]) => unknown>(method: F, held: (table: object, id: number) => object | undefined): F {
+  return function (this: object, node: Id, ...rest: never[]) {
+    const was = held(this, node.id);
+    if (was !== undefined && was !== node && latest(was) !== latest(node)) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
+    return method.call(this, node, ...rest);
+  } as F;
+}
+type Held = { table: Map<number, unknown> };
+const inMap = (t: object, id: number) => ((t as unknown as Held).table.get(id) as { node: object } | undefined)?.node;
+const inSet = (t: object, id: number) => (t as unknown as Held).table.get(id) as object | undefined;
+for (const m of ["get", "has", "set", "delete"] as const) NodeMap.prototype[m] = noting(NodeMap.prototype[m] as never, inMap);
+for (const m of ["has", "add", "delete"] as const) NodeSet.prototype[m] = noting(NodeSet.prototype[m] as never, inSet);
+
+// The node tables tell nodes apart by id alone, so no table may meet two nodes under one id, but
+// for a node and its replacement: std, macros, quotes, comptime and generic classes all make or copy
+// nodes.
+test("no node table meets two different nodes under one id", () => {
+  const session = cachedSession();
+  const sample = corpus().filter((p) => /^(macro|comptime|generic|derive|class|std|json)/.test(p.name) && !p.src.includes("// mode: parse"));
+  expect(sample.length).toBeGreaterThan(50);
+  const a = { id: 1, kind: "a" };
+  new NodeMap<{ id: number }, string>().set(a, "a").get({ ...a });
+  expect(clashes).toEqual(["two nodes share id 1: a a and a a"]);
+  clashes.length = 0;
+  for (const p of sample) {
+    try {
+      analyze(session, p.src, p.file);
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  expect([...new Set(clashes)]).toEqual([]);
+}, 240_000);
 
 // The AST types a table may not be keyed by: every type in src/parser.ts carrying `Id`, and any
 // alias a file gives one, as `type Arrow = Extract<Expr, ...>`, `type Decl = Stmt & ...` or

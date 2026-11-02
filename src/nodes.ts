@@ -71,18 +71,33 @@ function idIn(n: AnyNode): usize | undefined {
   return typeof id === "number" ? id : undefined;
 }
 
+// What tells a node apart from another under the same id: its kind and its span.
+function markOf(n: AnyNode): string {
+  const node = n.node as { kind?: string; start?: usize; end?: usize };
+  return `${n.of} ${node.kind ?? ""} ${node.start ?? ""} ${node.end ?? ""}`;
+}
+
+// Whether `n`, a node with id `id`, was reached already. A different node under an id already
+// reached, as a copy that kept its original's id, is an internal error rather than one node.
+function reachedBefore(seen: Map<usize, string>, id: usize, n: AnyNode): boolean {
+  const was = seen.get(id);
+  if (was === undefined) return false;
+  if (was !== markOf(n)) throw new Error(`internal error: two nodes share id ${id}`);
+  return true;
+}
+
 // Gives every node in `tree` a fresh id: a copy made by `structuredClone` or deserializing shares
 // its original's ids, or another process's. A node reached twice, as a shared object, keeps the
 // first one it got: nodes are told apart by their ids, which are all found before any changes, as
 // a fresh id could equal an old one. `next` gives the ids.
 export function renumber<T extends object>(of: RootKind, tree: T, next: () => usize): T {
-  const seen = new Set<usize>();
+  const seen = new Map<usize, string>();
   const found: Id[] = [];
   walk(of, tree as never, (n) => {
     const id = idIn(n);
     if (id === undefined) return;
-    if (seen.has(id)) return false;
-    seen.add(id);
+    if (reachedBefore(seen, id, n)) return false;
+    seen.set(id, markOf(n));
     found.push(n.node as Id);
   });
   for (const node of found) node.id = next();
@@ -90,17 +105,18 @@ export function renumber<T extends object>(of: RootKind, tree: T, next: () => us
 }
 
 // Moves every span in a parsed tree, nodes of type `of`, by `by`, for a source placed past others
-// in one program. A node reached twice, as a shared object, moves once.
+// in one program. A node reached twice, as a shared object, moves once: it is known by its id and
+// its span once moved.
 export function shiftSpans<K extends RootKind>(of: K, tree: NodeOf<K> | NodeOf<K>[], by: usize) {
-  const seen = new Set<usize>();
+  const seen = new Map<usize, string>();
   walk(of, tree, (n) => {
     const id = idIn(n);
     if (id === undefined) return;
-    if (seen.has(id)) return false;
-    seen.add(id);
+    if (reachedBefore(seen, id, n)) return false;
     const node = n.node as Partial<Span>;
     if (typeof node.start === "number") node.start += by;
     if (typeof node.end === "number") node.end += by;
+    seen.set(id, markOf(n));
   });
 }
 
@@ -112,7 +128,8 @@ function idOf(node: Id): usize {
   return id;
 }
 
-// A `Map` from nodes, keyed by their ids, holding each node as a `Map` holds its keys.
+// A `Map` from nodes, keyed by their ids, holding each node as a `Map` holds its keys. Iterating
+// gives each node as it was first stored, not a replacement lowering made for it since.
 export class NodeMap<K extends Id, V> {
   private table = new Map<usize, { node: K; value: V }>();
 
@@ -166,7 +183,8 @@ export class NodeMap<K extends Id, V> {
   }
 }
 
-// A `Set` of nodes, keyed by their ids, holding each node as a `Set` holds its members.
+// A `Set` of nodes, keyed by their ids, holding each node as a `Set` holds its members. Iterating
+// gives each node as it was first added, not a replacement lowering made for it since.
 export class NodeSet<K extends Id> {
   private table = new Map<usize, K>();
 
