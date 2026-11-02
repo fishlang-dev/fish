@@ -3830,6 +3830,79 @@ function __arrayTypedSet${name}(target: Mut<${t}[]>, source: Ref<${t}[]>, offset
 }).join("\n")}
 `;
 
+// DataView over an ArrayBuffer it owns, reading and writing numbers of each width in either byte
+// order, big-endian unless told otherwise, as JavaScript's does.
+const DATA_VIEW = String.raw`
+class DataView {
+  byteLength: usize;
+  byteOffset: usize;
+  buffer: ArrayBuffer;
+  constructor(buffer: ArrayBuffer, byteOffset?: i64, byteLength?: i64) {
+    const total = buffer.length as i64;
+    const offset = byteOffset ?? 0;
+    assert(offset >= 0 && offset <= total, "RangeError: Start offset " + String(offset) + " is outside the bounds of the buffer");
+    const length = byteLength ?? total - offset;
+    assert(length >= 0 && offset + length <= total, "RangeError: Invalid DataView length " + String(length));
+    this.byteLength = length as usize;
+    this.byteOffset = offset as usize;
+    this.buffer = buffer;
+  }
+  #at(offset: i64, size: i64): i64 {
+    assert(offset >= 0 && offset + size <= (this.byteLength as i64), "RangeError: Offset is outside the bounds of the DataView");
+    return (this.byteOffset as i64) + offset;
+  }
+  #read(offset: i64, size: i64, little: boolean): u64 {
+    const at = this.#at(offset, size);
+    let v: u64 = 0;
+    for (let i = 0; i < size; i++) v = (v << 8) | (this.buffer[(at + (little ? size - 1 - i : i)) as usize] as u64);
+    return v;
+  }
+  #write(this: Mut<this>, offset: i64, size: i64, little: boolean, value: u64): void {
+    const at = this.#at(offset, size);
+    for (let i = 0; i < size; i++) this.buffer[(at + (little ? i : size - 1 - i)) as usize] = ((value >> ((8 * i) as u64)) & 255) as u8;
+  }
+  getUint8(byteOffset: i64): u8 { return this.#read(byteOffset, 1, false) as u8; }
+  getInt8(byteOffset: i64): i8 { return this.#read(byteOffset, 1, false) as i8; }
+  getUint16(byteOffset: i64, littleEndian?: boolean): u16 { return this.#read(byteOffset, 2, littleEndian === true) as u16; }
+  getInt16(byteOffset: i64, littleEndian?: boolean): i16 { return this.#read(byteOffset, 2, littleEndian === true) as i16; }
+  getUint32(byteOffset: i64, littleEndian?: boolean): u32 { return this.#read(byteOffset, 4, littleEndian === true) as u32; }
+  getInt32(byteOffset: i64, littleEndian?: boolean): i32 { return this.#read(byteOffset, 4, littleEndian === true) as i32; }
+  getBigUint64(byteOffset: i64, littleEndian?: boolean): bigint { return BigInt(this.#read(byteOffset, 8, littleEndian === true)); }
+  getBigInt64(byteOffset: i64, littleEndian?: boolean): bigint { return BigInt(this.#read(byteOffset, 8, littleEndian === true) as i64); }
+  getFloat32(byteOffset: i64, littleEndian?: boolean): f64 {
+    const bits = this.#read(byteOffset, 4, littleEndian === true) as u32;
+    let x: f32 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 4) };
+    return x as f64;
+  }
+  getFloat64(byteOffset: i64, littleEndian?: boolean): f64 {
+    const bits = this.#read(byteOffset, 8, littleEndian === true);
+    let x: f64 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 8) };
+    return x;
+  }
+  setUint8(this: Mut<this>, byteOffset: i64, value: u8): void { this.#write(byteOffset, 1, false, value as u64); }
+  setInt8(this: Mut<this>, byteOffset: i64, value: i8): void { this.#write(byteOffset, 1, false, value as u64); }
+  setUint16(this: Mut<this>, byteOffset: i64, value: u16, littleEndian?: boolean): void { this.#write(byteOffset, 2, littleEndian === true, value as u64); }
+  setInt16(this: Mut<this>, byteOffset: i64, value: i16, littleEndian?: boolean): void { this.#write(byteOffset, 2, littleEndian === true, value as u64); }
+  setUint32(this: Mut<this>, byteOffset: i64, value: u32, littleEndian?: boolean): void { this.#write(byteOffset, 4, littleEndian === true, value as u64); }
+  setInt32(this: Mut<this>, byteOffset: i64, value: i32, littleEndian?: boolean): void { this.#write(byteOffset, 4, littleEndian === true, value as u64); }
+  setBigUint64(this: Mut<this>, byteOffset: i64, value: bigint, littleEndian?: boolean): void { this.#write(byteOffset, 8, littleEndian === true, value as u64); }
+  setBigInt64(this: Mut<this>, byteOffset: i64, value: bigint, littleEndian?: boolean): void { this.#write(byteOffset, 8, littleEndian === true, (value as i64) as u64); }
+  setFloat32(this: Mut<this>, byteOffset: i64, value: f64, littleEndian?: boolean): void {
+    const x = value as f32;
+    let bits: u32 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(x) as Ptr<u8>, 4) };
+    this.#write(byteOffset, 4, littleEndian === true, bits as u64);
+  }
+  setFloat64(this: Mut<this>, byteOffset: i64, value: f64, littleEndian?: boolean): void {
+    let bits: u64 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(value) as Ptr<u8>, 8) };
+    this.#write(byteOffset, 8, littleEndian === true, bits);
+  }
+}
+`;
+
 const BTOA = `
 // btoa and atob, as the HTML spec has them: base64 of a string's characters as Latin-1 bytes. The
 // UTF-8 the string holds is read back as code points up to U+00FF.
@@ -5550,7 +5623,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + BTOA + ATOB + DATE + STDIN + TLS;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BTOA + ATOB + DATE + STDIN + TLS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -5584,6 +5657,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const js = next(JS_ERROR);
   const bytes = next(BYTES);
   const typed = next(TYPED);
+  const dataView = next(DATA_VIEW);
   const btoa = next(BTOA);
   const atob = next(ATOB);
   const dates = next(DATE);
@@ -5591,7 +5665,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const tls = next(TLS);
   renameValue([...json, ...jsonName]);
   const astNames = ast.flatMap(declaredNames);
-  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]], [reading, ["readLine"]]] as const;
+  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [dataView, ["DataView"]], [btoa, ["btoa"]], [atob, ["atob"]], [reading, ["readLine"]]] as const;
   const packages = written.some(fromPackage);
   // A program's own URL, URLSearchParams or TypeError keeps its name, and std's takes one no
   // program can write.
@@ -5611,7 +5685,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const dated = httpUsed || uses(written, dates, ["Date"]);
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
-  const typing = mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && Object.hasOwn(TYPED_ARRAYS, n.name));
+  const typing = linked.some((s) => dataView.includes(s)) || mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && Object.hasOwn(TYPED_ARRAYS, n.name));
   return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(typing ? typed : []), ...(secure ? tls : [])];
 }
 
