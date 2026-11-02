@@ -2990,9 +2990,14 @@ export class Expressions implements Union {
   }
 
   // A spread argument fills only a rest parameter, since an array's length isn't known while compiling.
-  private refuseSpread(list: Expr[]) {
+  private refuseSpread(this: Mut<this>, list: Expr[]) {
     const spread = list.find((a) => a.kind === "spread");
-    if (spread) throw new CompileError("E0408", "a spread argument fills only a rest parameter, as in 'function f(...xs: T[])', since an array's length isn't known while compiling; a tuple spreads into parameters from a variable, as in 'const t = pair(); f(...t)'", spread.start, spread.end);
+    if (spread?.kind !== "spread") return;
+    // A tuple reached any other way than by a variable would be read again for each element.
+    const t = this.value(spread.value);
+    const held = this.typing.lower(this.isRefType(t) ? this.typing.rec(t).to : t);
+    if (this.typing.isTuple(held)) throw new CompileError("E0408", "a tuple spreads into parameters from a variable, since each element reads it again; name it first, as in 'const t = pair(); f(...t)'", spread.start, spread.end);
+    throw new CompileError("E0408", "a spread argument fills only a rest parameter, as in 'function f(...xs: T[])', since an array's length isn't known while compiling; a tuple spreads into parameters from a variable, as in 'const t = pair(); f(...t)'", spread.start, spread.end);
   }
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
@@ -5412,7 +5417,8 @@ export class Expressions implements Union {
         this.ctx.noteThis(e);
         return this.self.type;
       case "new": {
-        if (this.spreadTuples(e) !== e) return this.typeOf(this.spreadTuples(e));
+        const spread = this.spreadTuples(e);
+        if (spread !== e) return this.typeOf(spread);
         let list = e.args ?? [];
         if (e.callee.kind === "ident" && INTERIORS.has(e.callee.name) && !this.ctx.lookup(e.callee.name) && !this.classes.has(e.callee.name)) {
           return this.interiorNew(e, e.callee.name as InteriorRecord["which"], list);

@@ -568,7 +568,7 @@ class C { constructor(public n: i64) {} }
 function own(a: C, b: C): void { console.log(a.n + b.n); }
 function main(): void { const cs: [C, C] = [new C(1), new C(2)]; own(...cs); console.log(cs[0].n); }
 // case: tuple_spread_unnamed
-// error: a tuple spreads into parameters from a variable, as in 'const t = pair(); f(...t)'
+// error: a tuple spreads into parameters from a variable, since each element reads it again; name it first, as in 'const t = pair(); f(...t)'
 function add(a: i64, b: string): void { console.log(a, b); }
 function pair(): [i64, string] { return [1, "x"]; }
 function main(): void { add(...pair()); }
@@ -651,6 +651,29 @@ function main(): void { const t: [C, string] = [new C(1), "a"]; for (const x of 
 function pair(): [i64, i64] { return [1, 2]; }
 function main(): void { for (const x of pair()) console.log(x); }
 // case: tuple_for_of_borrows
-// error: cannot change 'cs' while 'c' borrows 'cs[1]' and is used later
+// error: cannot give 'cs' a new tuple inside a 'for...of' over it, which reads it on each pass
 class C { constructor(public n: i64) {} }
 function main(): void { let cs: [C, C] = [new C(1), new C(2)]; for (const c of cs) { cs = [new C(3), new C(4)]; console.log(c.n); } }
+// case: tuple_spread_member
+// error: a tuple spreads into parameters from a variable, since each element reads it again; name it first
+class O { t: [i64, string] = [1, "x"]; }
+function add(a: i64, b: string): void { console.log(a, b); }
+function main(): void { const o = new O(); add(...o.t); }
+// case: tuple_readonly_pairs_iterable
+// expect: a 1
+// expect: a b
+function first<K, V>(xs: Iterable<readonly [K, V]>): K | null { for (const [k, _v] of xs) return k; return null; }
+function f(xs: Iterable<readonly [string, i64]>): void { for (const [k, v] of xs) console.log(k, v); }
+function main(): void {
+  const ps: (readonly [string, i64])[] = [["a", 1]];
+  f(ps.clone());
+  console.log(first(ps), first([["b", 2] as const]));
+}
+// case: tuple_for_of_reassigned
+// error: cannot give 't' a new tuple inside a 'for...of' over it, which reads it on each pass
+function main(): void { let t: [i64, i64, i64] = [1, 2, 3]; for (const x of t) { t = [10, 20, 30]; console.log(x); } }
+// case: tuple_for_of_element_written
+// expect: 1
+// expect: 5
+// expect: 3
+function main(): void { let t: [i64, i64, i64] = [1, 2, 3]; for (const x of t) { t[1] = 5; console.log(x); } }

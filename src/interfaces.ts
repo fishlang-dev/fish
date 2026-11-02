@@ -125,8 +125,8 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   const gives = iterable === undefined ? undefined : typing.iteratedBy(type);
   // String literals, or a union of them, give strings, as a `let` of one widens.
   const text = (t: Type) => { const r = typing.recOf(t); return r?.kind === "union" ? r.members.every((m) => typing.widenLet(m) === "string") : typing.widenLet(t) === "string"; };
-  // A loop's owned pair is the `readonly [K, V]` a table's entries are written as.
-  if (gives !== undefined) return typing.lower(gives) === typing.lower(typing.writable(iterable!)) || (typing.lower(iterable!) === "string" && text(typing.lower(gives))) ? undefined : `it gives '${typing.show(gives)}', not '${typing.show(iterable!)}'`;
+  // A pair is the `readonly [K, V]` a table's entries are written as, whether or not it is readonly.
+  if (gives !== undefined) return typing.lower(typing.writable(gives)) === typing.lower(typing.writable(iterable!)) || (typing.lower(iterable!) === "string" && text(typing.lower(gives))) ? undefined : `it gives '${typing.show(gives)}', not '${typing.show(iterable!)}'`;
   const t = typeof type === "string" ? undefined : typing.rec(type);
   // A type parameter has what its bound has.
   if (t?.kind === "param") {

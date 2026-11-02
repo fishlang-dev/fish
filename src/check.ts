@@ -2850,6 +2850,10 @@ class BodyChecker implements Context, Outer, Sight {
       const object = place(x.object);
       return object && { ...x, id: nextId(ids), object };
     };
+    // JavaScript's loop keeps the tuple it started with, and this one reads the variable on each
+    // pass, so a body giving the variable a new tuple is refused rather than read differently.
+    const root = this.cx.rewrites.current(s.right);
+    if (root.kind === "ident" && assignsOwn(s.body, root.name)) throw new CompileError("E0203", `cannot give '${root.name}' a new tuple inside a 'for...of' over it, which reads it on each pass; change its elements, or loop over a copy, as in 'const each = ${root.name};'`, at.start, at.end);
     const from = (): Expr => place(s.right) ?? (() => { throw new CompileError("E0212", "a 'for...of' over a tuple reads it once per element, so it needs a name; give the value one first, as in 'const t = ...;'", at.start, at.end); })();
     const preset = (t: Type): TypeNode => {
       const made: TypeNode = { id: nextId(ids), kind: "ref", name: typing.show(t), args: [], ...at };
