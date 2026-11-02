@@ -141,8 +141,8 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
     }
     return;
   }
-  if (node.kind === "ref" && node.name === "shared" && node.args.length === 1 && !names.has(node.name)) {
-    if (a?.kind === "shared") infer(tables, node.args[0]!, a.of, names, bindings, at);
+  if (node.kind === "ref" && (node.name === "shared" || node.name === "Rc" || node.name === "Weak") && node.args.length === 1 && !names.has(node.name)) {
+    if (a?.kind === "shared" && a.which === node.name) infer(tables, node.args[0]!, a.of, names, bindings, at);
     return;
   }
   // `Box<T>` against `Box<i64>` matches the type arguments.

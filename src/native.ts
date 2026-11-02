@@ -4704,6 +4704,42 @@ int32_t fsh_rt_shared_release(int64_t *block) {
   return block && __atomic_sub_fetch(block, 1, __ATOMIC_ACQ_REL) == 0;
 }
 
+// An Rc's block: its strong and weak counts, then a Lock's word and the value. One thread owns
+// every handle to it, so the counts change without atomics. The strong handles hold one weak
+// count between them, so the block outlives the value until the last Weak lets go.
+void *fsh_rt_rc_new(int64_t size) {
+  int64_t *block = fsh_rt_alloc(size);
+  block[0] = 1;
+  block[1] = 1;
+  *(int32_t *)(block + 2) = 0;
+  return block;
+}
+
+void fsh_rt_rc_retain(int64_t *block) {
+  if (block) block[0]++;
+}
+
+// Whether that was the last strong count, so the caller drops the value, then the weak count.
+int32_t fsh_rt_rc_release(int64_t *block) {
+  return block && --block[0] == 0;
+}
+
+void fsh_rt_weak_retain(int64_t *block) {
+  if (block) block[1]++;
+}
+
+// A Weak made with nothing to reach, or moved out of its slot, is null and holds no count.
+void fsh_rt_weak_release(int64_t *block) {
+  if (block && --block[1] == 0) fsh_rt_free(block);
+}
+
+// The block with a new strong count while its value is alive, or null.
+void *fsh_rt_rc_upgrade(int64_t *block) {
+  if (!block || block[0] == 0) return 0;
+  block[0]++;
+  return block;
+}
+
 // Waits on a semaphore, a channel or a signal, oldest first, each holding a count on its task. A
 // task waits once for each of its futures waiting, which the tag tells apart: the future's frame,
 // or for a signal its waiting flag.
