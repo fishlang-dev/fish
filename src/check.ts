@@ -1437,7 +1437,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (f.name === "main") throw new CompileError("E1002", "'main' can't be a C function; it is where the program starts", f.start, f.end);
     if (f.throws) throw new CompileError("E1002", "a C function can't throw; C reports failures in its result", f.throws.start, f.throws.end);
     if (!f.returnType) throw new CompileError("E1002", "a C function needs its return type written, 'void' if it returns nothing", f.start, f.end);
-    const crosses = (t: Type) => isNumeric(t) || t === "boolean" || this.recOf(t)?.kind === "pointer";
+    // std's FileHandle hands its counted descriptor to the runtime, which is a pointer to C.
+    const descriptor = (t: Type) => {
+      const r = this.recOf(t);
+      const held = r?.kind === "ref" ? this.recOf(r.to) : r;
+      return held?.kind === "block" && held.which === "FileDescriptor";
+    };
+    const crosses = (t: Type) => isNumeric(t) || t === "boolean" || this.recOf(t)?.kind === "pointer" || descriptor(t);
     const params = this.instancing().paramTypes(instance, this.instancing().scopeOf(instance));
     f.params.forEach((p, i) => {
       if (p.rest || p.optional || p.default) throw unsupported("rest, optional and default parameters on C functions", p);

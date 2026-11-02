@@ -6370,6 +6370,33 @@ int64_t fsh_rt_fd_call(int64_t which, int64_t fd, int64_t value) {
   return r < 0 ? -errno : 0;
 }
 
+// A FileHandle's descriptor: counted, and closed when the last count goes unless close took it
+// first, so a handle dropped without close still closes its file.
+typedef struct fsh_fd { int64_t count; int64_t fd; } fsh_fd;
+
+fsh_fd *fsh_rt_fd_hold(int64_t fd) {
+  fsh_fd *f = fsh_rt_alloc(sizeof *f);
+  f->count = 1;
+  f->fd = fd;
+  return f;
+}
+
+// The descriptor, or -1 once closed. A borrowed block crosses as the place holding it.
+int64_t fsh_rt_fd_of(fsh_fd **f) {
+  return __atomic_load_n(&(*f)->fd, __ATOMIC_ACQUIRE);
+}
+
+// close takes the descriptor to close it, leaving -1, so the release doesn't close it again.
+int64_t fsh_rt_fd_take(fsh_fd **f) {
+  return __atomic_exchange_n(&(*f)->fd, -1, __ATOMIC_ACQ_REL);
+}
+
+void fsh_rt_fd_release(fsh_fd *f) {
+  if (!f || __atomic_sub_fetch(&f->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (f->fd >= 0) fsh_rt_fd_call(3, f->fd, 0);
+  fsh_rt_free(f);
+}
+
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;

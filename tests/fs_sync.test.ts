@@ -11,18 +11,19 @@ setDefaultTimeout(30_000);
 const tmp = mkdtempSync(join(tmpdir(), "fish-fs-sync-"));
 
 // `setup` makes the same files in both directories first; absolute paths print as `<dir>`.
-function compare(name: string, imports: string, body: string, setup: (dir: string) => void = () => {}, nodeBody = body) {
+// `waits` runs the body in an async main.
+function compare(name: string, imports: string, body: string, setup: (dir: string) => void = () => {}, nodeBody = body, waits = false) {
   const fishDir = mkdtempSync(join(tmp, `${name}-fish-`));
   const nodeDir = mkdtempSync(join(tmp, `${name}-node-`));
   setup(fishDir);
   setup(nodeDir);
   const program = join(tmp, `${name}.fsh`);
-  writeFileSync(program, `${imports}\nfunction main(): void throws IoError {${body}\n}\n`);
+  writeFileSync(program, `${imports}\n${waits ? "async function main(): Promise<void>" : "function main(): void"} throws IoError {${body}\n}\n`);
   const out = join(tmp, name);
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: fishDir, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync } = fs; (() => {${nodeBody}\n})();`;
+  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync } = fs; const { open } = require("node:fs/promises"); (${waits ? "async " : ""}() => {${nodeBody}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: nodeDir });
   expect(fish.stderr.toString()).toBe("");
   expect(node.stderr.toString()).toBe("");
@@ -236,4 +237,65 @@ test("openSync, readSync, writeSync and the other descriptor calls give what nod
     writeFileSync(join(dir, "f"), "hello world");
     writeFileSync(join(dir, "g"), "abc");
   });
+});
+
+test("open gives a FileHandle whose calls give what node's give, closed when dropped", () => {
+  const imports = `import { readFileSync, statSync, openSync, closeSync } from "node:fs";\nimport { open } from "node:fs/promises";`;
+  const body = `
+  const text = new TextDecoder();
+  const fh = await open("f", "r+");
+  let b = new Uint8Array(4);
+  const first = await fh.read(b, 0, 4, 0);
+  console.log(fh.fd > 2, first.bytesRead, text.decode(b));
+  const second = await fh.read(b, 1, 2);
+  const third = await fh.read(b);
+  console.log(second.bytesRead, third.bytesRead, text.decode(b));
+  const fourth = await fh.read(b, 0, 4, 100);
+  console.log(fourth.bytesRead);
+  const w1 = await fh.write("XY", 0);
+  const w2 = await fh.write(b.slice(), 1, 2, 12);
+  const w3 = await fh.write(b.slice());
+  const w4 = await fh.write("é");
+  console.log(w1.bytesWritten, w2.bytesWritten, w3.bytesWritten, w4.bytesWritten, readFileSync("f", "utf8"));
+  const s = await fh.stat();
+  console.log(s.size, s.isFile(), s.mode === statSync("f").mode);
+  await fh.truncate(3);
+  console.log(readFileSync("f", "utf8"));
+  await fh.truncate();
+  await fh.chmod(0o600);
+  await fh.sync();
+  console.log(statSync("f").size, statSync("f").mode & 0o777);
+  try { await fh.read(b, 0, 5); } catch (e) { console.log(e.message, e.code); }
+  try { await fh.write(b.slice(), 5); } catch (e) { console.log(e.message, e.code); }
+  await fh.close();
+  await fh.close();
+  console.log(fh.fd);
+  try { await fh.read(b); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { await fh.write("x"); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { await fh.stat(); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { await fh.truncate(); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { await fh.sync(); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { await fh.chmod(0o644); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  try { await open("missing"); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+  try { await open("f", "zz"); } catch (e) { console.log(e.message, e.code); }
+  const a = await open("g", "a");
+  await a.write("more");
+  await a.close();
+  console.log(readFileSync("g", "utf8"));
+  const d = await open(".");
+  try { await d.read(b, 0, 1, 0); } catch (e) { console.log(e.message, e.code, e.syscall); }
+  await d.close();`;
+  // A handle dropped without close closes its file, so the next open reuses its descriptor; node
+  // closes one only when it is collected, so its side closes it here.
+  const dropped = `
+  const before = openSync("g");
+  closeSync(before);
+  await drop();
+  const after = openSync("g");
+  console.log(after === before);
+  closeSync(after);`;
+  compare("handle", `${imports}\nasync function drop(): Promise<void> throws IoError {\n  const _h = await open("g");\n}`, body + dropped, (dir) => {
+    writeFileSync(join(dir, "f"), "hello world");
+    writeFileSync(join(dir, "g"), "abc");
+  }, body + dropped.replace("await drop();", "await (await open(\"g\")).close();"), true);
 });
