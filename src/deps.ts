@@ -27,7 +27,7 @@ const EQUIVALENTS = new Map<string, { name: string; planned: boolean }>(Object.e
   uuid: IN_STD("crypto.randomUUID, for v4 only"), nanoid: IN_STD("crypto.getRandomValues, to build IDs from"),
   ...Object.fromEntries(["dayjs", "date-fns", "moment", "luxon"].map((p) => [p, PLANNED("Date parsing and formatting")])),
   ...Object.fromEntries(["pino", "winston", "bunyan"].map((p) => [p, PLANNED("Structured logging")])),
-  ...Object.fromEntries(["pg", "postgres"].map((p) => [p, PLANNED("Postgres driver")])),
+  ...Object.fromEntries(["pg", "postgres"].map((p) => [p, IN_STD("the postgres module's Pool")])),
   ...Object.fromEntries(["better-sqlite3", "sqlite3"].map((p) => [p, PLANNED("SQLite binding")])),
   ...Object.fromEntries(["ioredis", "redis"].map((p) => [p, PLANNED("Redis client")])),
   ...Object.fromEntries(["glob", "fast-glob", "globby"].map((p) => [p, PLANNED("Glob")])),

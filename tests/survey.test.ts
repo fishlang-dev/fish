@@ -475,6 +475,14 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
   });
 });
 
+test("pg and postgres are replaced by std's postgres module", () => {
+  project({ "package.json": JSON.stringify({ dependencies: { pg: "8", postgres: "3" } }), "a.ts": "const x = 1;\n" }, (dir) => {
+    const d = dependencies(dir)!;
+    expect(d.counts).toEqual({ std: 2, planned: 0, native: 0, pure: 0, unknown: 0 });
+    expect(d.list.map((x) => x.equivalent)).toEqual([{ name: "the postgres module's Pool", planned: false }, { name: "the postgres module's Pool", planned: false }]);
+  });
+});
+
 test("node:readline waits on nothing, as readLine and the stdin module replace it", () => {
   project({ "a.ts": "import { createInterface } from \"node:readline\";\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[]]);

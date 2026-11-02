@@ -4153,6 +4153,588 @@ export async function connect(host: string, port: i64, options: ConnectOptions =
   return conn;
 }
 `,
+  // Postgres over its wire protocol: a pool of connections, statements with parameters sent apart from
+  // their text, and rows read by column name into a type.
+  postgres: String.raw`
+declare function fsh_rt_crypto_digest(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, rounds: i64, out: MutPtr<u8>): i64;
+declare function fsh_rt_crypto_missing(): Ptr<u8>;
+declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
+
+// A value a query's $1, $2 and the rest can take, sent as text: bytes as bytea's hex form, a Date
+// as its ISO string.
+export type SqlValue = null | boolean | i64 | f64 | string | u8[] | Date;
+
+// What the server said went wrong: SQLSTATE's five-character code, its message, and its detail
+// when it gave one.
+export class PostgresError extends Error {
+  code: string;
+  detail: string | null;
+  severity: string;
+  constructor(message: string, code: string, detail: string | null, severity: string) {
+    super(message);
+    this.name = "PostgresError";
+    this.code = code;
+    this.detail = detail;
+    this.severity = severity;
+  }
+}
+
+// A row that can't be read as the type asked for: a column it needs is missing, null where the
+// field can't be, or of another type.
+export class RowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RowError";
+  }
+}
+
+// What a URL asks for; ca is PEM certificates to trust in place of the system's, from sslrootcert.
+type Config = { host: string; port: i64; user: string; password: string; database: string; tls: boolean; ca: string; max: i64 };
+
+// One message from the server: its type byte and its body.
+type Message = { kind: u8; body: u8[] };
+
+// What a statement gave back: its columns' names and type OIDs, each row's values as the server's
+// text, null for SQL's NULL, and the command's tag.
+type Outcome = { names: string[]; types: i64[]; rows: (u8[] | null)[][]; tag: string };
+
+function put32(out: Mut<u8[]>, n: i64) {
+  out.push(((n >> 24) & 255) as u8);
+  out.push(((n >> 16) & 255) as u8);
+  out.push(((n >> 8) & 255) as u8);
+  out.push((n & 255) as u8);
+}
+
+function put16(out: Mut<u8[]>, n: i64) {
+  out.push(((n >> 8) & 255) as u8);
+  out.push((n & 255) as u8);
+}
+
+function putText(out: Mut<u8[]>, s: string) {
+  for (const b of new TextEncoder().encode(s)) out.push(b);
+}
+
+function putCString(out: Mut<u8[]>, s: string) {
+  putText(out, s);
+  out.push(0);
+}
+
+// A message of kind, or the untyped startup ones when kind is 0, with its length in front.
+function framed(kind: u8, body: Ref<u8[]>): u8[] {
+  let out: u8[] = [];
+  if (kind !== 0) out.push(kind);
+  put32(out, (body.length as i64) + 4);
+  for (const b of body) out.push(b);
+  return out;
+}
+
+function get32(bytes: Ref<u8[]>, at: i64): i64 {
+  const i = at as usize;
+  const n = ((bytes[i] as i64) << 24) | ((bytes[i + 1] as i64) << 16) | ((bytes[i + 2] as i64) << 8) | (bytes[i + 3] as i64);
+  return n >= 2147483648 ? n - 4294967296 : n;
+}
+
+function get16(bytes: Ref<u8[]>, at: i64): i64 {
+  const i = at as usize;
+  return ((bytes[i] as i64) << 8) | (bytes[i + 1] as i64);
+}
+
+// The NUL-terminated string starting at an index, and where the next field starts.
+function getCString(bytes: Ref<u8[]>, at: i64): [string, i64] {
+  let end = at;
+  while (end < (bytes.length as i64) && bytes[end as usize] !== 0) end++;
+  return [new TextDecoder().decode(bytes.slice(at, end)), end + 1];
+}
+
+// An ErrorResponse's fields as the error it reports.
+function serverError(body: Ref<u8[]>): PostgresError {
+  let at: i64 = 0;
+  let code = "";
+  let message = "";
+  let severity = "";
+  let detail: string | null = null;
+  while (at < (body.length as i64) && body[at as usize] !== 0) {
+    const field = body[at as usize];
+    const [value, next] = getCString(body, at + 1);
+    if (field === 67) code = value;
+    else if (field === 77) message = value;
+    else if (field === 86) severity = value;
+    else if (field === 68) detail = value;
+    at = next;
+  }
+  return new PostgresError(message, code, detail, severity);
+}
+
+function digest(which: i64, key: Ref<u8[]>, data: Ref<u8[]>, rounds: i64): u8[] throws IoError {
+  // A pointer is taken to an element, so an empty input is passed as one byte of length 0.
+  const k: u8[] = key.length === 0 ? [0 as u8] : key.clone();
+  const d: u8[] = data.length === 0 ? [0 as u8] : data.clone();
+  let out: u8[] = new Array(32).fill(0 as u8);
+  const ok = unsafe { fsh_rt_crypto_digest(which, ptrOf(k[0]), key.length as i64, ptrOf(d[0]), data.length as i64, rounds, mutPtrOf(out[0])) };
+  if (ok !== 1) {
+    const why = unsafe { fromCString(fsh_rt_crypto_missing()) };
+    throw new IoError(why.length > 0 ? "Postgres's password authentication hashes with OpenSSL: " + why : "OpenSSL couldn't hash the password for Postgres's authentication");
+  }
+  return which === 3 ? out.slice(0, 16) : out;
+}
+
+function hmac(key: Ref<u8[]>, data: string): u8[] throws IoError {
+  return digest(1, key, new TextEncoder().encode(data), 0);
+}
+
+// Throws unless what a message's body holds is what its type promises.
+function wellFormed(ok: boolean): void throws IoError {
+  if (!ok) throw new IoError("the Postgres server sent a malformed message");
+}
+
+class Conn {
+  stream: TcpStream;
+  // What has been read and not yet taken, from start on.
+  buffer: u8[] = [];
+  start: i64 = 0;
+  // The transaction status of the last ReadyForQuery: idle, in a transaction, or in a failed one.
+  status: u8 = 73;
+
+  constructor(stream: TcpStream) {
+    this.stream = stream;
+  }
+
+  async send(this: Ref<this>, bytes: u8[]): Promise<void> throws IoError | AbortError {
+    await this.stream.write(bytes);
+  }
+
+  // The next message, past the notices and parameter changes the server sends whenever it likes.
+  async next(this: Mut<this>): Promise<Message> throws IoError | AbortError {
+    while (true) {
+      while (!this.whole()) {
+        if (this.start > 0) {
+          this.buffer.splice(0, this.start);
+          this.start = 0;
+        }
+        const got = await this.stream.read(65536);
+        if (got.length === 0) throw new IoError("the Postgres server closed the connection");
+        for (const b of got) this.buffer.push(b);
+      }
+      const at = this.start;
+      const length = get32(this.buffer, at + 1);
+      const kind = this.buffer[at as usize];
+      this.start = at + 1 + length;
+      if (kind === 78 || kind === 83 || kind === 65) continue;
+      return { kind: kind, body: this.buffer.slice(at + 5, at + 1 + length) };
+    }
+  }
+
+  // Whether the buffer holds a whole message from start.
+  whole(this: Ref<this>): boolean throws IoError {
+    const held = (this.buffer.length as i64) - this.start;
+    if (held < 5) return false;
+    const length = get32(this.buffer, this.start + 1);
+    if (length < 4) throw new IoError("the Postgres server sent a malformed message");
+    // Postgres builds no message past MaxAllocSize, 1 GiB, so a longer one isn't Postgres's.
+    if (length > 1073741824) throw new IoError("the Postgres server sent a message of " + String(length + 1) + " bytes, more than the 1 GiB Postgres itself can send");
+    return held >= 1 + length;
+  }
+
+  static async open(config: Ref<Config>): Promise<Conn> throws PostgresError | IoError | AbortError {
+    const stream = await TcpStream.connect(config.host, config.port);
+    if (config.tls) {
+      let request: u8[] = [];
+      put32(request, 80877103);
+      await stream.write(framed(0, request));
+      const answer = await stream.read(1);
+      if (answer.length === 0 || answer[0] !== 83) throw new IoError("the Postgres server doesn't take TLS connections, which sslmode=require asks for");
+      await __tlsClient(stream, config.host, config.ca, new AbortController().signal);
+    }
+    let conn = new Conn(stream);
+    let start: u8[] = [];
+    put32(start, 196608);
+    putCString(start, "user");
+    putCString(start, config.user);
+    putCString(start, "database");
+    putCString(start, config.database);
+    putCString(start, "client_encoding");
+    putCString(start, "UTF8");
+    start.push(0);
+    await conn.send(framed(0, start));
+    await conn.authenticate(config);
+    while (true) {
+      const m = await conn.next();
+      if (m.kind === 90) {
+        wellFormed(m.body.length === 1);
+        conn.status = m.body[0];
+        return conn;
+      }
+      if (m.kind === 69) throw serverError(m.body);
+    }
+  }
+
+  async authenticate(this: Mut<this>, config: Ref<Config>): Promise<void> throws PostgresError | IoError | AbortError {
+    while (true) {
+      const m = await this.next();
+      if (m.kind === 69) throw serverError(m.body);
+      if (m.kind !== 82) throw new IoError("the Postgres server sent an unexpected message while authenticating");
+      wellFormed(m.body.length >= 4);
+      const code = get32(m.body, 0);
+      if (code === 0) return;
+      if (code === 3) await this.password(config.password);
+      else if (code === 5) {
+        wellFormed(m.body.length >= 8);
+        const none: u8[] = [];
+        const inner = digest(3, none, new TextEncoder().encode(config.password + config.user), 0).toHex();
+        let salted = new TextEncoder().encode(inner);
+        for (const b of m.body.slice(4, 8)) salted.push(b);
+        await this.password("md5" + digest(3, none, salted, 0).toHex());
+      } else if (code === 10) {
+        await this.scram(config.password, m.body);
+        return;
+      } else throw new IoError("the Postgres server asked for an authentication method Fish doesn't support (code " + String(code) + ")");
+    }
+  }
+
+  async password(this: Ref<this>, text: string): Promise<void> throws IoError | AbortError {
+    let body: u8[] = [];
+    putCString(body, text);
+    await this.send(framed(112, body));
+  }
+
+  // SCRAM-SHA-256, RFC 5802 and 7677, without channel binding.
+  async scram(this: Mut<this>, password: string, offer: u8[]): Promise<void> throws PostgresError | IoError | AbortError {
+    let mechanisms: string[] = [];
+    let at: i64 = 4;
+    while (at < (offer.length as i64) && offer[at as usize] !== 0) {
+      const [name, next] = getCString(offer, at);
+      mechanisms.push(name);
+      at = next;
+    }
+    if (!mechanisms.includes("SCRAM-SHA-256")) throw new IoError("the Postgres server offers no SASL mechanism Fish supports, only " + mechanisms.join(", "));
+    let random: u8[] = new Array(18).fill(0 as u8);
+    unsafe { fsh_rt_random_fill(mutPtrOf(random[0]), 18) };
+    const nonce = random.toBase64();
+    const first = "n=,r=" + nonce;
+    let initial: u8[] = [];
+    putCString(initial, "SCRAM-SHA-256");
+    const firstBytes = new TextEncoder().encode("n,," + first);
+    put32(initial, firstBytes.length as i64);
+    for (const b of firstBytes) initial.push(b);
+    await this.send(framed(112, initial));
+
+    const challenge = await this.saslStep(11);
+    let serverNonce = "";
+    let salt = "";
+    let rounds: i64 = 0;
+    for (const part of challenge.split(",")) {
+      if (part.startsWith("r=")) serverNonce = part.slice(2);
+      else if (part.startsWith("s=")) salt = part.slice(2);
+      else if (part.startsWith("i=")) rounds = parseInt(part.slice(2)) ?? 0;
+    }
+    let saltBytes: u8[] = [];
+    try {
+      saltBytes = u8.fromBase64(salt);
+    } catch (e) {
+      saltBytes = [];
+    }
+    if (!serverNonce.startsWith(nonce) || saltBytes.length === 0 || rounds <= 0) throw new IoError("the Postgres server sent a malformed SCRAM challenge");
+    // Postgres's default is 4096. Ten million is far above any server's setting yet still under a
+    // second of hashing; a count near INT_MAX would hold a worker thread for minutes, uncancellably.
+    if (rounds > 10000000) throw new IoError("the Postgres server asks for " + String(rounds) + " SCRAM iterations, more than the 10000000 Fish allows, as hashing that many would hold a thread for minutes");
+    const salted = digest(2, new TextEncoder().encode(password), saltBytes, rounds);
+    const clientKey = hmac(salted, "Client Key");
+    const none: u8[] = [];
+    const storedKey = digest(0, none, clientKey, 0);
+    const final = "c=biws,r=" + serverNonce;
+    const message = first + "," + challenge + "," + final;
+    const signature = hmac(storedKey, message);
+    let proof: u8[] = [];
+    for (let i: usize = 0; i < 32; i++) proof.push(clientKey[i] ^ signature[i]);
+    let response: u8[] = [];
+    putText(response, final + ",p=" + proof.toBase64());
+    await this.send(framed(112, response));
+
+    const verdict = await this.saslStep(12);
+    const expected = "v=" + hmac(hmac(salted, "Server Key"), message).toBase64();
+    if (verdict.split(",")[0] !== expected) throw new IoError("the Postgres server's SCRAM signature doesn't match: it may not know the password");
+    const done = await this.next();
+    if (done.kind === 69) throw serverError(done.body);
+    if (done.kind !== 82 || done.body.length < 4 || get32(done.body, 0) !== 0) throw new IoError("the Postgres server didn't finish SCRAM authentication");
+  }
+
+  // The data of the SASL message of the code expected.
+  async saslStep(this: Mut<this>, code: i64): Promise<string> throws PostgresError | IoError | AbortError {
+    const m = await this.next();
+    if (m.kind === 69) throw serverError(m.body);
+    if (m.kind !== 82 || m.body.length < 4 || get32(m.body, 0) !== code) throw new IoError("the Postgres server sent an unexpected message during SCRAM authentication");
+    return new TextDecoder().decode(m.body.slice(4, m.body.length as i64));
+  }
+
+  // Runs sql with params through Parse, Bind, Describe, Execute and Sync, reading every reply up
+  // to ReadyForQuery, so the connection is ready for the next even when the server refused it.
+  async run(this: Mut<this>, sql: string, params: Ref<SqlValue[]>): Promise<Outcome | PostgresError> throws IoError | AbortError {
+    let out: u8[] = [];
+    let parse: u8[] = [];
+    putCString(parse, "");
+    putCString(parse, sql);
+    put16(parse, 0);
+    for (const b of framed(80, parse)) out.push(b);
+    let bind: u8[] = [];
+    putCString(bind, "");
+    putCString(bind, "");
+    put16(bind, 0);
+    put16(bind, params.length as i64);
+    for (const p of params) {
+      const text = sqlText(p);
+      if (text === null) put32(bind, -1);
+      else {
+        const bytes = new TextEncoder().encode(text);
+        put32(bind, bytes.length as i64);
+        for (const b of bytes) bind.push(b);
+      }
+    }
+    put16(bind, 0);
+    for (const b of framed(66, bind)) out.push(b);
+    let describe: u8[] = [80, 0];
+    for (const b of framed(68, describe)) out.push(b);
+    let execute: u8[] = [0];
+    put32(execute, 0);
+    for (const b of framed(69, execute)) out.push(b);
+    const sync: u8[] = [];
+    for (const b of framed(83, sync)) out.push(b);
+    await this.send(out);
+
+    let outcome: Outcome = { names: [], types: [], rows: [], tag: "" };
+    let failed: PostgresError | null = null;
+    while (true) {
+      const m = await this.next();
+      if (m.kind === 90) {
+        wellFormed(m.body.length === 1);
+        this.status = m.body[0];
+        const refused = failed;
+        if (refused !== null) return refused;
+        return outcome;
+      }
+      if (m.kind === 69) failed = serverError(m.body);
+      else if (m.kind === 84) {
+        const size = m.body.length as i64;
+        wellFormed(size >= 2);
+        const count = get16(m.body, 0);
+        let at: i64 = 2;
+        for (let i: i64 = 0; i < count; i++) {
+          const [name, next] = getCString(m.body, at);
+          wellFormed(next + 18 <= size);
+          outcome.names.push(name);
+          outcome.types.push(get32(m.body, next + 6));
+          at = next + 18;
+        }
+      } else if (m.kind === 68) {
+        const size = m.body.length as i64;
+        wellFormed(size >= 2 && get16(m.body, 0) === (outcome.names.length as i64));
+        let at: i64 = 2;
+        let row: (u8[] | null)[] = [];
+        for (let i: usize = 0; i < outcome.names.length; i++) {
+          wellFormed(at + 4 <= size);
+          const length = get32(m.body, at);
+          at += 4;
+          if (length < 0) row.push(null);
+          else {
+            wellFormed(at + length <= size);
+            row.push(m.body.slice(at, at + length));
+            at += length;
+          }
+        }
+        outcome.rows.push(row);
+      } else if (m.kind === 67) {
+        const [tag, _] = getCString(m.body, 0);
+        outcome.tag = tag;
+      } else if (m.kind === 71) {
+        // COPY FROM STDIN waits for data no query gives, so it is refused, and the server goes on.
+        let body: u8[] = [];
+        putCString(body, "COPY FROM STDIN isn't supported by Fish's postgres module");
+        await this.send(framed(102, body));
+      }
+    }
+  }
+
+  // Ends a transaction left open, or failed, by a statement run on the pool.
+  async rollback(this: Mut<this>): Promise<void> throws IoError | AbortError {
+    let body: u8[] = [];
+    putCString(body, "ROLLBACK");
+    await this.send(framed(81, body));
+    while (true) {
+      const m = await this.next();
+      if (m.kind === 90) {
+        wellFormed(m.body.length === 1);
+        this.status = m.body[0];
+        return;
+      }
+    }
+  }
+}
+
+// A parameter as the text Postgres reads it from, or null for SQL's NULL.
+function sqlText(p: Ref<SqlValue>): string | null {
+  if (p === null) return null;
+  if (typeof p === "boolean") return p ? "true" : "false";
+  if (typeof p === "string") return p;
+  if (typeof p === "number") {
+    // An i64 or an f64, which JSON writes as they are, but for the floats it has no number for.
+    const text = JSON.stringify(p);
+    if (text !== "null") return text;
+    const infinity: f64 = 1e300 * 1e300;
+    return p === infinity ? "Infinity" : p === -infinity ? "-Infinity" : "NaN";
+  }
+  if (p instanceof Date) return p.toISOString();
+  return "\\x" + p.toHex();
+}
+
+// A column's text as the JSON a row is read through, by its type's OID.
+function columnJson(type: i64, value: Ref<u8[] | null>): string {
+  if (value === null) return "null";
+  const text = new TextDecoder().decode(value);
+  if (type === 16) return text === "t" ? "true" : "false";
+  if (type === 20 || type === 21 || type === 23 || type === 26) return text;
+  if (type === 700 || type === 701) return text === "NaN" || text.endsWith("Infinity") ? JSON.stringify(text) : text;
+  if (type === 114 || type === 3802) return text;
+  if (type === 17) {
+    try {
+      return JSON.stringify(u8.fromHex(text.slice(2)));
+    } catch (e) {
+      return JSON.stringify(text);
+    }
+  }
+  return JSON.stringify(text);
+}
+
+function rowsAs<T>(outcome: Ref<Outcome>): T[] throws RowError {
+  let rows: T[] = [];
+  for (const row of outcome.rows) {
+    let json = "{";
+    for (let i: usize = 0; i < outcome.names.length; i++) {
+      if (i > 0) json += ",";
+      json += JSON.stringify(outcome.names[i]) + ":" + columnJson(outcome.types[i], row[i]);
+    }
+    json += "}";
+    try {
+      rows.push(JSON.parse<T>(json));
+    } catch (e) {
+      throw new RowError(rowMessage(e.message, outcome.names, row));
+    }
+  }
+  return rows;
+}
+
+// A JSON reading error put in terms of columns: "missing field 'x' at $" is column x missing,
+// and "... at $.x" is about column x, which may be a null its field can't hold.
+function rowMessage(message: string, names: Ref<string[]>, row: Ref<(u8[] | null)[]>): string {
+  if (message.startsWith("missing field ")) {
+    const end = message.lastIndexOf(" at ");
+    return "the row has no column " + message.slice("missing field ".length as i64, end) + ", which the type reads";
+  }
+  const at = message.indexOf(" at $.");
+  if (at < 0) return "the row can't be read: " + message;
+  const column = message.slice(at + 6);
+  const i = names.indexOf(column);
+  if (i >= 0 && row[i as usize] === null) return "column '" + column + "' is null, which its field can't hold; type it 'T | null'";
+  return "column '" + column + "': " + message.slice(0, at);
+}
+
+// The affected-row count at the end of a command tag, as in "UPDATE 3", or 0.
+function affected(tag: string): i64 {
+  const parts = tag.split(" ");
+  return parseInt(parts[parts.length - 1]) ?? 0;
+}
+
+// A URL's percent-encoded user, password or database name, decoded as a query's values are, but
+// for '+', which stays itself.
+function decoded(text: string): string {
+  return new URLSearchParams("v=" + text.replaceAll("+", "%2B")).get("v") ?? "";
+}
+
+// A postgres:// URL read as what to connect to and how: user, password, host, port and database,
+// then sslmode, sslrootcert and max, the pool's size, from its query.
+function config(url: string): Config throws TypeError | IoError {
+  let u = new URL("postgres://localhost");
+  try {
+    u = new URL(url);
+  } catch (e) {
+    // The URL itself isn't repeated, as it may hold a password.
+    throw new TypeError("the Postgres URL can't be read as a URL: " + e.message);
+  }
+  if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") throw new TypeError("a Postgres URL starts with postgres:// or postgresql://, not " + u.protocol);
+  const port = u.port.length === 0 ? 5432 : parseInt(u.port) ?? 5432;
+  const user = decoded(u.username);
+  const password = decoded(u.password);
+  const database = decoded(u.pathname.startsWith("/") ? u.pathname.slice(1) : u.pathname);
+  const sslmode = u.searchParams.get("sslmode") ?? "disable";
+  if (sslmode !== "disable" && sslmode !== "require" && sslmode !== "verify-full") throw new TypeError("sslmode is 'disable', 'require' or 'verify-full', not '" + sslmode + "'");
+  const root = u.searchParams.get("sslrootcert");
+  const ca = root === null ? "" : new TextDecoder().decode(fileReadSync(root));
+  const maxText = u.searchParams.get("max") ?? "10";
+  const max = parseInt(maxText) ?? 0;
+  if (max < 1) throw new TypeError("max, the pool's size, is a whole number of at least 1, not '" + maxText + "'");
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, (u.hostname.length as i64) - 1) : u.hostname;
+  return { host: host.length === 0 ? "localhost" : host, port: port, user: user, password: password, database: database.length === 0 ? user : database, tls: sslmode !== "disable", ca: ca, max: max };
+}
+
+type Shared = { gate: Semaphore; idle: Lock<Conn[]> };
+
+// Connections to one server, at most max of them, each running one statement at a time. A caller
+// takes an idle one or opens one, and waits in turn when all max are busy; a connection that breaks
+// is dropped, and the next caller opens a new one. Clones share the connections.
+export class Pool {
+  private config: Config;
+  private state: shared<Shared>;
+
+  private constructor(config: Config, state: shared<Shared>) {
+    this.config = config;
+    this.state = state;
+  }
+
+  // A pool for the server url names, with one connection opened now, so a wrong address or
+  // password fails here.
+  static async connect(url: string): Promise<Pool> throws PostgresError | IoError | AbortError | TypeError {
+    const c = config(url);
+    const conn = await Conn.open(c);
+    const idle: Conn[] = [conn];
+    const gate = new Semaphore(c.max);
+    return new Pool(c, shared<Shared>({ gate: gate, idle: new Lock<Conn[]>(idle) }));
+  }
+
+  // The rows sql gives, each read by column name into a T.
+  async query<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T[]> throws PostgresError | RowError | IoError | AbortError {
+    const outcome = await this.run(sql, params);
+    return rowsAs<T>(outcome);
+  }
+
+  // The first row sql gives as a T, or null when it gives none.
+  async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws PostgresError | RowError | IoError | AbortError {
+    let rows = await this.query<T>(sql, params);
+    let first = rows.splice(0, 1);
+    return first.pop();
+  }
+
+  // How many rows sql inserted, updated, deleted or gave.
+  async execute(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<i64> throws PostgresError | IoError | AbortError {
+    const outcome = await this.run(sql, params);
+    return affected(outcome.tag);
+  }
+
+  private async run(this: Ref<this>, sql: string, params: Ref<SqlValue[]>): Promise<Outcome> throws PostgresError | IoError | AbortError {
+    const state = this.state.clone();
+    const _permit = await state.gate.acquire();
+    const idle = state.idle.update((cs) => cs.pop());
+    let conn: Conn;
+    if (idle === null) conn = await Conn.open(this.config);
+    else conn = idle;
+    const result = await conn.run(sql, params);
+    // The server answered, so the connection is whole: it goes back once it is idle again. A
+    // transaction the statement began, or one it failed, is rolled back, since the pool's next
+    // statement may run on another connection.
+    if (conn.status !== 73) await conn.rollback();
+    if (conn.status === 73) state.idle.update((cs) => cs.push(conn));
+    if (result instanceof PostgresError) throw result;
+    return result;
+  }
+}
+`,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
   // buffer so readers can be mixed.
   stdin: String.raw`

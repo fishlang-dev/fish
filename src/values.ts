@@ -1,5 +1,5 @@
 import type { Tables } from "./compilation.ts";
-import { fileAt, textAt } from "./modules.ts";
+import { stdModuleAt, textAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
 import { abstractIn, copyFor, inherited, shownName, isLifetime, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
@@ -1194,7 +1194,7 @@ export function expressions(ctx: Context) {
     }
     // `fileRead(path)` and `fileWrite(path, bytes)`: the futures node:fs/promises is written over,
     // each a job on the runtime's blocking pool.
-    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && (inStd || fileAt(files, e.start).startsWith("node:"))) {
+    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && (inStd || stdModuleAt(files, e.start) !== undefined)) {
       const reading = callee.name === "fileRead";
       if (e.args.length !== (reading ? 1 : 2)) throw new CompileError("E0504", `'${callee.name}' takes ${reading ? "a path" : "a path and the bytes"}`, e.start, e.end);
       const path = value(e.args[0]!);
@@ -1208,7 +1208,7 @@ export function expressions(ctx: Context) {
     }
     // The blocking calls node:fs is written over, as `fileReadSync(path)`, run on the calling
     // thread.
-    const sync = callee.kind === "ident" && (inStd || fileAt(files, e.start).startsWith("node:")) ? syncFileSignatures(typing)[callee.name] : undefined;
+    const sync = callee.kind === "ident" && (inStd || stdModuleAt(files, e.start) !== undefined) ? syncFileSignatures(typing)[callee.name] : undefined;
     if (sync) {
       const [params, returns, throws] = sync;
       const name = (callee as Extract<Expr, { kind: "ident" }>).name;
@@ -1239,7 +1239,7 @@ export function expressions(ctx: Context) {
       value(e.args[3]!);
       return { type: "i64", what: "'timerSet'" };
     }
-    if (callee.kind === "ident" && callee.name === "jsEvaluate" && fileAt(files, e.start) === "fish:engine") {
+    if (callee.kind === "ident" && callee.name === "jsEvaluate" && stdModuleAt(files, e.start) === "fish:engine") {
       coerce(e.args[0]!, value(e.args[0]!), "string", "a module's source is a 'string'");
       jsEvaluations.add(e);
       return { type: blockType("JsValue"), what: "'jsEvaluate'" };
@@ -1278,7 +1278,7 @@ export function expressions(ctx: Context) {
     // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
     if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
     // The signal the first SIGINT or SIGTERM aborts, for node:process's 'shutdown' and the HTTP server.
-    if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || fileAt(files, e.start).startsWith("node:")) && e.args.length === 0) return { type: blockType("AbortSignal"), what: "'shutdownSignal'" };
+    if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || stdModuleAt(files, e.start) !== undefined) && e.args.length === 0) return { type: blockType("AbortSignal"), what: "'shutdownSignal'" };
     // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
     if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && owner?.name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
       value(e.args[0]!);
@@ -1314,9 +1314,9 @@ export function expressions(ctx: Context) {
       const callable = typeof held !== "string" && (held.kind === "function" || held.kind === "closure" || (held.kind === "param" && held.bound?.kind === "function"));
       throw new CompileError(callable ? "E1005" : "E0503", callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${show(jsView(held))}' has no call signatures`, e.start, e.end);
     }
-    if (target?.name.replace(/-fsh\d+$/, "") === "ok" && fileAt(files, target.start) === "node:assert") return assertion(e);
+    if (target?.name.replace(/-fsh\d+$/, "") === "ok" && stdModuleAt(files, target.start) === "node:assert") return assertion(e);
     // node:util's functions that take any values, as Node's do, given their meaning here.
-    const util = target && callee.kind === "ident" && fileAt(files, target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
+    const util = target && callee.kind === "ident" && stdModuleAt(files, target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
       if (e.optional) throw new CompileError("E0505", "'format' is always there, so it is called without '?.'", e.start, e.end);
       refuseSpread(e.args);
