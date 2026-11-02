@@ -25,6 +25,11 @@ const refused = new Map([
   ["tests/programs/jsdoc_throws.fsh > jsdoc_throws_conflict", "a JSDoc @throws disagreeing with the written clause"],
   ["tests/programs/jsdoc_throws.fsh > jsdoc_throws_still_conflicts", "a JSDoc @throws disagreeing with the written clause"],
   ["tests/programs/error_codes.fsh > code_syntax", "a syntax error's code"],
+  ["tests/programs/string_raw.fsh > string_raw_invalid_escape", "an invalid escape outside String.raw"],
+  ["tests/programs/string_raw.fsh > string_raw_invalid_escape_tag", "an invalid escape outside String.raw"],
+  ["tests/programs/string_raw.fsh > string_raw_invalid_escape_unterminated", "an invalid escape outside String.raw"],
+  ["tests/programs/string_raw.fsh > string_raw_invalid_escape_pattern", "an invalid escape outside String.raw"],
+  ["tests/programs/string_raw.fsh > string_raw_invalid_escape_import", "an invalid escape outside String.raw"],
 ]);
 
 const root = new URL("..", import.meta.url).pathname;
