@@ -4658,6 +4658,19 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`${held} = load ${llvm(typing.lower(to))}, ptr ${v}`);
       return inspectTree(held, writtenPart(written, t, (x) => { const held = typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to, "%d");
     }
+    // A typed array prints as an array under its name, an ArrayBuffer as its bytes in hex.
+    const typed = typing.typedName(written);
+    if (typed === "ArrayBuffer") {
+      const [length, data, node] = [temp(), temp(), temp()];
+      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+      emit(`${node} = call ptr @fsh_rt_insp_buffer(ptr ${data}, i64 ${length})`);
+      return node;
+    }
+    const named = (node: string) => {
+      if (typed) emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${cString(typed)})`);
+      return node;
+    };
     // std's Date prints as its ISO string at any depth, as Node prints one.
     const iso = r.kind === "class" ? instances.find((i) => bodyOf(i).name === `${r.name}.toISOString` && bodyOf(i).start >= STD_BASE) : undefined;
     if (iso) {
@@ -4674,12 +4687,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`${deep} = icmp sgt i64 %d, 2`);
       emit(`br i1 ${deep}, label %${shell}, label %${full}`);
       startBlock(shell);
-      emit(`ret ptr ${inspectShell(v, t, written)}`);
+      emit(`ret ptr ${named(inspectShell(v, t, written))}`);
       startBlock(full);
     }
     const next = temp();
     emit(`${next} = add i64 %d, 1`);
-    if (r.kind === "array" || r.kind === "fixed") return inspectElements(v, t as ArrayType | FixedType, writtenPart(written, t, (x) => typing.rec(x as ArrayType).element) ?? r.element, next);
+    if (r.kind === "array" || r.kind === "fixed") return named(inspectElements(v, t as ArrayType | FixedType, writtenPart(written, t, (x) => typing.rec(x as ArrayType).element) ?? r.element, next, typed === "Float32Array"));
     if (r.kind === "map") return inspectEntries(v, t as MapType, writtenPart(written, t, (x) => typing.rec(x as MapType).value) ?? r.value, next);
     if (r.kind === "union") {
       const members = writtenMembers(written, t as UnionType);
@@ -4895,7 +4908,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   // An array's first 100 elements, and how many it has.
-  function inspectElements(v: string, t: ArrayType | FixedType, written: Type, depth: string): string {
+  function inspectElements(v: string, t: ArrayType | FixedType, written: Type, depth: string, wide = false): string {
     const element = llvm(typing.lower(typing.rec(t).element));
     const [length, data] = [temp(), temp()];
     if (typing.rec(t).kind === "array") {
@@ -4925,7 +4938,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const [at, x, next] = [temp(), temp(), temp()];
     emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
     emit(`${x} = load ${element}, ptr ${at}`);
-    emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, written, depth)})`);
+    // A Float32Array's elements print as the doubles JavaScript reads them as.
+    let shown = x;
+    if (wide) {
+      shown = temp();
+      emit(`${shown} = fpext float ${x} to double`);
+    }
+    emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(shown, shown === x ? written : "f64", depth)})`);
     emit(`${next} = add i64 ${i}, 1`);
     emit(`store i64 ${next}, ptr ${index}`);
     emit(`br label %${head}`);

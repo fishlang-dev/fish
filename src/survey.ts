@@ -190,9 +190,10 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("import.meta.url and file URLs")], ["querystring", PLANNED("node:querystring")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
-  ["buffer", PLANNED("Typed arrays and DataView")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
+  ["buffer", PLANNED("Buffer")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
   // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
-  // `buffer` is more than the base64 and hex std has: `Buffer` is a typed array with endian reads.
+  // `buffer` is more than typed arrays and std's base64 and hex: `Buffer` is a Uint8Array with Node's
+  // own methods, such as `toString("hex")` and `readUInt32BE`.
   // `crypto` is more than std's random functions and one-shot hashes: an import of only those is portable.
   ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
   ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
@@ -533,8 +534,8 @@ function stdHas(n: Node, specifier: string): boolean {
 
 // Names of a std module's Node counterpart that wait on something besides the module's own
 // equivalent, by the built-in each is filed under. Node's randomBytes gives a Buffer and std's a
-// u8[], so code calling Buffer methods on it, as 'randomBytes(16).toString("hex")', waits on typed
-// arrays. randomInt has no plan item, so it is filed under its own name, which nothing replaces.
+// u8[], so code calling Buffer methods on it, as 'randomBytes(16).toString("hex")', waits on
+// Buffer. randomInt has no plan item, so it is filed under its own name, which nothing replaces.
 // Node's tls.connect takes options and gives a socket with events, where std's is awaited and
 // gives a TcpStream, so it waits on Node's tls.
 const NAME_MODULES: Record<string, Record<string, string>> = { crypto: { randomBytes: "buffer", randomInt: "crypto.randomInt" }, tls: { connect: "tls" } };
