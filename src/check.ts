@@ -14,7 +14,7 @@ import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots } from "./flow.ts";
 import { declareEnum, type EnumInfo, type EnumInstance } from "./enums.ts";
-import { bindingKey, covers, either, guard, isPath, type Facts } from "./narrow.ts";
+import { bindingKey, covers, either, guard, isPath, presentKey, type Facts } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
@@ -109,6 +109,9 @@ export type Instance = {
   // Statements this instance never reaches, as a check its type argument rules out guards:
   // checked, but not compiled.
   unreached?: NodeSet<Stmt>;
+  // Calls of an interface's optional method, and tests for one, whose method this instance's
+  // concrete type leaves out.
+  absent?: NodeSet<Expr>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -1692,6 +1695,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     delete instance.made;
     delete instance.predicates;
     delete instance.narrowedFields;
+    delete instance.absent;
     const within = (c: Instance): boolean => c === instance || (bodyOf(c).closure !== undefined && within(this.arenas.instanceOf(bodyOf(c).closure!.parent)));
     // A closure checked within a discarded pass isn't in progress any more either.
     for (const c of [...this.inProgress]) if (within(this.arenas.instanceOf(c))) this.inProgress.delete(c);
@@ -2404,6 +2408,10 @@ class BodyChecker implements Context, Outer, Sight {
     const t = key === undefined ? undefined : this.facts.findLast((f) => f.has(key))?.get(key);
     if (t !== undefined) this.narrowReads.push({ local: key!, at: e });
     return t;
+  }
+  present(this: Mut<this>, object: Expr, name: string): boolean {
+    const root = this.pathKey(object);
+    return root !== undefined && this.facts.some((f) => f.has(presentKey(root, name)));
   }
   // A change at `path` inside a binding or `this` forgets what was known of the field paths it
   // reaches, below an element all of the array's. Lending a path as the one member a check

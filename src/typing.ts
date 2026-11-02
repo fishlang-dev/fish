@@ -45,7 +45,8 @@ export type ClassType = TypeId<ClassRecord>;
 // was written as, as a generic function type does, each call resolving it.
 // `optional`: which parameters are written with `?`, kept for JS, which tells left out from null.
 // `throws`: what a stored callable's call may throw.
-export type Method = { name: string; params: Type[]; returns: Type; throws?: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[] };
+// `omittable`: declared `m?()`, so a type satisfying the interface may leave it out.
+export type Method = { name: string; params: Type[]; returns: Type; throws?: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[]; omittable?: true };
 // A generic interface's instance knows the interface and the type arguments it was made from.
 export type InterfaceRecord = { kind: "interface"; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
 export type InterfaceType = TypeId<InterfaceRecord>;

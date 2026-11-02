@@ -707,6 +707,9 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       if (!same) this.typing.rec(found).methods.push(m);
       else if (this.typing.shapeKey(same.returns) !== this.typing.shapeKey(m.returns) || same.params.length !== m.params.length || same.params.some((p, i) => this.typing.shapeKey(p) !== this.typing.shapeKey(m.params[i]!))) {
         throw new CompileError("E0114", `method '${m.name}' has different types on each side of '&'`, from.start, to.end);
+      } else if (same.omittable && !m.omittable) {
+        // A side requiring the method makes the whole require it.
+        this.typing.rec(found).methods.splice(this.typing.rec(found).methods.indexOf(same), 1, m);
       }
     }
     return found;
@@ -733,11 +736,11 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   private sameShape(this: Mut<this>, made: InterfaceType): InterfaceType {
     const r = this.typing.rec(made);
     const key = (t: Type) => this.typing.shapeKey(t);
-    const shape = [...r.fields.map((f) => `${f.name}${f.optional ? "?" : ""}:${key(f.type)}${f.readonly ? " readonly" : ""}`), ...r.methods.map((m) => `${m.name}(${m.params.map((p) => key(p)).join(",")}):${key(m.returns)}${m.mutable ? " mut" : ""}${m.owned ? " owned" : ""}`)].join(";");
+    const shape = [...r.fields.map((f) => `${f.name}${f.optional ? "?" : ""}:${key(f.type)}${f.readonly ? " readonly" : ""}`), ...r.methods.map((m) => `${m.name}${m.omittable ? "?" : ""}(${m.params.map((p) => key(p)).join(",")}):${key(m.returns)}${m.mutable ? " mut" : ""}${m.owned ? " owned" : ""}`)].join(";");
     const found = this.host.resolverState.shapes.get(shape);
     if (found) return found;
     this.host.resolverState.shapes.set(shape, made);
-    const parts = [...r.fields.map((f) => `${f.name}${f.optional ? "?" : ""}: ${this.typing.show(f.type)}`), ...r.methods.map((m) => `${m.name}(${m.params.map((p) => this.typing.show(p)).join(", ")}): ${this.typing.show(m.returns)}`)];
+    const parts = [...r.fields.map((f) => `${f.name}${f.optional ? "?" : ""}: ${this.typing.show(f.type)}`), ...r.methods.map((m) => `${m.name}${m.omittable ? "?" : ""}(${m.params.map((p) => this.typing.show(p)).join(", ")}): ${this.typing.show(m.returns)}`)];
     r.name = `{ ${parts.join("; ")} }`;
     return made;
   }
@@ -768,7 +771,10 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // TypeScript lets a derived member replace its base's.
     const inherited = new Set<string>();
     const add = (name: string, at: Span) => {
-      if (i.js && inherited.delete(name)) {
+      // An interface may require a method its base leaves optional, as TypeScript lets it.
+      const written = at as { kind?: string; optional?: boolean };
+      const requires = written.kind === "method" && !written.optional && this.typing.rec(t).methods.some((m) => m.name === name && m.omittable);
+      if ((i.js || requires) && inherited.delete(name)) {
         this.typing.rec(t).fields = this.typing.rec(t).fields.filter((f) => f.name !== name);
         this.typing.rec(t).methods = this.typing.rec(t).methods.filter((m) => m.name !== name);
         return;
@@ -813,7 +819,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     return (m: TypeMember) => {
       if (m.kind === "method") {
         if (typeof m.name !== "string") throw symbolKey(m.name);
-        if (m.optional) throw unsupported("optional methods", m);
+        if (m.optional && i.js) throw unsupported("optional methods", m);
         if (!m.returns) throw new CompileError("E0104", `method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
         add(m.name, m);
         const first = m.params[0];
@@ -825,7 +831,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
         const own = m.typeParams.length > 0 ? placeholders(this.typing, m.typeParams, (n, s) => this.withScope(new Map([...around, ...s]), () => this.resolveType(n))) : new Map<string, Type>();
         const returns = m.returns;
         const [params, result] = this.withScope(new Map([...around, ...own]), () => [(self ? m.params.slice(1) : m.params).map((p) => this.paramType(p)), this.resolveType(returns)] as const);
-        const method: Method = { name: m.name, params, returns: result, mutable: self ? mutates(self) : false, owned: self ? owns(self) : false };
+        const method: Method = { name: m.name, params, returns: result, mutable: self ? mutates(self) : false, owned: self ? owns(self) : false, ...(m.optional && { omittable: true as const }) };
         if (i.js) method.optional = (self ? m.params.slice(1) : m.params).map((p) => p.optional);
         if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, id: nextId(this.ids), params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
         if ([method.returns, ...method.params].some((t) => this.typing.holdsPattern(t))) throw unsupported("template literal pattern types in interface methods", m);

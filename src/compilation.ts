@@ -264,6 +264,11 @@ export type Tables = {
   // The `get`, `at` and `has` calls on a JsValue.
   jsAccessors: WeakNodeSet<Expr>;
   dynCalls: WeakNodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>;
+  // The `h.m?.()` calls of an interface's optional methods.
+  optionalCalls: WeakNodeSet<Expr>;
+  // Each test of whether an optional method is there, `h.m !== undefined` or
+  // `typeof h.m === "function"`: the receiver, the method, and what the test gives when it is.
+  presenceTests: WeakNodeMap<Expr, { object: Expr; name: string; when: boolean }>;
 
   // Each generic class's statics, declared with its first instance.
   genericStatics: WeakNodeMap<ClassNode, Map<string, BodyId>>;
@@ -412,6 +417,8 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     jsOptionalOf: new WeakNodeMap<Expr, boolean[]>(),
     jsAccessors: new WeakNodeSet<Expr>(),
     dynCalls: new WeakNodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>(),
+    optionalCalls: new WeakNodeSet<Expr>(),
+    presenceTests: new WeakNodeMap<Expr, { object: Expr; name: string; when: boolean }>(),
     genericStatics: new WeakNodeMap<ClassNode, Map<string, BodyId>>(),
     classScopes: new WeakNodeMap<TypeParam, Map<string, Type>>(),
     aliases: new Map<string, TypeAlias>(),
