@@ -52,3 +52,90 @@ interface Must { onClose(): void }
 class B {}
 function f(h: Maybe & Must): void {}
 function main(): void { f(new B()); }
+// case: optionalmethods_call
+// expect: closed a
+// expect: 5
+// expect: null
+// expect: hi a
+// expect: null
+interface Handler {
+  onClose?(): void;
+  size?(by: i64): i64;
+  greet?(s: string): string;
+}
+class A implements Handler {
+  onClose(): void { console.log("closed a"); }
+  size(by: i64): i64 { return by + 3; }
+  greet(s: string): string { return s + " a"; }
+}
+class B implements Handler {}
+function noisy(): string { console.log("evaluated"); return "hi"; }
+function close(h: Handler): void { h.onClose?.(); }
+function size(h: Handler): i64 | null { return h.size?.(2); }
+function greet(h: Handler): string | null { return h.greet?.("hi" + ""); }
+function lazy(h: Handler): string | null { return h.greet?.(noisy()); }
+function main(): void {
+  close(new A());
+  close(new B());
+  console.log(size(new A()));
+  console.log(size(new B()));
+  console.log(greet(new A()));
+  console.log(lazy(new B()));
+}
+// case: optionalmethods_dyn_call
+// expect: closed a
+// expect: 5
+// expect: null
+// expect: hi a
+// expect: null
+interface Handler {
+  onClose?(): void;
+  size?(by: i64): i64;
+  greet?(s: string): string;
+}
+class A implements Handler {
+  onClose(): void { console.log("closed a"); }
+  size(by: i64): i64 { return by + 3; }
+  greet(s: string): string { return s + " a"; }
+}
+class B implements Handler {}
+function main(): void {
+  const hs: Dyn<Handler>[] = [new A(), new B()];
+  for (const h of hs) h.onClose?.();
+  for (const h of hs) console.log(h.size?.(2));
+  for (const h of hs) console.log(h.greet?.("hi" + ""));
+  for (const h of hs) h.greet?.("dropped" + "");
+}
+// case: optionalmethods_required_call
+// error: 'name' is always there in 'Handler', so it is called without '?.'
+interface Handler { name(): string; onClose?(): void }
+function f(h: Handler): void { h.name?.(); }
+function main(): void {}
+// case: optionalmethods_plain_call
+// error: 'onClose' may be missing, since 'Handler' declares it optional; call it as 'h.onClose?.()'
+interface Handler { onClose?(): void }
+function f(h: Handler): void { h.onClose(); }
+function main(): void {}
+// case: optionalmethods_function_call
+// error: optional calls are not supported yet
+function main(): void { const f = (): void => {}; f?.(); }
+// case: optionalmethods_mut_call
+// expect: 3
+// expect: 0
+// expect: 3
+type Counter = { n: i64; add?(this: Mut<this>, by: i64): void };
+class C {
+  n: i64 = 0;
+  add(this: Mut<this>, by: i64): void { this.n += by; }
+}
+function bump(c: Mut<Counter>): void { c.add?.(1); c.add?.(2); }
+function grow(x: Counter): i64 { return x.n; }
+function main(): void {
+  let c = new C();
+  bump(c);
+  console.log(c.n);
+  let o = { n: 0 };
+  bump(o);
+  console.log(o.n);
+  console.log(grow(c));
+}

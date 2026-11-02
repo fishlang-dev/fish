@@ -109,6 +109,9 @@ export type Instance = {
   // Statements this instance never reaches, as a check its type argument rules out guards:
   // checked, but not compiled.
   unreached?: NodeSet<Stmt>;
+  // Calls of an interface's optional method, and tests for one, whose method this instance's
+  // concrete type leaves out.
+  absent?: NodeSet<Expr>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -1676,6 +1679,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     delete instance.made;
     delete instance.predicates;
     delete instance.narrowedFields;
+    delete instance.absent;
     const within = (c: Instance): boolean => c === instance || (bodyOf(c).closure !== undefined && within(this.arenas.instanceOf(bodyOf(c).closure!.parent)));
     // A closure checked within a discarded pass isn't in progress any more either.
     for (const c of [...this.inProgress]) if (within(this.arenas.instanceOf(c))) this.inProgress.delete(c);

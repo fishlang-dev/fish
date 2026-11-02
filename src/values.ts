@@ -356,6 +356,7 @@ export class Expressions implements Union {
     this.joinCalls = this.ctx.tables.joinCalls;
     this.integerCalls = this.ctx.tables.integerCalls;
     this.dynCalls = this.ctx.tables.dynCalls;
+    this.optionalCalls = this.ctx.tables.optionalCalls;
     this.dynMembers = this.ctx.tables.dynMembers;
     this.boxedMembers = this.ctx.tables.boxedMembers;
     this.madeArrows = this.ctx.tables.madeArrows;
@@ -449,6 +450,7 @@ export class Expressions implements Union {
   private joinCalls: Tables["joinCalls"];
   private integerCalls: Tables["integerCalls"];
   private dynCalls: Tables["dynCalls"];
+  private optionalCalls: Tables["optionalCalls"];
   private dynMembers: Tables["dynMembers"];
   private boxedMembers: Tables["boxedMembers"];
   private madeArrows: Tables["madeArrows"];
@@ -1162,7 +1164,8 @@ export class Expressions implements Union {
     e = this.rewrites.current(e) as Call;
     // A call checked as another form, as `isDeepStrictEqual` is, has its own type already.
     if ((e as Expr).kind !== "call") return result;
-    return e.callee.kind === "member" && this.linked(e.callee) && result.type !== "void" ? { ...result, type: this.optional(result.type, e) } : result;
+    if (e.optional && !this.optionalCalls.has(e)) throw unsupported("optional calls", e);
+    return e.callee.kind === "member" && (this.linked(e.callee) || e.optional) && result.type !== "void" ? { ...result, type: this.optional(result.type, e) } : result;
   }
 
   // The call `spawnBlocking` makes of a function it was given by name or value must take no
@@ -1196,7 +1199,7 @@ export class Expressions implements Union {
     if (this.rewrites.current(e.callee) !== e.callee) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.current(e.callee) });
     const { callee } = e;
     if (this.blockingRuns.has(e) && callee.kind === "ident") this.blockingRun(callee);
-    if (e.optional) throw unsupported("optional calls", e);
+    if (e.optional && callee.kind !== "member") throw unsupported("optional calls", e);
     if (callee.kind === "super") {
       if (e !== this.superCall) throw new CompileError("E0703", "'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
       const base = this.ctx.classOf(this.typing.rec(this.self!.type).base!);
@@ -4602,10 +4605,14 @@ export class Expressions implements Union {
     const found = trait?.kind === "interface" ? trait.methods.find((m) => m.name === callee.name) : undefined;
     if (!found) throw new CompileError("E0502", `property '${shownName(callee.name)}' does not exist on type '${r.name}'${didYouMean(callee.name, this.memberNames(receiver))}`, callee.start, callee.end);
     const stored = r.kind === "param" ? r.concrete : undefined;
+    this.omittableCall(e, callee, found, r.name);
+    // An instance whose type leaves an optional method out never calls it.
+    const absent = found.omittable === true && stored !== undefined && (this.recOf(stored)?.kind !== "class" || !inherited(this.arenas, this.ctx.classOf(stored as ClassType), "methods", callee.name));
+    if (absent) (this.ctx.instance.absent ??= new NodeSet()).add(e);
     // A generic method's call infers its types, then in an instance runs the concrete method's.
     if (found.generic) {
       const { type } = this.familyCall(e, { generic: found.generic }, `'${callee.name}'`);
-      if (typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, type), what: `'${callee.name}'` };
+      if (!absent && typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, type), what: `'${callee.name}'` };
       return { type, what: `'${callee.name}'` };
     }
     if (e.typeArgs.length > 0) throw new CompileError("E0106", "expected 0 type arguments", e.start, e.end);
@@ -4620,8 +4627,22 @@ export class Expressions implements Union {
     // `Promise<T>` describes, which in the definition is checked as one borrowing it.
     const promised = this.typing.promiseElement(found.returns);
     if (this.typing.holdsRef(found.returns) || promised !== undefined) this.borrowsFrom.set(e, [callee.object, ...e.args.filter((a) => this.lends(a))]);
-    if (typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, found.returns), what: `'${callee.name}'` };
+    if (!absent && typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, found.returns), what: `'${callee.name}'` };
     return { type: promised !== undefined ? this.typing.lentPromise(promised) : found.returns, what: `'${callee.name}'` };
+  }
+
+  // `h.m?.()` calls only an optional method, which a plain call may call only where a check
+  // found it there.
+  private omittableCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, m: Method, shown: string) {
+    if (!e.optional) {
+      if (m.omittable) throw new CompileError("E0108", `'${m.name}' may be missing, since '${shown}' declares it optional; call it as '${this.placeText(callee)}?.()'`, callee.start, callee.end);
+      return;
+    }
+    if (!m.omittable) throw new CompileError("E0505", `'${m.name}' is always there in '${shown}', so it is called without '?.'`, e.start, e.end);
+    if (this.linked(callee)) throw unsupported("optional calls in an optional chain", e);
+    if (m.owned) throw unsupported("optional calls of methods taking their object over", e);
+    if (this.typing.promiseElement(m.returns) !== undefined) throw unsupported("optional calls of methods giving a Promise", e);
+    this.optionalCalls.add(e);
   }
 
   // In an instance, a call through a type parameter runs its concrete class's method. An
@@ -6939,6 +6960,7 @@ export class Expressions implements Union {
       throw new CompileError("E0502", `property '${shownName(callee.name)}' does not exist on type '${this.typing.show(t)}'${hint}`, callee.start, callee.end);
     }
     if (this.linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
+    this.omittableCall(e, callee, m, this.typing.rec(this.typing.rec(t).of).name);
     if (m.generic) throw new CompileError("E0211", `'${m.name}' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn; take a type parameter bounded by '${this.typing.rec(this.typing.rec(t).of).name}' instead`, callee.start, callee.end);
     const async = this.typing.promiseElement(m.returns);
     if (async !== undefined && m.owned) throw unsupported("async methods taking their object over through a Dyn", callee);

@@ -138,7 +138,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
     dynMembers, boxedMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
     fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, keyTests, typing, regex: regexTables,
-    joinCalls, integerCalls, arenas,
+    joinCalls, integerCalls, optionalCalls, arenas,
   } = noted;
   const localOf = (id: LocalId): Local => arenas.localOf(id);
   const llvm = layoutOf(typing);
@@ -2612,14 +2612,41 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const m = typing.rec(typing.rec(t).of).methods[info.index]!;
     const [data, table] = opened(object, info.owned);
     const fn = vslot(table, info.index);
-    const args = e.args.map((a, i) => `, ${llvm(m.params[i]!)} ${owned(a)}`).join("");
-    // A `Promise<T>` comes back as its boxed future.
-    const gives = typing.promiseElement(m.returns) !== undefined ? types.get(e)! : m.returns;
-    const returns = m.throws ? throwing(gives, m.throws) : gives === "void" ? "void" : llvm(gives);
-    const made = returns === "void" ? undefined : temp();
-    unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
-    const result = m.throws ? unpacked(returns, made!, gives, e) : made;
-    if (result && !types.has(e) && needsDrop(gives)) pending.push({ v: result, type: gives });
+    const called = () => {
+      const args = e.args.map((a, i) => `, ${llvm(m.params[i]!)} ${owned(a)}`).join("");
+      // A `Promise<T>` comes back as its boxed future.
+      const gives = typing.promiseElement(m.returns) !== undefined ? types.get(e)! : m.returns;
+      const returns = m.throws ? throwing(gives, m.throws) : gives === "void" ? "void" : llvm(gives);
+      const made = returns === "void" ? undefined : temp();
+      unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
+      const result = m.throws ? unpacked(returns, made!, gives, e) : made;
+      if (result && !types.has(e) && needsDrop(gives)) pending.push({ v: result, type: gives });
+      return result;
+    };
+    return optionalCalls.has(e) ? slotted(e, fn, m.returns, called) : called();
+  }
+
+  // `d.m?.()` through a Dyn: the empty Option when the type left the method out, its slot empty.
+  function slotted(e: Expr, fn: string, gives: Type, called: () => string | undefined): string | undefined {
+    const [some, none, end, missing] = [label(), label(), label(), temp()];
+    emit(`${missing} = icmp eq ptr ${fn}, null`);
+    emit(`br i1 ${missing}, label %${none}, label %${some}`);
+    startBlock(some);
+    const mark = pending.length;
+    const got = called();
+    const type = types.get(e);
+    const wrapped = got !== undefined && type ? convert(got, gives, type) : undefined;
+    settle(mark);
+    const someEnd = block;
+    emit(`br label %${end}`);
+    startBlock(none);
+    const empty = wrapped !== undefined && type ? convert("zeroinitializer", "null", type) : undefined;
+    const noneEnd = block;
+    emit(`br label %${end}`);
+    startBlock(end);
+    if (wrapped === undefined || !type || empty === undefined) return undefined;
+    const result = temp();
+    emit(`${result} = phi ${llvm(type)} [ ${wrapped}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
     return result;
   }
 
@@ -6663,8 +6690,20 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (stringBuilds.has(e)) return stringBuilt(e, stringBuilds.get(e)!);
     // A joined handle is the same task's pointer.
     if (joinCalls.has(e)) return owned((e.callee as Extract<Expr, { kind: "member" }>).object);
+    if (current.absent?.has(e)) return absentCall(e);
     if (e.callee.kind === "member" && unwraps(e.callee.object)) return link(e, e.callee.object, () => run(e));
     return run(e);
+  }
+
+  // A call of an optional method this instance's type leaves out: `?.()` gives the empty Option
+  // without running its arguments, and a plain call, which only a check that is false here
+  // guards, is never reached.
+  function absentCall(e: Extract<Expr, { kind: "call" }>): string | undefined {
+    const type = types.get(e);
+    if (optionalCalls.has(e)) return type && convert("zeroinitializer", "null", type);
+    emit("unreachable");
+    startBlock(label());
+    return type && "undef";
   }
 
   // node:fs's blocking calls: what each gives, or a failure raised as the IoError the runtime's
