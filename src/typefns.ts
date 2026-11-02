@@ -1,6 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
-import { TypeSet, isNumeric, type ClassType, type Field, type Hole, type ParamType, type Type, type Typing } from "./typing.ts";
+import { TypeSet, isNumeric, type ClassType, type Field, type Hole, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 
 // The type parameter `t` is, or with `deep` the first anywhere in it, standing for no type yet.
 export function openParam(typing: Typing, t: Type, deep: boolean, seen: TypeSet<Type> = new TypeSet<Type>()): ParamType | undefined {
@@ -127,6 +127,13 @@ export class TypeFunctions {
     if (r?.kind === "array") {
       if (isNumeric(k)) return r.element;
       throw new CompileError("E0114", `an array type is indexed by 'number', which gives its element type, here '${this.typing.show(r.element)}'`, keyAt.start, keyAt.end);
+    }
+    // A tuple's `T[number]` is the union of its elements, and `T[0]` its first.
+    if (r?.kind === "object" && r.tuple) {
+      if (isNumeric(k)) return this.typing.unionType([...this.typing.elementsOf(t as ObjectType), ...(r.rest === undefined ? [] : [r.rest])]);
+      const kr = this.recOf(k);
+      const positions = (kr?.kind === "union" ? kr.members : [k]).map((m) => this.recOf(m));
+      if (positions.every((m) => m?.kind === "literal" && typeof m.value === "bigint")) return this.typing.unionType(this.fieldTypes(t, positions.map((m) => String((m as { value: bigint }).value)), at, keyAt));
     }
     const names = this.keysOf(k, "an indexed access type", keyAt);
     // As in TypeScript, a union gives the union of each member's field, which every member must have.

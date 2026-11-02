@@ -35,6 +35,8 @@ type Call = Extract<Expr, { kind: "call" }>;
 
 const I64_MAX = (1n << 63n) - 1n;
 
+const isConstAssertion = (e: Expr) => e.kind === "as" && e.type.kind === "ref" && e.type.name === "const" && e.type.args.length === 0;
+
 // The operators an expression of only literals may use and still take its type from context.
 const LITERAL_OPERATORS = new Set<string>(["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>"]);
 const BITWISE_OPERATORS = new Set<string>(["&", "|", "^", "<<", ">>", ">>>"]);
@@ -2277,6 +2279,56 @@ export class Expressions implements Union {
 
   // `[a, b]` written where a tuple is expected: each element checked against its own type, then
   // the literal becomes the object of fields `0`, `1` and on that the tuple is laid out as.
+  // `x as const`: a literal checked as its literal type, deeply, as TypeScript gives it.
+  private constAssertion(this: Mut<this>, x: Expr): Type {
+    x = this.rewrites.current(x);
+    const literal = ["string", "template", "int", "bool", "array", "object"].includes(x.kind) || (x.kind === "unary" && x.op === "-" && x.operand.kind === "int");
+    if (!literal) throw new CompileError("E0111", "a 'const' assertion can only be applied to a string, number, boolean, array or object literal", x.start, x.end);
+    const t = this.constType(x);
+    this.expect(x, t);
+    this.coerce(x, this.value(x), t, `type '${this.typing.show(this.types.get(x) ?? t)}' is not assignable to type '${this.typing.show(t)}'`);
+    return t;
+  }
+
+  // The type `as const` gives an expression: a literal's own, an array of strings the array of
+  // their union, a mixed array a tuple, and an object's fields readonly. Anything else is
+  // checked here, once, and keeps its type.
+  private constType(this: Mut<this>, written: Expr): Type {
+    const x = this.rewrites.current(written);
+    if (x.kind === "string") return this.typing.literalType(x.value);
+    if (x.kind === "template" && x.exprs.length === 0) return this.typing.literalType(x.quasis[0]!);
+    if (x.kind === "int" && x.value <= I64_MAX) return this.typing.literalType(x.value);
+    if (x.kind === "unary" && x.op === "-" && x.operand.kind === "int" && x.operand.value <= I64_MAX) return this.typing.literalType(-x.operand.value);
+    if (x.kind === "bool") return this.typing.literalType(x.value);
+    if (x.kind === "array" && x.elements.length > 0 && x.elements.every((y) => y !== undefined && y.kind !== "spread")) {
+      const parts = (x.elements as Expr[]).map((y) => this.constType(y));
+      return parts.every((p) => this.constWide(p) === this.constWide(parts[0]!)) ? this.typing.arrayType(this.constJoin(parts)) : this.typing.tupleType(parts);
+    }
+    const props = x.kind === "object" ? x.props.filter((p): p is Extract<ObjectProp, { kind: "property" }> => p.kind === "property" && typeof p.key === "string") : [];
+    if (x.kind === "object" && props.length === x.props.length) return this.typing.objectType(props.map((p) => ({ name: p.key as string, type: this.constType(p.value), readonly: true })));
+    const t = this.value(x);
+    this.ctx.exprsState.once.add(x);
+    return t;
+  }
+
+  // A const type with its literals widened to their base types, so parts that agree on it join.
+  private constWide(this: Mut<this>, t: Type): Type {
+    const r = this.recOf(t);
+    if (r?.kind === "literal" && !r.owner) return this.typing.baseOf(t as LiteralType);
+    if (r?.kind === "object" && r.tuple) return this.typing.tupleType(this.typing.elementsOf(t as ObjectType).map((p) => this.constWide(p)));
+    if (r?.kind === "object") return this.typing.objectType(r.fields.map((f) => ({ ...f, type: this.constWide(f.type) })));
+    return t;
+  }
+
+  // One type holding each of parts, which widen alike: the union of their literals, or tuples and
+  // objects joined element by element.
+  private constJoin(this: Mut<this>, parts: Type[]): Type {
+    const r = this.recOf(parts[0]!);
+    if (r?.kind === "object" && r.tuple) return this.typing.tupleType(this.typing.elementsOf(parts[0] as ObjectType).map((_, i) => this.constJoin(parts.map((p) => this.typing.elementsOf(p as ObjectType)[i]!))));
+    if (r?.kind === "object") return this.typing.objectType(r.fields.map((f) => ({ ...f, type: this.constJoin(parts.map((p) => this.typing.field(p as ObjectType, f.name)!.type)) })));
+    return this.typing.unionType(parts);
+  }
+
   private tupleLiteral(this: Mut<this>, e: Expr, tuple: ObjectType): Type {
     const elements = this.typing.elementsOf(tuple);
     // Once a literal became an object, its rest elements are its field `...`, checked again.
@@ -5017,6 +5069,7 @@ export class Expressions implements Union {
       // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
       // an integer.
       case "as": {
+        if (isConstAssertion(e)) return this.constAssertion(e.expr);
         const written = this.ctx.resolveType(e.type);
         // A function type or a `Promise<T>` makes the value a stored one, as a declared variable's does.
         const to = this.typing.stored(written);
@@ -6009,6 +6062,8 @@ export class Expressions implements Union {
       // An object stores its fields, so an arrow written in one owns what it captures.
       if (p.value.kind === "arrow") this.ctx.exprsState.owning.add(p.value);
       const type = this.value(p.value);
+      // A value written `as const` keeps its literal type.
+      if (isConstAssertion(this.rewrites.current(p.value))) return { name: p.key, type };
       const widened = this.typing.widenLet(type);
       if (widened !== type) this.coerce(p.value, type, widened, "");
       return { name: p.key, type: widened };
