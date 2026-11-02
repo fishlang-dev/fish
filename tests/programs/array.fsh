@@ -1147,3 +1147,31 @@ function main() {
 // expect: b4 3
 // expect: x2
 // expect: b1
+// case: array_reverse_callbacks
+// expect: 9 null 3 -1
+// expect: 1 49183 -17
+// expect: b2 c32b21a10 c3b2a1
+// expect: 2 0
+// expect: null -1 7
+// findLast, findLastIndex and reduceRight walk from the last element back, each given its own
+// index, with findLast and reduceRight's first accumulator as clones.
+class P { n: i64; constructor(n: i64) { this.n = n; } }
+function main() {
+  const xs = [3, 8, 1, 9, 4];
+  console.log(xs.findLast((x) => x > 5), xs.findLast((x) => x > 50), xs.findLastIndex((x) => x > 5), xs.findLastIndex((x) => x > 50));
+  console.log(xs.findLastIndex((x, i) => i === 1), xs.reduceRight((a, x) => a * 10 + x, 0), xs.reduceRight((a, x) => a - x));
+  const ws = ["a" + 1, "b" + 2, "c" + 3];
+  const w = ws.findLast((s) => s.startsWith("b"));
+  console.log(w, ws.reduceRight((a, s, i) => a + s + i, ""), ws.reduceRight((a, s) => a + s));
+  const ps = [new P(1), new P(2), new P(3)];
+  const p = ps.findLast((q) => q.n < 3);
+  if (p !== null) console.log(p.n, ps.findLastIndex((q) => q.n === 1));
+  const empty: i64[] = [];
+  console.log(empty.findLast((x) => true), empty.findLastIndex((x) => true), empty.reduceRight((a, x) => a + x, 7));
+}
+// case: array_reduce_right_empty
+// panic: reduce of empty array with no initial value
+function main() { const xs: string[] = []; console.log(xs.reduceRight((a, x) => a + x)); }
+// case: array_find_last_truthy
+// error: 'findLast''s callback has to give a 'boolean'
+function main() { const xs = [1]; xs.findLast((x) => x); }

@@ -84,6 +84,8 @@ function byName(lines: string[]): string[] {
 // correctly rounded ones, since libm's differ by platform and LLVM folds constants with the
 // libm of the machine compiling.
 const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt"]);
+// The array methods that are another walking from the last element back.
+const BACKWARD: Record<string, string> = { findLast: "find", findLastIndex: "findIndex", reduceRight: "reduce" };
 
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
@@ -5656,7 +5658,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // element, a copy when it copies and otherwise a pointer to it, and its index. The array is
   // only read, so its length and data are read once. `some`, `every` and `find` stop at the
   // first element that decides them.
-  function callbackLoop(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
+  function callbackLoop(e: Extract<Expr, { kind: "call" }>, written: string, array: ArrayType, at: string): string | undefined {
+    const backward = Object.hasOwn(BACKWARD, written);
+    const method = backward ? BACKWARD[written]! : written;
     const [callback, init] = e.args as [Expr, Expr | undefined];
     const element = typing.rec(array).element;
     const t = llvm(element);
@@ -5699,18 +5703,30 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nreduce of empty array with no initial value\n`)})`);
       emit("unreachable");
       startBlock(ok);
-      emit(`store ${llvm(result)} ${convert(copied(load(elementAt("0")), element), element, result)}, ptr ${out}`);
+      let start = "0";
+      if (backward) {
+        start = temp();
+        emit(`${start} = sub i64 ${length}, 1`);
+      }
+      emit(`store ${llvm(result)} ${convert(copied(load(elementAt(start)), element), element, result)}, ptr ${out}`);
       first = "1";
     }
     emit(`store i64 ${first}, ptr ${index}`);
     const [head, body, next, done] = [label(), label(), label(), label()];
     emit(`br label %${head}`);
     startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${length}`);
+    const [k, more] = [temp(), temp()];
+    emit(`${k} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${k}, ${length}`);
     emit(`br i1 ${more}, label %${body}, label %${done}`);
     startBlock(body);
+    let i = k;
+    if (backward) {
+      const last = temp();
+      i = temp();
+      emit(`${last} = sub i64 ${length}, 1`);
+      emit(`${i} = sub i64 ${last}, ${k}`);
+    }
     const slot = elementAt(i);
     const given = typing.rec(closure).params[reducing ? 1 : 0];
     const passed = given === undefined ? [] : [isRef(given) ? `ptr ${slot}` : `${llvm(given)} ${convert(copied(load(slot), element), element, given)}`];
@@ -5759,7 +5775,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (method === "map" || method === "flatMap" || method === "forEach" || reducing) emit(`br label %${next}`);
     startBlock(next);
     const after = temp();
-    emit(`${after} = add i64 ${i}, 1`);
+    emit(`${after} = add i64 ${k}, 1`);
     emit(`store i64 ${after}, ptr ${index}`);
     emit(`br label %${head}`);
     startBlock(done);

@@ -2145,7 +2145,7 @@ export class Expressions implements Union {
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
-    if (["at", "find", "filter", "slice", "concat", "fill", "entries", "values"].includes(callee.name) || (callee.name === "reduce" && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
+    if (["at", "find", "findLast", "filter", "slice", "concat", "fill", "entries", "values"].includes(callee.name) || ((callee.name === "reduce" || callee.name === "reduceRight") && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
     if (callee.name === "flat" && this.isArray(this.typing.lower(this.typing.rec(array).element))) this.clonable(this.typing.rec(this.typing.lower(this.typing.rec(array).element) as ArrayType).element, callee, "flat");
     // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
@@ -2195,7 +2195,7 @@ export class Expressions implements Union {
   // clone of the first element.
   private callbackCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
-    const reducing = name === "reduce";
+    const reducing = name === "reduce" || name === "reduceRight";
     if (reducing ? e.args.length < 1 || e.args.length > 2 : e.args.length !== 1) {
       throw new CompileError("E0506", `'${name}' takes ${reducing ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'"}`, e.start, e.end);
     }
@@ -2226,14 +2226,14 @@ export class Expressions implements Union {
     if (PREDICATES.has(name) && gives !== "boolean") {
       throw new CompileError("E0506", `'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'reduce''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
+    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'${name}''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     if (name === "map" && (gives === "void" || this.typing.holdsRef(gives))) throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.typing.show(gives)}'`, callback.start, callback.end);
     const many = this.typing.lower(gives);
     if (name === "flatMap" && (typeof many === "string" || this.typing.rec(many).kind !== "array")) {
       throw new CompileError("E0506", `'flatMap''s callback gives an array for each element, whose elements make up the result; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    const type = name === "map" ? this.typing.arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" ? this.typing.unionType([this.typing.rec(array).element, "null"])
-      : name === "findIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
+    const type = name === "map" ? this.typing.arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" || name === "findLast" ? this.typing.unionType([this.typing.rec(array).element, "null"])
+      : name === "findIndex" || name === "findLastIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
     return { type, what: `'${name}'` };
   }
 
@@ -4365,7 +4365,7 @@ export class Expressions implements Union {
     if (lent && gives !== "boolean") {
       throw new CompileError("E0506", `'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     }
-    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'reduce''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
+    if (acc && !this.typing.fits(gives, acc)) throw new CompileError("E0506", `'${name}''s callback gives the next accumulator, a '${this.typing.show(acc)}', but this one gives '${this.typing.show(gives)}'`, callback.start, callback.end);
     if (name === "map" && (gives === "void" || this.typing.holdsRef(gives))) throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.typing.show(gives)}'`, callback.start, callback.end);
     let target = GENERATOR_HELPERS[name]!;
     if (name === "flatMap") {
@@ -7244,14 +7244,14 @@ const stringMethods = (typing: Typing): Record<string, [Type[], Type, usize]> =>
 const article = (name: string) => `${/^[aeiou]/i.test(name) ? "an" : "a"} '${name}'`;
 
 // The methods that run a callback on each element.
-const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex"]);
+const CALLBACK_METHODS = new Set(["map", "filter", "find", "some", "every", "reduce", "forEach", "flatMap", "findIndex", "findLast", "findLastIndex", "reduceRight"]);
 // Generators' iterator helpers, and the std function each calls.
 const GENERATOR_HELPERS: Record<string, string> = {
   map: "iter map", filter: "iter filter", take: "iter take", drop: "iter drop", flatMap: "iter flat map",
   reduce: "iter reduce", toArray: "array collect", forEach: "iter for each", some: "iter some", every: "iter every", find: "iter find",
 };
 // The callback methods whose callback decides yes or no.
-const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex"]);
+const PREDICATES = new Set(["filter", "find", "some", "every", "findIndex", "findLast", "findLastIndex"]);
 // The methods that read an array's elements by value.
 const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "slice", "concat", "flat"]);
 // The methods that change an array in place, beside push, pop and sort.
