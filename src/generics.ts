@@ -420,7 +420,9 @@ export class Instancing {
     }
     // A function type returned is a stored callable, and a `Promise<T>` a boxed future, except
     // as an async function's own result, which its `Promise<T>` describes.
-    const written = this.host.withScope(scope, () => this.host.resolveType(f.returnType!));
+    // In a method's return type, `this` is the class of the receiver: each subclass checks its own copy.
+    const self = f.self && !f.self.constructor ? new Map([...scope, ["this", f.self.type as Type]]) : scope;
+    const written = this.host.withScope(self, () => this.host.resolveType(f.returnType!));
     const returned = f.async ? written : this.typing.stored(written);
     if (typeof returned === "string") return returned;
     const t = this.typing.rec(returned);

@@ -258,3 +258,16 @@ test("x as const", () => {
     message: "a 'const' assertion can only be applied to an enum member, or a string, number, boolean, array or object literal", start, end: start + 1,
   }));
 });
+
+// `this` as a type names a method's receiver class, so a function or a static method has none.
+for (const [where, src] of [
+  ["a function", "function f(): this {\n  return 1;\n}\nfunction main() {}"],
+  ["a static method", "class B {\n  static make(): this {\n    return new B();\n  }\n}\nfunction main() {}"],
+]) {
+  test(`'this' as the return type of ${where}`, () => {
+    const start = src!.indexOf("this");
+    expect(() => checkSource(src!)).toThrow(expect.objectContaining({
+      message: "'this' as a type is the class of a method's receiver, so only a class's instance methods can name it, in their parameters and return type", start, end: start + 4,
+    }));
+  });
+}

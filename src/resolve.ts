@@ -553,6 +553,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       }
       return apply(args, t, t.args);
     }
+    if (t.name === "this") throw new CompileError("E0105", "'this' as a type is the class of a method's receiver, so only a class's instance methods can name it, in their parameters and return type", t.start, t.end);
     throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
   }
 
