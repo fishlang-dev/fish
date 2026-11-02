@@ -333,8 +333,13 @@ function main() {}
 class C {
   r: Ref<i64> | null = null
 }
-function main() {}
-// error: unions holding references are not supported yet
+function main() {
+  const n = 3
+  let c = new C()
+  c.r = n
+  if (c.r !== null) console.log(c.r)
+}
+// expect: 3
 // case: option_refs_object_literal
 function f(x: Ref<i64>): Ref<i64> | null {
   return x
@@ -342,12 +347,13 @@ function f(x: Ref<i64>): Ref<i64> | null {
 function main() {
   const n = 1
   const o = { r: f(n) }
+  console.log(o.r !== null)
 }
-// error: unions holding references are not supported yet
+// expect: true
 // case: option_refs_two_refs
 function f(x: Ref<i64> | Ref<string>) {}
 function main() {}
-// error: unions holding references are not supported yet
+// error: unions of bare references are not supported yet; hold each in an object member with a tag
 // case: option_refs_array
 function f(xs: (Ref<i64> | null)[]) {}
 function main() {}

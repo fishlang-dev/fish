@@ -6079,7 +6079,16 @@ export class Expressions implements Union {
         this.coercions.set(e, to);
         return;
       }
-      intoUnion(e, type, to as UnionType, message, this);
+      const member = e.kind === "object" ? this.lentMember(e, to as UnionType) : undefined;
+      if (member) type = this.lendFields(e as Extract<Expr, { kind: "object" }>, member, message);
+      const lending = e.kind === "object" && !member && tr.members.some((m) => this.recOf(m)?.kind === "object" && this.typing.holdsRef(m));
+      try {
+        intoUnion(e, type, to as UnionType, message, this);
+      } catch (err) {
+        // A literal that could have lent to a member holding references fails for want of a tag.
+        if (!lending || !(err instanceof CompileError) || err.code !== "E0101") throw err;
+        throw new CompileError("E0101", `can't choose which member of '${this.typing.show(to)}' this object goes into: a member holding references is chosen by its literal fields, like 'of: "a"', so give each member one and write its value here as a literal`, e.start, e.end);
+      }
       return;
     }
     // A literal type takes exactly its value, so only a literal expression of that value fits.
@@ -6277,6 +6286,21 @@ export class Expressions implements Union {
     }
   }
 
+  // The member holding references an object literal meeting a union goes into: the one object
+  // member whose literal fields its literal properties all match, as a tag picks it.
+  private lentMember(e: Extract<Expr, { kind: "object" }>, to: UnionType): ObjectType | undefined {
+    const found = this.typing.rec(to).members.filter((m): m is ObjectType => {
+      if (this.recOf(m)?.kind !== "object" || !this.typing.holdsRef(m)) return false;
+      return this.typing.rec(m as ObjectType).fields.every((f) => {
+        const r = this.recOf(f.type);
+        if (r?.kind !== "literal") return true;
+        const p = this.winner(e, f.name);
+        return p?.kind === "property" && literalValue(p.value) === r.value;
+      });
+    });
+    return found.length === 1 ? found[0] : undefined;
+  }
+
   // An object literal meeting a type with fields holding references lends each property to
   // its field, so the literal holds what it borrows.
   private lendFields(this: Mut<this>, e: Extract<Expr, { kind: "object" }>, to: ObjectType, message: string): Type {
@@ -6463,7 +6487,6 @@ export class Expressions implements Union {
       return { ...field, type: own };
     }
     if (typeof field.type !== "string" && this.typing.rec(field.type).kind === "closure") throw unsupported("functions stored in objects", p);
-    if (this.typing.optionRef(field.type)) throw unsupported("unions holding references", p);
     return field;
   }
 

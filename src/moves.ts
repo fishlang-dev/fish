@@ -1072,7 +1072,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             const local = localAt(p)!;
             // A shorthand lent to a reference field lends its variable; a mutable reference copied
             // lends itself mutably, as `{ m: m }` does, so only one of them is used at a time.
-            if (isRef(typing.field(to as Exclude<Type, string>, p.name)!.type) && !isRef(local.type)) lend(String(local.id), false, p, holder);
+            // Meeting a union, the literal's own type is the member it went into.
+            const shape = isUnion(to) ? types.get(e)! : to;
+            if (isRef(typing.field(shape as Exclude<Type, string>, p.name)!.type) && !isRef(local.type)) lend(String(local.id), false, p, holder);
             else if (typing.holdsRef(local.type)) {
               if (isRef(local.type) && typing.rec(local.type).mutable) lend(String(local.id), true, p, holder);
               inheritFrom(holder, local);

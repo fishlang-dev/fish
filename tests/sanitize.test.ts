@@ -170,6 +170,47 @@ function main() {
   expect([code, out]).toEqual([0, "15\nhi!\n0 3 0\n"]);
 });
 
+// References held in Option fields and in a tagged union's members are pointers in the payload,
+// read and written through once narrowed, with nothing dropped through them.
+test.skipIf(noAddress !== undefined)("unions holding references run clean under the address sanitizer", () => {
+  const src = `class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+class Stmt {
+  line: i64 = 3
+}
+type AnyNode = { of: "expr"; node: Ref<Expr> } | { of: "stmt"; node: Mut<Stmt> }
+class Holder {
+  item: Ref<Expr> | undefined
+  constructor(item: Ref<Expr> | undefined) {
+    this.item = item
+  }
+}
+function show(n: Ref<AnyNode>): string {
+  if (n.of === "expr") return n.node.text + "!"
+  return \`line \${n.node.line}\`
+}
+function main() {
+  const e = new Expr("hello")
+  let s = new Stmt()
+  const h = new Holder(e)
+  if (h.item !== undefined) console.log(h.item.text)
+  const a: AnyNode = { of: "expr", node: e }
+  console.log(show(a))
+  const b: AnyNode = { of: "stmt", node: s }
+  if (b.of === "stmt") b.node.line = 9
+  console.log(show(b))
+  console.log(s.line)
+}
+`;
+  const { code, out, err } = run("union-refs", src, ["--sanitize", "address"]);
+  expect(err).toBe("");
+  expect([code, out]).toEqual([0, "hello\nhello!\nline 9\n9\n"]);
+});
+
 // Clang's -O0 code for AArch64 misread large aggregates passed to address-sanitized functions,
 // so fetch's init arrived empty and the request went out as a bare GET.
 test.skipIf(noAddress !== undefined)("an address-sanitized fetch sends the method, headers and body it was given", async () => {

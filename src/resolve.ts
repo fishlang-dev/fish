@@ -61,8 +61,6 @@ export function storable(typing: Typing, written: Type, at: Span): Type {
     throw new CompileError("E0115", `a field can't have the interface type '${r.name}'; use a type parameter instead`, at.start, at.end);
   }
   if (r?.kind === "closure") throw unsupported("functions stored in fields", at);
-  // A reference or nothing is only a variable's, a parameter's or a result's.
-  if (typing.holdsPart(type, (t) => typing.optionRef(t) !== undefined)) throw unsupported("unions holding references", at);
   return type;
 }
 
@@ -633,10 +631,10 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     return this.typing.refType(to, t.name === "Mut", life?.name);
   }
 
-  // The one union holding a reference is a reference or nothing, `Ref<T> | null`, as Rust's
-  // `Option<&T>` is.
+  // A union holds a bare reference only as a reference or nothing, `Ref<T> | null`, as Rust's
+  // `Option<&T>` is; other references sit in object members a tag tells apart.
   private union(this: Mut<this>, nodes: TypeNode[]): Type {
-    const option = nodes.filter((n) => !(n.kind === "ref" && n.name === "null" && n.args.length === 0)).length === 1;
+    const option = nodes.filter((n) => !(n.kind === "ref" && (n.name === "null" || n.name === "undefined") && n.args.length === 0)).length === 1;
     return this.typing.unionType(nodes.map((n) => this.unionMember(n, option)));
   }
 
@@ -650,7 +648,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // A union holds a value, so a function type in one is a stored callable.
     if (r?.kind === "function" && r.generic) throw new CompileError("E0115", familyHeld("a union"), node.start, node.end);
     if (r?.kind === "function") return this.typing.stored(t);
-    if (this.typing.holdsRef(t) && !(option && r?.kind === "ref")) throw unsupported("unions holding references", node);
+    if (r?.kind === "ref" && !option) throw new CompileError("E0801", `unions of bare references are not supported yet; hold each in an object member with a tag, like '{ kind: "a"; node: Ref<A> }'`, node.start, node.end);
     return t;
   }
 
