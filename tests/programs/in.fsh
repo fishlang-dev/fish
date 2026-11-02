@@ -133,3 +133,71 @@ function main() {
 // expect: 2
 // expect: 5 -1
 // expect: 3
+
+// case: in_type_arguments
+type A = { a: i64 }
+type B = { b: i64 }
+type AB = { a: i64; b: i64 }
+
+// Each instance answers by its type argument, not by the parameter's bound.
+function has<T>(x: T): boolean {
+  return "a" in x
+}
+
+function hasB<T extends { a: i64 }>(x: T): boolean {
+  return "b" in x
+}
+
+interface S {
+  a(): i64
+}
+
+class C {
+  a(): i64 {
+    return 1
+  }
+  extra(): i64 {
+    return 2
+  }
+}
+
+// An interface parameter answers by the class it is called with.
+function extra(s: S): boolean {
+  return "extra" in s
+}
+
+const FOLDED = comptime has<B>({ b: 1 })
+
+function main() {
+  print(has<A>({ a: 1 }), has<B>({ b: 1 }), hasB<AB>({ a: 1, b: 2 }), hasB<A>({ a: 1 }))
+  print(extra(new C()), FOLDED)
+}
+// expect: true false true false
+// expect: true false
+
+// case: in_class_fields
+// A class's declared field is its own key even while an optional one is unset, and a string
+// key never names a '#' member.
+class P {
+  lives?: i64
+  #secret = 1
+  #hid(): i64 {
+    return this.#secret
+  }
+}
+
+class Q {
+  other = 2
+}
+
+function kind(x: P | Q): string {
+  if ("lives" in x) return "P"
+  return "Q"
+}
+
+function main() {
+  print(kind(new P()), kind(new Q()))
+  print("#hid" in new P(), "#secret" in new P())
+}
+// expect: P Q
+// expect: false false

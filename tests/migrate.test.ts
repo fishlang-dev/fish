@@ -334,9 +334,9 @@ test("G6 reports a string key: a literal, a template, a string name or a for...i
   expect(guidedIn("function f(xs: number[], i: number) {\n  const j = 2;\n  return xs[0] + xs[i] + xs[j];\n}\n").filter((h) => h.startsWith("G6"))).toEqual([]);
 });
 
-test("G6 reports 'in' with a key known only at run time; a written key narrows, so it is left", () => {
-  const src = 'function f(o: Rec, k: string) {\n  return k in o || "a" in o;\n}\n';
-  expect(guidedIn(src)).toEqual(["G6 k in o"]);
+test("G6 reports 'in' with any key but a string literal, as the checker refuses them; a string literal narrows, so it is left", () => {
+  const src = 'function f(o: Rec, k: string, xs: number[]) {\n  return k in o || "a" in o || 0 in xs;\n}\n';
+  expect(guidedIn(src)).toEqual(["G6 k in o", "G6 0 in xs"]);
 });
 
 test("G7 reports top-level code with side effects, suggesting main() or a Lazy", () => {

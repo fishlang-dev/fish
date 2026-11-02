@@ -176,17 +176,26 @@ export function keyCheck(e: Extract<Expr, { kind: "binary" }>, host: Union): Typ
     if (visiting.has(t)) return "both";
     visiting.add(t);
     let found: Verdict;
+    if (r?.kind === "param") {
+      // An instance's type parameter is judged by its type argument, which the same parameter
+      // differs in from one instance to the next, so it isn't recorded; the definition's check
+      // has none, so either answer may hold.
+      visiting.delete(t);
+      return r.concrete === undefined ? "both" : verdict(r.concrete);
+    }
     if (r?.kind === "union" || r?.kind === "recursive") {
       const parts = new Set((r.kind === "union" ? r.members : [r.of]).map(verdict));
       found = parts.size === 1 ? [...parts][0]! : "both";
-    } else if (r?.kind === "object" || r?.kind === "class" || r?.kind === "param") {
+    } else if (r?.kind === "object" || r?.kind === "class") {
+      // A string key never names a `#` member. A class's declared field is always its own
+      // property in JavaScript, even an optional one left unset.
       const field = key.startsWith("#") ? undefined : typing.field(t as Exclude<Type, string>, key);
-      const method = r.kind === "class" && host.declares(t as ClassType, key);
-      found = field?.optional ? "both" : field || method ? "yes" : r.kind === "param" && !r.bound ? "both" : "no";
+      const method = !key.startsWith("#") && r.kind === "class" && host.declares(t as ClassType, key);
+      found = field?.optional && r.kind === "object" ? "both" : field || method ? "yes" : "no";
     } else if (r?.kind === "dyn") {
       throw new CompileError("E0109", `a '${typing.show(t)}' keeps no record of its value's class, so 'in' can't test it; add a method to the interface that says`, e.start, e.end);
     } else {
-      throw new CompileError("E0109", `'in' tests an object or a class instance for a key, and a '${typing.show(t)}' has none to test; narrow the value to an object first`, e.right.start, e.right.end);
+      throw new CompileError("E0109", `'in' tests an object or a class instance for a key, and ${/^[aeiou]/.test(typing.show(t)) ? "an" : "a"} '${typing.show(t)}' has none to test; narrow the value to an object first`, e.right.start, e.right.end);
     }
     visiting.delete(t);
     verdicts.set(t, found);

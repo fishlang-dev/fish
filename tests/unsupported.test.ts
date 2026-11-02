@@ -165,7 +165,7 @@ test("typeof 1", () => {
 const IN: [string, string, string][] = [
   ["const k = \"a\"\n  const o = { a: 1 }\n  let x = k in o", "k", "'in' tests a key written as a string literal, as in '\"name\" in v'; for a key known only at run time, keep the keys in a Set or the values in a Map"],
   ["const o: { a: i64 } | null = null\n  let x = \"a\" in o", "o", "'in' tests an object or a class instance for a key, and a 'null' has none to test; narrow the value to an object first"],
-  ["const xs = [1]\n  let x = \"length\" in xs", "xs", "'in' tests an object or a class instance for a key, and a 'i64[]' has none to test; narrow the value to an object first"],
+  ["const xs = [1]\n  let x = \"length\" in xs", "xs", "'in' tests an object or a class instance for a key, and an 'i64[]' has none to test; narrow the value to an object first"],
 ];
 for (const [body, part, message] of IN) {
   test(`in: ${part}`, () => {

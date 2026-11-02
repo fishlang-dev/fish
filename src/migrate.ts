@@ -835,7 +835,7 @@ function guided(program: unknown[], f: File): Hit[] {
     if (n.kind === "class" && baseName(n) && typed.has(baseName(n)!)) hit("G4", n.start, n.end);
     if (n.kind === "binary" && n.op === "instanceof" && isNode(n.right) && n.right.kind === "ident" && extended.has(n.right.name as string)) hit("G5", n.start, n.end);
     if (n.kind === "index" && isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template" || (n.index.kind === "ident" && stringy(n.index)))) hit("G6", n.start, n.end);
-    if (n.kind === "binary" && n.op === "in" && isNode(n.left) && !["string", "int", "privateName"].includes(n.left.kind as string)) hit("G6", n.start, n.end);
+    if (n.kind === "binary" && n.op === "in" && isNode(n.left) && !["string", "privateName"].includes(n.left.kind as string)) hit("G6", n.start, n.end);
     // A call signature in an interface is a `call` too, without arguments.
     if (n.kind !== "call" || !Array.isArray(n.args)) continue;
     const callee = n.callee as Node;
