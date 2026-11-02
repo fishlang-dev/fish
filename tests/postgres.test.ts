@@ -127,6 +127,16 @@ beforeAll(async () => {
   binaries = { auth, queries, concurrent };
 });
 
+test("a user file named like a std module gets no std allowances", async () => {
+  const dir = mkdtempSync(join(tmp, "named-"));
+  writeFileSync(join(dir, "node:helper.fsh"), "export function first<T>(xs: T[]): T | null {\n  return null;\n}\n");
+  writeFileSync(join(dir, "main.fsh"), 'import { first } from "./node:helper.fsh";\nfunction main() {\n  console.log(first<i64>([1]));\n}\n');
+  writeFileSync(join(dir, "node:x.fsh"), "function wrap<T>(x: T): T | null {\n  return x;\n}\nfunction main() {\n  console.log(wrap<i64>(7));\n}\n");
+  for (const entry of ["main.fsh", "node:x.fsh"]) {
+    await expect(buildAsync(session, join(dir, entry), join(dir, "out"))).rejects.toThrow("unions holding a type parameter are not supported yet");
+  }
+});
+
 // One message: its type byte, its length, its body.
 const message = (kind: string, ...parts: Buffer[]) => {
   const body = Buffer.concat(parts);

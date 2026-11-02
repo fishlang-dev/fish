@@ -627,8 +627,8 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
     // An interface is met by shape, as a conditional type's `extends` asks of it.
     (from, to, at) => (typeof to !== "string" && to.kind === "interface" ? unsatisfied(from, to, members, at) === undefined : fits(from, to)),
     (at) => reached([...aliases.keys(), ...classes.keys(), ...templates.keys(), ...interfaces.keys(), ...enums.keys()], at),
-    // Std's modules, loaded as files named for their Node specifiers, are std's own code.
-    (at) => at >= STD_BASE || compilation.files.some((f) => f.file.startsWith("node:") && at >= f.base && at < f.base + FILE_SPAN));
+    // Std's modules, loaded as files of the program, are std's own code.
+    (at) => at >= STD_BASE || compilation.files.some((f) => f.std && at >= f.base && at < f.base + FILE_SPAN));
   // A generic enum's variant made with other type arguments, while lowering.
   lowersVariants((v, args) => enumInstance(enums.get(v.enum)!, args, checking?.body ?? { start: 0, end: 0 }).variants.get(v.member)!);
   lowersInterfaces(interfaceInstance);

@@ -23,7 +23,8 @@ import type { DynTable } from "./values.ts";
 // reference to the class points at, though Fish code can't upcast it itself. A span outlives the
 // copies macros make.
 // `files` are the program's files once loaded, by the offset each starts at, for naming where a
-// declaration is. `rust` holds the Rust names its `rust:` modules declare.
+// declaration is, each marked when it is one of std's modules. `rust` holds the Rust names its
+// `rust:` modules declare.
 // `enumInits` are the computed enum initializers being evaluated, innermost last, as the span and
 // member name an error about one points at.
 // `fileNames`: for a linked program, each file's top-level names by its base offset: the name each
@@ -31,7 +32,7 @@ import type { DynTable } from "./values.ts";
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
 // `looked`: every source file loading read or looked for, as an absolute path, missing ones included.
 export type Compilation = {
-  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: number; file: string; src: string }[]; rust: RustTables;
+  session: Session; ids: Ids; names: Names; regex: RegexTables; typing: Typing; counts: Counts; upcasts: Set<string>; files: { base: number; file: string; src: string; std: boolean }[]; rust: RustTables;
   enumInits: [number, number, string][]; fileNames: WeakMap<Stmt[], Map<number, Map<string, string>>>; generated: WeakNodeSet<Id>; looked: string[];
 };
 

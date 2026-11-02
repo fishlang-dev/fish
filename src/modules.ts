@@ -254,7 +254,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
     if (e instanceof CompileError) e.sources = [...sources, STD];
     throw e;
   }
-  compilation.files.push(...modules.map(({ base, file, src }) => ({ base, file: base === 0 ? basename(entry) : file, src })));
+  compilation.files.push(...modules.map(({ base, file, src, path }) => ({ base, file: base === 0 ? basename(entry) : file, src, std: path.startsWith("std:") })));
   // std's text sits past every file's, so it goes last, where an offset past them finds it.
   return { modules, sources: [...sources, STD], packages, rust };
 }
