@@ -335,8 +335,11 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, host: Unio
   };
   const isUnion = (t: Type) => union(t) !== undefined && host.typing.lower(t) !== "string";
   // In an instance, a union holding a type parameter is the union its type argument flattens into.
+  // So is a type parameter the type it stands for.
   const flat = (t: Type) => {
     const u = union(t);
+    const r = typeof t === "string" ? undefined : host.typing.rec(t);
+    if (r?.kind === "param" && r.concrete) return host.typing.lower(r.concrete);
     return u && holdsArgument(host.typing, u) ? host.typing.lower(t) : t;
   };
   const instanced = flat(left) !== left || flat(right) !== right;
@@ -344,13 +347,16 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, host: Unio
   if (!isUnion(left) && !isUnion(right)) {
     if (!instanced) return undefined;
     // What's left is a plain value, which a literal on the other side becomes to be compared.
-    if (host.typing.lower(left) === "string" && host.typing.lower(right) !== "string") host.coercions.set(e.right, "string");
-    if (host.typing.lower(right) === "string" && host.typing.lower(left) !== "string") host.coercions.set(e.left, "string");
+    const text = (t: Type) => host.typing.widenLet(t) === "string";
+    if (host.typing.lower(left) === "string" && host.typing.lower(right) !== "string" && text(right)) host.coercions.set(e.right, "string");
+    if (host.typing.lower(right) === "string" && host.typing.lower(left) !== "string" && text(left)) host.coercions.set(e.left, "string");
     if (isNumeric(left)) adapt(e.right, left);
     if (isNumeric(right)) adapt(e.left, right);
   }
   if (objectsMeet(host.typing, left, right)) throw unsupported("comparisons of objects", e);
-  if (!comparable(host.typing, left, right)) {
+  // A type parameter's argument may miss a value its bound has, which the definition compared.
+  const param = (t: Type) => typeof t !== "string" && host.typing.rec(t).kind === "param";
+  if (!comparable(host.typing, left, right) && !param(host.read(e.left)) && !param(host.read(e.right))) {
     throw new CompileError("E0112", `this comparison appears to be unintentional because the types '${host.typing.show(left)}' and '${host.typing.show(right)}' have no overlap`, e.start, e.end);
   }
   return "boolean";

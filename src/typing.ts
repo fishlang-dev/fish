@@ -53,8 +53,11 @@ export type InterfaceType = TypeId<InterfaceRecord>;
 // A type parameter: it stands for any type satisfying its bound, and offers only the bound's
 // fields. At the definition it stands for nothing in particular. In an instance it also holds
 // the concrete type it stands for, so the instance checks exactly as the definition did while
-// codegen lays the value out as its concrete type; `lower` removes it before codegen.
-export type ParamRecord = { kind: "param"; name: string; bound: Bound | undefined; fields: Field[]; concrete?: Type };
+// codegen lays the value out as its concrete type; `lower` removes it before codegen. A
+// parameter bounded by a union, primitive, literal or brand stands at its definition for that
+// whole bound, so the definition checks as TypeScript's does against the constraint, and each
+// instance again with its own argument.
+export type ParamRecord = { kind: "param"; name: string; bound: Bound | undefined; fields: Field[]; concrete?: Type; within?: true };
 export type ParamType = TypeId<ParamRecord>;
 
 // A literal type has one value, known at compile time, so on its own it takes no space: it
@@ -694,6 +697,9 @@ export class Typing {
       const bound = this.rec(r.bound);
       if (bound.kind === "function" && bound.generic) return true;
     }
+    // One bounded by a union or primitive copies when every value of its bound does, and in an
+    // instance as its argument does.
+    if (r.kind === "param" && r.concrete && this.isCopy(r.concrete)) return true;
     // A fixed array copies when its elements do, as Rust's `[T; N]` does.
     if (r.kind === "fixed") return this.isCopy(r.element) && !this.holdsMut(r.element);
     // A tuple copies when everything in it does, as a union does.
@@ -874,7 +880,18 @@ export class Typing {
   // A brand's base, or the type itself.
   unbranded(t: Type): Type {
     const r = this.recOf(t);
+    if (r?.kind === "union") return this.brandsBase(r.members) ?? t;
     return r?.kind === "brand" ? r.base : t;
+  }
+
+  // The base every one of a union's plain brands shares, as a union of kinds of id has, when
+  // they share one: it works as that base, as each member would.
+  private brandsBase(members: Type[]): Type | undefined {
+    const bases = members.map((m) => {
+      const b = this.recOf(m);
+      return b?.kind === "brand" && !b.unit ? b.base : undefined;
+    });
+    return bases.every((b) => b !== undefined && b === bases[0]) ? bases[0] : undefined;
   }
 
   private brands = new Map<string, BrandType>();
@@ -1769,8 +1786,8 @@ export class Typing {
     return fitting.length > 0 || !js(type) ? fitting : members.filter(js);
   }
 
-  typeParameter(this: Mut<this>, name: string, bound: Bound | undefined): ParamType {
-    const t = this.made<ParamType>({ kind: "param", name, bound, fields: [] }, `param ${this.declared++}`);
+  typeParameter(this: Mut<this>, name: string, bound: Bound | undefined, within?: Type): ParamType {
+    const t = this.made<ParamType>({ kind: "param", name, bound, fields: [], ...(within === undefined ? {} : { concrete: within, within: true as const }) }, `param ${this.declared++}`);
     return t;
   }
 
@@ -1939,7 +1956,7 @@ export class Typing {
     if (r.kind === "dyn" && this.rec(r.of).generic?.args.some((a) => this.lower(a) !== a)) return this.dynType(this.lower(r.of) as InterfaceType);
     if (r.kind === "dyn" && r.shown !== undefined) return this.dynType(r.of);
     if (r.kind === "literal" || r.kind === "interface" || r.kind === "closure" || r.kind === "function" || r.kind === "generator" || r.kind === "future" || r.kind === "dyn" || r.kind === "regex") return t;
-    if (r.kind === "param") return r.concrete ? this.lower(r.concrete) : t;
+    if (r.kind === "param") return r.concrete && !r.within ? this.lower(r.concrete) : t;
     if (r.kind === "pattern") return "string";
     if (r.kind === "brand") return r.base;
     if (r.kind === "pointer") return this.pointerType(this.lower(r.to), r.mutable);
@@ -1959,7 +1976,9 @@ export class Typing {
     if (loop && !this.rec(loop).args.some((a) => this.lower(a) !== a)) return t;
     let found = this.lowered.get(t);
     if (!found) {
-      if (r.kind === "class") found = r.generic?.args.some((a) => this.lower(a) !== a) ? this.instanceClass(t as ClassType, r.generic.args.map((t) => this.lower(t))) : t;
+      // A class keeps its brands, which a bound on its type parameters may ask for; its fields are
+      // lowered where they are laid out.
+      if (r.kind === "class") found = r.generic?.args.some((a) => this.lowerKeepingBrands(a) !== a) ? this.instanceClass(t as ClassType, r.generic.args.map((t) => this.lowerKeepingBrands(t))) : t;
       else if (r.kind === "ref") found = this.refType(this.lower(r.to), r.mutable, r.life);
       else if (r.kind === "array") found = this.arrayType(this.lower(r.element));
       else if (r.kind === "fixed") found = this.fixedType(this.lower(r.element), r.size);
@@ -1995,7 +2014,7 @@ export class Typing {
     const r = this.rec(t as Exclude<Type, string>);
     const kept = (u: Type) => this.lowerKeepingBrands(u);
     if (r.kind === "brand") return t;
-    if (r.kind === "param" && r.concrete) return kept(r.concrete);
+    if (r.kind === "param" && r.concrete && !r.within) return kept(r.concrete);
     if (r.kind === "union") return this.unionType(r.members.map(kept), r.name);
     if (r.kind === "array") return this.arrayType(kept(r.element));
     if (r.kind === "fixed") return this.fixedType(kept(r.element), r.size);

@@ -583,6 +583,25 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     throw new CompileError("E1102", what, at.start, at.end);
   }
 
+  // Two numbers of different types, as an instance's argument and a value of its bound may be,
+  // equal by value: as f64 when either is a float, as JavaScript's numbers are, else as i128.
+  // ponytail: a u128 beside a signed type compares as i128, wrong past i128's range.
+  function mixedNumbers(a: string, aType: Type, b: string, bType: Type): string | undefined {
+    const number = (t: Type): [Numeric, string | undefined] | undefined => {
+      const r = recOf(t);
+      const base = r?.kind === "literal" ? typing.baseOf(t as LiteralType) : t;
+      return base !== undefined && isNumeric(base) ? [base, r?.kind === "literal" ? String(r.value) : undefined] : undefined;
+    };
+    const [x, y] = [number(aType), number(bType)];
+    if (!x || !y || x[0] === y[0]) return undefined;
+    const common: Numeric = isFloat(x[0]) || isFloat(y[0]) ? "f64" : x[0] === "u128" && y[0] === "u128" ? "u128" : "i128";
+    const side = ([type, constant]: [Numeric, string | undefined], v: string) => (constant !== undefined ? (isFloat(common) && !constant.includes(".") ? `${constant}.0` : constant) : cast(v, type, common));
+    const [l, r] = [side(x, a), side(y, b)];
+    const result = temp();
+    emit(`${result} = ${isFloat(common) ? "fcmp oeq" : "icmp eq"} ${llvm(common)} ${l}, ${r}`);
+    return result;
+  }
+
   // Rust's `as`: integers truncate or extend by the source's signedness, floats round toward
   // zero into integers, saturating with NaN as 0, and widen or narrow between themselves.
   function cast(v: string, from: Type, to: Numeric): string {
@@ -3019,6 +3038,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   function statement(s: Stmt) {
+    if (current.unreached?.has(s)) return;
     const outer = site;
     site = s;
     lowerStatement(s);
@@ -9411,6 +9431,16 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (tested) return tested;
         const condition = COMPARISON[e.op];
         const [a, b] = [first(e.left), value(e.right)];
+        // A literal, as a literal type argument is, compares by value, and two types of different
+        // bases, as an instance's argument and a value of its bound may have, are never equal.
+        const [lt, rt] = [typing.lower(valueType(e.left)), typing.lower(valueType(e.right))];
+        if ((e.op === "===" || e.op === "!==") && (lt !== rt || recOf(lt)?.kind === "literal")) {
+          const same = mixedNumbers(a, lt, b, rt) ?? equals(a, lt, b, rt);
+          if (e.op === "===") return same;
+          const differ = temp();
+          emit(`${differ} = xor i1 ${same}, true`);
+          return differ;
+        }
         // An operand keeps a literal type only when both are the same string literal.
         const type = coercions.get(e.left) ?? types.get(e.left)!;
         if (!condition) return numeric(e.op, a, b, e, type);
@@ -9430,7 +9460,6 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
           emit(`${differ} = xor i1 ${same}, true`);
           return differ;
         }
-        if (typeof type !== "string") return String(e.op === "===");
         const result = temp();
         if (isFloat(type)) {
           emit(`${result} = fcmp ${FLOAT_COMPARISON[e.op]} ${llvm(type)} ${a}, ${b}`);

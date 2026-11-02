@@ -106,6 +106,9 @@ export type Instance = {
   patterns: NodeMap<Pattern, PatternInfo>;
   // Each read of a shared value's plain field: a copy made under its lock, not a place.
   copiesOut: NodeSet<Expr>;
+  // Statements this instance never reaches, as a check its type argument rules out guards:
+  // checked, but not compiled.
+  unreached?: NodeSet<Stmt>;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -900,7 +903,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // A class first made while lowering is reported at the function being checked.
   classInstance(this: Mut<this>, c: ClassType, args: Type[]): ClassType {
-    return this.genericClasses().classNamed(this.typing.rec(c).generic!.name, args, (this.beingChecked && bodyOf(this.beingChecked)) ?? { start: 0, end: 0 })!;
+    return this.genericClasses().classNamed(this.typing.rec(c).generic!.name, args, (this.beingChecked && bodyOf(this.beingChecked)) ?? { start: 0, end: 0 }, true)!;
   }
 
   checking(): Instance | undefined {
@@ -1950,7 +1953,7 @@ class BodyChecker implements Context, Outer, Sight {
     // parameters as this body sees them, so it reads through their bounds as the definition did.
     const generic = this.f.self && this.cx.typing.rec(this.f.self.type).generic;
     const resolver = this.cx.resolver();
-    const viewed = generic && this.cx.genericClasses().classNamed(generic.name, this.cx.registry().classOf(this.f.self!.type).node.typeParams.map((p) => resolver.resolveType({ id: nextId(this.cx.ids), kind: "ref", name: p.name, args: [], start: this.f.start, end: this.f.start })), this.f)!;
+    const viewed = generic && this.cx.genericClasses().classNamed(generic.name, this.cx.registry().classOf(this.f.self!.type).node.typeParams.map((p) => resolver.resolveType({ id: nextId(this.cx.ids), kind: "ref", name: p.name, args: [], start: this.f.start, end: this.f.start })), this.f, true)!;
     this.enclosing = this.f.closure && selfOf(this.cx.arenas, this.f);
     this.self = this.f.closure ? this.enclosing && { ...this.enclosing, constructor: false, mutable: false, owned: false } : this.f.self && { ...this.f.self, type: viewed ?? this.f.self.type };
     this.captures = this.instance.captures;
@@ -2652,6 +2655,7 @@ class BodyChecker implements Context, Outer, Sight {
       const s = list[i]!;
       this.siblings = { list, at: i };
       const mark = this.changed.length;
+      if (this.ruledOut()) (this.instance.unreached ??= new NodeSet()).add(s);
       const after = each(s, (x) => this.statement(x));
       if (after) this.facts.push(this.current(after, mark));
     }
@@ -3610,6 +3614,12 @@ class BodyChecker implements Context, Outer, Sight {
 
   // Whether control never reaches the end of these statements, leaving by `return`, `break`
   // or `continue`.
+  // Whether a check made here rules out what an instance's type parameter stands for, which the
+  // narrowing marks by giving its variable the type `never`.
+  private ruledOut(): boolean {
+    return this.facts.some((m) => [...m].some(([key, t]) => t === "never" && !isPath(key) && this.cx.typing.recOf(this.cx.localOf(Number(key) as LocalId).type)?.kind === "param"));
+  }
+
   leaves(stmts: Stmt[]): boolean {
     const last = stmts.at(-1);
     return alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue";
