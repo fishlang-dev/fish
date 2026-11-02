@@ -224,3 +224,30 @@ function main() {
   print(i)
 }
 // error: cannot find name 'i'
+// case: for_of_temporary_through_as
+// expect: ab
+// expect: 1
+// expect: cd 1
+// expect: ab
+// expect: ab 1
+function main() {
+  const xs = ["a" + "b"];
+  const ys = ["c" + "d"];
+  for (const s of xs.slice() as string[]) console.log(s);
+  console.log(xs.length);
+  for (const s of (xs.length > 1 ? xs : ys) as string[]) console.log(s, xs.length);
+  for (const s of unsafe { xs.slice() }) console.log(s);
+  const k = "a" + "b";
+  for (const [x, v] of new Map([[k, 1]]) as Map<string, i64>) console.log(x, v);
+}
+// case: for_of_temporary_through_satisfies
+// expect: ab
+// expect: cd
+// expect: 1
+function main() {
+  const xs = ["a" + "b"];
+  const ys = ["c" + "d"];
+  for (const s of xs.slice() satisfies string[]) console.log(s);
+  for (const s of (xs.length > 1 ? xs : ys) satisfies string[]) console.log(s);
+  console.log(xs.length);
+}
