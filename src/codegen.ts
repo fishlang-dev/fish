@@ -9405,6 +9405,16 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (tested) return tested;
         const condition = COMPARISON[e.op];
         const [a, b] = [first(e.left), value(e.right)];
+        // A literal, as a literal type argument is, compares by value, and two types of different
+        // bases, as an instance's argument and a value of its bound may have, are never equal.
+        const [lt, rt] = [typing.lower(valueType(e.left)), typing.lower(valueType(e.right))];
+        if ((e.op === "===" || e.op === "!==") && (lt !== rt || recOf(lt)?.kind === "literal")) {
+          const same = equals(a, lt, b, rt);
+          if (e.op === "===") return same;
+          const differ = temp();
+          emit(`${differ} = xor i1 ${same}, true`);
+          return differ;
+        }
         // An operand keeps a literal type only when both are the same string literal.
         const type = coercions.get(e.left) ?? types.get(e.left)!;
         if (!condition) return numeric(e.op, a, b, e, type);
@@ -9423,12 +9433,6 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
           const differ = temp();
           emit(`${differ} = xor i1 ${same}, true`);
           return differ;
-        }
-        // Two literals, as a type argument's literal meeting another, are equal by value.
-        if (typeof type !== "string") {
-          const [l, r] = [recOf(typing.lower(valueType(e.left))), recOf(typing.lower(valueType(e.right)))];
-          const same = l?.kind !== "literal" || r?.kind !== "literal" || l.value === r.value;
-          return String(same === (e.op === "==="));
         }
         const result = temp();
         if (isFloat(type)) {

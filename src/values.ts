@@ -5187,11 +5187,13 @@ export class Expressions implements Union {
           load();
           return this.linked(e) ? this.optional("usize", e) : "usize";
         }
-        // A string's one property is its length in UTF-16 code units.
-        if (stringLike(this.typing, object)) {
+        // A string's one property is its length in UTF-16 code units, a type parameter's bounded
+        // by strings included.
+        const plain = this.plainOf(object);
+        if (stringLike(this.typing, plain)) {
           if (stringMethods(this.typing)[e.name]) throw new CompileError("E0503", `string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
           if (e.name !== "length") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type 'string'${didYouMean(e.name, ["length", ...Object.keys(stringMethods(this.typing))])}`, e.start, e.end);
-          this.text(e.object, object, this.linked(e));
+          this.text(e.object, plain, this.linked(e));
           return this.linked(e) ? this.optional("usize", e) : "usize";
         }
         const found = or === undefined || or.kind === "closure" ? undefined : this.typing.field(object as Exclude<Type, string>, e.name);

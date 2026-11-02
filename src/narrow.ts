@@ -158,7 +158,10 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     // member, which it can point to inside the union.
     const t = typeof type === "string" ? undefined : typing.rec(type);
     const ref = t?.kind === "ref" ? t : undefined;
-    const held = ref ? ref.to : type;
+    // A type parameter bounded by a union or primitive splits as what it stands for.
+    const read = ref ? ref.to : type;
+    const p = typeof read === "string" ? undefined : typing.rec(read);
+    const held = p?.kind === "param" && p.concrete && !p.bound ? (p.within ? p.concrete : typing.lowerKeepingBrands(read)) : read;
     const h = typeof held === "string" ? undefined : typing.rec(held);
     // A member that holds itself stands for its own members, which the check may tell apart.
     const members = (h?.kind === "union" ? h.members : [held]).flatMap((m) => {

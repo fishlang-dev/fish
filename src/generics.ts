@@ -3,6 +3,7 @@ import { holdsNode, type Instance } from "./check.ts";
 import { declareClass, inherited, isApart, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { Tables } from "./compilation.ts";
+import { literalValue } from "./narrow.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
@@ -43,6 +44,15 @@ function valueBound(typing: Typing, t: Type): boolean {
   const r = typing.rec(t);
   if (r.kind === "union") return r.members.every((m) => { const k = typing.recOf(m)?.kind; return k !== "interface" && k !== "param"; });
   return r.kind === "literal" || r.kind === "pattern" || r.kind === "brand";
+}
+
+// The literal type of the first literal argument given for a parameter typed `name`.
+function literalArgument(typing: Typing, f: Body, name: string, args: Expr[]): Type | undefined {
+  for (const [i, p] of f.params.entries()) {
+    const value = args[i] && literalValue(args[i]);
+    if (p.type?.kind === "ref" && p.type.name === name && p.type.args.length === 0 && value !== undefined) return typing.literalType(value);
+  }
+  return undefined;
 }
 
 // A generic class's placeholders, one set shared by its definition check and its members,
@@ -558,7 +568,15 @@ export class Instancing {
       if ((r?.kind === "closure" || r?.kind === "function") && heldInArgument(f, p.name)) bindings.set(p.name, this.typing.heldArgument(type));
     }
     // A bound may name the class's parameters too, as this instance of it holds them.
-    this.host.withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => p.constraint && checkBound(bindings.get(p.name)!, this.host.resolveType(p.constraint), this.host.members(), at)));
+    this.host.withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => {
+      if (!p.constraint) return;
+      const bound = this.host.resolveType(p.constraint);
+      // A number literal argument is that literal where the bound takes it and not its type, as
+      // `lt(1)` with `K extends 1 | 2` infers `1` in TypeScript.
+      const literal = typeArgs.length === 0 && !this.typing.fits(bindings.get(p.name)!, bound) ? literalArgument(this.typing, f, p.name, args) : undefined;
+      if (literal !== undefined && this.typing.fits(literal, bound)) bindings.set(p.name, literal);
+      checkBound(bindings.get(p.name)!, bound, this.host.members(), at);
+    }));
     // A type parameter only an arrow's own parameters decided is still the definition's
     // placeholder, which the arrow was typed with; a body calling itself passes its placeholder
     // on in an argument of its own.

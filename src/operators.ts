@@ -81,7 +81,8 @@ function brandedType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: 
   const [l, r] = [typing.recOf(left), typing.recOf(right)];
   // A union of brands of one base works as that base with a plain number.
   const [lb, rb] = [l?.kind === "union" ? typing.unbranded(left) : left, r?.kind === "union" ? typing.unbranded(right) : right];
-  if ((lb !== left && r?.kind !== "brand" && rb === right) || (rb !== right && l?.kind !== "brand" && lb === left)) return binaryType(typing, op, lb, rb, at);
+  // So do two values of one such union, as two of one type parameter's are.
+  if ((lb !== left && r?.kind !== "brand" && rb === right) || (rb !== right && l?.kind !== "brand" && lb === left) || (lb !== left && left === right)) return binaryType(typing, op, lb, rb, at);
   if (l?.kind !== "brand" && r?.kind !== "brand") return undefined;
   if ((l?.kind === "brand" && l.unit) || (r?.kind === "brand" && r.unit)) return unitResult(typing, op, left, right, at);
   if (l?.kind === "brand" && r?.kind === "brand" && left !== right) {

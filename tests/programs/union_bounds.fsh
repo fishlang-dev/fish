@@ -201,3 +201,81 @@ class C {}
 function f<K extends C>(k: K) {}
 
 function main() {}
+// case: union_bounds_compare_other_member
+// An instance whose argument can't equal the other side compares unequal, and a literal argument
+// compares with a value by value.
+function g<K extends i64 | string>(k: K): boolean {
+  return k === 3
+}
+
+function f<K extends i64 | string>(k: K): boolean {
+  return k !== "a"
+}
+
+function eq<K extends 1 | 2>(k: K, n: i64): boolean {
+  return k === n
+}
+
+function main() {
+  const s: string = "q"
+  console.log(g("a"), g(3), g(4), g(s))
+  console.log(f(3), f("a"), f("b"))
+  const n: i64 = 2
+  console.log(eq<1>(1, n), eq<2>(2, n))
+}
+// expect: false true false false
+// expect: true false true
+// expect: false true
+// case: union_bounds_number_literal
+// A number literal argument is its literal type where the bound takes literals.
+function lt<K extends 1 | 2 | 3>(k: K): boolean {
+  return k < 2
+}
+
+function main() {
+  console.log(lt(1), lt(2), lt(3))
+}
+// expect: true false false
+// case: union_bounds_typeof
+// `typeof` narrows a union-bounded parameter to the members it names.
+function f<K extends string | i64>(k: K): string {
+  if (typeof k === "string") return k + "!"
+  return `${k + 1}`
+}
+
+function main() {
+  console.log(f("a"), f(4))
+  const u: string | i64 = 7
+  const v: string | i64 = "zz"
+  console.log(f(u), f(v))
+}
+// expect: a! 5
+// expect: 8 zz!
+// case: union_bounds_compare_params
+// A parameter compared with a value of its bound, in instances of a member and of the whole bound.
+function eq<K extends "a" | "b">(k: K, l: "a" | "b"): boolean {
+  return k === l
+}
+
+function main() {
+  const x: "a" | "b" = "b"
+  console.log(eq("a", "a"), eq("a", "b"), eq(x, "b"), eq(x, "a"))
+}
+// expect: true false true false
+// case: union_bounds_length_and_brands
+// A string-bounded parameter's length, and two values of one brand-bounded parameter added.
+type A = Brand<i64, "a">
+type B = Brand<i64, "b">
+
+function len<K extends string>(k: K): usize {
+  return k.length
+}
+
+function sum<T extends A | B>(t: T, s: T): i64 {
+  return t + s
+}
+
+function main() {
+  console.log(len("abc"), sum(1 as A, 2 as A), sum(5 as B, 5 as B))
+}
+// expect: 3 3 10

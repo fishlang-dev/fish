@@ -347,8 +347,9 @@ export function unionComparison(e: Extract<Expr, { kind: "binary" }>, host: Unio
   if (!isUnion(left) && !isUnion(right)) {
     if (!instanced) return undefined;
     // What's left is a plain value, which a literal on the other side becomes to be compared.
-    if (host.typing.lower(left) === "string" && host.typing.lower(right) !== "string") host.coercions.set(e.right, "string");
-    if (host.typing.lower(right) === "string" && host.typing.lower(left) !== "string") host.coercions.set(e.left, "string");
+    const text = (t: Type) => host.typing.widenLet(t) === "string";
+    if (host.typing.lower(left) === "string" && host.typing.lower(right) !== "string" && text(right)) host.coercions.set(e.right, "string");
+    if (host.typing.lower(right) === "string" && host.typing.lower(left) !== "string" && text(left)) host.coercions.set(e.left, "string");
     if (isNumeric(left)) adapt(e.right, left);
     if (isNumeric(right)) adapt(e.left, right);
   }
