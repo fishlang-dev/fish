@@ -10,8 +10,11 @@ import { NodeMap } from "./nodes.ts";
 // type, which codegen takes out of the union. A field path narrows too, keyed by its root's id or
 // `this` and its field names, as `3.next.value`, until something could change it.
 
-export type Key = LocalId | string;
-export type Facts = Map<Key, Type>;
+// A binding is keyed by its id, written as a string, so both kinds of key share one table.
+export type Facts = Map<string, Type>;
+export const bindingKey = (id: LocalId): string => String(id);
+// Whether a key is a field path's, or `this` as the root of some, rather than a binding's.
+export const isPath = (key: string): boolean => !/^\d+$/.test(key);
 export type Guard = { yes: Facts; no: Facts };
 
 // What `typeof` says for a value of each type. Every sized number is "number", as in
@@ -106,7 +109,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     const read = name && JS_READS[name];
     const tested = types.get(test.operand);
     if (local && read && tested && typing.holdsPlainJs(tested) && narrowable(local)) {
-      const facts: Guard = { yes: new Map([[local.localId, read]]), no: new Map() };
+      const facts: Guard = { yes: new Map([[bindingKey(local.localId), read]]), no: new Map() };
       return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
     }
     if (local && tested && typing.holdsPlainJs(tested)) return nothing;
@@ -146,7 +149,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
   // Splits a narrowable variable's or field path's members by whether a check holds for them.
   function split(subject: Expr, check: (m: Type) => "yes" | "no" | "both", positive: boolean): Guard {
     const local = subject.kind === "ident" ? tables.arenas.localOf(locals.get(subject)) : undefined;
-    const key = local && narrowable(local) ? local.localId : subject.kind === "member" ? path(subject) : undefined;
+    const key = local && narrowable(local) ? bindingKey(local.localId) : subject.kind === "member" ? path(subject) : undefined;
     const type = types.get(subject);
     if (key === undefined || !type) return nothing;
     // A reference narrows to a reference to fewer members; a mutable one only to a single
@@ -182,11 +185,8 @@ export const isEmpty = (e: Expr, locals: NodeMap<Expr, LocalId>) => e.kind === "
 
 // Whether a change under `changed` reaches what `key` narrows: the same binding or path, or a path
 // below it.
-export function covers(changed: Key, key: Key): boolean {
-  if (changed === key) return true;
-  if (typeof key !== "string") return false;
-  const prefix = String(changed);
-  return key.startsWith(`${prefix}.`) || key.startsWith(`${prefix}[`);
+export function covers(changed: string, key: string): boolean {
+  return changed === key || (isPath(key) && (key.startsWith(`${changed}.`) || key.startsWith(`${changed}[`)));
 }
 
 // A variable either of two branches narrowed has, after them, whichever type it had.
