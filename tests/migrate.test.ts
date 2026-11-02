@@ -339,10 +339,10 @@ test("G6 reports 'in' with any key but a string literal, as the checker refuses 
   expect(guidedIn(src)).toEqual(["G6 k in o", "G6 0 in xs"]);
 });
 
-test("G6 and R3 leave a dictionary: a name declared with an index signature, 'Record<string, V>' or an alias of one, or a field of this declared so", () => {
-  const src = 'type D = { [k: string]: number };\nclass C {\n  items: Record<string, string> = {};\n  f(k: string) {\n    delete this.items[k];\n    return this.items[k];\n  }\n}\nfunction f(a: D, b: { [k: string]: number }, c: Rec, k: string) {\n  delete a[k];\n  delete c.x;\n  return a[k] + b[k] + c[k] + (k in a ? 1 : 0) + (k in c ? 1 : 0);\n}\n';
+test("G6 and R3 leave a dictionary: a name declared with an index signature, 'Record<string, V>' or an alias of one, or a field its class declares so", () => {
+  const src = 'type D = { [k: string]: number };\nclass C {\n  items: Record<string, string> = {};\n  f(k: string) {\n    delete this.items[k];\n    return this.items[k];\n  }\n}\nclass E {\n  items: Rec;\n  f(k: string) {\n    return this.items[k];\n  }\n}\nfunction f(a: D, b: { [k: string]: number }, c: Rec, k: string) {\n  delete a[k];\n  delete c.x;\n  return a[k] + b[k] + c[k] + (k in a ? 1 : 0) + (k in c ? 1 : 0);\n}\n';
   const found = surveyHits(parse(src, { last: 0 })).filter((h) => h.rule === "G6" || h.rule === "R3").sort((a, b) => a.start - b.start).map((h) => `${h.rule} ${src.slice(h.start, h.end)}`);
-  expect(found).toEqual(["R3 delete c.x", "G6 c[k]", "G6 k in c"]);
+  expect(found).toEqual(["G6 this.items[k]", "R3 delete c.x", "G6 c[k]", "G6 k in c"]);
 });
 
 test("G7 reports top-level code with side effects, suggesting main() or a Lazy", () => {

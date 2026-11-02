@@ -892,7 +892,7 @@ function scopesOf(f: File): Map<object, Map<string, Binding>> {
 
 // Whether an expression is a dictionary, as far as its syntax tells: a name declared with
 // `{ [k: string]: V }`, `Record<string, V>` or a type alias of the file naming one, or a field of
-// `this` some class of the file declares so. Fish reads, writes, deletes and tests its keys.
+// `this` its class declares so. Fish reads, writes, deletes and tests its keys.
 function dictionaries(f: File): (o: unknown) => boolean {
   const scopes = scopesOf(f);
   const aliases = new Set<string>();
@@ -903,10 +903,18 @@ function dictionaries(f: File): (o: unknown) => boolean {
     return t.kind === "ref" && ((t.name === "Record" && (t.args as Node[]).length === 2 && typeName((t.args as Node[])[0], "string")) || aliases.has(t.name as string));
   };
   for (const n of f.nodes) if (n.kind === "typeAlias" && (n.typeParams as Node[]).length === 0 && dict(n.type)) aliases.add(n.name as string);
-  const fields = new Set(f.nodes.flatMap((n) => (n.kind === "field" && typeof n.name === "string" && dict(n.type) ? [n.name] : [])));
+  const fields = new Map<object, Set<string>>();
+  for (const n of f.nodes) {
+    if (n.kind !== "class") continue;
+    fields.set(n, new Set((n.members as Node[]).flatMap((m) => (m.kind === "field" && typeof m.name === "string" && dict(m.type) ? [m.name] : []))));
+  }
+  const classOf = (n: Node): object | undefined => {
+    for (let at = f.up.get(n); at; at = f.up.get(at.holder)) if ((at.holder as Node).kind === "class") return at.holder;
+    return undefined;
+  };
   return (o) => {
     if (!isNode(o)) return false;
-    if (o.kind === "member") return isNode(o.object) && o.object.kind === "this" && fields.has(o.name as string);
+    if (o.kind === "member") return isNode(o.object) && o.object.kind === "this" && (fields.get(classOf(o) ?? {})?.has(o.name as string) ?? false);
     if (o.kind !== "ident") return false;
     const b = resolve(f, scopes, o);
     return b?.kind === "param" ? dict(b.param.type) : b?.kind === "let" ? dict(b.declarator.type) : false;

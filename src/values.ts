@@ -4647,7 +4647,13 @@ export class Expressions implements Union {
 
   // `e`, a dictionary's read, write, delete or key test, become the call of its Map method.
   private dictCall(e: Expr, object: Expr, name: string, args: Expr[]): Call {
-    const call = this.become(e, { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object, name, optional: false, start: e.start, end: e.end }, args, typeArgs: [], optional: false, start: e.start, end: e.end }) as Call;
+    const call = this.become(e, this.dictMethod(object, name, args, e)) as Call;
+    this.dictCalls.add(call);
+    return call;
+  }
+
+  private dictMethod(object: Expr, name: string, args: Expr[], at: Span): Call {
+    const call: Call = { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object, name, optional: false, start: at.start, end: at.end }, args, typeArgs: [], optional: false, start: at.start, end: at.end };
     this.dictCalls.add(call);
     return call;
   }
@@ -4662,8 +4668,16 @@ export class Expressions implements Union {
     const t = this.value(place.object);
     this.ctx.exprsState.once.add(place.object);
     if (!this.dictOf(t)) return undefined;
-    const key: Expr = place.kind === "index" ? place.index : { id: nextId(this.ids), kind: "string", value: place.name, start: place.start, end: place.end };
+    const key: Expr = place.kind === "index" ? this.dictKey(place.index) : { id: nextId(this.ids), kind: "string", value: place.name, start: place.start, end: place.end };
     return { place, object: place.object, key };
+  }
+
+  // A dictionary's key, checked to be a string where it is written.
+  private dictKey(this: Mut<this>, key: Expr): Expr {
+    const t = this.value(key);
+    this.coerce(key, t, "string", `a dictionary's keys are strings, not '${this.typing.show(t)}'`);
+    this.ctx.exprsState.once.add(key);
+    return key;
   }
 
   // A dictionary isn't iterable, as a plain object isn't in JavaScript.
@@ -4685,7 +4699,7 @@ export class Expressions implements Union {
     if (!this.dictOf(through)) return false;
     if (e.optional) throw unsupported("optional index expressions", e);
     if (this.ctx.exprsState.writing === e) throw this.dictWrite(e);
-    this.dictCall(e, e.object, "get", [e.index]);
+    this.dictCall(e, e.object, "get", [this.dictKey(e.index)]);
     return true;
   }
 
@@ -5356,7 +5370,12 @@ export class Expressions implements Union {
           return gives;
         }
         const deleted = e.op === "delete" ? this.dictEntry(e.operand) : undefined;
-        if (deleted) return this.typeOf(this.dictCall(e, deleted.object, "delete", [deleted.key]));
+        // JavaScript's delete gives true whether or not the key was there.
+        if (deleted) {
+          const at = { start: e.start, end: e.end };
+          const removed = this.dictMethod(deleted.object, "delete", [deleted.key], e);
+          return this.typeOf(this.become(e, { id: nextId(this.ids), kind: "binary", op: "||", left: removed, right: { id: nextId(this.ids), kind: "bool", value: true, ...at }, ...at }));
+        }
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
         const type = this.operand(e.operand);
         // The smallest i64 is written as the negation of a literal one past the largest.
@@ -5486,7 +5505,7 @@ export class Expressions implements Union {
           if (e.right.kind === "ident") this.ctx.exprsState.objects.add(e.right);
           const tested = this.value(e.right);
           this.ctx.exprsState.once.add(e.right);
-          if (this.dictOf(tested)) return this.typeOf(this.dictCall(e, e.right, "has", [e.left]));
+          if (this.dictOf(tested)) return this.typeOf(this.dictCall(e, e.right, "has", [this.dictKey(e.left)]));
           return keyCheck(e, this);
         }
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);

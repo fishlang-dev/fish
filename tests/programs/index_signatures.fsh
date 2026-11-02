@@ -1,7 +1,7 @@
 // case: index_signatures_entries
 // expect: 3 5 null
 // expect: true false
-// expect: true false
+// expect: true true
 // expect: [ 'ann', 'bo b', 'cy' ] 12
 // expect: [ [ 'ann', 3 ], [ 'bo b', 4 ], [ 'cy', 5 ] ]
 // expect: 4
@@ -30,6 +30,25 @@ function main() {
   s.size = 1;
   console.log(s);
   console.log(JSON.stringify(s));
+}
+// case: index_signatures_order
+// expect: [ '2', '10', '4294967294', 'b', 'a', '01', '4294967295' ]
+// expect: 4, 2, 7, 1, 3, 5, 6 7
+// expect: {"2":4,"10":2,"4294967294":7,"b":1,"a":3,"01":5,"4294967295":6}
+// expect: { 'a\x00b': 1, ['__proto__']: 2 }
+// Keys that are array indexes come first, ascending, then the rest as they were made, as
+// JavaScript orders an object's keys; a key is printed whole, a NUL in it included.
+type D = { [k: string]: i64 };
+function main() {
+  let d: D = { b: 1, "10": 2, a: 3, "2": 4, "01": 5, "4294967295": 6, "4294967294": 7 };
+  console.log(Object.keys(d));
+  const values = Object.values(d);
+  console.log(values.join(", "), values.length);
+  console.log(JSON.stringify(d));
+  let e: D = {};
+  e["a\u0000b"] = 1;
+  e["__proto__"] = 2;
+  console.log(e);
 }
 // case: index_signatures_record
 // expect: { a: { b: { c: [Object] } } }
@@ -113,3 +132,6 @@ function main() { let d: Record<string, i64> = { a: 1, b: "x" }; }
 // case: index_signatures_number_key
 // error: an index signature is keyed by 'string' so far; for keys of another type use a 'Map', or an array for consecutive numbers
 function main() { let d: { [i: i64]: string } = {}; }
+// case: index_signatures_key
+// error: a dictionary's keys are strings, not 'i64'
+function main() { let d: Record<string, i64> = {}; d[1] = 2; }

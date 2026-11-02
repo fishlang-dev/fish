@@ -1402,6 +1402,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // Runs the body for each live entry of a map, in insertion order, with a pointer to it.
   function entriesLoop(t: MapType, map: string, each: (entry: string) => void) {
     const [used, index] = [temp(), alloca("i64")];
+    const order = dictOrder(t, map);
     emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
     emit(`store i64 0, ptr ${index}`);
     const [head, body, live, next, done] = [label(), label(), label(), label(), label()];
@@ -1413,7 +1414,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`br i1 ${more}, label %${body}, label %${done}`);
     startBlock(body);
     const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${at} = ${entryAt(map, order, i)}`);
     emit(`${state} = load i64, ptr ${at}`);
     emit(`${alive} = icmp eq i64 ${state}, 1`);
     emit(`br i1 ${alive}, label %${live}, label %${next}`);
@@ -1426,6 +1427,20 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store i64 ${after}, ptr ${index}`);
     emit(`br label %${head}`);
     startBlock(done);
+    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
+  }
+
+  // A dictionary's entries are read in the order JavaScript gives an object's keys, which the
+  // runtime works out for each read of them all; a Map's in the order they were made.
+  function dictOrder(t: MapType, map: string): string | undefined {
+    if (!typing.rec(t).dict) return undefined;
+    const order = temp();
+    emit(`${order} = call ptr @fsh_rt_dict_order(ptr ${map})`);
+    return order;
+  }
+
+  function entryAt(map: string, order: string | undefined, i: string): string {
+    return order ? `call ptr @fsh_rt_dict_at(ptr ${map}, ptr ${order}, i64 ${i})` : `call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`;
   }
 
   // `keys()`, `values()` and `entries()`: arrays of clones, in insertion order. A Set's values
@@ -4801,6 +4816,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`${size} = call i64 @fsh_rt_map_size(ptr ${map})`);
     if (dict) emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString("")})`);
     else emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${typing.rec(t).set ? 5 : 4}, i64 ${size})`);
+    const order = dictOrder(t, map);
     const [counter, taken] = [alloca("i64"), alloca("i64")];
     emit(`store i64 0, ptr ${counter}`);
     emit(`store i64 0, ptr ${taken}`);
@@ -4819,7 +4835,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`br i1 ${going}, label %${live}, label %${end}`);
     startBlock(live);
     const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${at} = ${entryAt(map, order, i)}`);
     emit(`${state} = load i64, ptr ${at}`);
     emit(`${alive} = icmp eq i64 ${state}, 1`);
     emit(`br i1 ${alive}, label %${loop}, label %${next}`);
@@ -4853,6 +4869,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store i64 ${step}, ptr ${counter}`);
     emit(`br label %${test}`);
     startBlock(end);
+    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
     return node;
   }
 
@@ -5415,6 +5432,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   function jsonEntries(w: string, map: string, t: MapType, written: Type) {
     const entry = entryType(t);
     jsonRaw(w, "{");
+    const order = dictOrder(t, map);
     const [counter, wrote] = [alloca("i64"), alloca("i1")];
     emit(`store i64 0, ptr ${counter}`);
     emit(`store i1 false, ptr ${wrote}`);
@@ -5428,7 +5446,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`br i1 ${more}, label %${live}, label %${end}`);
     startBlock(live);
     const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    emit(`${at} = ${entryAt(map, order, i)}`);
     emit(`${state} = load i64, ptr ${at}`);
     emit(`${alive} = icmp eq i64 ${state}, 1`);
     emit(`br i1 ${alive}, label %${loop}, label %${next}`);
@@ -5456,6 +5474,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store i64 ${step}, ptr ${counter}`);
     emit(`br label %${test}`);
     startBlock(end);
+    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
     jsonRaw(w, "}");
   }
 

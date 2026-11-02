@@ -58,6 +58,8 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_map_insert(ptr, i64, ptr)",
   "declare ptr @fsh_rt_map_remove(ptr, i64)",
   "declare ptr @fsh_rt_map_at(ptr, i64)",
+  "declare ptr @fsh_rt_dict_order(ptr)",
+  "declare ptr @fsh_rt_dict_at(ptr, ptr, i64)",
   "declare i64 @fsh_rt_map_used(ptr)",
   "declare i64 @fsh_rt_map_size(ptr)",
   "declare void @fsh_rt_map_clear(ptr)",
