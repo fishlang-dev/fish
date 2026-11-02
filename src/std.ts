@@ -4067,6 +4067,30 @@ export function sha1(data: string | u8[]): u8[] {
 export function sha256(data: string | u8[]): u8[] {
   return shaOf(256, bytesOf(data));
 }
+
+// RFC 2104's HMAC over either hash, both of which take 64-byte blocks.
+export function hmac(algorithm: "sha1" | "sha256", key: string | u8[], data: string | u8[]): u8[] {
+  const which: i64 = algorithm === "sha1" ? 1 : 256;
+  let k = bytesOf(key);
+  if (k.length > 64) k = shaOf(which, k);
+  let inner: u8[] = [];
+  let outer: u8[] = [];
+  for (let i: usize = 0; i < 64; i++) {
+    const b: u8 = i < k.length ? k[i] : 0;
+    inner.push(b ^ 0x36);
+    outer.push(b ^ 0x5C);
+  }
+  for (const b of bytesOf(data)) inner.push(b);
+  for (const b of shaOf(which, inner)) outer.push(b);
+  return shaOf(which, outer);
+}
+
+// Node's one-shot crypto.hash, in the text encodings it gives; base64url is unpadded, as there.
+export function hash(algorithm: "sha1" | "sha256", data: string | u8[], encoding: "hex" | "base64" | "base64url" = "hex"): string {
+  const digest = shaOf(algorithm === "sha1" ? 1 : 256, bytesOf(data));
+  if (encoding === "hex") return digest.toHex();
+  return encoding === "base64" ? digest.toBase64() : digest.toBase64({ alphabet: "base64url", omitPadding: true });
+}
 `,
   // The checker gives these their meaning, as each takes values of any type; a rest parameter
   // keeps them from being used as values.

@@ -97,3 +97,42 @@ function main() {
   console.log(crypto.sha256(million).toHex());
   console.log(crypto.sha1("x").length, crypto.sha256("x").length, crypto.sha256("é").toHex() === crypto.sha256(new TextEncoder().encode("é")).toHex());
 }
+// case: crypto_hmac
+// expect: b617318655057264e28bc0b6fb378c8ef146be00
+// expect: effcdf6ae5eb2fa2d27416d5f184df9c259a7c79
+// expect: aa4ae5e15272d00e95705637ce8a3b55ed402112
+// expect: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+// expect: 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+// expect: 60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54
+// expect: 20 32
+// RFC 2202's cases 1, 2 and 6 for SHA-1 and RFC 4231's cases 1, 2 and 6 for SHA-256; case 6 keys
+// are longer than a block, so they're hashed first.
+function main() {
+  const key: u8[] = new Array(20).fill(0x0b as u8);
+  const long: u8[] = new Array(80).fill(0xaa as u8);
+  const longer: u8[] = new Array(131).fill(0xaa as u8);
+  console.log(crypto.hmac("sha1", key.clone(), "Hi There").toHex());
+  console.log(crypto.hmac("sha1", "Jefe", "what do ya want for nothing?").toHex());
+  console.log(crypto.hmac("sha1", long, "Test Using Larger Than Block-Size Key - Hash Key First").toHex());
+  console.log(crypto.hmac("sha256", key, "Hi There").toHex());
+  console.log(crypto.hmac("sha256", "Jefe", new TextEncoder().encode("what do ya want for nothing?")).toHex());
+  console.log(crypto.hmac("sha256", longer, "Test Using Larger Than Block-Size Key - Hash Key First").toHex());
+  console.log(crypto.hmac("sha1", "", "").length, crypto.hmac("sha256", [], []).length);
+}
+// case: crypto_hash
+// expect: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+// expect: qZk+NkcGgWq6PiVxeFDCbJzQ2J0=
+// expect: 47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU true
+// Node's crypto.hash: hex by default, then base64, and unpadded base64url, here as imports.
+import { hash, sha256 } from "node:crypto";
+function main() {
+  console.log(hash("sha256", "abc"));
+  console.log(hash("sha1", new TextEncoder().encode("abc"), "base64"));
+  console.log(hash("sha256", "", "base64url"), hash("sha256", "x", "hex") === sha256("x").toHex());
+}
+// case: crypto_hash_algorithm
+// error: argument of type '"md5"' is not assignable to parameter of type '"sha1" | "sha256"'
+import { hash } from "node:crypto";
+function main() {
+  console.log(hash("md5", "abc"));
+}
