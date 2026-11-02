@@ -1,4 +1,4 @@
-import { checkOverrideModifiers, checkOverrides, copySelfTyped, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrideModifiers, checkOverrides, copySelfTyped, embed, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
 import type { Tables } from "./compilation.ts";
 import { nextId } from "./nodes.ts";
 import type { Arenas, ClassId } from "./arenas.ts";
@@ -85,6 +85,13 @@ export class Registry {
       return;
     }
     if (path.has(c.type)) throw new CompileError("E0704", `class '${this.typing.rec(c.type).name}' embeds itself through 'extends'`, c.node.start, c.node.end);
+    if ((c.baseName === "Map" || c.baseName === "Set") && !this.host.classes.has(c.baseName) && !this.host.templates.has(c.baseName)) {
+      embed(this.host.tables, c, c.baseName);
+      checkOverrideModifiers(this.arenas, this.typing, c);
+      implementAbstracts(this.host.tables, c);
+      this.host.registryState.linked.add(c.type);
+      return;
+    }
     const base = this.baseOf(c, c.baseName);
     // A Rust type's value is Rust's, behind its handle, with no fields to embed.
     const rust = rustClassOf(this.typing, base.type);

@@ -253,6 +253,10 @@ export type RecordOf<T> = T extends { readonly __record?: infer R } ? Exclude<R,
 // The name a `[Symbol.iterator]` method takes, which no identifier or member read can spell.
 export const ITERATOR = "[Symbol.iterator]";
 
+// A Map's and a Set's methods.
+export const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "keys", "values", "entries", "forEach"]);
+export const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
+
 // The ids the primitives key tables by, below every type record's.
 const PRIMITIVES: Extract<Type, string>[] = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "boolean", "void", "null", "never", "string", "bigint"];
 const PRIMITIVE_IDS = new Map(PRIMITIVES.map((p, i): [string, usize] => [p, i + 1]));

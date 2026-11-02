@@ -3304,7 +3304,7 @@ class BodyChecker implements Context, Outer, Sight {
           return;
         }
         // A class with a `[Symbol.iterator]` method is looped over through what it gives.
-        const iterator = this.exprs().iteratorCall(s.right, object);
+        const iterator = this.exprs().iteratorCall(s.right, object) ?? this.exprs().embeddedIterated(s.right, object);
         if (iterator) return this.statement(this.cx.rewrites.replace(s, { ...s, right: iterator }));
         // A loop borrows what it reads from as long as it runs, so it can't read a part of a
         // value made for the statement, which is gone before the first pass.

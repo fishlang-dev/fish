@@ -3,7 +3,7 @@ import { CompileError } from "./diag.ts";
 import type { RustName, RustTables } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { rebuiltParam } from "./rebuild.ts";
-import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts";
+import { MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
@@ -111,6 +111,9 @@ export type ClassInfo = {
   overrides: Overridden[];
   // The class this one embeds and delegates to, named by `extends`.
   baseName: string | undefined;
+  // A Map or Set named by `extends`, held in the field `EMBEDDED`, which members the class and
+  // its bases don't declare are delegated to.
+  embedded?: "Map" | "Set";
   base?: ClassId;
   // The initializers and parameter properties a derived constructor runs after `super(...)`.
   prelude: Stmt[];
@@ -481,6 +484,36 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   constructor.body = [{ id: nextId(ids), kind: "expr", expr: call, ...at }, ...c.prelude];
 }
 
+// The field a class extending Map or Set holds its collection in: a private name no source can
+// spell, so printing and JSON leave it out.
+export const EMBEDDED = "#embedded base";
+
+// Links a class to the Map or Set it extends, held in the field `EMBEDDED`. Its constructor's
+// `super(...)` makes the collection, as `new Map<K, V>(...)` would; without a constructor of
+// its own it makes an empty one.
+export function embed(tables: Tables, c: ClassInfo, kind: "Map" | "Set") {
+  const { arenas, ids, prologues } = tables;
+  const named = c.node.extends!;
+  const at = { start: named.start, end: named.end };
+  const typeArgs = named.kind === "instantiation" ? named.typeArgs : [];
+  c.embedded = kind;
+  c.fields.unshift({ name: EMBEDDED, type: { id: nextId(ids), kind: "ref", name: kind, args: typeArgs, ...at }, init: undefined, access: "public", readonly: false, ...at });
+  c.required.add(EMBEDDED);
+  const made = (args: Expr[], s: Span): Stmt => assignField(ids, EMBEDDED, { id: nextId(ids), kind: "new", callee: { id: nextId(ids), kind: "ident", name: kind, ...at }, typeArgs, args, start: s.start, end: s.end }, s);
+  const constructor = arenas.bodyOf(c.constructor);
+  if (!c.node.members.some((m) => m.kind === "constructor")) {
+    constructor.body = [made([], at), ...c.prelude];
+    return;
+  }
+  const written = constructor.body.slice(c.prelude.length);
+  const defaults = written.filter((s) => prologues.has(s));
+  const [first, ...rest] = written.slice(defaults.length);
+  if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
+    throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", constructor.start, constructor.end);
+  }
+  constructor.body = [...defaults, made(first.expr.args, first), ...c.prelude, ...rest];
+}
+
 // The names a type, or the types inside a parameter or statements, refer to without type arguments.
 function refNames(t: TypeNode | Param | Stmt[] | undefined): string[] {
   const found: string[] = [];
@@ -563,15 +596,17 @@ export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
 export function checkOverrideModifiers(arenas: Arenas, typing: Typing, c: ClassInfo) {
   const name = typing.rec(c.type).name;
   for (const o of c.overrides) {
-    if (c.baseName === undefined) throw new CompileError("E0704", `'${o.name}' can't be marked 'override': class '${name}' doesn't extend another class`, o.start, o.end);
-    if (!hasMember(arenas, arenas.classOf(c.base), o)) {
-      throw new CompileError("E0704", `'${o.name}' can't be marked 'override': '${c.baseName}' has no ${o.static ? "static " : ""}member '${o.name}' for it to replace`, o.start, o.end);
+    if (c.baseName === undefined && !c.embedded) throw new CompileError("E0704", `'${o.name}' can't be marked 'override': class '${name}' doesn't extend another class`, o.start, o.end);
+    if (!hasMember(arenas, c, o)) {
+      throw new CompileError("E0704", `'${o.name}' can't be marked 'override': '${c.embedded ?? c.baseName}' has no ${o.static ? "static " : ""}member '${o.name}' for it to replace`, o.start, o.end);
     }
   }
 }
 
-function hasMember(arenas: Arenas, base: ClassInfo | undefined, o: Overridden): boolean {
-  for (let b = base; b; b = arenas.classOf(b.base)) {
+function hasMember(arenas: Arenas, c: ClassInfo, o: Overridden): boolean {
+  for (let b = c.embedded ? c : arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
+    if (b.embedded && !o.static && (o.name === "size" || (b.embedded === "Set" ? SET_METHODS : MAP_METHODS).has(o.name))) return true;
+    if (b === c) continue;
     const found = o.static
       ? b.statics.has(o.name) || b.statics.has(`get ${o.name}`) || b.statics.has(`set ${o.name}`) || b.staticFields.has(o.name)
       : b.methods.has(o.name) || b.getters.has(o.name) || b.setters.has(o.name) || b.fields.some((f) => f.name === o.name);
