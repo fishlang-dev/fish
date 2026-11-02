@@ -13,26 +13,36 @@ import { WeakNodeMap, NodeMap, NodeSet, forEachChild, type AnyNode } from "./nod
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
 
-// A bound must be an interface or an object type. Classes are nominal and embed rather than
-// subclass, so a class bound could only ever mean that one class. In an instance, each
-// parameter also holds the concrete type `concrete` gives it.
+// A bound is an interface or an object type, offering its members, or a type naming values, as
+// `K extends "a" | "b"` does. Classes are nominal and embed rather than subclass, so a class
+// bound could only ever mean that one class. In an instance, each parameter also holds the
+// concrete type `concrete` gives it.
 export function placeholders(typing: Typing, params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type, concrete?: (name: string) => Type): Map<string, Type> {
   const scope = new Map<string, Type>();
   for (const p of params) {
     if (p.modifiers.length > 0) throw new CompileError("E0801", `'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);
     if (p.default) throw new CompileError("E0801", "default type arguments are not supported yet", p.default.start, p.default.end);
     let bound: ObjectType | InterfaceType | undefined;
+    let within: Type | undefined;
     if (p.constraint) {
       const t = resolve(p.constraint, scope);
       const r = typeof t === "string" ? undefined : typing.rec(t);
-      if (r?.kind !== "interface" && r?.kind !== "object") {
-        throw new CompileError("E0107", `a type parameter's bound must be an interface or an object type, not '${typing.show(t)}'`, p.constraint.start, p.constraint.end);
-      }
-      bound = t as ObjectType | InterfaceType;
+      if (r?.kind === "interface" || r?.kind === "object") bound = t as ObjectType | InterfaceType;
+      else if (valueBound(typing, t)) within = t;
+      else throw new CompileError("E0107", `a type parameter's bound must be an interface, an object type, or a union, primitive, literal or brand type, not '${typing.show(t)}'`, p.constraint.start, p.constraint.end);
     }
-    scope.set(p.name, concrete ? typing.wrapped(p.name, bound, concrete(p.name)) : typing.typeParameter(p.name, bound));
+    scope.set(p.name, concrete ? typing.wrapped(p.name, bound, concrete(p.name)) : typing.typeParameter(p.name, bound, within));
   }
   return scope;
+}
+
+// A bound naming values rather than members: a primitive, literal, pattern or brand, or a union
+// with no interface or type parameter in it.
+function valueBound(typing: Typing, t: Type): boolean {
+  if (typeof t === "string") return t !== "void" && t !== "never";
+  const r = typing.rec(t);
+  if (r.kind === "union") return r.members.every((m) => { const k = typing.recOf(m)?.kind; return k !== "interface" && k !== "param"; });
+  return r.kind === "literal" || r.kind === "pattern" || r.kind === "brand";
 }
 
 // A generic class's placeholders, one set shared by its definition check and its members,
@@ -890,7 +900,7 @@ function heldInArgument(f: Body, name: string): boolean {
 // The generic classes' instances so far, kept by the host between uses.
 export class GenericClassesState {
   // Where each instance was first used, and each template's instances by their arguments.
-  uses = new TypeMap<ClassType, { c: ClassId; at: Span }>();
+  uses = new TypeMap<ClassType, { c: ClassId; at: Span; derived?: boolean }>();
   instancesOf = new NodeMap<ClassNode, Map<string, ClassId>>();
   shapesOf = new NodeMap<ClassNode, Set<string>>();
   // An instance made while the resolver is still being built waits for `start` to check its
@@ -926,17 +936,17 @@ export class GenericClasses {
     this.host.templates.forEach((t) => this.host.genericClassesState.defined.set(t.name, this.classInstance(t, [...classPlaceholders(this.host.tables, t.typeParams, (n, s) => this.host.withScope(s, () => this.host.resolveType(n))).values()], t).classId));
   }
 
-  classNamed(this: Mut<this>, name: string, args: Type[], at: Span): ClassType | undefined {
+  classNamed(this: Mut<this>, name: string, args: Type[], at: Span, derived = false): ClassType | undefined {
     const c = this.host.tables.arenas.classOf(this.host.classes.get(name));
     if (c && args.length > 0) throw new CompileError("E0106", `type '${name}' is not generic`, at.start, at.end);
     if (c) return c.type;
     const template = this.host.templates.get(name);
-    return template && this.classInstance(template, args, at).type;
+    return template && this.classInstance(template, args, at, derived).type;
   }
 
   // The class a generic class's type arguments make, declared on first use, checked for its
   // bounds, and named like `Box<i64>`.
-  private classInstance(this: Mut<this>, template: ClassNode & { name: string }, given: Type[], at: Span): ClassInfo {
+  private classInstance(this: Mut<this>, template: ClassNode & { name: string }, given: Type[], at: Span, derived = false): ClassInfo {
     if (given.some((a) => {
       const r = typeof a === "string" ? undefined : this.typing.rec(a);
       return (r?.kind === "function" || r?.kind === "closure") && !!r.generic;
@@ -963,15 +973,17 @@ export class GenericClasses {
     byKey.set(key, c.classId);
     shapes.add(shape);
     this.host.register(c);
-    this.host.genericClassesState.uses.set(c.type, { c: c.classId, at });
+    this.host.genericClassesState.uses.set(c.type, { c: c.classId, at, derived });
     if (this.host.genericClassesState.ready) this.bounded(c);
     return c;
   }
 
   // A generic class's type arguments must satisfy their bounds, checked where it is first used.
+  // One made from another's arguments, as lowering makes one holding a brand's base or a member
+  // views its class through its type parameters, was checked as that other.
   private bounded(c: ClassInfo) {
-    const { at } = this.host.genericClassesState.uses.get(c.type)!;
-    this.host.withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, this.host.resolveType(p.constraint), this.host.members(), at)));
+    const { at, derived } = this.host.genericClassesState.uses.get(c.type)!;
+    if (!derived) this.host.withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, this.host.resolveType(p.constraint), this.host.members(), at)));
     this.host.layout(c);
   }
 

@@ -4521,7 +4521,7 @@ export class Expressions implements Union {
     const type = this.linked(callee) ? this.unwrapped(object, callee.optional) : this.value(object);
     // A method called through a reference gets the pointer itself.
     const r = this.recOf(type);
-    return this.typing.unfold(r?.kind === "ref" ? r.to : type);
+    return this.typing.unfold(r?.kind === "ref" ? r.to : this.plainOf(type));
   }
 
   // Whether a field read or method call is a link of an optional chain: written `?.`, or after
@@ -5331,49 +5331,15 @@ export class Expressions implements Union {
       // an integer.
       case "as": {
         if (isConstAssertion(e)) return this.constAssertion(e.expr);
-        const written = this.ctx.resolveType(e.type);
-        // A function type or a `Promise<T>` makes the value a stored one, as a declared variable's does.
-        const to = this.typing.stored(written);
-        if (to !== written) this.expect(e.expr, to);
-        const from = this.operand(e.expr);
-        // A raw pointer converts to another, or to and from an address, only inside `unsafe`.
-        const pointer = (t: Type) => typeof t !== "string" && this.typing.rec(t).kind === "pointer";
-        if (pointer(to) || pointer(from)) {
-          this.needsUnsafe("'as' with a raw pointer", e);
-          if (!((pointer(to) && (pointer(from) || isInteger(from))) || (to === "usize" && pointer(from)))) {
-            throw new CompileError("E1006", `a raw pointer converts only to another raw pointer or a 'usize', not '${this.typing.show(pointer(to) ? from : to)}'`, e.start, e.end);
-          }
-          return to;
+        const resolved = this.ctx.resolveType(e.type);
+        // A type parameter bounded by a union or primitive is reached as its bound is at its
+        // definition, and as its argument in each instance.
+        const plain = this.plainOf(resolved);
+        if (plain !== resolved) {
+          this.converted(e, plain);
+          return resolved;
         }
-        // A brand is made and taken apart with 'as', between its base and what converts to it.
-        const [fb, tb] = [this.typing.unbranded(from), this.typing.unbranded(to)];
-        if (fb !== from || tb !== to) {
-          if (tb !== to && this.adapt(e.expr, tb)) return to;
-          if (isNumeric(fb) && isNumeric(tb)) return to;
-          if (fb === tb || this.typing.fits(fb, tb)) {
-            if (from !== tb) this.coerce(e.expr, from, tb, "");
-            return to;
-          }
-          throw new CompileError("E0111", `'${this.typing.show(from)}' can't be converted to '${this.typing.show(to)}' with 'as'`, e.start, e.end);
-        }
-        // A bigint becomes a number with 'as', truncated to an integer type's bits as
-        // 'BigInt.asIntN' does; a number becomes a bigint only through 'BigInt(x)'.
-        if (to === "bigint" && from !== "bigint") throw new CompileError("E0111", `'${this.typing.show(from)}' converts to a bigint with 'BigInt(x)', not 'as'`, e.start, e.end);
-        if (from === "bigint" && (isNumeric(to) || to === "bigint")) return to;
-        // Between other types, 'as' only widens, which nothing needs to check at run time; a
-        // narrower type is reached by a check that narrows.
-        if (!isNumeric(to) || !isNumeric(from)) {
-          // A reference widened to what it points to would be a copy nobody wrote.
-          const read = this.types.get(e.expr) ?? from;
-          if ((this.isRefType(from) || this.isRefType(read)) && !this.typing.isCopy(this.typing.lower(from)) && !this.isRefType(to) && !this.typing.optionRef(to)) throw new CompileError("E0202", `'as' can't take the value out of '${this.typing.show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
-          if (!(from === "boolean" && isInteger(to)) && (this.typing.fits(from, to) || this.typing.fits(from, written))) {
-            this.coerce(e.expr, from, to, "");
-            return to;
-          }
-          if (this.typing.fits(to, from)) throw new CompileError("E0111", `'as' can't narrow '${this.typing.show(from)}' to '${this.typing.show(to)}', since nothing would check it while the program runs; narrow it with a check, like 'typeof', 'instanceof' or '!== null'`, e.start, e.end);
-          if (!(from === "boolean" && isInteger(to))) throw new CompileError("E0111", `'${this.typing.show(from)}' can't be converted to '${this.typing.show(to)}' with 'as', since neither fits the other`, e.start, e.end);
-        }
-        return to;
+        return this.converted(e, resolved);
       }
       case "this":
         if (!this.self) throw new CompileError("E0708", "'this' can only be used inside a class", e.start, e.end);
@@ -5975,6 +5941,11 @@ export class Expressions implements Union {
       this.coercions.delete(e);
       this.coerce(e, held.of, to, message);
       if (!this.coercions.has(e)) this.coercions.set(e, held.of);
+      return;
+    }
+    // At a definition, a type parameter bounded by a union or primitive meets types as its bound.
+    if (held?.kind === "param" && held.within && type !== to) {
+      this.coerce(e, held.concrete!, to, message);
       return;
     }
     // A value meeting a recursive type meets the type it stands for, then moves into a block.
@@ -7054,9 +7025,73 @@ export class Expressions implements Union {
     return e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "(...)";
   }
 
-  // An operator works on a literal's base type, so `1` adds like any i64.
+  // Whether a type parameter stands for a plain value, as one bounded by a union or primitive
+  // does: a primitive, literal, pattern or brand, or a union of them.
+  private valueParam(r: ParamRecord): boolean {
+    const plain = (t: Type): boolean => {
+      const k = this.recOf(t)?.kind;
+      return k === undefined || k === "literal" || k === "pattern" || k === "brand";
+    };
+    const c = this.recOf(r.concrete);
+    return r.within === true || (c?.kind === "union" ? c.members.every(plain) : plain(r.concrete!));
+  }
+
+  // `e as written`: a conversion between numbers or into and out of a brand, or a widening.
+  private converted(this: Mut<this>, e: Extract<Expr, { kind: "as" | "satisfies" }>, written: Type): Type {
+    // A function type or a `Promise<T>` makes the value a stored one, as a declared variable's does.
+    const to = this.typing.stored(written);
+    if (to !== written) this.expect(e.expr, to);
+    const from = this.operand(e.expr);
+    // A raw pointer converts to another, or to and from an address, only inside `unsafe`.
+    const pointer = (t: Type) => typeof t !== "string" && this.typing.rec(t).kind === "pointer";
+    if (pointer(to) || pointer(from)) {
+      this.needsUnsafe("'as' with a raw pointer", e);
+      if (!((pointer(to) && (pointer(from) || isInteger(from))) || (to === "usize" && pointer(from)))) {
+        throw new CompileError("E1006", `a raw pointer converts only to another raw pointer or a 'usize', not '${this.typing.show(pointer(to) ? from : to)}'`, e.start, e.end);
+      }
+      return to;
+    }
+    // A brand is made and taken apart with 'as', between its base and what converts to it.
+    const [fb, tb] = [this.typing.unbranded(from), this.typing.unbranded(to)];
+    if (fb !== from || tb !== to) {
+      if (tb !== to && this.adapt(e.expr, tb)) return to;
+      if (isNumeric(fb) && isNumeric(tb)) return to;
+      if (fb === tb || this.typing.fits(fb, tb)) {
+        if (from !== tb) this.coerce(e.expr, from, tb, "");
+        return to;
+      }
+      throw new CompileError("E0111", `'${this.typing.show(from)}' can't be converted to '${this.typing.show(to)}' with 'as'`, e.start, e.end);
+    }
+    // A bigint becomes a number with 'as', truncated to an integer type's bits as
+    // 'BigInt.asIntN' does; a number becomes a bigint only through 'BigInt(x)'.
+    if (to === "bigint" && from !== "bigint") throw new CompileError("E0111", `'${this.typing.show(from)}' converts to a bigint with 'BigInt(x)', not 'as'`, e.start, e.end);
+    if (from === "bigint" && (isNumeric(to) || to === "bigint")) return to;
+    // Between other types, 'as' only widens, which nothing needs to check at run time; a
+    // narrower type is reached by a check that narrows.
+    if (!isNumeric(to) || !isNumeric(from)) {
+      // A reference widened to what it points to would be a copy nobody wrote.
+      const read = this.types.get(e.expr) ?? from;
+      if ((this.isRefType(from) || this.isRefType(read)) && !this.typing.isCopy(this.typing.lower(from)) && !this.isRefType(to) && !this.typing.optionRef(to)) throw new CompileError("E0202", `'as' can't take the value out of '${this.typing.show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
+      if (!(from === "boolean" && isInteger(to)) && (this.typing.fits(from, to) || this.typing.fits(from, written))) {
+        this.coerce(e.expr, from, to, "");
+        return to;
+      }
+      if (this.typing.fits(to, from)) throw new CompileError("E0111", `'as' can't narrow '${this.typing.show(from)}' to '${this.typing.show(to)}', since nothing would check it while the program runs; narrow it with a check, like 'typeof', 'instanceof' or '!== null'`, e.start, e.end);
+      if (!(from === "boolean" && isInteger(to))) throw new CompileError("E0111", `'${this.typing.show(from)}' can't be converted to '${this.typing.show(to)}' with 'as', since neither fits the other`, e.start, e.end);
+    }
+    return to;
+  }
+
+  // An operator works on a literal's base type, so `1` adds like any i64. A type parameter
+  // bounded by a union or primitive is used as its bound at its definition, and in an instance as
+  // its argument.
   private operand(this: Mut<this>, e: Expr): Type {
-    return this.widen(e, this.read(e));
+    return this.widen(e, this.plainOf(this.read(e)));
+  }
+
+  private plainOf(this: Mut<this>, t: Type): Type {
+    const r = this.recOf(t);
+    return r?.kind === "param" && r.concrete && this.valueParam(r) ? (r.within ? r.concrete : this.typing.lowerKeepingBrands(t)) : t;
   }
 
   declares(this: Mut<this>, c: ClassType, name: string): boolean {

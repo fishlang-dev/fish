@@ -9424,7 +9424,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
           emit(`${differ} = xor i1 ${same}, true`);
           return differ;
         }
-        if (typeof type !== "string") return String(e.op === "===");
+        // Two literals, as a type argument's literal meeting another, are equal by value.
+        if (typeof type !== "string") {
+          const [l, r] = [recOf(typing.lower(valueType(e.left))), recOf(typing.lower(valueType(e.right)))];
+          const same = l?.kind !== "literal" || r?.kind !== "literal" || l.value === r.value;
+          return String(same === (e.op === "==="));
+        }
         const result = temp();
         if (isFloat(type)) {
           emit(`${result} = fcmp ${FLOAT_COMPARISON[e.op]} ${llvm(type)} ${a}, ${b}`);
