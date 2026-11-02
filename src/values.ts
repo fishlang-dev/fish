@@ -4652,6 +4652,9 @@ export class Expressions implements Union {
     if (!test && !empty(e.left) && !empty(e.right)) return false;
     const member = this.rewrites.current(test ? test.operand : empty(e.right) ? e.left : e.right);
     if (member.kind !== "member" || member.optional || this.chained(member.object)) return false;
+    // A class's or an enum's name reads a static, not a method.
+    if (member.object.kind === "ident" && !this.ctx.lookup(member.object.name)) return false;
+    if (member.object.kind === "ident") this.ctx.exprsState.objects.add(member.object);
     const object = this.value(member.object);
     const r = this.recOf(object);
     const t = this.typing.unfold(r?.kind === "ref" ? r.to : this.plainOf(object));

@@ -240,3 +240,24 @@ function main(): void {
     d.onClose();
   }
 }
+// case: optionalmethods_moved_argument
+// expect: hi a
+// expect: null
+// expect: hi a
+// expect: null
+interface Handler { greet?(s: string): string }
+class A { greet(s: string): string { return s + " a"; } }
+class B {}
+function greet(h: Handler): string | null {
+  const s = "h" + "i";
+  return h.greet?.(s);
+}
+function main(): void {
+  console.log(greet(new A()));
+  console.log(greet(new B()));
+  const hs: Dyn<Handler>[] = [new A(), new B()];
+  for (const h of hs) {
+    const s = "h" + "i";
+    console.log(h.greet?.(s));
+  }
+}

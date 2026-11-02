@@ -16,8 +16,8 @@ export const bindingKey = (id: LocalId): string => String(id);
 // Whether a key is a field path's, or `this` as the root of some, rather than a binding's.
 export const isPath = (key: string): boolean => !/^\d+$/.test(key);
 export type Guard = { yes: Facts; no: Facts };
-// What a check proves of an interface's optional method on a value is known under its own key
-// below the value's, so a change to the value forgets it; that the method is there is all it says.
+// That a check found an interface's optional method on a value is kept under a key below the
+// value's, so a change to the value forgets it. The type stored there only marks it.
 export const presentKey = (root: string, name: string): string => `${root}.${name}()`;
 
 // What `typeof` says for a value of each type. Every sized number is "number", as in
