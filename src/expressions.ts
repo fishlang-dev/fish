@@ -370,7 +370,7 @@ function chain(c: Mut<Cursor>, head: Expr, calls: boolean): Expr {
         e = { id: nextId(c.ids), kind: "instantiation", expr: e, typeArgs: written, start, end: c.end() };
       }
     } else if (atTemplate(c)) {
-      const quoted = template(c);
+      const quoted = template(c, e.kind === "member" && e.name === "raw" && !e.optional && e.object.kind === "ident" && e.object.name === "String");
       const quotedEnd: usize = quoted.end;
       e = { id: nextId(c.ids), kind: "tagged", tag: e, typeArgs: [], template: quoted, start, end: quotedEnd };
     } else if (c.at("!") && !t.newlineBefore) {
@@ -426,9 +426,11 @@ function newExpression(c: Mut<Cursor>): Expr {
 
 // A template's pieces, with each substitution parsed by `part`; shared with template literal types.
 /** @throws {CompileError} */
-export function templateParts<T>(c: Mut<Cursor>, part: Parse<T>): { quasis: string[]; raw: string[]; parts: T[]; start: usize; end: usize } {
+// An invalid escape is an error unless `rawOnly`, for a template only `String.raw` reads.
+export function templateParts<T>(c: Mut<Cursor>, part: Parse<T>, rawOnly = false): { quasis: string[]; raw: string[]; parts: T[]; start: usize; end: usize } {
   const first = c.next();
   const start = first.start;
+  if (first.invalid && !rawOnly) throw first.invalid;
   let quasis = [first.text];
   let raw = [first.raw ?? ""];
   let parts: T[] = [];
@@ -438,6 +440,7 @@ export function templateParts<T>(c: Mut<Cursor>, part: Parse<T>): { quasis: stri
     piece = c.token();
     if (piece.kind !== "templateMiddle" && piece.kind !== "templateTail") throw c.error("expected '}'");
     const next = c.next();
+    if (next.invalid && !rawOnly) throw next.invalid;
     quasis.push(next.text);
     raw.push(next.raw ?? "");
   }
@@ -445,8 +448,8 @@ export function templateParts<T>(c: Mut<Cursor>, part: Parse<T>): { quasis: stri
 }
 
 /** @throws {CompileError} */
-function template(c: Mut<Cursor>): Expr {
-  const { quasis, raw, parts, start, end } = templateParts(c, (c) => allowingIn(c, true, (c) => sequence(c)));
+function template(c: Mut<Cursor>, rawOnly = false): Expr {
+  const { quasis, raw, parts, start, end } = templateParts(c, (c) => allowingIn(c, true, (c) => sequence(c)), rawOnly);
   return { id: nextId(c.ids), kind: "template", quasis, raw, exprs: parts, start, end };
 }
 
