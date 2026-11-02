@@ -22,7 +22,7 @@ function compare(name: string, imports: string, body: string, setup: (dir: strin
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: fishDir, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync } = fs; (() => {${nodeBody}\n})();`;
+  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants } = fs; (() => {${nodeBody}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: nodeDir });
   expect(fish.stderr.toString()).toBe("");
   expect(node.stderr.toString()).toBe("");
@@ -99,4 +99,18 @@ test("a failing realpathSync names the part node's walk stops at", () => {
     symlinkSync("loop2", join(dir, "loop1"));
     symlinkSync("loop1", join(dir, "loop2"));
   });
+});
+
+test("mkdirSync makes a directory, or with recursive its missing parents, as node's does", () => {
+  compare("mkdir", `import { mkdirSync, statSync, realpathSync } from "node:fs";`, `
+  console.log(mkdirSync("a") === undefined, mkdirSync("x/y/z", { recursive: true }), mkdirSync("x/y", { recursive: true }) === undefined);
+  console.log(mkdirSync("p/q/", { recursive: true }), mkdirSync("r/./s/../t", { recursive: true }), statSync("r/s/../t").isDirectory());
+  console.log(mkdirSync(realpathSync(".") + "/abs/b", { recursive: true }));
+  mkdirSync("m1", { mode: 0o700 });
+  mkdirSync("m2", 0o750);
+  console.log(statSync("m1").mode & 0o777, statSync("m2").mode & 0o777);
+  const cases: [string, boolean][] = [["a", false], ["f", false], ["x/missing/y", false], ["f", true], ["f/q/r", true], ["", false], ["", true]];
+  for (const [p, recursive] of cases) {
+    try { mkdirSync(p, { recursive }); } catch (e) { console.log(e.message, e.code, e.syscall, e.path === p); }
+  }`, (dir) => writeFileSync(join(dir, "f"), "hi"));
 });

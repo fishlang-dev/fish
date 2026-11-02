@@ -4713,6 +4713,14 @@ export type RmOptions = { recursive?: boolean; force?: boolean };
 export function rmSync(path: string, options: RmOptions = {}): void throws IoError {
   pathRemove(path, options.recursive ?? false, options.force ?? false);
 }
+
+export type MakeDirectoryOptions = { recursive?: boolean; mode?: i64 };
+
+// The first directory made with recursive, as the prefix of path spells it; otherwise undefined.
+export function mkdirSync(path: string, options: MakeDirectoryOptions | i64 = {}): string | undefined throws IoError {
+  if (typeof options === "number") return dirMake(path, false, options);
+  return dirMake(path, options.recursive ?? false, options.mode ?? 0o777);
+}
 `,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;

@@ -6076,6 +6076,50 @@ int32_t fsh_rt_fs_mkdtemp(fsh_str *prefix, fsh_str **out, fsh_str **error) {
   return result;
 }
 
+// mkdirSync. With recursive, Node's MKDirpSync walk: a prefix missing its parent is retried after
+// the prefix cut at its last '/', so *out is the first directory made as that prefix spells it,
+// or NULL when every one existed. A failure names the path as given.
+int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str **out, fsh_str **error) {
+  *out = NULL;
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "mkdir", "");
+  size_t n = strlen(c), depth = 0;
+  for (size_t i = 0; i < n; i++) depth += c[i] == '/';
+  // Each pending prefix by its length; each ENOENT adds at most one, so the slashes bound them.
+  size_t *pending = fsh_rt_alloc((depth + 2) * sizeof(size_t)), count = 0;
+  pending[count++] = n;
+  char *at = fsh_rt_alloc(n + 1);
+  int failure = 0;
+  while (count > 0 && !failure) {
+    size_t length = pending[--count];
+    memcpy(at, c, length);
+    at[length] = 0;
+    int made = mkdir(at, (mode_t)mode) == 0 ? 0 : errno;
+    char *slash = strrchr(at, '/');
+    if (!recursive) failure = made;
+    else if (made == 0) {
+      if (!*out) *out = fsh_rt_str_from_cstring(at);
+    } else if (made == EACCES || made == ENOSPC || made == ENOTDIR || made == EPERM) failure = made;
+    else if (made == ENOENT && slash) {
+      pending[count++] = length;
+      pending[count++] = (size_t)(slash - at);
+    } else if (made != ENOENT || count == 0) {
+      struct stat st;
+      if (stat(at, &st) != 0) failure = errno;
+      else if (!S_ISDIR(st.st_mode)) failure = made == EEXIST && count > 0 ? ENOTDIR : EEXIST;
+    }
+  }
+  int32_t result = failure ? fsh_fs_failed(error, failure, "mkdir", c) : 1;
+  if (failure && *out) {
+    fsh_rt_str_release(*out);
+    *out = NULL;
+  }
+  fsh_rt_free(at);
+  fsh_rt_free(pending);
+  fsh_rt_free(c);
+  return result;
+}
+
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;

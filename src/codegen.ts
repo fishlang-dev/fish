@@ -6976,6 +6976,20 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         emit(`${status} = call i32 @fsh_rt_fs_rm(ptr ${path}, i32 ${recursive}, i32 ${force}, ptr ${parts})`);
         break;
       }
+      case "dirMake": {
+        const [recursive, out] = [temp(), alloca("ptr")];
+        emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);
+        emit(`${status} = call i32 @fsh_rt_fs_mkdir(ptr ${path}, i32 ${recursive}, i64 ${value(e.args[2]!)}, ptr ${out}, ptr ${parts})`);
+        read = () => {
+          const option = typing.unionType(["string", "null"]);
+          const [made, none, held] = [temp(), temp(), temp()];
+          emit(`${made} = load ptr, ptr ${out}`);
+          emit(`${none} = icmp eq ptr ${made}, null`);
+          emit(`${held} = select i1 ${none}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(made, "string", option)}`);
+          return held;
+        };
+        break;
+      }
     }
     const [failed, bad, good] = [temp(), label(), label()];
     emit(`${failed} = icmp ne i32 ${status}, 1`);
@@ -6986,7 +7000,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (!read) return undefined;
     const result = read();
     // Unused, as a statement, what a call gives is released when the statement ends.
-    const gives: Record<string, Type> = { processSpawn: typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), fileReadSync: typing.arrayType("u8"), dirRead: typing.arrayType("string"), pathReal: "string", dirTemp: "string" };
+    const gives: Record<string, Type> = { processSpawn: typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), fileReadSync: typing.arrayType("u8"), dirRead: typing.arrayType("string"), pathReal: "string", dirTemp: "string", dirMake: typing.unionType(["string", "null"]) };
     if (!types.has(e) && gives[name]) pending.push({ v: result, type: gives[name]! });
     return result;
   }
