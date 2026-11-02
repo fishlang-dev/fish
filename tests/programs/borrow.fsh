@@ -1111,3 +1111,80 @@ function first(h: Ref<H>): Ref<Box> {
   return (local.b as Box);
 }
 function main() { const h = new H(); console.log(first(h).items[0]!); }
+// case: borrow_reference_through_as_conditional_held
+// error: borrow_reference_through_as_conditional_held.fsh:7:3: error[E0203]: cannot change 'h' while 'r' borrows 'h.b' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; n: i64 = 1; }
+class H { b: Box = new Box(); k: Box = new Box(); }
+function main() {
+  let h = new H(); const c = h.b.n > 0;
+  const r: Ref<Box> = (c ? h.b : h.k) as Box;
+  h = new H();
+  console.log(r.items[0]!);
+}
+// case: borrow_reference_through_as_conditional_other_side
+// error: borrow_reference_through_as_conditional_other_side.fsh:7:3: error[E0203]: cannot change 'k' while 'r' borrows 'k.b' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; n: i64 = 1; }
+class H { b: Box = new Box(); k: Box = new Box(); }
+function main() {
+  let h = new H(); let k = new H(); const c = h.b.n > 0;
+  const r: Ref<Box> = (c ? h.b : k.b) as Box;
+  k = new H();
+  console.log(r.items[0]!);
+}
+// case: borrow_reference_through_satisfies_conditional_held
+// error: borrow_reference_through_satisfies_conditional_held.fsh:7:3: error[E0203]: cannot change 'h' while 'r' borrows 'h.b' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; n: i64 = 1; }
+class H { b: Box = new Box(); k: Box = new Box(); }
+function main() {
+  let h = new H(); const c = h.b.n > 0;
+  const r: Ref<Box> = (c ? h.b : h.k) satisfies Box;
+  h = new H();
+  console.log(r.items[0]!);
+}
+// case: borrow_reference_through_as_conditional_field_held
+// error: borrow_reference_through_as_conditional_field_held.fsh:7:3: error[E0203]: cannot change 'h' while 'r' borrows 'h.b.items' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; n: i64 = 1; }
+class H { b: Box = new Box(); k: Box = new Box(); }
+function main() {
+  let h = new H(); const c = h.b.n > 0;
+  const r: Ref<string[]> = (c ? h.b.items : h.k.items) as string[];
+  h = new H();
+  console.log(r[0]!);
+}
+// case: borrow_return_local_through_as_conditional
+// error: borrow_return_local_through_as_conditional.fsh:6:11: error[E0209]: can't return a reference to 'local.b', which belongs to this function and is gone once it returns
+class Box { items: string[] = ["a" + "b", "c" + "d"]; n: i64 = 1; }
+class H { b: Box = new Box(); k: Box = new Box(); }
+function first(h: Ref<H>): Ref<Box> {
+  const local = new H();
+  return (h.b.n > 0 ? local.b : local.k) as Box;
+}
+function main() { const h = new H(); console.log(first(h).items[0]!); }
+// case: borrow_mut_through_as_conditional_read
+// error: borrow_mut_through_as_conditional_read.fsh:7:15: error[E0203]: cannot use 'h.b.n' while 'r' borrows 'h.b' mutably and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; n: i64 = 1; }
+class H { b: Box = new Box(); k: Box = new Box(); }
+function main() {
+  let h = new H(); const c = h.b.n > 0;
+  const r: Mut<Box> = (c ? h.b : h.k) as Box;
+  console.log(h.b.n);
+  r.n = 2;
+}
+// case: borrow_through_as_conditional_runs
+// expect: 5 cd
+// expect: 5
+// expect: 2 5
+class Box { items: string[] = ["a" + "b", "c" + "d"]; n: i64 = 1; }
+class H { b: Box = new Box(); k: Box = new Box(); }
+function pick(h: Ref<H>, c: boolean): Ref<Box> { return (c ? h.b : h.k) as Box; }
+function bump(b: Mut<Box>) { b.n += 1; }
+function main() {
+  let h = new H();
+  h.k.n = 5;
+  console.log(pick(h, false).n, pick(h, false).items[1]!);
+  const c = h.b.n > 0;
+  const r: Ref<Box> = (c ? h.k : h.b) satisfies Box;
+  console.log(r.n);
+  bump((c ? h.b : h.k) as Box);
+  console.log(h.b.n, h.k.n);
+}

@@ -5744,6 +5744,16 @@ export class Expressions implements Union {
       if (type !== to) this.types.set(e, this.coercions.has(e.expr) ? this.coercions.get(e.expr)! : this.types.get(e.expr)!);
       return;
     }
+    // A widening `as` or a `satisfies` around a `?:` lends the place either side chooses, as the
+    // `?:` alone does; lent as a whole, it would lend a copy no borrow keeps track of.
+    if ((tr?.kind === "ref" || this.typing.optionRef(to)) && this.handsOnChoice(e)) {
+      const inner = this.rewrites.current((e as Extract<Expr, { kind: "as" | "satisfies" }>).expr);
+      this.coercions.delete(e);
+      this.coercions.delete(inner);
+      this.coerce(inner, this.types.get(inner)!, to, message);
+      this.types.set(e, this.coercions.get(inner) ?? this.types.get(inner)!);
+      return;
+    }
     // A recursive type's value meeting another type is the type it stands for, read out of
     // its block.
     const held = this.recOf(type);
@@ -5946,6 +5956,21 @@ export class Expressions implements Union {
   // a value holding references.
   private lends(a: Expr): boolean {
     return this.typing.holdsRef(this.coercions.get(a) ?? this.types.get(a)!);
+  }
+
+  // Whether an `as` that only widens, or a `satisfies`, hands on a `?:` its operand chooses, through
+  // any further such wrappers or `unsafe { }`.
+  private handsOnChoice(e: Expr): boolean {
+    if (e.kind === "as" && (isConstAssertion(e) || !this.widening(this.types.get(e)))) return false;
+    if (e.kind !== "as" && e.kind !== "satisfies") return false;
+    let inner = this.rewrites.current(e.expr);
+    while (inner.kind === "unsafe" || inner.kind === "satisfies" || (inner.kind === "as" && !isConstAssertion(inner) && this.widening(this.types.get(inner)))) inner = this.rewrites.current(inner.expr);
+    return inner.kind === "conditional";
+  }
+
+  // Whether an `as` to this type widens, rather than converting a number, a bigint or a pointer.
+  private widening(to: Type | undefined): boolean {
+    return to !== undefined && !isNumeric(to) && to !== "bigint" && this.recOf(to)?.kind !== "pointer";
   }
 
   // Whether an expression reaches into a variable or `this`, rather than being a temporary.
