@@ -265,7 +265,7 @@ export class TypeMap<K extends Type, V> {
   private table = new Map<usize, V>();
 
   constructor(entries?: Iterable<readonly [K, V]>) {
-    if (entries) for (const [type, value] of entries) this.set(type, value);
+    if (entries !== undefined) for (const [type, value] of entries) this.set(type, value);
   }
 
   get size(): usize {
@@ -319,7 +319,7 @@ export class TypeSet<K extends Type> {
   private table = new Set<usize>();
 
   constructor(types?: Iterable<K>) {
-    if (types) for (const t of types) this.add(t);
+    if (types !== undefined) for (const t of types) this.add(t);
   }
 
   get size(): usize {
