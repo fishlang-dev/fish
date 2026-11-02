@@ -460,3 +460,85 @@ function main(): void {
   if (s.kind === "let") console.log(s.decls.length, s.decls[1]!.start)
 }
 // expect: 2 2
+// case: recursive_named_members
+// A union of named members that refer back to it reads their shared fields, a field typed differently per member as the union of them.
+// expect: call
+// expect: 14
+// expect: member
+// expect: ident
+// expect: 2
+// expect: s
+// expect: 4
+// expect: if
+// expect: if(call) { expr } else member
+type Ident = { kind: "ident"; name: string; start: i64 };
+type Member = { kind: "member"; object: Expr; prop: string; start: i64 };
+type Call = { kind: "call"; callee: Expr; args: Expr[]; start: i64 };
+type Num = { kind: "num"; value: i64; start: string };
+type Expr = Ident | Member | Call | Num;
+type ExprStmt = { kind: "expr"; expr: Expr };
+type If = { kind: "if"; cond: Expr; then: Stmt; else?: Stmt };
+type Block = { kind: "block"; body: Stmt[] };
+type Stmt = ExprStmt | If | Block;
+
+function count(e: Expr): i64 {
+  if (e.kind === "member") return 1 + count(e.object);
+  if (e.kind === "call") {
+    let n = 1 + count(e.callee);
+    for (const a of e.args) n += a.kind === "num" ? 10 : 1;
+    return n;
+  }
+  return 1;
+}
+
+function kinds(s: Stmt): string {
+  if (s.kind === "if") {
+    const e = s.else;
+    const tail = e === undefined ? "" : " else " + kinds(e);
+    return "if(" + s.cond.kind + ") " + kinds(s.then) + tail;
+  }
+  if (s.kind === "block") {
+    let out = "{";
+    for (const t of s.body) out += " " + t.kind;
+    return out + " }";
+  }
+  return s.expr.kind;
+}
+
+function main() {
+  const x: Expr = { kind: "ident", name: "x", start: 0 };
+  const m: Expr = { kind: "member", object: x.clone(), prop: "y", start: 1 };
+  const c: Expr = { kind: "call", callee: m.clone(), args: [{ kind: "num", value: 3, start: "s" }, { kind: "ident", name: "z", start: 4 }], start: 2 };
+  console.log(c.kind);
+  console.log(count(c.clone()));
+  if (c.kind === "call") console.log(c.callee.kind);
+  if (c.kind === "call") { const f = c.callee.clone(); if (f.kind === "member") console.log(f.object.kind); }
+  const st = c.start;
+  console.log(st);
+  if (c.kind === "call") for (const a of c.args) console.log(a.start);
+  const s: Stmt = { kind: "if", cond: c.clone(), then: { kind: "block", body: [{ kind: "expr", expr: x.clone() }] }, else: { kind: "expr", expr: m.clone() } };
+  console.log(s.kind);
+  console.log(kinds(s));
+}
+// case: recursive_named_members_nested
+// expect: add
+// expect: neg
+// expect: -3
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; r: Expr };
+type Neg = { kind: "neg"; of: Expr };
+type Compound = Add | Neg;
+type Expr = Lit | Compound;
+function ev(e: Expr): i64 {
+  if (e.kind === "lit") return e.v;
+  if (e.kind === "add") return ev(e.l) + ev(e.r);
+  if (e.kind === "neg") return -ev(e.of);
+  return 0;
+}
+function main() {
+  const e: Expr = { kind: "add", l: { kind: "lit", v: 2 }, r: { kind: "neg", of: { kind: "lit", v: 5 } } };
+  console.log(e.kind);
+  const n: Expr = { kind: "neg", of: { kind: "lit", v: 1 } };
+  console.log(n.kind);
+  console.log(ev(e));
+}

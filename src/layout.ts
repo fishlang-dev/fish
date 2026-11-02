@@ -211,6 +211,14 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
   // A field every member of the union has, read from whichever member it holds.
   function unionField(v: string, union: UnionType, name: string, to: Type): string {
     return eachMember(v, union, to, (part, member) => {
+      // A member holding the union again keeps its value in a block.
+      const r = typing.rec(member as Exclude<Type, string>);
+      if (r.kind === "recursive") {
+        const loaded = temp();
+        emit(`${loaded} = load ${llvm(r.of)}, ptr ${part}`);
+        if (typing.recOf(r.of)?.kind === "union") return unionField(loaded, r.of as UnionType, name, to);
+        [part, member] = [loaded, r.of];
+      }
       // The checker found the field on every member, so each is an object or an instance.
       const holder = member as ObjectType | ClassType;
       const value = temp();
