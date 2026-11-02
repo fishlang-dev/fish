@@ -40,7 +40,7 @@ type Named = Expr | Extract<ObjectProp, { kind: "shorthand" }>;
 type Access = "read" | "change" | "move" | "lend" | "lend mutably";
 
 // The array methods that change their array.
-const ARRAY_CHANGES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
+const ARRAY_CHANGES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"]);
 // The place a temporary or a copy stands for: a reference into one can't be returned.
 const TEMPORARY = "temporary";
 

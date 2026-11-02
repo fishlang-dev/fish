@@ -2145,7 +2145,7 @@ export class Expressions implements Union {
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
-    if (["at", "find", "findLast", "filter", "slice", "concat", "fill", "entries", "values", ...COPYING_METHODS].includes(callee.name) || ((callee.name === "reduce" || callee.name === "reduceRight") && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
+    if (["at", "find", "findLast", "filter", "slice", "concat", "fill", "entries", "values", "copyWithin", ...COPYING_METHODS].includes(callee.name) || ((callee.name === "reduce" || callee.name === "reduceRight") && e.args.length === 1)) this.clonable(this.typing.rec(array).element, callee, callee.name);
     if (callee.name === "flat" && this.isArray(this.typing.lower(this.typing.rec(array).element))) this.clonable(this.typing.rec(this.typing.lower(this.typing.rec(array).element) as ArrayType).element, callee, "flat");
     // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
@@ -2160,7 +2160,7 @@ export class Expressions implements Union {
       if (e.args.length > most) throw new CompileError("E0504", most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
       return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] }));
     }
-    if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"].includes(callee.name)) {
+    if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"].includes(callee.name)) {
       throw new CompileError("E0211", `'${callee.name}' changes its array, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
     }
     const held = this.types.get(callee.object)!;
@@ -2301,7 +2301,8 @@ export class Expressions implements Union {
   }
 
   // `shift` moves the first element out; `unshift` moves values in at the front; `splice`
-  // moves a run out and values in where it was; `reverse` and `fill` change the array in place.
+  // moves a run out and values in where it was; `reverse`, `fill` and `copyWithin` change the
+  // array in place.
   // What they give, JavaScript's new length for `unshift` and the array itself for `reverse`
   // and `fill`, they don't.
   private changingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
@@ -2321,6 +2322,7 @@ export class Expressions implements Union {
     const counts: Record<string, [usize, usize, string]> = {
       shift: [0, 0, "no arguments"], reverse: [0, 0, "no arguments"], unshift: [0, Infinity, "the values to put at the front"],
       splice: [1, Infinity, "a start, an optional count to remove and the values to put in their place"], fill: [1, 3, "a value and an optional start and end"],
+      copyWithin: [2, 3, "a position to copy to, a start and an optional end"],
       reserve: [1, 1, "a count of elements to make room for"], shrinkToFit: [0, 0, "no arguments"],
     };
     const [least, most, takes] = counts[name]!;
@@ -2328,7 +2330,7 @@ export class Expressions implements Union {
     if (name === "unshift") e.args.forEach(element);
     if (name === "splice") e.args.forEach((a, i) => (i < 2 ? position(a) : element(a)));
     if (name === "fill") e.args.forEach((a, i) => (i === 0 ? element(a) : position(a)));
-    if (name === "reserve") position(e.args[0]!);
+    if (name === "reserve" || name === "copyWithin") e.args.forEach(position);
     const what = `'${name}', which changes its array in place,`;
     if (name === "shift") return { type: this.typing.unionType([this.typing.rec(array).element, "null"]), what: "'shift'" };
     if (name === "splice") return { type: array, what: "'splice'" };
@@ -7281,7 +7283,7 @@ const READING_METHODS = new Set(["includes", "indexOf", "lastIndexOf", "join", "
 // The methods that change an array in place, beside push, pop and sort.
 // The methods giving a changed copy of the array, leaving it as it is.
 const COPYING_METHODS = new Set(["toReversed", "toSorted", "toSpliced", "with"]);
-const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "reserve", "shrinkToFit"]);
+const CHANGING_METHODS = new Set(["shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"]);
 // The methods giving an iterator over an array, as generators in the prelude.
 const ITERATORS: Record<string, string> = { entries: "array entries", keys: "array keys", values: "array values" };
 // `u8`'s statics decoding text into bytes, and the prelude function each calls.

@@ -1243,3 +1243,34 @@ function main() { const ps = [new P(1)]; ps.toSorted(); }
 // case: array_with_arguments
 // error: 'with' takes a position, like 'with(-1, x)' for the last element, and the value to put there
 function main() { const xs = [1]; xs.with(0); }
+// case: array_copy_within
+// expect: 4,5,3,4,5
+// expect: 1,1,2,3,4
+// expect: 2,3,3,4,5
+// expect: 1,2,3,2,3
+// expect: 1,2,3,4,5
+// expect: a1,a1,b2,c3
+// expect: b2,c3,b2,c3
+// copyWithin copies a range over the array as JavaScript does, positions counted from the end and
+// clamped, overlapping either way as if through a buffer; each element written over drops.
+function main() {
+  let a = [1, 2, 3, 4, 5]; a.copyWithin(0, 3); console.log(a.join());
+  let b = [1, 2, 3, 4, 5]; b.copyWithin(1, 0); console.log(b.join());
+  let c = [1, 2, 3, 4, 5]; c.copyWithin(0, 1, 3); console.log(c.join());
+  let d = [1, 2, 3, 4, 5]; d.copyWithin(-2, -4, -1); console.log(d.join());
+  let e = [1, 2, 3, 4, 5]; e.copyWithin(2, 4, 1); e.copyWithin(9, 0); e.copyWithin(1, 1); console.log(e.join());
+  let ws = ["a" + 1, "b" + 2, "c" + 3, "d" + 4]; ws.copyWithin(1, 0, 3); console.log(ws.join());
+  ws.copyWithin(0, 2); console.log(ws.join());
+}
+// case: array_copy_within_constant
+// error: cannot copyWithin 'xs' because it is a constant
+function main() { const xs = [1, 2]; xs.copyWithin(0, 1); }
+// case: array_copy_within_result
+// error: 'copyWithin', which changes its array in place, does not return a value
+function main() { let xs = [1, 2]; const ys = xs.copyWithin(0, 1); }
+// case: array_copy_within_lent
+// error: cannot change 'xs' while a 'for...of' loop is reading 'xs'
+function main() {
+  let xs = [1, 2];
+  for (const x of xs) xs.copyWithin(0, 1);
+}

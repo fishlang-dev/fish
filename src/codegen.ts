@@ -5980,9 +5980,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return v;
   }
 
-  // `shift`, `unshift`, `splice`, `reverse` and `fill`. Elements move in and out bitwise, through
-  // the runtime's gap and take helpers; only `fill` makes copies, each stored before the element
-  // it replaces is dropped.
+  // `shift`, `unshift`, `splice`, `reverse`, `fill` and `copyWithin`. Elements move in and out
+  // bitwise, through the runtime's gap and take helpers; only `fill` and `copyWithin` make copies,
+  // each stored before the element it replaces is dropped.
   function changed(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
     const element = typing.rec(array).element;
     const t = llvm(element);
@@ -6067,6 +6067,10 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       if (!types.has(e)) pending.push({ v, type: array });
       return v;
     }
+    if (method === "copyWithin") {
+      copiedWithin(args, element, length, at);
+      return undefined;
+    }
     // `fill`: a copy of the value in each slot of the range, then the value itself dropped.
     const given = args[0]!;
     const from = args[1] !== undefined ? position(args[1], length) : "0";
@@ -6094,6 +6098,54 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     startBlock(done);
     dispose(given, element);
     return undefined;
+  }
+
+  // `copyWithin(target, start, end?)`: a clone of each element of the range written over the
+  // element `target - start` on, which drops. Copying back to front when the range runs over its
+  // destination reads each element before it is written, as through a buffer.
+  function copiedWithin(args: string[], element: Type, length: string, at: string) {
+    const t = llvm(element);
+    const to = position(args[0]!, length);
+    const from = position(args[1]!, length);
+    const end = args[2] !== undefined ? position(args[2], length) : length;
+    const [span, room, shorter, count, after, ahead, overlaps, backward, last] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${span} = sub i64 ${end}, ${from}`);
+    emit(`${room} = sub i64 ${length}, ${to}`);
+    emit(`${shorter} = icmp slt i64 ${span}, ${room}`);
+    emit(`${count} = select i1 ${shorter}, i64 ${span}, i64 ${room}`);
+    emit(`${after} = add i64 ${from}, ${count}`);
+    emit(`${ahead} = icmp slt i64 ${from}, ${to}`);
+    emit(`${overlaps} = icmp slt i64 ${to}, ${after}`);
+    emit(`${backward} = and i1 ${ahead}, ${overlaps}`);
+    emit(`${last} = sub i64 ${count}, 1`);
+    const index = alloca("i64");
+    emit(`store i64 0, ptr ${index}`);
+    const [head, body, done] = [label(), label(), label()];
+    emit(`br label %${head}`);
+    startBlock(head);
+    const [k, more, back, j, dataAt, data, source, target, v, old, next] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
+    emit(`${k} = load i64, ptr ${index}`);
+    emit(`${more} = icmp slt i64 ${k}, ${count}`);
+    emit(`br i1 ${more}, label %${body}, label %${done}`);
+    startBlock(body);
+    emit(`${back} = sub i64 ${last}, ${k}`);
+    emit(`${j} = select i1 ${backward}, i64 ${back}, i64 ${k}`);
+    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    emit(`${data} = load ptr, ptr ${dataAt}`);
+    const [i, o] = [temp(), temp()];
+    emit(`${i} = add i64 ${from}, ${j}`);
+    emit(`${o} = add i64 ${to}, ${j}`);
+    emit(`${source} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+    emit(`${target} = getelementptr ${t}, ptr ${data}, i64 ${o}`);
+    emit(`${v} = load ${t}, ptr ${source}`);
+    const copy = copied(v, element);
+    emit(`${old} = load ${t}, ptr ${target}`);
+    emit(`store ${t} ${copy}, ptr ${target}`);
+    dispose(old, element);
+    emit(`${next} = add i64 ${k}, 1`);
+    emit(`store i64 ${next}, ptr ${index}`);
+    emit(`br label %${head}`);
+    startBlock(done);
   }
 
   // Where `lastIndexOf` searches back from, as an end past it: a negative position counts from
@@ -6331,7 +6383,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       return undefined;
     }
     if (callee.name === "concat" || callee.name === "flat") return gathered(e, callee.name, type, at);
-    if (["shift", "unshift", "splice", "reverse", "fill"].includes(callee.name)) return changed(e, callee.name, type, at);
+    if (["shift", "unshift", "splice", "reverse", "fill", "copyWithin"].includes(callee.name)) return changed(e, callee.name, type, at);
     if (["includes", "indexOf", "lastIndexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
     if (callee.name !== "pop") return callbackLoop(e, callee.name, type, at);
     const option = typing.unionType([typing.rec(type).element, "null"]);
