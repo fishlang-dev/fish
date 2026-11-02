@@ -1,7 +1,7 @@
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Value } from "./comptime.ts";
 import type { Names } from "./diag.ts";
-import type { Kind } from "./narrow.ts";
+import type { Kind, Verdict } from "./narrow.ts";
 import { Rewrites, WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
@@ -269,6 +269,8 @@ export type Tables = {
   // The `instanceof Map`, `instanceof Set` and `instanceof Array` tests and the `Array.isArray`
   // calls, by the kind each tests a value for.
   kindTests: WeakNodeMap<Expr, Kind>;
+  // Each `"x" in v` test, with whether each member type `v` was seen holding has key `x`.
+  keyTests: WeakNodeMap<Expr, TypeMap<Type, Verdict>>;
 
   // Each lowered parameter: its name as written, and whether its default is `null`.
   defaulted: WeakNodeMap<Param, { name: string; empty: boolean }>;
@@ -403,6 +405,7 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     aliases: new Map<string, TypeAlias>(),
     expanding: new Set<string>(),
     kindTests: new WeakNodeMap<Expr, Kind>(),
+    keyTests: new WeakNodeMap<Expr, TypeMap<Type, Verdict>>(),
     defaulted: new WeakNodeMap<Param, { name: string; empty: boolean }>(),
     fallbacks: new WeakNodeMap<Expr, TypeNode>(),
     declaredTypes: new WeakNodeMap<Param, Type>(),

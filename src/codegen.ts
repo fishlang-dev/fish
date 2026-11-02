@@ -137,7 +137,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds,
     syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
     dynMembers, boxedMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
-    fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, typing, regex: regexTables,
+    fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, keyTests, typing, regex: regexTables,
     joinCalls, integerCalls, arenas,
   } = noted;
   const localOf = (id: LocalId): Local => arenas.localOf(id);
@@ -275,7 +275,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   const declaredRust = new Set<string>();
   const rustDrops = new Set<string>();
   const { operate, arithmetic, panicIf, method: integerLowering } = lowering(builder, where, release, intrinsics);
-  const { convert, test, equals, unionField, holds, holdsWhere, eachMember } = conversions(builder, kindTests);
+  const { convert, test, equals, unionField, holds, holdsWhere, eachMember } = conversions(builder, kindTests, keyTests);
 
   // The instance each generator type resumes, and each future type polls.
   const generatorOf = new TypeMap(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));

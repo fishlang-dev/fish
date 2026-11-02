@@ -24,7 +24,7 @@ import { holdsNull } from "./defaults.ts";
 import { bodyOf, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
-import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 import { forEachChild, nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
 import { rebuiltExpr } from "./rebuild.ts";
 
@@ -364,6 +364,7 @@ export class Expressions implements Union {
     this.jsUses = this.ctx.tables.jsUses;
     this.jsonCalls = this.ctx.tables.jsonCalls;
     this.kindTests = this.ctx.tables.kindTests;
+    this.keyTests = this.ctx.tables.keyTests;
     this.lengthChecks = this.ctx.tables.lengthChecks;
     this.maths = this.ctx.tables.maths;
     this.namedParams = this.ctx.tables.namedParams;
@@ -455,6 +456,7 @@ export class Expressions implements Union {
   private jsUses: Tables["jsUses"];
   private jsonCalls: Tables["jsonCalls"];
   kindTests: Tables["kindTests"];
+  keyTests: Tables["keyTests"];
   private lengthChecks: Tables["lengthChecks"];
   private maths: Tables["maths"];
   private namedParams: Tables["namedParams"];
@@ -5244,6 +5246,7 @@ export class Expressions implements Union {
         if (e.op === "in" && e.left.kind === "privateName") {
           throw new CompileError("E0802", `'${e.left.name} in' can't be used: Fish has no run-time reflection, and a value's class is known while compiling`, e.start, e.end);
         }
+        if (e.op === "in") return keyCheck(e, this);
         if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
         if (e.op === "+") {
           const [left, right] = [this.operand(e.left), this.operand(e.right)];
@@ -6555,6 +6558,11 @@ export class Expressions implements Union {
   // An operator works on a literal's base type, so `1` adds like any i64.
   private operand(this: Mut<this>, e: Expr): Type {
     return this.widen(e, this.read(e));
+  }
+
+  declares(this: Mut<this>, c: ClassType, name: string): boolean {
+    const info = this.ctx.classOf(c);
+    return (["methods", "getters", "setters"] as const).some((table) => inherited(this.arenas, info, table, name) !== undefined);
   }
 
   // The class a name declares, unless a variable shadows it.

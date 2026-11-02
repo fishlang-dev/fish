@@ -1,5 +1,5 @@
 import type { Builder } from "./arithmetic.ts";
-import { category, ofKind, typeofTest } from "./narrow.ts";
+import { category, ofKind, typeofTest, type Verdict } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import type { Tables } from "./compilation.ts";
@@ -83,7 +83,7 @@ export type Slots = Builder & { typing: Typing; alloca(type: string): string; te
 // Whether values of a type compare part by part rather than as one word.
 export const compound = (typing: Typing, t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(typing.rec(t).kind);
 
-export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
+export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: Tables["keyTests"]) {
   const { emit, temp, label, startBlock, alloca, deep, typing } = b;
   const llvm = layoutOf(typing);
   return { convert, test, equals, unionField, holds, holdsWhere, eachMember };
@@ -99,6 +99,8 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
       return holdsWhere(v, type, (m) => ofKind(typing, m, instance));
     }
     if (e.kind !== "binary") return undefined;
+    const keyed = keyTests.get(e);
+    if (keyed) return hasKey(value(e.right), typeOf(e.right), (m) => keyed.get(m)!, (e.left as { value: string }).value);
     if (e.op === "instanceof") {
       const [type, c] = [typeOf(e.left), typeOf(e.right)];
       const v = value(e.left);
@@ -131,6 +133,28 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"]) {
     const negated = temp();
     emit(`${negated} = xor i1 ${result}, true`);
     return negated;
+  }
+
+  // Whether `v` has `key`, by the member it holds; a member whose `key` is optional has it when
+  // the field holds a value, as Fish can't tell one left out from one set empty.
+  function hasKey(v: string, type: Type, verdict: (m: Type) => Verdict, key: string): string {
+    const r = typeof type === "string" ? undefined : typing.rec(type);
+    if (r?.kind === "ref" || r?.kind === "recursive") {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(r.kind === "ref" ? r.to : r.of)}, ptr ${v}`);
+      return hasKey(loaded, r.kind === "ref" ? r.to : r.of, verdict, key);
+    }
+    if (r?.kind === "union") {
+      return r.members.some((m) => verdict(m) === "both")
+        ? eachMember(v, type as UnionType, "boolean", (part, m) => hasKey(part, m, verdict, key))
+        : holdsWhere(v, type, (m) => verdict(m) === "yes");
+    }
+    if (verdict(type) !== "both") return String(verdict(type) === "yes");
+    const holder = type as ObjectType | ClassType;
+    const field = typing.field(holder, key)!.type;
+    const read = temp();
+    emit(`${read} = extractvalue ${llvm(type)} ${v}, ${typing.fieldPath(holder, key).join(", ")}`);
+    return holdsWhere(read, field, (m) => m !== "null");
   }
 
   // Whether two values are equal, as JavaScript's `===` would find them. A union is compared

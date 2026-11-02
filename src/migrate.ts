@@ -791,7 +791,7 @@ const GUIDES: Record<string, string> = {
   G3: "this 'number' counts or indexes, and a Fish 'number' is a float; make it 'i64', or 'usize' for an index",
   G4: "this class extends one that is also used as a type, so a subclass stands in for its base, which Fish's embedded bases don't allow; extract an interface for what they share, and hold the base as a field",
   G5: "'instanceof' tests a class that others extend, and Fish has no subclass checks at run time; 'match' on an interface or an enum instead",
-  G6: "indexing with a string key reads the object as a dictionary, which a Fish object isn't; use a 'Map<string, T>'",
+  G6: "indexing with a string key, or testing one with 'in' that isn't written as a literal, reads the object as a dictionary, which a Fish object isn't; use a 'Map<string, T>'",
   G7: "top-level code runs when the module loads, which Fish doesn't do; move it into 'main()', or into a 'Lazy<T>' for a value made once",
   G8: "parsing gives an 'Option' in Fish rather than NaN; 'match' on the parsed 'Option' instead of checking 'isNaN'",
   G9: "'.call', '.apply' and '.bind' choose a function's 'this' at run time; pass the receiver as an argument, or use a closure",
@@ -835,6 +835,7 @@ function guided(program: unknown[], f: File): Hit[] {
     if (n.kind === "class" && baseName(n) && typed.has(baseName(n)!)) hit("G4", n.start, n.end);
     if (n.kind === "binary" && n.op === "instanceof" && isNode(n.right) && n.right.kind === "ident" && extended.has(n.right.name as string)) hit("G5", n.start, n.end);
     if (n.kind === "index" && isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template" || (n.index.kind === "ident" && stringy(n.index)))) hit("G6", n.start, n.end);
+    if (n.kind === "binary" && n.op === "in" && isNode(n.left) && !["string", "privateName"].includes(n.left.kind as string)) hit("G6", n.start, n.end);
     // A call signature in an interface is a `call` too, without arguments.
     if (n.kind !== "call" || !Array.isArray(n.args)) continue;
     const callee = n.callee as Node;

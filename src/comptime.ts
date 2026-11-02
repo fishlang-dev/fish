@@ -840,6 +840,14 @@ class Interpreter {
       const v = this.expr(f, e.left);
       return unwrap(v) === null ? this.expr(f, e.right) : v;
     }
+    if (e.op === "in") {
+      const v = unwrap(this.expr(f, e.right));
+      if (v === null || typeof v !== "object" || v.kind !== "record") return false;
+      const key = (e.left as { value: string }).value;
+      // A literal's record may carry its own type rather than the member's, so a field it holds answers.
+      const said = this.tables.keyTests.get(e)!.get(v.type);
+      return said === "yes" || said === "no" ? said === "yes" : (unwrap(v.fields.get(key)) ?? null) !== null;
+    }
     if (e.op === "instanceof") {
       const v = unwrap(this.expr(f, e.left));
       return v !== null && typeof v === "object" && v.kind === "record" && this.typing.isSubclass(v.type, f.instance.types.get(e.right)!);
