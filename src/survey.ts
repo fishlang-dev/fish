@@ -63,7 +63,7 @@ const RULES: Rule[] = [
   { id: "bunModules", action: "unsupported", title: "imports of Bun's own modules such as bun:test", feature: "Bun's own modules" },
   { id: "untypedPackages", action: "unsupported", title: "imports of installed npm packages with no TypeScript declarations", feature: "Calling JsValues" },
   { id: "nodeBuiltins", action: "unsupported", title: "imports of Node built-in modules such as node:fs", feature: "Node built-ins" },
-  { id: "destructuring", action: "guided", title: "destructuring Fish can't take as written: computed keys, a default on a whole destructured parameter, or nesting, defaults and rest in a loop head; name the parts, or destructure in the body" },
+  { id: "destructuring", action: "guided", title: "destructuring Fish can't take as written: computed keys known only at run time, a default on a whole destructured parameter, or nesting, defaults and rest in a loop head; name the parts, or destructure in the body" },
   { id: "localCaptures", action: "guided", title: "a class or enum declared inside a function that uses the function's variables: pass them to its constructor" },
   { id: "destructuringAssignment", action: "guided", title: "a destructuring assignment used as a value or as a for update: write it as a statement of its own" },
   { id: "defaults", action: "guided", title: "a default Fish can't take as written: before a required parameter, on a parameter that may be null, or neither typed nor a literal; move it last, use '?' and default in the body, or write the type" },
@@ -567,20 +567,29 @@ function callRules(n: Node, push: (id: string) => void) {
 }
 
 // A pattern of names, holes and renames only, with no defaults, rest or nesting.
+// A pattern's key Fish takes: a name, or a computed key that may be known while compiling, as a
+// literal, a template, or a name or member holding one; a `Symbol` names no field.
+function patternKey(k: unknown): boolean {
+  if (typeof k === "string") return true;
+  if (!isNode(k)) return false;
+  if (k.kind === "member") return !named(k.object, "Symbol");
+  return ["string", "int", "float", "template", "ident"].includes(k.kind as string);
+}
+
 function plainPattern(p: Node): boolean {
   const name = (x: unknown) => x === undefined || x === null || (isNode(x) && x.kind === "ident");
   if (p.kind === "array") return !p.rest && (p.elements as unknown[]).every(name);
-  return p.kind === "object" && !p.rest && (p.props as Node[]).every((q) => typeof q.key === "string" && name(q.value));
+  return p.kind === "object" && !p.rest && (p.props as Node[]).every((q) => patternKey(q.key) && name(q.value));
 }
 
 // A pattern Fish destructures in a declaration or a parameter: names, renames, defaults, holes,
-// nesting and rest, with keys written as names.
+// nesting and rest, with keys known while compiling.
 function fishPattern(p: Node): boolean {
   const part = (x: unknown) => x === undefined || x === null || (isNode(x) && fishPattern(x));
   if (p.kind === "ident") return true;
   if (p.kind === "default") return isNode(p.target) && fishPattern(p.target);
   if (p.kind === "array") return (p.elements as unknown[]).every(part) && part(p.rest);
-  return p.kind === "object" && (p.props as Node[]).every((q) => typeof q.key === "string" && part(q.value)) && part(p.rest);
+  return p.kind === "object" && (p.props as Node[]).every((q) => patternKey(q.key) && part(q.value)) && part(p.rest);
 }
 
 function letRules(n: Node, ambient: boolean, head: boolean, push: (id: string) => void) {
