@@ -137,6 +137,8 @@ export type Context = {
   // Declares a name a pattern binds, read-only, in the arm's scope.
   bind(name: string, type: Type, node: Expr): Local;
   narrowed(l: Local): Type | undefined;
+  forget(l: Local, at: Span): void;
+  lendsWhole(l: Local, at: Expr): boolean;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
   // Records an error a call raises, and what the instance called may throw.
@@ -5483,6 +5485,7 @@ export class Expressions implements Union {
         if (local && typeof local.type !== "string" && this.typing.rec(local.type).kind === "ref" && !this.coercions.has(place)) this.rebind(local, e.value);
         const narrow = local && this.ctx.narrowed(local);
         if (local && op === "=" && this.coercions.has(place) && narrow && this.isRefType(narrow) && !this.typing.fits(type, this.typing.rec(narrow).to)) this.ctx.rewritten(local, e);
+        if (local && op === "=") this.ctx.forget(local, e);
         return target;
       }
       case "update": {
@@ -6079,6 +6082,12 @@ export class Expressions implements Union {
       this.coerce(e, type, this.typing.rec(to).to, message);
       type = this.coercions.get(e) ?? this.types.get(e)!;
     }
+    // A narrowed variable lent mutably is lent whole, as declared.
+    const lent = e.kind === "ident" && this.typing.rec(to).mutable ? this.localAt(e) : undefined;
+    if (lent && type !== lent.type && this.typing.sameLowered(lent.type, this.typing.rec(to).to) && this.ctx.lendsWhole(lent, e)) {
+      this.types.set(e, lent.type);
+      type = lent.type;
+    }
     const exact = this.typing.sameLowered(type, this.typing.rec(to).to);
     // A type that holds itself may lend a part of a parameter's value as the parameter's type,
     // which each instance checks against the type it is made for.
@@ -6493,6 +6502,11 @@ export class Expressions implements Union {
         this.types.set(target, declared);
         this.coercions.set(target, this.typing.rec(declared).to);
         return this.typing.rec(declared).to;
+      }
+      // A whole value goes in a variable as declared, whatever a check narrowed it to.
+      if (target.kind === "ident" && !reads && declared !== read && !this.isRefType(declared)) {
+        this.types.set(target, declared);
+        this.ctx.copiesOut.delete(target);
       }
       intoMember(this.typing, target, this.types);
       this.changeable(target, "assign to");

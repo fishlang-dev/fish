@@ -23,7 +23,7 @@ function main() {
   print(c === null, c)
   c = 7
   const e: i64 | null = c
-  print(c === null, e !== null && e > 5)
+  print(e === null, e !== null && e > 5)
   const d: boolean | null = b === null ? true : null
   print(d)
   const u: u8 | null = 200

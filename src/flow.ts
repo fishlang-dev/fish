@@ -51,13 +51,29 @@ export function assignedNames(body: Stmt[] | undefined): Set<string> {
   return names;
 }
 
+// The names the closures and nested functions in these statements assign: a check outside them
+// can't tell when a call runs them.
+export function closureAssigned(body: Stmt[] | undefined): Set<string> {
+  const names = new Set<string>();
+  walk("stmt", body, ({ of, node: n }) => {
+    const inner = of === "expr" && n.kind === "arrow" ? n.body : of === "stmt" && n.kind === "function" ? n.body : undefined;
+    if (!inner) return;
+    const stmts: Stmt[] = Array.isArray(inner) ? inner : [{ id: 0, kind: "expr", expr: inner, start: inner.start, end: inner.end }];
+    // A name the function takes as a parameter, or declares, is its own.
+    for (const name of assignedNames(stmts)) if (assignsOwn([n as Stmt], name)) names.add(name);
+    return false;
+  });
+  return names;
+}
+
 // Whether these statements assign `name` where it means the binding they start with. A part
 // that declares the name again is passed over: a block or function body declaring it, a
 // function taking it as a parameter, a loop declaring it in its head, a catch binding it. A
 // switch case or other list declaring it is still read whole, which errs toward "assigned".
 export function assignsOwn(body: Stmt[], name: string): boolean {
   const declares = (list: unknown[]) => list.some((s) => {
-    const d = s as { kind?: string; name?: string; declarations?: { target: unknown }[] };
+    // An array pattern's hole is a missing element.
+    const d = (s ?? {}) as { kind?: string; name?: string; declarations?: { target: unknown }[] };
     return (d.kind === "let" && d.declarations!.some((x) => patternNames(x.target).includes(name))) || ((d.kind === "function" || d.kind === "class") && d.name === name);
   });
   const visit = (v: unknown): boolean => {
