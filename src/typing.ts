@@ -2412,7 +2412,8 @@ export class Typing {
     // A value may leave out a field whose type is an Option.
     return tr.fields.every((f) => {
       const found = this.field(from, f.name);
-      if (!found) return this.isOption(f.type);
+      // An optional `unknown` holds null when left out, as its `| null` is part of it.
+      if (!found) return this.isOption(f.type) || (f.optional !== undefined && this.isUnknown(f.type));
       return (found.access ?? "public") === "public" && this.fits(found.type, f.type);
     });
   }

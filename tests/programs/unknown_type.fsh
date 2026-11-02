@@ -209,6 +209,48 @@ function main() {
 // expect: 7 as u8 is 7
 // expect: both one
 // expect: not the string
+// case: unknown_type_compare_integers
+// Integers of different kinds compare exactly, never through an f64.
+function main() {
+  const a: unknown = 9007199254740992
+  const b: unknown = 9007199254740993 as u64
+  const neg: unknown = -1
+  const byte: unknown = 255 as u8
+  console.log(a === b, a === 9007199254740992 as u64, neg === byte, byte === 255)
+}
+// expect: false true false true
+// case: unknown_type_exact_integer
+// typeof "number" reads any number as an f64, rounding a large integer as TypeScript does; a
+// type predicate gets the integer back exactly.
+function isI64(u: Ref<unknown>): u is i64 {
+  return typeof u === "number"
+}
+function main() {
+  const big: unknown = 9007199254740993
+  if (typeof big === "number") console.log(big)
+  if (isI64(big)) console.log(big)
+}
+// expect: 9007199254740992
+// expect: 9007199254740993
+// case: unknown_type_inferred
+function put<T>(xs: Mut<T[]>, x: T) {
+  xs.push(x)
+}
+function main() {
+  let xs: unknown[] = []
+  put(xs, "s")
+  put(xs, 4)
+  console.log(xs)
+}
+// expect: [ 's', 4 ]
+// case: unknown_type_optional_field
+type Options = { extra?: unknown; size: i64 }
+function main() {
+  const o: Options = { size: 1 }
+  const p: Options = { extra: "more", size: 2 }
+  console.log(o.extra ?? "none", p.extra ?? "none")
+}
+// expect: none more
 // case: unknown_type_json
 function main() {
   const values: unknown[] = ["s", 1, [true, false], { a: 1 }]

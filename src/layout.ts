@@ -283,9 +283,20 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
     return out;
   }
 
+  // Two numbers of different kinds, equal by value: integers exactly, as i128, and through f64
+  // only when one is a float, as codegen's mixed comparisons do.
+  // ponytail: a u128 beside a signed type compares as i128, wrong past i128's range.
   function sameNumber(a: string, aType: Type, b: string, bType: Type): string {
     const result = temp();
-    emit(`${result} = fcmp oeq double ${asDouble(a, aType)}, ${asDouble(b, bType)}`);
+    if (isInteger(aType) && isInteger(bType)) emit(`${result} = icmp eq i128 ${wide(a, aType)}, ${wide(b, bType)}`);
+    else emit(`${result} = fcmp oeq double ${asDouble(a, aType)}, ${asDouble(b, bType)}`);
+    return result;
+  }
+
+  function wide(v: string, from: Type): string {
+    if (from === "i128" || from === "u128") return v;
+    const result = temp();
+    emit(`${result} = ${INTEGERS[from as keyof typeof INTEGERS].signed ? "sext" : "zext"} ${llvm(from)} ${v} to i128`);
     return result;
   }
 
