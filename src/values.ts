@@ -7132,8 +7132,10 @@ export class Expressions implements Union {
   }
 
   // Whether a type parameter stands for a plain value, as one bounded by a union or primitive
-  // does: a primitive, literal, pattern or brand, or a union of them.
+  // does: a primitive, literal, pattern or brand, or a union of them. One with an interface or
+  // object bound offers its bound's members, even as the `never` a left-out optional stands for.
   private valueParam(r: ParamRecord): boolean {
+    if (r.bound !== undefined) return false;
     const plain = (t: Type): boolean => {
       const k = this.recOf(t)?.kind;
       return k === undefined || k === "literal" || k === "pattern" || k === "brand";
