@@ -390,10 +390,23 @@ function declaredIn(f: { params: Param[]; body?: Stmt[]; typeParams?: TypeParam[
   return names;
 }
 
-// A generic arrow held by a const, as the function declaration it amounts to.
+// An arrow held by a const, as the function declaration it amounts to.
 function arrowFunction(ids: Ids, name: string, arrow: Extract<Expr, { kind: "arrow" }>, at: Span): Func {
   const body: Stmt[] = Array.isArray(arrow.body) ? arrow.body : [{ id: nextId(ids), kind: "return", value: arrow.body, start: arrow.body.start, end: arrow.body.end }];
-  return { id: nextId(ids), kind: "function", name, async: arrow.async, generator: false, macro: false, typeParams: arrow.typeParams, params: arrow.params, returnType: arrow.returnType, body, start: at.start, end: at.end } as Func;
+  return { id: nextId(ids), kind: "function", name, async: arrow.async, generator: false, macro: false, typeParams: arrow.typeParams, params: arrow.params, returnType: arrow.returnType, throws: arrow.throws, body, start: at.start, end: at.end } as Func;
+}
+
+// A const's function type gives the arrow it holds the parameter, result and error types the
+// arrow leaves unwritten, as TypeScript's contextual typing does.
+function typedBy(arrow: Extract<Expr, { kind: "arrow" }>, fn: TypeNode | undefined): Extract<Expr, { kind: "arrow" }> {
+  if (fn?.kind !== "function") return arrow;
+  const extra = arrow.params[fn.params.length];
+  if (extra && !fn.params.some((p) => p.rest)) {
+    const name = extra.pattern.kind === "ident" ? `'${extra.pattern.name}'` : "this parameter";
+    throw new CompileError("E0506", `the const's type passes ${fn.params.length} argument${fn.params.length === 1 ? "" : "s"}, so this arrow can't take ${name}`, extra.start, extra.end);
+  }
+  const params = arrow.params.map((p, i) => (p.type || !fn.params[i] ? p : { ...p, type: fn.params[i]!.type, optional: p.optional || fn.params[i]!.optional }));
+  return { ...arrow, params, returnType: arrow.returnType ?? fn.returns, throws: arrow.throws ?? fn.throws };
 }
 
 // A library is checked with `library` set: it needs no `main`, and its exports cross to C.
@@ -468,6 +481,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   files: Map<usize, Map<string, string>> | undefined;
   program: Stmt[];
   funcs: (Func & Body)[];
+  // Arrows held by consts with a written type, checked against it.
+  typedArrows: { body: Body; type: TypeNode; arrow: Span & { throws?: TypeNode }; name: string }[];
   classes: Map<string, ClassId>;
   // Generic classes, declared again for each set of type arguments they are used with.
   templates: Map<string, ClassNode & { name: string }>;
@@ -588,6 +603,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (!this.library) timersRunAsync(this.ids, this.written, this.timerMains);
     this.program = [...lowerOverloads(this.ids, stdFor(this.compilation, this.written)), ...this.written];
     this.funcs = [];
+    this.typedArrows = [];
     const aliases: Tables["aliases"] = this.tables.aliases;
     this.classes = new Map<string, ClassId>();
     this.templates = new Map<string, ClassNode & { name: string }>();
@@ -659,9 +675,16 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
             if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
             if (["undefined", "console", "print"].includes(d.target.name)) throw new CompileError("E0407", `'${d.target.name}' already names something every program has; call the const something else`, d.target.start, d.target.end);
             if (!d.init) throw new CompileError("E0404", "a top-level 'const' needs its value", d.start, d.end);
-            // A generic arrow is a family of functions, so it is declared as a generic function is.
-            if (d.init.kind === "arrow" && d.init.typeParams.some((p) => !isLifetime(p))) {
-              this.funcs.push(this.addBody(arrowFunction(this.ids, d.target.name, d.init, d)));
+            // An arrow held by a const is the function declaration it amounts to; the const's
+            // written type is checked against it once its body is.
+            if (d.init.kind === "arrow") {
+              const generic = d.init.typeParams.some((p) => !isLifetime(p));
+              const signature = this.signatureOf(d.type);
+              const genericType = signature?.kind === "function" && signature.typeParams.some((p) => !isLifetime(p));
+              if (d.type && (generic || genericType)) throw new CompileError("E0801", "a const holding a generic arrow takes its type from the arrow; drop the const's written type", d.type.start, d.type.end);
+              const body = this.addBody(arrowFunction(this.ids, d.target.name, typedBy(d.init, signature), d));
+              this.funcs.push(body);
+              if (d.type) this.typedArrows.push({ body, type: d.type, arrow: d.init, name: d.target.name });
               continue;
             }
             const giving: Stmt = { id: nextId(this.ids), kind: "return", value: d.init, start: d.init.start, end: d.init.end };
@@ -931,6 +954,22 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.typing.jsUncalled.set(f, e);
       }
     });
+    for (const { body, type, arrow, name } of this.typedArrows) {
+      try {
+        const want = this.resolveType(type);
+        const got = this.functionTypeOf(body, arrow);
+        if (!this.typing.fits(got, want)) throw new CompileError("E0101", `type '${this.typing.show(got)}' is not assignable to type '${this.typing.show(want)}'`, arrow.start, arrow.end);
+        // The function type `typeof` gives carries no error type, so the arrow's is checked here.
+        const thrown = arrow.throws && this.resolveType(arrow.throws);
+        const wanted = this.recOf(want);
+        const allowed = wanted?.kind === "function" ? wanted.throws : undefined;
+        if (thrown && (allowed === undefined || !this.typing.fits(thrown, allowed))) {
+          throw new CompileError("E0602", `'${name}' can throw '${this.typing.show(thrown)}', which its type '${this.typing.show(want)}' doesn't declare; add 'throws ${this.typing.show(thrown)}' to the const's type`, arrow.throws!.start, arrow.throws!.end);
+        }
+      } catch (e) {
+        this.recover(e);
+      }
+    }
     // Once a body has failed, a generic body's or class's instances aren't checked: their
     // definitions were, and an instance's error then is most often one a refused call already
     // reported.
@@ -1040,6 +1079,24 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   reached(names: Iterable<string>, at: usize) {
     return [...names].flatMap((n) => this.reachedAs(n, at) ?? []);
   }
+  // The function type a const's written type is, through an alias taking no type parameters.
+  signatureOf(type: TypeNode | undefined): TypeNode | undefined {
+    if (type?.kind === "query" && type.target.kind === "ref") return this.declaredSignature(type.target.name) ?? type;
+    if (type?.kind !== "ref" || type.args.length > 0) return type;
+    const alias = this.program.find((s) => s.kind === "typeAlias" && s.name === type.name && s.typeParams.length === 0);
+    return alias?.kind === "typeAlias" ? alias.type : type;
+  }
+
+  // The parameter, result and error types a top-level function or arrow const writes, for `typeof`.
+  declaredSignature(name: string): TypeNode | undefined {
+    for (const s of this.program) {
+      const d = s.kind === "export" ? s.body : s;
+      const f = d.kind === "function" && d.name === name ? d : d.kind === "let" && d.keyword === "const" ? d.declarations.find((x) => x.target.kind === "ident" && x.target.name === name)?.init : undefined;
+      if (f?.kind === "function" || f?.kind === "arrow") return { id: 0, kind: "function", typeParams: f.typeParams, params: f.params, returns: f.returnType!, throws: "throws" in f ? f.throws : undefined, construct: false, abstract: false, start: f.start, end: f.end } as TypeNode;
+    }
+    return undefined;
+  }
+
   // What `typeof name` names in a type: a top-level const's type, or a non-generic function's,
   // whose result is checked from its body when it isn't written.
   valueTypeOf(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type {
@@ -3329,7 +3386,10 @@ class BodyChecker implements Context, Outer, Sight {
         // A closure returned is boxed into the callable the function declares.
         // A generic function value is returned as it is, capturing nothing.
         const r = this.cx.recOf(type);
-        if (r?.kind === "closure" && !r.generic && this.cx.recOf(this.declared)?.kind !== "dyn") throw unsupported("functions returned without a function return type", s.value!);
+        if (r?.kind === "closure" && !r.generic && this.cx.recOf(this.declared)?.kind !== "dyn") {
+          if (this.f.comptime === "const") throw new CompileError("E0801", "a top-level const holding a function is supported when its value is an arrow written in place, as in 'const f = (x: i64) => ...'; declare the function with 'function', or call it by its own name", s.value!.start, s.value!.end);
+          throw unsupported("functions returned without a function return type", s.value!);
+        }
         // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
         if (!this.declared && this.cx.recOf(this.inferred)?.kind === "regex" && r?.kind === "regex" && this.inferred !== type) this.inferred = ANY_REGEX;
         const expected = this.declared ?? this.inferred;

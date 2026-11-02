@@ -270,3 +270,21 @@ for (const [where, src] of [
     }));
   });
 }
+
+// A top-level const holds a function only as an arrow written in place.
+test("a top-level const holding a function value", () => {
+  const src = "function twice(x: i64): i64 {\n  return x * 2;\n}\nconst f = twice;\nfunction main() {}";
+  const start = src.indexOf("twice;");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "a top-level const holding a function is supported when its value is an arrow written in place, as in 'const f = (x: i64) => ...'; declare the function with 'function', or call it by its own name", start, end: start + 5,
+  }));
+});
+
+// A written type on a generic arrow const is refused at that type.
+test("a generic arrow const with a written type", () => {
+  const src = "const f: <T>(x: T) => T = <T>(x: T) => x;\nfunction main() {}";
+  const start = src.indexOf("<T>(x: T) =>");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "a const holding a generic arrow takes its type from the arrow; drop the const's written type", start, end: start + "<T>(x: T) => T".length,
+  }));
+});

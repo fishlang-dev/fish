@@ -291,3 +291,13 @@ async function main() {
   console.log(v)
 }
 // expect: 4
+// case: parameter_with_array_pattern_holes
+// expect: 2
+// A hole in an array pattern is no declaration of a parameter's name.
+function second(xs: i64[]): i64 {
+  const [, b] = xs;
+  return b;
+}
+function main() {
+  console.log(second([1, 2]));
+}
