@@ -1,4 +1,4 @@
-import { declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
+import { declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
 import { newTables, timed, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError, CompileErrors, named } from "./diag.ts";
@@ -12,9 +12,9 @@ import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, Rewrites, walk, type I
 import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
-import { alwaysReturns, assignedNames, assignsOwn, closureAssigned } from "./flow.ts";
+import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots } from "./flow.ts";
 import { declareEnum, type EnumInfo, type EnumInstance } from "./enums.ts";
-import { either, guard, type Facts } from "./narrow.ts";
+import { covers, either, guard, type Facts, type Key } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
@@ -126,6 +126,9 @@ export type Instance = {
   // Each call of a type predicate that narrows its argument: the predicate's type, and whether
   // its true and its false answers narrow, which codegen checks against the argument's tag.
   predicates?: NodeMap<Expr, { index: usize; type: Type; yes: boolean; no: boolean }>;
+  // Each field read a check narrowed, and the type it reads as declared. Narrowed to one member,
+  // its place is inside its union's payload; to several, its value is a copy.
+  narrowedFields?: NodeMap<Expr, Type>;
   // A closure's own type.
   closure?: ClosureType;
   // A C function's parameter types, for its declaration.
@@ -1604,6 +1607,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     delete instance.dyns;
     delete instance.made;
     delete instance.predicates;
+    delete instance.narrowedFields;
     const within = (c: Instance): boolean => c === instance || (bodyOf(c).closure !== undefined && within(this.arenas.instanceOf(bodyOf(c).closure!.parent)));
     // A closure checked within a discarded pass isn't in progress any more either.
     for (const c of [...this.inProgress]) if (within(this.arenas.instanceOf(c))) this.inProgress.delete(c);
@@ -1732,14 +1736,17 @@ class BodyChecker implements Context, Outer, Sight {
   // innermost last.
   facts: Facts[];
   // Each binding written so far, in order, and where: a write forgets what was known of it.
-  written: { local: LocalId; at: usize }[];
+  written: { local: Key; at: usize }[];
   // The names closures and nested functions in the body assign, which never narrow outside them.
   closureAssigned: Set<string>;
   // The bindings nested functions lend mutably, which never narrow once one is seen.
   nestedLent: Set<LocalId>;
+  // The roots of field paths, a binding's id or `this`, that a closure or nested function changes,
+  // whose paths never narrow once one is seen.
+  closureChanged: Set<string>;
   // Each read of a binding as narrowed, in order, and for each loop being checked, how many facts
   // and such reads there were where it starts.
-  narrowReads: { local: LocalId; at: Expr }[];
+  narrowReads: { local: Key; at: Expr }[];
   loops: { facts: usize; reads: usize }[];
   // The list being checked and the place in it, for a statement that becomes several.
   siblings: { list: Stmt[]; at: usize } | undefined;
@@ -1861,6 +1868,7 @@ class BodyChecker implements Context, Outer, Sight {
     this.written = [];
     this.closureAssigned = closureAssigned(this.f.body);
     this.nestedLent = new Set();
+    this.closureChanged = new Set();
     this.narrowReads = [];
     this.loops = [];
     this.changedParams = new Set();
@@ -2089,11 +2097,14 @@ class BodyChecker implements Context, Outer, Sight {
     return true;
   }
 
+  // A closure's change to what it captures, which a call of it could make at any time.
   changesLocal(this: Mut<this>, l: Local, path: string, action: string, target: Expr, throughMut: boolean) {
+    this.closureChanged.add(String(l.localId));
     this.exprs().changesLocal(l, path, action, target, throughMut);
   }
 
   changesThis(this: Mut<this>, path: string, action: string, target: Expr) {
+    this.closureChanged.add("this");
     this.exprs().changesThis(path, action, target);
   }
 
@@ -2199,20 +2210,35 @@ class BodyChecker implements Context, Outer, Sight {
   }
   // A write to a binding holding no reference forgets what any check or assignment said of it.
   forget(this: Mut<this>, l: Local, at: Span) {
+    this.forgetPaths(String(l.localId), at);
     if (this.cx.typing.holdsRef(l.type)) return;
     this.written.push({ local: l.localId, at: at.start });
+    this.drop((k) => k === l.localId);
+  }
+  // Forgets what was known of the field paths at or below `prefix`.
+  forgetPaths(this: Mut<this>, prefix: string, at: Span) {
+    if (!this.facts.some((f) => [...f.keys()].some((k) => covers(prefix, k)))) return;
+    this.written.push({ local: prefix, at: at.start });
+    this.drop((k) => typeof k === "string" && covers(prefix, k));
+  }
+  drop(this: Mut<this>, gone: (k: Key) => boolean) {
     for (let i = 0; i < this.facts.length; i++) {
-      if (!this.facts[i]!.has(l.localId)) continue;
-      const kept = new Map(this.facts[i]);
-      kept.delete(l.localId);
-      this.facts[i] = kept;
+      if (![...this.facts[i]!.keys()].some(gone)) continue;
+      this.facts[i] = new Map([...this.facts[i]!].filter(([k]) => !gone(k)));
     }
   }
   // Forgets, before a loop, what is known of the bindings it assigns, since a later iteration
   // could reach any read in it with another member.
   forgetLoop(this: Mut<this>, loop: Stmt) {
     const known = new Set(this.facts.flatMap((f) => [...f.keys()]));
+    const roots = fieldRoots([loop]);
     for (const id of known) {
+      if (typeof id === "string") {
+        const root = id.split(/[.[]/)[0]!;
+        const name = root === "this" ? root : this.cx.localOf(Number(root) as LocalId).name;
+        if (roots.has(name) || (root !== "this" && assignsOwn([loop], name))) this.forgetPaths(root, loop);
+        continue;
+      }
       const l = this.cx.localOf(id);
       if (assignsOwn([loop], l.name)) this.forget(l, loop);
     }
@@ -2232,6 +2258,7 @@ class BodyChecker implements Context, Outer, Sight {
       if (this.f.closure?.self !== undefined) this.outer!.lentPerCall(from);
       return;
     }
+    this.loopChange(String(l.localId), "mutably borrow", at);
     const from = this.facts.findIndex((f) => f.has(l.localId));
     const loop = from < 0 ? undefined : this.loops.find((x) => x.facts > from);
     if (loop && this.narrowReads.slice(loop.reads).some((r) => r.local === l.localId && r.at !== at)) {
@@ -2247,6 +2274,64 @@ class BodyChecker implements Context, Outer, Sight {
   lentPerCall(l: Local) {
     this.nestedLent.add(l.localId);
   }
+  // The key a field path narrows under: its root's id or `this`, then its fields as a change to
+  // them is shown. Only plain fields of objects and classes make one, read through no getter or
+  // `?.`, holding no reference, below a root no closure changes.
+  pathKey(this: Mut<this>, written: Expr): string | undefined {
+    const e = this.cx.rewrites.current(written);
+    if (e.kind === "this") return this.closureChanged.has("this") ? undefined : "this";
+    if (e.kind === "ident") {
+      const id = this.locals.get(e);
+      return id === undefined || this.closureChanged.has(String(id)) ? undefined : String(id);
+    }
+    if (e.kind !== "member" || e.optional || this.calls.has(e) || this.cx.tables.computed.has(e) || this.cx.tables.jsMembers.has(e) || this.copiesOut.has(e)) return undefined;
+    const t = this.types.get(e.object);
+    const r = this.cx.recOf(t);
+    const holder = r?.kind === "ref" ? r.to : t;
+    if (holder === undefined || typeof holder === "string") return undefined;
+    const h = this.cx.typing.unfold(holder);
+    const hr = this.cx.recOf(h);
+    // Through a parameter typed by an object type, a field is read with the type its bound gives.
+    const bound = hr?.kind === "param" ? hr.bound : h;
+    const kind = this.cx.recOf(bound)?.kind;
+    if (kind !== "object" && kind !== "class") return undefined;
+    const field = this.cx.typing.field(bound as Exclude<Type, string>, e.name);
+    if (!field || this.cx.typing.holdsRef(field.type)) return undefined;
+    const root = this.pathKey(e.object);
+    return root === undefined ? undefined : `${root}${/^\d+$/.test(e.name) ? `[${e.name}]` : `.${shownName(e.name)}`}`;
+  }
+  // Whether something is known of the field paths at or below `prefix`. A change there, in a loop
+  // that read one of them as narrowed by a check from before the loop, is refused.
+  loopChange(this: Mut<this>, prefix: string, action: string, at: Expr): boolean {
+    const from = this.facts.findIndex((f) => [...f.keys()].some((k) => typeof k === "string" && covers(prefix, k)));
+    if (from < 0) return false;
+    const loop = this.loops.find((x) => x.facts > from);
+    if (loop && this.narrowReads.slice(loop.reads).some((r) => typeof r.local === "string" && covers(prefix, r.local) && r.at !== at)) {
+      throw new CompileError("E0109", `can't ${action} this here: earlier in this loop a field it reaches was read as narrowed by what was known before the loop, and the next time round it may hold another member; check it inside the loop`, at.start, at.end);
+    }
+    return true;
+  }
+  // A field's type where a check narrowed its path, noting the read.
+  narrowedField(this: Mut<this>, e: Expr): Type | undefined {
+    const key = this.pathKey(e);
+    const t = key === undefined ? undefined : this.facts.findLast((f) => f.has(key))?.get(key);
+    if (t !== undefined) this.narrowReads.push({ local: key!, at: e });
+    return t;
+  }
+  // A change at `path` inside a binding or `this` forgets what was known of the field paths it
+  // reaches, below an element all of the array's. Lending a path as the one member a check
+  // narrowed it to, or updating it in place as `+=` does, keeps that member.
+  changesPath(this: Mut<this>, root: Local | "this", path: string, action: string, at: Expr) {
+    const cut = path.indexOf("[...]");
+    const prefix = `${root === "this" ? root : root.localId}${cut < 0 ? path : path.slice(0, cut)}`;
+    if (!this.loopChange(prefix, action, at)) return;
+    const kept = action !== "assign to" || this.exprsState.updating === at ? this.facts.findLast((f) => f.has(prefix))?.get(prefix) : undefined;
+    const keeps = kept !== undefined && kept === this.types.get(at) && this.cx.recOf(kept)?.kind !== "union";
+    if (!keeps) return this.forgetPaths(prefix, at);
+    const below = (k: Key) => typeof k === "string" && k !== prefix && covers(prefix, k);
+    for (const k of new Set(this.facts.flatMap((f) => [...f.keys()].filter(below)))) this.written.push({ local: k, at: at.start });
+    this.drop(below);
+  }
   // A call of a function whose result is `x is T` narrows its argument for x to T.
   predicate(this: Mut<this>, call: Extract<Expr, { kind: "call" }>) {
     const target = this.cx.arenas.instanceOf(this.calls.get(call));
@@ -2258,7 +2343,7 @@ class BodyChecker implements Context, Outer, Sight {
   }
   // A binding the condition itself writes isn't narrowed by it.
   proves(e: Expr) {
-    const proven = guard(this.cx.tables, e, this.types, this.locals as NodeMap<Expr, LocalId>, (l) => this.narrowable(l), (call) => this.predicate(call));
+    const proven = guard(this.cx.tables, e, this.types, this.locals as NodeMap<Expr, LocalId>, (l) => this.narrowable(l), (x) => this.pathKey(x), (call) => this.predicate(call));
     const inside = this.written.filter((w) => w.at >= e.start && w.at < e.end);
     // A variable compared as declared, in a check it was already narrowed past, stays as narrow.
     const declared = new Set<LocalId>();
@@ -2266,7 +2351,7 @@ class BodyChecker implements Context, Outer, Sight {
       if (of === "expr" && node.kind === "ident" && this.exprsState.asDeclared.has(node)) declared.add(this.locals.get(node)!);
     });
     if (inside.length === 0 && declared.size === 0) return proven;
-    const keep = (f: Facts) => new Map([...f].filter(([l]) => !inside.some((w) => w.local === l)).map(([l, t]) => [l, declared.has(l) ? this.narrowedPast(l, t) : t] as const));
+    const keep = (f: Facts) => new Map([...f].filter(([l]) => !inside.some((w) => covers(w.local, l))).map(([l, t]) => [l, typeof l !== "string" && declared.has(l) ? this.narrowedPast(l, t) : t] as const));
     return { yes: keep(proven.yes), no: keep(proven.no) };
   }
   // What a check on a variable read as declared leaves of what it was narrowed to.
@@ -2455,7 +2540,9 @@ class BodyChecker implements Context, Outer, Sight {
     if (target.kind === "member" && target.object.kind === "this" && this.f.self) return this.cx.typing.allFields(this.f.self.type as ClassType).find((x) => x.name === target.name)?.type;
     // A target with only a setter can't be read for its type; its part keeps its own.
     try {
-      const t = this.exprs().value(renumber("expr", structuredClone(target), () => nextId(this.cx.ids)));
+      const read = renumber("expr", structuredClone(target), () => nextId(this.cx.ids));
+      this.exprsState.asDeclared.add(read);
+      const t = this.exprs().value(read);
       return this.cx.recOf(t)?.kind === "ref" ? undefined : t;
     } catch (err) {
       if (err instanceof CompileError) return undefined;
@@ -2502,6 +2589,12 @@ class BodyChecker implements Context, Outer, Sight {
     }
     const ends: Facts = new Map();
     for (const { local } of this.written.slice(writes)) {
+      // A field path written is forgotten wherever it was narrowed, so it is joined as declared;
+      // no value has type `void`, so it marks one.
+      if (typeof local === "string") {
+        ends.set(local, "void");
+        continue;
+      }
       const l = this.cx.localOf(local);
       ends.set(local, this.narrowed(l) ?? l.type);
     }
@@ -2738,8 +2831,9 @@ class BodyChecker implements Context, Outer, Sight {
   joined(after: Facts | undefined, entry: Facts[], branches: [boolean, Facts, Facts][]): Facts | undefined {
     const wrote = new Set(branches.flatMap(([, ends]) => [...ends.keys()]));
     if (wrote.size === 0) return after;
-    const out: Facts = new Map([...(after ?? [])].filter(([l]) => !wrote.has(l)));
+    const out: Facts = new Map([...(after ?? [])].filter(([l]) => ![...wrote].some((w) => covers(w, l))));
     for (const id of wrote) {
+      if (typeof id === "string") continue;
       const l = this.cx.localOf(id);
       const types = branches.filter(([leaves]) => !leaves).map(([, ends, proved]) => ends.get(id) ?? proved.get(id) ?? entry.findLast((f) => f.has(id))?.get(id) ?? l.type);
       if (types.length === 0) continue;
@@ -2768,7 +2862,7 @@ class BodyChecker implements Context, Outer, Sight {
   // Facts proven before a statement that carry past it, less any it gave another member.
   current(proven: Facts, mark: usize): Facts {
     const gone = this.changed.slice(mark);
-    return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => !gone.includes(l)));
+    return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => typeof l === "string" || !gone.includes(l)));
   }
 
   assume<T>(this: Mut<this>, proven: Facts, check: () => T): T {

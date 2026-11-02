@@ -7253,12 +7253,19 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // answer in every build, as an index is against the length.
   function predicateCheck(e: Extract<Expr, { kind: "call" }>, answer: string) {
     const { index, type, yes, no } = current.predicates!.get(e)!;
-    // Only a variable is narrowed by a predicate's answer, so only one needs its answer checked.
+    // Only a variable or a field is narrowed by a predicate's answer, so only one needs its answer
+    // checked. A field is read again, which runs nothing: a field read through a getter isn't one
+    // a check narrows. One moved into the call is gone, and nothing reads it after.
     const arg = e.args[index];
-    if (arg?.kind !== "ident") return;
-    const local = resolved(arg);
-    let [v, whole] = [temp(), local.type];
-    emit(`${v} = load ${llvm(whole)}, ptr ${slot(local)}`);
+    if (arg?.kind !== "ident" && arg?.kind !== "member") return;
+    if (arg.kind === "member" && current.consumes.has(arg)) return;
+    let v: string, whole: Type;
+    if (arg.kind === "member") [v, whole] = [value(arg), valueType(arg)];
+    else {
+      const local = resolved(arg);
+      [v, whole] = [temp(), local.type];
+      emit(`${v} = load ${llvm(whole)}, ptr ${slot(local)}`);
+    }
     for (let held = recOf(whole); held?.kind === "ref" || held?.kind === "recursive"; held = recOf(whole)) {
       const [inner, next] = [temp(), held.kind === "ref" ? held.to : held.of];
       emit(`${inner} = load ${llvm(next)}, ptr ${v}`);
@@ -7275,6 +7282,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const [said, saidNot] = [label(), label()];
     emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
     const name = bodyOf(callOf(e)!).name;
+    const shown = (x: Expr): string => (x.kind === "member" ? `${shown(x.object)}.${x.name}` : x.kind === "ident" ? x.name : "this");
     for (const [at, is] of [[said, "is"], [saidNot, "is not"]] as const) {
       startBlock(at);
       const tag = temp();
@@ -7283,7 +7291,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`switch i32 ${tag}, label %${cases[0]} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
       union.members.forEach((m, i) => {
         startBlock(cases[i]!);
-        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nthe type predicate '${name}' said '${arg.name}' ${is} '${typing.show(type)}', but it holds a '${typing.show(m)}'\n`)})`);
+        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nthe type predicate '${name}' said '${shown(arg)}' ${is} '${typing.show(type)}', but it holds a '${typing.show(m)}'\n`)})`);
         emit("unreachable");
       });
     }
@@ -7422,8 +7430,11 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const result = temp();
     emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${typing.fieldPath(object, e.name).join(", ")}`);
     // A field read through an interface or object parameter takes the type its bound declares. A
-    // class's field keeps its type as written, `?` markers included, which lowering drops.
-    return convert(result, typing.lower(typing.field(object, e.name)!.type), types.get(e)!);
+    // class's field keeps its type as written, `?` markers included, which lowering drops. One a
+    // check narrowed is read as declared first.
+    const field = typing.lower(typing.field(object, e.name)!.type);
+    const declared = current.narrowedFields?.get(e);
+    return declared === undefined ? convert(result, field, types.get(e)!) : convert(convert(result, field, declared), declared, types.get(e)!);
   }
 
   // A nested function's environment built for one call, in a slot of its own.
@@ -9586,10 +9597,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const payload = temp();
     emit(`${payload} = getelementptr ${llvm(whole)}, ptr ${at}, i32 0, i32 1`);
     if (r.members.includes(want)) return payload;
+    // A member holding itself keeps its value in a block, which a field of a class points to.
     const holder = r.members.find((m) => {
       const block = recOf(m);
-      const of = block?.kind === "recursive" ? recOf(block.of) : undefined;
-      return of?.kind === "union" && of.members.includes(want);
+      if (block?.kind !== "recursive") return false;
+      const of = recOf(block.of);
+      return block.of === want || (of?.kind === "union" && of.members.includes(want));
     });
     return holder ? narrowedPlace(payload, holder, want) : payload;
   }
@@ -9617,13 +9630,24 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const result = temp();
     const path = typing.fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");
     emit(`${result} = getelementptr ${llvm(object)}, ptr ${base}, i32 0, ${path}`);
-    return result;
+    return inPayload(target) ? narrowedPlace(result, typing.field(object, target.name)!.type, types.get(target)!) : result;
+  }
+
+  // A field read a check narrowed to one member, whose place is inside its union's payload,
+  // where it is stored as it is read.
+  function inPayload(e: Expr): boolean {
+    const declared = current.narrowedFields?.get(e);
+    if (declared === undefined || e.kind !== "member" || recOf(types.get(e))?.kind === "union") return false;
+    const holder = typing.unfold(referent(stored(e.object))) as ObjectType | ClassType;
+    return typing.lower(typing.unfolded(typing.field(holder, e.name)!.type)) === typing.lower(declared);
   }
 
   // Whether an expression names somewhere a value lives: a variable, `this`, or a field of one,
   // but not a variable narrowed to part of a union, an enum's member or a union's shared field.
   function lendable(e: Expr): boolean {
     for (e = bare(e); e.kind === "member" && !calls.has(e); e = bare(e.object)) {
+      // A field narrowed to several members is read as a copy, laid out as the narrower union.
+      if (current.narrowedFields?.has(e) && !inPayload(e)) return false;
       // A string's or an array's `length` is computed, not a field.
       const object = types.has(e.object) ? referent(types.get(e.object)!) : undefined;
       // A shared value's interior-mutable field lives in its block, wherever the handle is.
@@ -9651,7 +9675,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     // A shared value's field is stored in its block's value.
     const shared = recOf(holder);
     const object = shared?.kind === "shared" ? shared.of : holder;
-    return typing.field(object as ObjectType | ClassType, e.name)!.type;
+    return inPayload(e) ? types.get(e)! : typing.field(object as ObjectType | ClassType, e.name)!.type;
   }
 
   // The right side runs only when the left side does not already decide the result.
