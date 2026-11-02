@@ -83,7 +83,6 @@ const CLASSES: [string, string, string][] = [
   ["abstract class A<T> {}", "generic abstract classes", "abstract class A<T> {}"],
   ["class A extends f() {}", "base class expressions", "f()"],
   ["class A<T> { static readonly n = 1 }\nconst a = new A<i64>()", "static fields in generic classes", "static readonly n = 1"],
-  ["class A { override n = 1 }", "'override' modifiers", "override n = 1"],
   ["class A { n!: i64 }", "definite assignment assertions", "n!: i64"],
   ["class A { [k: string]: i64 }", "index signatures", "[k: string]: i64"],
   ["class A { static {} }", "static blocks", "static {}"],

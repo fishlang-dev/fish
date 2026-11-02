@@ -12,7 +12,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { ITERATOR, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -1322,8 +1322,12 @@ export class Expressions implements Union {
       if (t !== "i64" && t !== "usize") throw new CompileError("E0504", `an array's length is an 'i64' or a 'usize', not '${this.typing.show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       return { type: "i64", what: "an array length" };
     }
+    // `super.m(...)` the bases don't declare runs on the Map or Set the class embeds.
+    if (callee.kind === "member" && callee.object.kind === "super" && this.superDelegated(callee.name)) return this.call(this.become(e, { ...e, callee: this.throughEmbedded(callee) }) as Call);
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? this.receiverType(callee) : undefined;
+    // A method a class extending Map or Set doesn't declare is the embedded collection's.
+    if (callee.kind === "member" && this.delegated(receiver, callee.name)) return this.call(this.become(e, { ...e, callee: this.throughEmbedded(callee) }) as Call);
     if (callee.kind === "member" && callee.name === "clone" && receiver && this.copies(receiver)) return this.cloned(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && stringLike(this.typing, receiver)) return this.stringCall(e, callee, receiver);
     // A bigint's digits, in base 10 or the radix given.
@@ -1338,7 +1342,16 @@ export class Expressions implements Union {
     if (callee.kind === "member" && recv?.kind === "map" && recv.dict && callee.name !== "clone" && !this.dictCalls.has(e)) {
       throw new CompileError("E0502", `a dictionary has no methods, as a plain object has none; its keys are read as properties, like '${this.placeText(callee.object)}[k]'`, callee.start, callee.end);
     }
-    if (callee.kind === "member" && recv?.kind === "map" && callee.name !== "clone") return this.mapCall(e, callee, receiver as MapType);
+    if (callee.kind === "member" && recv?.kind === "map" && callee.name !== "clone") {
+      const result = this.mapCall(e, callee, receiver as MapType);
+      // A class extending Map or Set gets itself back from `set` and `add`, as JavaScript's
+      // `this`: the collection is its first field, so a pointer to one points at the other.
+      const holder = callee.object.kind === "member" && callee.object.name === EMBEDDED ? callee.object.object : undefined;
+      if (!holder || (callee.name !== "set" && callee.name !== "add")) return result;
+      this.borrowsFrom.set(e, [holder]);
+      const held = this.types.get(holder)!;
+      return { type: this.typing.refType(this.isRefType(held) ? this.typing.rec(held).to : held, true), what: result.what };
+    }
     if (callee.kind === "member" && receiver !== undefined && this.typing.yieldsOf(receiver) !== undefined) return this.generatorCall(e, callee, receiver, this.typing.yieldsOf(receiver)!);
     if (callee.kind === "member" && receiver !== undefined && this.typing.yieldsOf(receiver, true) !== undefined && recv?.kind !== "dyn") return this.generatorCall(e, callee, receiver, this.typing.yieldsOf(receiver, true)!, true);
     if (callee.kind === "member" && recv?.kind === "pointer") return this.pointerCall(e, callee, receiver as PointerType);
@@ -2839,6 +2852,11 @@ export class Expressions implements Union {
       const t = this.value(source);
       const held = this.isRefType(t) ? this.typing.rec(t).to : t;
       if (this.typing.iterableElement(held) !== undefined) throw unsupported("'Array.from' over an 'Iterable' parameter", source);
+      const inner = this.embeddedIterated(source, held);
+      if (inner) {
+        const listed: Expr = { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: inner, name: this.embeddedOf(held)!.embedded === "Set" ? "values" : "entries", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+        return this.call(this.rewrites.replace(e, { ...e, args: [listed, ...e.args.slice(1)] }) as Call);
+      }
       if (this.isArray(held)) made = f ? source : { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
       else if (stringLike(this.typing, held)) made = prelude("array chars", [source]);
       else if (this.typing.yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
@@ -2953,6 +2971,8 @@ export class Expressions implements Union {
     let from: Expr | undefined;
     if (this.dictOf(held)) throw this.notIterable(source);
     if (this.typing.iterableElement(held) !== undefined) throw unsupported("spreads of an 'Iterable' parameter", source);
+    const inner = this.embeddedIterated(source, held);
+    if (inner) return this.spreadElements(this.rewrites.replace(x, { ...x, value: inner }) as typeof x);
     if (stringLike(this.typing, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array chars", ...at }, [source]);
     else if (this.typing.yieldsOf(held) !== undefined) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [source]);
     else if (this.iteratorCall(source, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [this.iteratorCall(source, held)!]);
@@ -3253,7 +3273,9 @@ export class Expressions implements Union {
     if (this.isRefType(held)) this.coercions.set(callee.object, t);
     if (MAP_CHANGES.has(name)) {
       if (this.readCopy(callee.object)) throw new CompileError("E0211", `'${name}' changes its ${kind}, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
-      const lent = this.isRefType(held) && this.typing.rec(held).mutable;
+      // A class extending Map or Set lends its collection where it is lent.
+      const holder = callee.object.kind === "member" && callee.object.name === EMBEDDED ? this.types.get(callee.object.object) : undefined;
+      const lent = (this.isRefType(held) && this.typing.rec(held).mutable) || (holder !== undefined && this.isRefType(holder) && this.typing.rec(holder).mutable);
       if (!this.place(callee.object) && !lent) throw new CompileError("E0212", `'${name}' changes its ${kind}, so call it on a variable or a field`, callee.start, callee.end);
       if (!lent) this.changeable(callee.object, name === "clear" ? "clear" : name === "delete" ? "delete from" : name === "update" ? "update" : "add to");
     }
@@ -4737,6 +4759,38 @@ export class Expressions implements Union {
     return undefined;
   }
 
+  // The class, or the base it extends, holding the Map or Set its `extends` names.
+  private embeddedOf(t: Type | undefined): ClassInfo | undefined {
+    if (t === undefined || this.recOf(t)?.kind !== "class") return undefined;
+    for (let b: ClassInfo | undefined = this.ctx.classOf(t as ClassType); b; b = this.arenas.classOf(b.base)) if (b.embedded) return b;
+    return undefined;
+  }
+
+  // Whether `name` on a class reaches the Map or Set it embeds: neither it nor its bases declare it.
+  // Only the collection's own members are: `clone`, `equals` and the like stay the class's.
+  private delegated(t: Type | undefined, name: string): boolean {
+    const embedding = this.embeddedOf(t);
+    if (!embedding || !collectionMember(embedding, name)) return false;
+    const c = this.ctx.classOf(t as ClassType);
+    return !this.typing.field(t as ClassType, name) && !(["methods", "getters", "setters"] as const).some((table) => inherited(this.arenas, c, table, name));
+  }
+
+  // Whether `super.name` reaches the embedded Map or Set: no base between declares it.
+  private superDelegated(name: string): boolean {
+    const self = this.self?.type;
+    const embedding = self && this.embeddedOf(self);
+    if (!embedding || !collectionMember(embedding, name)) return false;
+    const base = this.arenas.classOf(this.ctx.classOf(self).base);
+    return !base || !(this.typing.field(base.type, name) || (["methods", "getters", "setters"] as const).some((table) => inherited(this.arenas, base, table, name)));
+  }
+
+  // `x.name` as `x`'s embedded collection's `name`; `super.name` as `this`'s.
+  private throughEmbedded(e: Extract<Expr, { kind: "member" }>): Extract<Expr, { kind: "member" }> {
+    const at = { start: e.object.start, end: e.object.end };
+    const object: Expr = e.object.kind === "super" ? { id: nextId(this.ids), kind: "this", ...at } : e.object;
+    return { ...e, id: nextId(this.ids), object: { id: nextId(this.ids), kind: "member", object, name: EMBEDDED, optional: false, ...at } };
+  }
+
   // Replaces `e` with `to`, keeping its own span and id.
   private become(e: Expr, to: Expr): Expr {
     return this.rewrites.replace(e, { ...to, start: e.start, end: e.end });
@@ -4794,6 +4848,14 @@ export class Expressions implements Union {
     if (!has) return undefined;
     const at = { start: source.start, end: source.end };
     return { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: ITERATOR, optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+  }
+
+  // The Map or Set a class extending one embeds, which iterating the class iterates unless the
+  // class declares its own `[Symbol.iterator]`.
+  embeddedIterated(source: Expr, held: Type): Expr | undefined {
+    const t = this.typing.lower(held);
+    if (!this.embeddedOf(t) || inherited(this.arenas, this.ctx.classOf(t as ClassType), "methods", ITERATOR)) return undefined;
+    return { id: nextId(this.ids), kind: "member", object: source, name: EMBEDDED, optional: false, start: source.start, end: source.end };
   }
 
   // A dictionary isn't iterable, as a plain object isn't in JavaScript.
@@ -4919,7 +4981,8 @@ export class Expressions implements Union {
   // TypeScript's access rules: a private member is reachable only from inside its class, and
   // a protected one also from the classes that embed it.
   private visible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string, at: Span) {
-    if (this.accessible(access, declaring, name)) return;
+    // Only delegation reads the embedded collection, from wherever the class is used.
+    if (name === EMBEDDED || this.accessible(access, declaring, name)) return;
     const message = name.startsWith("#")
       ? `property '${shownName(name)}' is not accessible outside class '${this.typing.rec(declaring).name}' because it has a private identifier`
       : `property '${name}' is ${access} and only accessible within class '${this.typing.rec(declaring).name}'${access === "protected" ? " and its subclasses" : ""}`;
@@ -5167,6 +5230,7 @@ export class Expressions implements Union {
         for (const x of e.exprs) this.joined(x, this.operand(x), "a template");
         return "string";
       case "member": {
+        if (e.object.kind === "super" && this.superDelegated(e.name)) return this.typeOf(this.become(e, this.throughEmbedded(e)));
         // A static property of a package's class.
         const jsClass = e.object.kind === "ident" && !this.ctx.lookup(e.object.name) ? this.jsClasses.get(e.object.name) : undefined;
         if (jsClass) {
@@ -5259,6 +5323,7 @@ export class Expressions implements Union {
           this.text(e.object, plain, this.linked(e));
           return this.linked(e) ? this.optional("usize", e) : "usize";
         }
+        if (this.delegated(object, e.name)) return this.typeOf(this.become(e, this.throughEmbedded(e)));
         const found = or === undefined || or.kind === "closure" ? undefined : this.typing.field(object as Exclude<Type, string>, e.name);
         const c = or?.kind === "class" ? this.ctx.classOf(object as ClassType) : undefined;
         const getter = !found && c ? inherited(this.arenas, c, "getters", e.name) : undefined;
@@ -6160,6 +6225,9 @@ export class Expressions implements Union {
       return;
     }
     const sub = this.recOf(type);
+    if (sub?.kind === "class" && tr?.kind === "map" && this.embeddedOf(type)) {
+      throw new CompileError("E0704", `'${sub.name}' extends '${this.typing.show(to)}' by embedding one, so it can't be used as '${this.typing.show(to)}'; take '${sub.name}' itself, or hold the collection in a field and pass that`, e.start, e.end);
+    }
     if (sub?.kind === "class" && tr?.kind === "class" && this.typing.derives(type as ClassType, to as ClassType)) {
       throw new CompileError("E0704", `'${sub.name}' extends '${tr.name}' by embedding one, so it can't be used as '${tr.name}'; extract an interface both classes implement`, e.start, e.end);
     }
@@ -7042,7 +7110,7 @@ export class Expressions implements Union {
     this.ctx.changesPath("this", path, action, target);
     if (this.closing) return this.ctx.changesCapture(undefined, path, action, target, false);
     if (this.self?.mutable) return;
-    throw new CompileError("E0206", `cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
+    throw new CompileError("E0206", `cannot ${action} 'this${shownPath(path)}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
   }
 
   // Whether a variable may change here, at `path` inside it, possibly through a mutable
@@ -7056,7 +7124,7 @@ export class Expressions implements Union {
     const lr = this.recOf(local.type);
     if ((path || action !== "assign to") && lr?.kind === "ref") {
       if (lr.mutable) return;
-      throw new CompileError("E0206", `cannot ${action} '${local.name}${path}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
+      throw new CompileError("E0206", `cannot ${action} '${local.name}${shownPath(path)}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
     }
     if (local.param && local.mutable) this.ctx.changedParams.add(local.localId);
     if (local.param && !local.mutable) {
@@ -7065,7 +7133,7 @@ export class Expressions implements Union {
       throw new CompileError("E0801", `${what} a parameter holding a reference is not supported yet; copy it into a 'let'`, target.start, target.end);
     }
     if (!local.mutable) {
-      const what = path ? `'${local.name}${path}' because '${local.name}'` : `'${local.name}' because it`;
+      const what = path ? `'${local.name}${shownPath(path)}' because '${local.name}'` : `'${local.name}' because it`;
       throw new CompileError("E0207", `cannot ${action} ${what} is a constant`, target.start, target.end);
     }
   }
@@ -7125,6 +7193,8 @@ export class Expressions implements Union {
   private placeText(e: Expr): string {
     const rest = restText(this.restStarts, e, (x) => this.placeText(x));
     if (rest) return rest;
+    // The collection a class extending Map or Set embeds reads as the object itself.
+    if (e.kind === "member" && e.name === EMBEDDED) return this.placeText(e.object);
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${this.placeText(e.object)}[${e.name}]` : `${this.placeText(e.object)}.${shownName(e.name)}`;
     if (e.kind === "index") return `${this.placeText(e.object)}[${indexText(e.index)}]`;
     if (e.kind === "nonNull") return `${this.placeText(e.expr)}!`;
@@ -7343,12 +7413,16 @@ const ITERATORS: Record<string, string> = { entries: "array entries", keys: "arr
 const BYTE_DECODERS: Record<string, string> = { fromBase64: "array from base64", fromHex: "array from hex" };
 // The methods encoding a `u8[]` as text, and the prelude function each calls.
 const BYTE_METHODS: Record<string, string> = { toBase64: "array to base64", toHex: "array to hex" };
-// A Map's and a Set's methods, how many arguments each takes, and those changing it.
-const MAP_METHODS = new Set(["set", "get", "has", "delete", "clear", "update", "keys", "values", "entries", "forEach"]);
-const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"]);
+// How many arguments each of a Map's and a Set's methods takes, and those changing it.
 const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...COPYING_METHODS, ...CHANGING_METHODS]);
+
+// Whether `name` is a member of the Map or Set a class embeds.
+const collectionMember = (c: ClassInfo, name: string) => name === "size" || (c.embedded === "Set" ? SET_METHODS : MAP_METHODS).has(name);
+
+// A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.
+const shownPath = (path: string) => path.replaceAll(`.${EMBEDDED}`, "");
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
 export function indexText(e: Expr): string {

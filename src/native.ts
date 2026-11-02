@@ -3295,6 +3295,15 @@ void fsh_rt_insp_append(fsh_insp *list, fsh_insp *more) {
   fsh_insp_free(more);
 }
 
+// A Map or Set a class extending one embeds, printed under the class's name; the class's own
+// fields follow its entries, keyed.
+void fsh_rt_insp_named(fsh_insp *v, const char *name) {
+  fsh_rt_free(v->text);
+  v->length = strlen(name);
+  v->text = fsh_rt_alloc(v->length + 1);
+  memcpy(v->text, name, v->length + 1);
+}
+
 fsh_insp *fsh_rt_insp_variant(const char *name) {
   return fsh_insp_new(FSH_INSP_VARIANT, name, strlen(name));
 }
@@ -3680,6 +3689,10 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   }
   const char *close = v->kind == FSH_INSP_ARRAY ? "]" : "}";
   int64_t size = v->kind == FSH_INSP_OBJECT ? v->count : v->size;
+  // A named Map's or Set's fields, after its entries.
+  int64_t fields = 0;
+  if (v->kind == FSH_INSP_MAP || v->kind == FSH_INSP_SET)
+    while (fields < v->count && v->keys[v->count - 1 - fields]) fields++;
   // An Error with nothing to show beside its header is its header; past the depth, its class.
   // A header of several lines is indented as Node indents it, to where it is written.
   if (v->error && size == 0) return fsh_insp_indented(v->text, c->indent);
@@ -3695,14 +3708,20 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     snprintf(open, room, "%s%s{", text, v->length ? " " : "");
     snprintf(cut, room, "[%s]", v->length ? text : "Object");
   } else {
-    snprintf(open, room, "%s(%lld) {", v->kind == FSH_INSP_MAP ? "Map" : "Set", (long long)size);
-    strcpy(cut, v->kind == FSH_INSP_MAP ? "[Map]" : "[Set]");
+    const char *kind = v->kind == FSH_INSP_MAP ? "Map" : "Set";
+    if (v->length) {
+      snprintf(open, room, "%s(%lld) [%s] {", text, (long long)size, kind);
+      snprintf(cut, room, "[%s [%s]]", text, kind);
+    } else {
+      snprintf(open, room, "%s(%lld) {", kind, (long long)size);
+      snprintf(cut, room, "[%s]", kind);
+    }
   }
   fsh_rt_free(text);
   int hidden = c->hidden && v->kind == FSH_INSP_ARRAY;
-  if ((size == 0 && !hidden) || recurse > 2) {
+  if ((size == 0 && fields == 0 && !hidden) || recurse > 2) {
     fsh_sb b = {0};
-    if (recurse > 2 && !(size == 0 && !hidden)) fsh_sb_str(&b, cut);
+    if (recurse > 2 && !(size == 0 && fields == 0 && !hidden)) fsh_sb_str(&b, cut);
     else {
       fsh_sb_str(&b, open);
       fsh_sb_str(&b, close);
@@ -3713,9 +3732,9 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   }
   recurse++;
   c->depth = recurse;
-  int64_t kept = v->kind == FSH_INSP_MAP ? v->count / 2 : v->count;
+  int64_t kept = v->kind == FSH_INSP_MAP ? (v->count - fields) / 2 : v->count - fields;
   int64_t rest = size - kept;
-  char **output = fsh_rt_alloc((kept + 2) * sizeof(char *));
+  char **output = fsh_rt_alloc((kept + fields + 2) * sizeof(char *));
   int64_t n = 0;
   int numeric = 1;
   c->indent += 2;
@@ -3757,6 +3776,18 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     snprintf(text, sizeof text, "... %lld more item%s", (long long)rest, rest > 1 ? "s" : "");
     output[n++] = fsh_insp_copy(text);
   }
+  c->indent += 2;
+  for (int64_t i = v->count - fields; i < v->count; i++) {
+    fsh_sb b = {0};
+    if (fsh_insp_identifier(v->keys[i]) && (int64_t)strlen(v->keys[i]) == v->lengths[i]) fsh_sb_str(&b, v->keys[i]);
+    else fsh_insp_quote(&b, v->keys[i], v->lengths[i]);
+    fsh_sb_str(&b, ": ");
+    char *x = fsh_insp_value(c, v->items[i], recurse);
+    fsh_sb_str(&b, x);
+    fsh_rt_free(x);
+    output[n++] = fsh_sb_done(&b);
+  }
+  c->indent -= 2;
   // A hidden key comes after the elements; as Node reads the array at each entry's index, the
   // columns pad as text unless there are elements past the entries shown. As in Node, only an
   // entry past the 100th is kept out of them.
