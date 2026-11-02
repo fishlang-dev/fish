@@ -24,7 +24,7 @@ import { holesOf, quoted, type Category } from "./quote.ts";
 import { holdsNull } from "./defaults.ts";
 import { bodyOf, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
-import { isEmpty, literalValue, type Facts, type Guard } from "./narrow.ts";
+import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 import { forEachChild, nextId, NodeMap, NodeSet, WeakNodeMap, WeakNodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
 import { rebuiltExpr } from "./rebuild.ts";
@@ -144,6 +144,8 @@ export type Context = {
   // A field's type where a check narrowed its path, noting the read; and a change at a path
   // inside a binding or `this`, which forgets what was known below it.
   narrowedField(e: Expr): Type | undefined;
+  // Whether a check proved an interface's optional method there on a value.
+  present(object: Expr, name: string): boolean;
   changesPath(root: Local | "this", path: string, action: string, at: Expr): void;
   // The instance being checked.
   instance: Instance;
@@ -356,6 +358,8 @@ export class Expressions implements Union {
     this.joinCalls = this.ctx.tables.joinCalls;
     this.integerCalls = this.ctx.tables.integerCalls;
     this.dynCalls = this.ctx.tables.dynCalls;
+    this.optionalCalls = this.ctx.tables.optionalCalls;
+    this.presenceTests = this.ctx.tables.presenceTests;
     this.dynMembers = this.ctx.tables.dynMembers;
     this.boxedMembers = this.ctx.tables.boxedMembers;
     this.madeArrows = this.ctx.tables.madeArrows;
@@ -449,6 +453,8 @@ export class Expressions implements Union {
   private joinCalls: Tables["joinCalls"];
   private integerCalls: Tables["integerCalls"];
   private dynCalls: Tables["dynCalls"];
+  private optionalCalls: Tables["optionalCalls"];
+  private presenceTests: Tables["presenceTests"];
   private dynMembers: Tables["dynMembers"];
   private boxedMembers: Tables["boxedMembers"];
   private madeArrows: Tables["madeArrows"];
@@ -1162,7 +1168,8 @@ export class Expressions implements Union {
     e = this.rewrites.current(e) as Call;
     // A call checked as another form, as `isDeepStrictEqual` is, has its own type already.
     if ((e as Expr).kind !== "call") return result;
-    return e.callee.kind === "member" && this.linked(e.callee) && result.type !== "void" ? { ...result, type: this.optional(result.type, e) } : result;
+    if (e.optional && !this.optionalCalls.has(e)) throw unsupported("optional calls", e);
+    return e.callee.kind === "member" && (this.linked(e.callee) || e.optional) && result.type !== "void" ? { ...result, type: this.optional(result.type, e) } : result;
   }
 
   // The call `spawnBlocking` makes of a function it was given by name or value must take no
@@ -1196,7 +1203,7 @@ export class Expressions implements Union {
     if (this.rewrites.current(e.callee) !== e.callee) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.current(e.callee) });
     const { callee } = e;
     if (this.blockingRuns.has(e) && callee.kind === "ident") this.blockingRun(callee);
-    if (e.optional) throw unsupported("optional calls", e);
+    if (e.optional && callee.kind !== "member") throw unsupported("optional calls", e);
     if (callee.kind === "super") {
       if (e !== this.superCall) throw new CompileError("E0703", "'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
       const base = this.ctx.classOf(this.typing.rec(this.self!.type).base!);
@@ -4650,10 +4657,14 @@ export class Expressions implements Union {
     const found = trait?.kind === "interface" ? trait.methods.find((m) => m.name === callee.name) : undefined;
     if (!found) throw new CompileError("E0502", `property '${shownName(callee.name)}' does not exist on type '${r.name}'${didYouMean(callee.name, this.memberNames(receiver))}`, callee.start, callee.end);
     const stored = r.kind === "param" ? r.concrete : undefined;
+    this.omittableCall(e, callee, found, r.name);
+    // An instance whose type leaves an optional method out never calls it.
+    const absent = found.omittable === true && this.lacks(stored, callee.name);
+    if (absent) (this.ctx.instance.absent ??= new NodeSet()).add(e);
     // A generic method's call infers its types, then in an instance runs the concrete method's.
     if (found.generic) {
       const { type } = this.familyCall(e, { generic: found.generic }, `'${callee.name}'`);
-      if (typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, type), what: `'${callee.name}'` };
+      if (!absent && typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, type), what: `'${callee.name}'` };
       return { type, what: `'${callee.name}'` };
     }
     if (e.typeArgs.length > 0) throw new CompileError("E0106", "expected 0 type arguments", e.start, e.end);
@@ -4668,8 +4679,62 @@ export class Expressions implements Union {
     // `Promise<T>` describes, which in the definition is checked as one borrowing it.
     const promised = this.typing.promiseElement(found.returns);
     if (this.typing.holdsRef(found.returns) || promised !== undefined) this.borrowsFrom.set(e, [callee.object, ...e.args.filter((a) => this.lends(a))]);
-    if (typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, found.returns), what: `'${callee.name}'` };
+    if (!absent && typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, found.returns), what: `'${callee.name}'` };
     return { type: promised !== undefined ? this.typing.lentPromise(promised) : found.returns, what: `'${callee.name}'` };
+  }
+
+  // Whether an instance's concrete type for a type parameter leaves out a method: an object,
+  // or a class without it.
+  private lacks(stored: Type | undefined, name: string): boolean {
+    return stored !== undefined && (this.recOf(stored)?.kind !== "class" || !inherited(this.arenas, this.ctx.classOf(stored as ClassType), "methods", name));
+  }
+
+  // `h.m !== undefined`, `h.m === null` or `typeof h.m === "function"` on an interface's optional
+  // method tests whether the value's type has it; read any other way, a method is called.
+  private presence(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): boolean {
+    if (e.op !== "===" && e.op !== "!==") return false;
+    const test = typeofTest(e);
+    const empty = (x: Expr) => isEmpty(x, this.locals as NodeMap<Expr, LocalId>);
+    const named = test?.name.kind === "string" ? test.name.value : undefined;
+    if (test && named !== "function" && named !== "undefined") return false;
+    if (!test && !empty(e.left) && !empty(e.right)) return false;
+    const member = this.rewrites.current(test ? test.operand : empty(e.right) ? e.left : e.right);
+    if (member.kind !== "member" || member.optional || this.chained(member.object)) return false;
+    // A class's or an enum's name reads a static, not a method.
+    if (member.object.kind === "ident" && !this.ctx.lookup(member.object.name)) return false;
+    if (member.object.kind === "ident") this.ctx.exprsState.objects.add(member.object);
+    const object = this.value(member.object);
+    const r = this.recOf(object);
+    const t = this.typing.unfold(r?.kind === "ref" ? r.to : this.plainOf(object));
+    const held = this.recOf(t);
+    const trait = this.recOf(held?.kind === "dyn" ? held.of : held?.kind === "param" ? held.bound : t);
+    const m = trait?.kind === "interface" ? trait.methods.find((x) => x.name === member.name) : undefined;
+    if (!m?.omittable) {
+      this.ctx.exprsState.once.add(member.object);
+      return false;
+    }
+    // A Dyn's table has no slot for a method no Dyn can call, so it can't say whether one is there.
+    if (held?.kind === "dyn" && (m.generic || (this.recOf(m.returns)?.kind === "interface" && this.typing.promiseElement(m.returns) === undefined))) {
+      throw new CompileError("E0211", `'${m.name}' can't be called through a Dyn, ${m.generic ? "being generic" : "returning an interface type"}, so a Dyn can't tell whether it is there; take a type parameter bounded by '${(trait as { name: string }).name}' instead`, member.start, member.end);
+    }
+    const when = test ? (e.op === "===") === (named === "function") : e.op === "!==";
+    this.presenceTests.set(e, { object: member.object, name: member.name, when });
+    if (held?.kind === "param" && this.lacks(held.concrete, member.name)) (this.ctx.instance.absent ??= new NodeSet()).add(e);
+    return true;
+  }
+
+  // `h.m?.()` calls only an optional method, which a plain call may call only where a check
+  // found it there.
+  private omittableCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, m: Method, shown: string) {
+    if (!e.optional) {
+      if (m.omittable && !this.ctx.present(callee.object, m.name)) throw new CompileError("E0108", `'${m.name}' may be missing, since '${shown}' declares it optional; call it as '${this.placeText(callee)}?.()', or check '${this.placeText(callee)} !== undefined' first`, callee.start, callee.end);
+      return;
+    }
+    if (!m.omittable) throw new CompileError("E0505", `'${m.name}' is always there in '${shown}', so it is called without '?.'`, e.start, e.end);
+    if (this.linked(callee)) throw unsupported("optional calls in an optional chain", e);
+    if (m.owned) throw unsupported("optional calls of methods taking their object over", e);
+    if (this.typing.promiseElement(m.returns) !== undefined) throw unsupported("optional calls of methods giving a Promise", e);
+    this.optionalCalls.add(e);
   }
 
   // In an instance, a call through a type parameter runs its concrete class's method. An
@@ -5687,6 +5752,7 @@ export class Expressions implements Union {
         return bothSides(this.typing, e, then, otherwise, (v, from, to, message) => this.coerce(v, from, to, message));
       }
       case "binary":
+        if (this.presence(e)) return "boolean";
         // Each instance of an isDeepStrictEqual checks its own operands' types.
         if (this.deepEqualities.has(e)) {
           for (const a of [e.left, e.right]) {
@@ -6988,7 +7054,9 @@ export class Expressions implements Union {
       return { methods: [body.id], fields: [], clone: fixed ? undefined : "copy" };
     }
     const methods = this.typing.rec(this.typing.rec(to).of).methods.map((m) => {
-      const body = inherited(this.arenas, c!, "methods", m.name)!;
+      const body = c && inherited(this.arenas, c, "methods", m.name);
+      // An optional method the type leaves out has an empty slot.
+      if (!body) return undefined;
       // A generic method has no one function for the table; calls of it through a Dyn are refused.
       if (m.generic) return undefined;
       if (body.params.some((p) => p.comptime)) throw new CompileError("E1102", `'${this.typing.show(type)}' can't be a '${this.typing.show(to)}': its method '${m.name}' takes a comptime parameter, so it has a version per value and no one method a Dyn could call`, e.start, e.end);
@@ -7031,6 +7099,7 @@ export class Expressions implements Union {
       throw new CompileError("E0502", `property '${shownName(callee.name)}' does not exist on type '${this.typing.show(t)}'${hint}`, callee.start, callee.end);
     }
     if (this.linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
+    this.omittableCall(e, callee, m, this.typing.rec(this.typing.rec(t).of).name);
     if (m.generic) throw new CompileError("E0211", `'${m.name}' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn; take a type parameter bounded by '${this.typing.rec(this.typing.rec(t).of).name}' instead`, callee.start, callee.end);
     const async = this.typing.promiseElement(m.returns);
     if (async !== undefined && m.owned) throw unsupported("async methods taking their object over through a Dyn", callee);
