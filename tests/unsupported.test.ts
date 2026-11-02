@@ -68,6 +68,15 @@ for (const [type, what, part] of MEMBERS) {
   });
 }
 
+// References side by side in a union are refused at the first one that isn't beside nothing.
+test("Ref<A> | Ref<B>", () => {
+  const src = "class A {}\nclass B {}\nfunction f(p: Ref<A> | Ref<B>) {}\nfunction main() {}";
+  const start = src.indexOf("Ref<A>");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: `unions of bare references are not supported yet; hold each in an object member with a tag, like '{ kind: "a"; node: Ref<A> }'`, start, end: start + "Ref<A>".length,
+  }));
+});
+
 // Class forms that parse but have no meaning yet: the rejected part is the third column.
 const CLASSES: [string, string, string][] = [
   ["abstract class A { abstract n: i64 }", "abstract fields", "abstract n: i64"],

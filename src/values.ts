@@ -6078,6 +6078,8 @@ export class Expressions implements Union {
         this.coercions.set(e, to);
         return;
       }
+      const member = e.kind === "object" ? this.lentMember(e, to as UnionType) : undefined;
+      if (member) type = this.lendFields(e as Extract<Expr, { kind: "object" }>, member, message);
       intoUnion(e, type, to as UnionType, message, this);
       return;
     }
@@ -6274,6 +6276,21 @@ export class Expressions implements Union {
     if (!lives || !this.place(e) || !this.inPlace(e, to)) {
       throw new CompileError("E0204", `'${target.name}' can only be pointed at a variable, or a field of one, declared in its own scope or an enclosing one, so that it lives as long as '${target.name}'`, e.start, e.end);
     }
+  }
+
+  // The member holding references an object literal meeting a union goes into: the one object
+  // member whose literal fields its literal properties all match, as a tag picks it.
+  private lentMember(e: Extract<Expr, { kind: "object" }>, to: UnionType): ObjectType | undefined {
+    const found = this.typing.rec(to).members.filter((m): m is ObjectType => {
+      if (this.recOf(m)?.kind !== "object" || !this.typing.holdsRef(m)) return false;
+      return this.typing.rec(m as ObjectType).fields.every((f) => {
+        const r = this.recOf(f.type);
+        if (r?.kind !== "literal") return true;
+        const p = this.winner(e, f.name);
+        return p?.kind === "property" && literalValue(p.value) === r.value;
+      });
+    });
+    return found.length === 1 ? found[0] : undefined;
   }
 
   // An object literal meeting a type with fields holding references lends each property to

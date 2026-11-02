@@ -189,3 +189,261 @@ function main() {
   if (v.item !== undefined) console.log(v.item.n)
 }
 // error: cannot change 'items' while 'v' borrows 'items' and is used later
+// case: union_refs_tagged
+// A tagged union's members hold references; the tag picks the member a literal goes into, and
+// a check on it, a switch or a match gives the member's reference.
+class Expr {
+  text = "e"
+}
+class Stmt {
+  line: i64 = 3
+}
+type AnyNode = { of: "expr"; node: Ref<Expr> } | { of: "stmt"; node: Ref<Stmt> }
+function show(n: AnyNode): string {
+  if (n.of === "expr") return n.node.text
+  return `line ${n.node.line}`
+}
+function shown(n: Ref<AnyNode>): string {
+  switch (n.of) {
+    case "expr":
+      return n.node.text
+    case "stmt":
+      return `line ${n.node.line}`
+  }
+  return ""
+}
+function pick(e: Ref<Expr>, s: Ref<Stmt>, expr: boolean): AnyNode {
+  if (expr) return { of: "expr", node: e }
+  return { of: "stmt", node: s }
+}
+function main() {
+  const e = new Expr()
+  const s = new Stmt()
+  const a: AnyNode = { of: "expr", node: e }
+  const b: AnyNode = { of: "stmt", node: s }
+  console.log(shown(a), shown(b))
+  console.log(show(pick(e, s, true)), show(pick(e, s, false)))
+  const m = match (a) {
+    case { of: "expr", node } => node.text,
+    case { of: "stmt", node } => `line ${node.line}`,
+  }
+  console.log(m)
+}
+// expect: e line 3
+// expect: e line 3
+// expect: e
+// case: union_refs_tagged_mut
+// A 'Mut' member writes through once narrowed, and its source waits for the union's last use.
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Mut<A> } | { of: "b"; node: Mut<B> }
+function main() {
+  let a = new A()
+  const n: Node = { of: "a", node: a }
+  if (n.of === "a") n.node.n = 7
+  console.log(a.n)
+}
+// expect: 7
+// case: union_refs_tagged_mut_used
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Mut<A> } | { of: "b"; node: Mut<B> }
+function main() {
+  let a = new A()
+  const n: Node = { of: "a", node: a }
+  console.log(a.n)
+  if (n.of === "a") n.node.n = 7
+}
+// error: cannot use 'a.n' while 'n' borrows 'a' mutably and is used later
+// case: union_refs_tagged_mut_twice
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Mut<A> } | { of: "b"; node: Mut<B> }
+function main() {
+  let a = new A()
+  const n: Node = { of: "a", node: a }
+  const m: Node = { of: "a", node: a }
+  if (n.of === "a") n.node.n = 7
+  if (m.of === "a") m.node.n = 8
+}
+// error: cannot use 'a' while 'n' borrows 'a' mutably and is used later
+// case: union_refs_tagged_change
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+function main() {
+  let a = new A()
+  const n: Node = { of: "a", node: a }
+  a.n = 3
+  if (n.of === "a") console.log(n.node.n)
+}
+// error: cannot change 'a.n' while 'n' borrows 'a' and is used later
+// case: union_refs_tagged_returned_local
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+function make(): Node {
+  const a = new A()
+  return { of: "a", node: a }
+}
+function main() {}
+// error: can't return a reference to 'a', which belongs to this function
+// case: union_refs_tagged_outlived
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+function show(n: Ref<Node>) {
+  if (n.of === "a") console.log(n.node.n)
+}
+function main() {
+  const b = new B()
+  let n: Node = { of: "b", node: b }
+  {
+    const a = new A()
+    n = { of: "a", node: a }
+  }
+  show(n)
+}
+// error: 'a' doesn't live long enough: 'n' still borrows it after its block ends
+// case: union_refs_tagged_temporary
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+function main() {
+  const n: Node = { of: "b", node: new B() }
+  console.log(n.of)
+}
+// error: 'n' would keep borrowing this temporary, which is gone once its statement ends
+// case: union_refs_tagged_returned_borrow
+// A union a function builds from its parameters borrows what was lent to the call.
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+function first(a: Ref<A>, b: Ref<B>): Node {
+  return { of: "a", node: a }
+}
+function main() {
+  let a = new A()
+  let b = new B()
+  const n = first(a, b)
+  b = new B()
+  console.log(n.of)
+}
+// error: cannot change 'b' while 'n' borrows 'b' and is used later
+// case: union_refs_tagged_narrowed_kept
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+function get(n: Ref<Node>): Ref<A> | null {
+  if (n.of === "a") return n.node
+  return null
+}
+function main() {
+  let a = new A()
+  const n: Node = { of: "a", node: a }
+  const r = get(n)
+  a.n = 4
+  if (r !== null) console.log(r.n)
+}
+// error: cannot change 'a.n' while 'r' borrows 'a' and is used later
+// case: union_refs_tagged_field
+// A class field holds a tagged union of references, changed member by member.
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+class Walker {
+  at: Node
+  count = 0
+  constructor(at: Node) {
+    this.at = at
+  }
+  step(this: Mut<this>) {
+    this.count++
+    if (this.at.of === "a") console.log(this.at.node.n)
+    else console.log(this.at.node.s)
+  }
+}
+function main() {
+  const a = new A()
+  const b = new B()
+  let w = new Walker({ of: "a", node: a })
+  w.step()
+  w.at = { of: "b", node: b }
+  w.step()
+  console.log(w.count)
+}
+// expect: 1
+// expect: b
+// expect: 2
+// case: union_refs_tagged_nested
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+type Wrap = { inner: Node; k: i64 }
+function main() {
+  let a = new A()
+  const w: Wrap = { inner: { of: "a", node: a }, k: 1 }
+  a.n = 2
+  console.log(w.inner.of)
+}
+// error: cannot change 'a.n' while 'w' borrows 'a' and is used later
+// case: union_refs_tagged_conditional
+class A {
+  n: i64 = 1
+}
+class B {
+  s = "b"
+}
+type Node = { of: "a"; node: Ref<A> } | { of: "b"; node: Ref<B> }
+function main() {
+  let a = new A()
+  const b = new B()
+  const n: Node | null = a.n > 0 ? { of: "a", node: a } : { of: "b", node: b }
+  a.n = 2
+  if (n !== null) console.log(n.of)
+}
+// error: cannot change 'a.n' while 'n' borrows 'a' and is used later

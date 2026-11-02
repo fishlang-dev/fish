@@ -477,7 +477,7 @@ function f(u: Ref<i64> | boolean): i64 {
 }
 
 function main() {}
-// error: unions holding references are not supported yet
+// error: unions of bare references are not supported yet; hold each in an object member with a tag
 // case: ref_values
 // Classes and object literals hold references, read and call through them, and take new ones.
 class Source {
@@ -714,7 +714,7 @@ function f(u: Ref<i64> | boolean): i64 {
 }
 
 function main() {}
-// error: unions holding references are not supported yet
+// error: unions of bare references are not supported yet; hold each in an object member with a tag
 // case: ref_values_write_through
 class P {
   x = 0

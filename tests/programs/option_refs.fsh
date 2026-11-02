@@ -353,7 +353,7 @@ function main() {
 // case: option_refs_two_refs
 function f(x: Ref<i64> | Ref<string>) {}
 function main() {}
-// error: unions holding references are not supported yet
+// error: unions of bare references are not supported yet; hold each in an object member with a tag
 // case: option_refs_array
 function f(xs: (Ref<i64> | null)[]) {}
 function main() {}
