@@ -688,8 +688,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       // test the place.
       case "match": {
         expr(e.subject);
-        let subject = e.subject;
-        while (subject.kind === "nonNull") subject = subject.expr;
+        const subject = through(e.subject);
         const place = key(subject);
         let entry = join(state, null);
         let after: State = null;
@@ -1104,8 +1103,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // body that can stop, losing the slot its pointer is kept in, can't hold one.
   function lentTemporary(s: Expr, across = false): boolean {
     const lent = coercions.get(s);
-    let at = s;
-    while (at.kind === "nonNull") at = at.expr;
+    const at = through(s);
     if (s.kind === "string" && !across && !f.generator && !f.async) return false;
     // A JsValue read out of JS is made for the statement, though it names a variable.
     return lent !== undefined && isRef(lent) && !isRef(types.get(s)!) && (key(at) === undefined || instance.copiesOut.has(at));
@@ -1357,8 +1355,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // The place an expression names: a variable or `this`, then fields, but not through a getter.
   function key(e: Named): string | undefined {
-    // `x!` is what `x` holds, so it is borrowed and changed as `x` is.
-    if (e.kind === "nonNull") return key(e.expr);
+    // `x!` is what `x` holds, so it is borrowed and changed as `x` is, as is `x as T`.
+    if (projection(e)) return key(e.expr);
     if (e.kind === "shorthand" || e.kind === "ident") {
       const local = localAt(e);
       return local && String(local.id);
@@ -1449,9 +1447,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return e.kind === "binary" && e.op === "??" && typing.holdsRef(types.get(e)!);
   }
 
-  // `x!` reads from the place `x` is, as `key` names it, whatever the Option holds.
   function rootOf(e: Named): Named {
-    if (e.kind === "nonNull" || transparent(e)) return rootOf((e as { expr: Expr }).expr);
+    if (projection(e)) return rootOf(e.expr);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
@@ -1478,8 +1475,19 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return (e.kind === "nonNull" && typing.optionRef(types.get(e.expr))) || transparent(e) ? unwrapped((e as { expr: Expr }).expr) : e;
   }
 
-  function transparent(e: Named): boolean {
+  function transparent(e: Named): e is Extract<Expr, { kind: "as" | "satisfies" | "unsafe" }> {
     return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe";
+  }
+
+  // Forms that read the place their operand names: `x!`, whatever the Option holds, and the
+  // transparent ones. `unwrapped` follows fewer, since it reads a value's own type and coercion.
+  function projection(e: Named): e is Extract<Expr, { kind: "nonNull" | "as" | "satisfies" | "unsafe" }> {
+    return e.kind === "nonNull" || transparent(e);
+  }
+
+  function through(e: Expr): Expr {
+    while (projection(e)) e = e.expr;
+    return e;
   }
 
   // The indexes into arrays along a place's path, outermost first.

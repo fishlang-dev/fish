@@ -1029,3 +1029,39 @@ function main() {
   h = new H();
   console.log(h.o!.items[0]!);
 }
+// case: borrow_loop_replaces_origin_through_satisfies
+// error: borrow_loop_replaces_origin_through_satisfies.fsh:6:53: error[E0203]: cannot change 'h' while a 'for...of' loop is reading 'h.b.items'
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function main() {
+  let h = new H();
+  for (const x of (h.b.items satisfies string[])) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_replaces_reference_origin_through_as
+// error: borrow_loop_replaces_reference_origin_through_as.fsh:6:46: error[E0203]: cannot change 'h' while a 'for...of' loop borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function main() {
+  let h = new H(); const y: Ref<H> = h;
+  for (const x of (y.b.items as string[])) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_replaces_origin_through_bang_satisfies
+// error: borrow_loop_replaces_origin_through_bang_satisfies.fsh:6:54: error[E0203]: cannot change 'h' while a 'for...of' loop is reading 'h.o.items'
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function main() {
+  let h = new H();
+  for (const x of (h.o!.items satisfies string[])) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_reads_origin_through_satisfies
+// expect: ab 2
+// expect: cd 2
+// expect: ab
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function main() {
+  let h = new H();
+  for (const x of (h.b.items satisfies string[])) console.log(x, h.b.items.length);
+  h = new H();
+  console.log(h.b.items[0]!);
+}
