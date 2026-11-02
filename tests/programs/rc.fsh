@@ -266,3 +266,37 @@ function main() {
   h.c.update((v) => { h.c = new Rc({ s: "q" + "" }); v.s = "x" + "y"; });
   console.log(h.c.s);
 }
+// case: rc_recursive_alias
+// expect: 2 2 true
+// expect: a
+type Tree = { kids: Rc<Tree>[]; n: i64 };
+type Node = { s: string; me: Weak<Node> };
+
+function main() {
+  const r = new Rc<Tree>({ kids: [], n: 1 });
+  r.update((v) => v.kids.push(new Rc<Tree>({ kids: [], n: 2 })));
+  r.update((v) => v.kids.push(new Rc<Tree>({ kids: [], n: 3 })));
+  const kids = r.kids;
+  const n = new Rc<Node>({ s: "a" + "", me: new Weak<Node>() });
+  n.update((v) => { v.me = n.downgrade(); });
+  const me = n.me.upgrade();
+  console.log(kids.length, kids[0]!.n, me !== null);
+  if (me !== null) console.log(me.s);
+}
+// case: rc_cell_field_blocks_whole_change
+// error: rc_cell_field_blocks_whole_change.fsh:9:19: error[E0304]: cannot call 'reset' on 'v' as a whole inside 'update'
+class Node {
+  label: Cell<string> = new Cell("start" + "!");
+  reset(this: Mut<this>) { this.label = new Cell("new" + "!"); }
+}
+
+// A borrowed Cell field would dangle if 'reset' replaced it.
+function look(c: Ref<Cell<string>>, r: Rc<Node>) {
+  r.update((v) => v.reset());
+  console.log(c.get());
+}
+
+function main() {
+  const r = new Rc(new Node());
+  look(r.label, r.clone());
+}

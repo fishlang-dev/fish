@@ -1697,6 +1697,17 @@ export class Typing {
         this.ties.set(of, back);
       }
     }
+    // An Rc, a Weak or a shared value already points at a block, so one that leads back holds the
+    // type inline too, and is the one written with the type.
+    if (typeof of !== "string") {
+      for (const which of ["shared", "Rc", "Weak"] as const) {
+        const held = this.shareds.get(`${which} ${this.keyOf(back)}`);
+        if (held === undefined) continue;
+        this.rec(held).of = of;
+        this.shareds.set(`${which} ${this.keyOf(of)}`, held);
+        this.ties.set(of, back);
+      }
+    }
     const array = this.arrays.get(`[${this.keyOf(back)}]`);
     // A type that is itself an array, as `type T = T[]`, has no other part to hold, so its
     // elements stay blocks.
