@@ -137,6 +137,10 @@ export type Context = {
   // Declares a name a pattern binds, read-only, in the arm's scope.
   bind(name: string, type: Type, node: Expr): Local;
   narrowed(l: Local): Type | undefined;
+  forget(l: Local, at: Span): void;
+  lendsWhole(l: Local, at: Expr): void;
+  // Notes a read of a variable as narrowed.
+  narrowRead(l: Local, at: Expr): void;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
   // Records an error a call raises, and what the instance called may throw.
@@ -310,6 +314,8 @@ export class ExpressionsState {
   statementAssign: Expr | undefined;
   // Objects of index expressions already checked, which their next read takes as checked.
   once = new WeakNodeSet<Expr>();
+  // Variables read as declared, whatever a check or assignment narrowed them to.
+  asDeclared = new WeakNodeSet<Expr>();
   // Names used as the object of a field read, an index or a method call.
   objects = new WeakNodeSet<Expr>();
   oversized: Extract<Expr, { kind: "int" }>[] = [];
@@ -5044,7 +5050,8 @@ export class Expressions implements Union {
         if (this.ctx.sharing && local.param && !this.ctx.exprsState.objects.has(e) && this.typing.interiorMutable(held)) {
           throw new CompileError("E0304", this.ctx.counting ? `inside an Rc's 'update', use '${e.name}' only through its fields: its interior-mutable parts are borrowed where they live, and another name for it could replace them` : `inside a shared value's 'update', use '${e.name}' only through its fields: other tasks borrow its interior-mutable parts without the lock, and another name for it could replace them`, e.start, e.end);
         }
-        const read = this.ctx.narrowed(local);
+        const read = this.ctx.exprsState.asDeclared.has(e) ? undefined : this.ctx.narrowed(local);
+        if (read !== undefined) this.ctx.narrowRead(local, e);
         // A JsValue narrowed by `typeof` to one kind of value is read out of JS, as a new value
         // each time; one narrowed to several stays a JsValue.
         const js = this.typing.jsRead(local.type, read);
@@ -5500,6 +5507,7 @@ export class Expressions implements Union {
         if (local && typeof local.type !== "string" && this.typing.rec(local.type).kind === "ref" && !this.coercions.has(place)) this.rebind(local, e.value);
         const narrow = local && this.ctx.narrowed(local);
         if (local && op === "=" && this.coercions.has(place) && narrow && this.isRefType(narrow) && !this.typing.fits(type, this.typing.rec(narrow).to)) this.ctx.rewritten(local, e);
+        if (local && op === "=") this.ctx.forget(local, e);
         return target;
       }
       case "update": {
@@ -5579,8 +5587,14 @@ export class Expressions implements Union {
           return binaryType(this.typing, e.op, left, this.ctx.assume(e.op === "&&" ? proven.yes : proven.no, () => this.operand(e.right)), e);
         }
         if (e.op === "===" || e.op === "!==") {
-          const special = this.jsEmpty(e) ?? typeofComparison(e, this) ?? this.equality(e) ?? unionComparison(e, this, (v, to) => this.adapt(v, to));
-          if (special) return special;
+          try {
+            return this.compared(e);
+          } catch (err) {
+            // A check against `null` or a literal that a narrowed variable can't be is redundant, as
+            // TypeScript allows, so the variable is compared as declared.
+            if (!(err instanceof CompileError && err.code === "E0112") || !this.asDeclared(e)) throw err;
+            return this.compared(e);
+          }
         }
         if (e.op === "instanceof") return instanceofCheck(e, this);
         if (e.op === "**") return this.power(e.left, this.operand(e.left), e.right, this.operand(e.right), e);
@@ -5600,7 +5614,7 @@ export class Expressions implements Union {
           const [left, right] = [this.operand(e.left), this.operand(e.right)];
           if (stringLike(this.typing, left) || stringLike(this.typing, right) || enumText(this.typing, left) || enumText(this.typing, right)) return this.join(e.left, left, e.right, right);
         }
-        return binaryType(this.typing, e.op, ...this.sameNumbers(e.left, this.operand(e.left), e.right, this.operand(e.right), e.op === "===" || e.op === "!=="), e);
+        return binaryType(this.typing, e.op, ...this.sameNumbers(e.left, this.operand(e.left), e.right, this.operand(e.right), false), e);
       // A spread anywhere but in an array literal or a call filling a rest parameter.
       case "spread":
         throw new CompileError("E0408", "'...' spreads into an array literal, or as an argument into a rest parameter, as in 'function f(...xs: T[])'; it can't be used here yet", e.start, e.end);
@@ -6094,6 +6108,25 @@ export class Expressions implements Union {
     this.coercions.set(e, to);
   }
 
+  private compared(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): Type {
+    const special = this.jsEmpty(e) ?? typeofComparison(e, this) ?? this.equality(e) ?? unionComparison(e, this, (v, to) => this.adapt(v, to));
+    return special ?? binaryType(this.typing, e.op, ...this.sameNumbers(e.left, this.operand(e.left), e.right, this.operand(e.right), true), e);
+  }
+
+  // Marks a narrowed variable compared with `null` or a literal to be read as declared; false when
+  // there is none.
+  private asDeclared(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): boolean {
+    let marked = false;
+    for (const [side, other] of [[e.left, e.right], [e.right, e.left]] as const) {
+      const local = side.kind === "ident" ? this.localAt(side) : undefined;
+      const plain = isEmpty(other, this.locals as NodeMap<Expr, LocalId>) || literalValue(other) !== undefined;
+      if (!local || !plain || this.types.get(side) === local.type || this.ctx.narrowed(local) === undefined) continue;
+      this.ctx.exprsState.asDeclared.add(side);
+      marked = true;
+    }
+    return marked;
+  }
+
   // A value meeting a reference is lent rather than handed over. A place is lent where it
   // lives, so it must be exactly the type borrowed; a temporary is converted first. Lending
   // mutably needs a place that could be assigned.
@@ -6113,6 +6146,14 @@ export class Expressions implements Union {
     if ((e.kind === "object" || e.kind === "array") && !this.typing.fits(type, this.typing.rec(to).to)) {
       this.coerce(e, type, this.typing.rec(to).to, message);
       type = this.coercions.get(e) ?? this.types.get(e)!;
+    }
+    // A narrowed variable lent mutably is lent whole, as declared.
+    const lent = e.kind === "ident" && this.typing.rec(to).mutable ? this.localAt(e) : undefined;
+    // Lent as the member a check narrowed it to, it keeps that member, and the check holds.
+    if (lent && !this.typing.holdsRef(lent.type) && this.typing.sameLowered(lent.type, this.typing.rec(to).to)) {
+      this.ctx.lendsWhole(lent, e);
+      this.types.set(e, lent.type);
+      type = lent.type;
     }
     const exact = this.typing.sameLowered(type, this.typing.rec(to).to);
     // A type that holds itself may lend a part of a parameter's value as the parameter's type,
@@ -6528,6 +6569,11 @@ export class Expressions implements Union {
         this.types.set(target, declared);
         this.coercions.set(target, this.typing.rec(declared).to);
         return this.typing.rec(declared).to;
+      }
+      // A whole value goes in a variable as declared, whatever a check narrowed it to.
+      if (target.kind === "ident" && !reads && declared !== read && !this.isRefType(declared)) {
+        this.types.set(target, declared);
+        this.ctx.copiesOut.delete(target);
       }
       intoMember(this.typing, target, this.types);
       this.changeable(target, "assign to");
