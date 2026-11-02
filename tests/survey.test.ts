@@ -74,6 +74,11 @@ test("the survey counts G2, G3 and G11 through the migration detector, with rows
   });
 });
 
+test("import.meta is counted unless it reads a member Fish fixes while compiling", () => {
+  expect(counts("const a = import.meta.dir;\nconst b = join(import.meta.dirname, import.meta.file);\nif (import.meta.main) run(import.meta.path, import.meta.url);\n")).toEqual({ importMeta: 1 });
+  expect(counts("const r = import.meta.resolve(\"x\");\nconst m = import.meta;\nconst t = new.target;\n")).toEqual({ importMeta: 2 });
+});
+
 test("the timer forms Fish doesn't take are counted, and the timers it does aren't", () => {
   expect(counts("function main() {\n  setTimeout(f, 1);\n  const t = setInterval(f, 2, a, b);\n  clearTimeout(t);\n}\n")).toEqual({});
   expect(counts("function main() {\n  setImmediate(f);\n  setTimeout(f, 1).unref();\n  setTimeout(f, 1, a, b, c);\n}\n")).toEqual({ timerForms: 3 });
@@ -207,7 +212,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(56);
+  expect(r.rules.length + r.waiting.length).toBe(57);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {

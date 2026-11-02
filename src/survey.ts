@@ -84,6 +84,7 @@ const RULES: Rule[] = [
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
+  { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url and main members" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
@@ -97,6 +98,9 @@ const WEIGHTS: Record<Action, usize> = { reject: 10, guided: 3, auto: 0, unsuppo
 // implementation patching prototypes near 90.
 const GRADES: [string, f64][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
+
+// The members of `import.meta` Fish fixes while compiling.
+const META_MEMBERS = ["path", "file", "dir", "url", "main"];
 
 // Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
 const numberKey = (args: unknown) => Array.isArray(args) && isNode(args[0]) && args[0].kind === "ref" && args[0].name === "number";
@@ -301,7 +305,7 @@ function scan(path: string, program: unknown[], note: (id: string, offset: usize
     if (name && whole) wholes.set(whole, { module: builtinModule(s.module), has: stdExports(name), names: NAME_MODULES[name] ?? {} });
   }
   const stack: [unknown, usize, boolean][] = program.map((s) => [s, 0, false]);
-  const scanning: Scanning = { path, envKeys: new WeakSet(), statementDestructures: new WeakSet() };
+  const scanning: Scanning = { path, envKeys: new WeakSet(), statementDestructures: new WeakSet(), metaRead: new WeakSet() };
   const heads = new WeakSet<object>();
   // Spreads written as call arguments, which fill only a rest parameter unless they spread a
   // name the file declares as a tuple, judged once its tuples are known.
@@ -396,14 +400,14 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: usiz
 // What a scan of one file at `path` notes as it goes: the `process.env` nodes read by key, which
 // Fish takes (any other use of it, it doesn't), and the destructuring assignments written as
 // statements of their own.
-type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures: WeakSet<object> };
+type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures: WeakSet<object>; metaRead: WeakSet<object> };
 
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
 // `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
 const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
 
-function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean): [string, usize, string?][] {
+function classify({ path, envKeys, statementDestructures, metaRead }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean): [string, usize, string?][] {
   const found: [string, usize, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
@@ -419,6 +423,10 @@ function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, d
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
+      if (isNode(n.object) && n.object.kind === "meta" && META_MEMBERS.includes(n.name as string)) metaRead.add(n.object);
+      break;
+    case "meta":
+      if (n.name === "import.meta" && !metaRead.has(n)) push("importMeta");
       break;
     case "unary":
       if (n.op === "delete" && envEntry(n.operand)) push("process");
