@@ -1,9 +1,9 @@
 import { CompileError } from "./diag.ts";
 import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
-import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind } from "./narrow.ts";
+import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind, type Verdict } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
-import { TypeSet, isNumeric } from "./typing.ts";
+import { TypeMap, TypeSet, isNumeric } from "./typing.ts";
 import type { ClassType, Field, LiteralType, Type, Typing, UnionType } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 
@@ -12,6 +12,7 @@ import { NodeMap } from "./nodes.ts";
 // What these rules need from expression checking.
 export type Union = {
   kindTests: Tables["kindTests"];
+  keyTests: Tables["keyTests"];
   typing: Typing;
   types: NodeMap<Expr, Type>;
   coercions: NodeMap<Expr, Type>;
@@ -19,6 +20,8 @@ export type Union = {
   excess(e: Expr, to: Type): void;
   // The class a name declares, unless a variable shadows it.
   classNamed(name: string): ClassType | undefined;
+  // Whether a class or a base it embeds declares a method, getter or setter of this name.
+  declares(c: ClassType, name: string): boolean;
   // Gives an expression of only number literals the number type it meets.
   adapt(e: Expr, to: Type): boolean;
 };
@@ -149,6 +152,50 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, host: Unio
   const tested = c ?? instances[0];
   if (!tested) throw new CompileError("E0109", "the right side of 'instanceof' must be a class, or a generic class this value may be an instance of", e.right.start, e.right.end);
   host.types.set(e.right, tested);
+  return "boolean";
+}
+
+// `"x" in v` checks whether v has key x, as JavaScript sees the value: an object by its fields, an
+// instance by its fields and its class's methods and accessors, known while compiling as for
+// `instanceof`. Each member's answer is recorded for narrowing and codegen.
+export function keyCheck(e: Extract<Expr, { kind: "binary" }>, host: Union): Type {
+  const { typing } = host;
+  if (e.left.kind !== "string") {
+    throw new CompileError("E0801", "'in' tests a key written as a string literal, as in '\"name\" in v'; for a key known only at run time, keep the keys in a Set or the values in a Map", e.left.start, e.left.end);
+  }
+  host.read(e.left);
+  const key = e.left.value;
+  const verdicts = host.keyTests.get(e) ?? new TypeMap<Type, Verdict>();
+  host.keyTests.set(e, verdicts);
+  const visiting = new TypeSet();
+  const verdict = (t: Type): Verdict => {
+    const r = typeof t === "string" ? undefined : typing.rec(t);
+    const known = verdicts.get(t);
+    if (known) return known;
+    // A type that holds itself answers for its own members, which decide it.
+    if (visiting.has(t)) return "both";
+    visiting.add(t);
+    let found: Verdict;
+    if (r?.kind === "union" || r?.kind === "recursive") {
+      const parts = new Set((r.kind === "union" ? r.members : [r.of]).map(verdict));
+      found = parts.size === 1 ? [...parts][0]! : "both";
+    } else if (r?.kind === "object" || r?.kind === "class" || r?.kind === "param") {
+      const field = key.startsWith("#") ? undefined : typing.field(t as Exclude<Type, string>, key);
+      const method = r.kind === "class" && host.declares(t as ClassType, key);
+      found = field?.optional ? "both" : field || method ? "yes" : r.kind === "param" && !r.bound ? "both" : "no";
+    } else if (r?.kind === "dyn") {
+      throw new CompileError("E0109", `a '${typing.show(t)}' keeps no record of its value's class, so 'in' can't test it; add a method to the interface that says`, e.start, e.end);
+    } else {
+      throw new CompileError("E0109", `'in' tests an object or a class instance for a key, and a '${typing.show(t)}' has none to test; narrow the value to an object first`, e.right.start, e.right.end);
+    }
+    visiting.delete(t);
+    verdicts.set(t, found);
+    // Codegen sees the type lowered, which drops the marks that say a field is optional.
+    const lowered = typing.lower(t);
+    if (!verdicts.has(lowered)) verdicts.set(lowered, found);
+    return found;
+  };
+  verdict(host.read(e.right));
   return "boolean";
 }
 

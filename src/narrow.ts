@@ -26,6 +26,10 @@ export function category(typing: Typing, t: Type): string {
 
 export type Kind = "Map" | "Set" | "Array";
 
+// Whether a member of `v` has key `x`, for `"x" in v`: "both" when its `x` is optional, since a
+// value may have left it out.
+export type Verdict = "yes" | "no" | "both";
+
 export function ofKind(typing: Typing, t: Type, kind: Kind): boolean {
   const held = typing.unfold(t);
   if (typeof held === "string") return false;
@@ -75,6 +79,8 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     const inner = of(e.operand);
     return { yes: inner.no, no: inner.yes };
   }
+  const keyed = tables.keyTests.get(e);
+  if (keyed && e.kind === "binary") return split(e.right, (m) => keyed.get(m) ?? "both", true);
   const kind = kindTests.get(e);
   if (kind) return split(e.kind === "call" ? e.args[0]! : (e as Extract<Expr, { kind: "binary" }>).left, (m) => (ofKind(typing, m, kind) ? "yes" : "no"), true);
   if (e.kind !== "binary") return nothing;
