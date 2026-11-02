@@ -303,7 +303,6 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     if (typeof m.name !== "string") throw symbolKey(m.name);
     const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
-    if (m.generator && !m.modifiers.includes("async")) throw unsupported("generator methods", m);
     if (!m.body) throw new CompileError("E0410", `'${m.name}' has no implementation; follow its overload signatures with a '${m.name}' method that has a body`, m.start, m.end);
     if (m.name === "constructor") throw new CompileError("E0407", "'constructor' can't be the name of a method", m.start, m.end);
     const table = isStatic ? statics : methods;

@@ -605,8 +605,8 @@ test("node:fs members the std module answers are portable; others are Node built
   });
 });
 
-test("async generators, their methods and for await are portable", () => {
-  project({ "a.ts": "async function* ticks(): AsyncGenerator<number> { yield 1; }\nclass Feed { async *each(): AsyncGenerator<number> { yield 1; } }\nasync function main() { for await (const t of ticks()) console.log(t); }\n" }, (dir) => {
+test("generators, async generators, their methods and for await are portable", () => {
+  project({ "a.ts": "async function* ticks(): AsyncGenerator<number> { yield 1; }\nclass Feed { async *each(): AsyncGenerator<number> { yield 1; } *all(): Generator<number> { yield 1; } static *none(): Generator<number> { yield 0; } }\nasync function main() { for await (const t of ticks()) console.log(t); }\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[]]);
     expect(scanFiles(dir)[0]!.findings).toEqual([]);
   });
