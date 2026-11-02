@@ -1,7 +1,7 @@
 import type { Tables } from "./compilation.ts";
 import { stdModuleAt, textAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
-import { abstractIn, copyFor, inherited, shownName, isLifetime, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
+import { abstractIn, copyFor, inherited, selfTyped, shownName, isLifetime, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { Direct } from "./overloads.ts";
@@ -4812,7 +4812,7 @@ export class Expressions implements Union {
     if (found.abstract) throw new CompileError("E0701", `'${callee.name}' is abstract in '${this.typing.rec(found.owner!).name}', so 'super.${callee.name}()' has nothing to run`, callee.start, callee.end);
     // A template runs as this class's own copy of it, on this class's `this`.
     const original = this.arenas.bodyOf(found.copyOf) ?? found;
-    const copied = original.template === true && !this.typing.rec(this.self!.type).abstract;
+    const copied = (original.template === true || selfTyped(original)) && !this.typing.rec(this.self!.type).abstract;
     if (copied) found = copyFor(this.ctx.tables, this.ctx.classOf(this.self!.type), original);
     this.visible(found.access, found.declared ?? found.owner!, callee.name, callee);
     if (found.self!.mutable && !this.self!.mutable) {

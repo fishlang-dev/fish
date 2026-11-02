@@ -559,6 +559,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       if (args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it gives, like '${t.name}<i64>'`, t.start, t.end);
       return t.name === "Iterable" ? this.typing.iterableInterface(args[0]!) : this.typing.generatorInterface(args[0]!);
     }
+    if (t.name === "this") throw new CompileError("E0105", "'this' as a type is supported only in a class's instance methods: in the return type, where it is the receiver's own class, and in parameter types, where it is the class that declares the method", t.start, t.end);
     throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...ITERATORS, ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
   }
 

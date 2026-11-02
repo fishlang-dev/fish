@@ -1,4 +1,4 @@
-import { checkOverrides, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
+import { checkOverrides, copySelfTyped, extend, implementAbstracts, type Body, type ClassInfo } from "./classes.ts";
 import type { Tables } from "./compilation.ts";
 import { nextId } from "./nodes.ts";
 import type { Arenas, ClassId } from "./arenas.ts";
@@ -92,6 +92,7 @@ export class Registry {
     const at = c.node.extends!;
     extend(this.host.tables, c, base, (name) => this.host.withScope(new Map(), () => this.host.resolveType({ id: nextId(this.ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
     implementAbstracts(this.host.tables, c);
+    copySelfTyped(this.host.tables, c);
     checkOverrides(this.arenas, this.typing, c);
     this.host.registryState.linked.add(c.type);
   }
