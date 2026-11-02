@@ -415,6 +415,8 @@ export class Cursor {
   /** @throws {CompileError} */
   error(this: Mut<this>, message: string, t: Token | undefined = undefined): CompileError {
     const at = t === undefined ? this.token() : t!;
+    // A template with an invalid escape is wrong first for that, wherever it was written.
+    if (at.invalid !== undefined) return at.invalid;
     return new CompileError("E0001", `${message}, found ${describe(at)}`, at.start, at.end);
   }
 
