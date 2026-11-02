@@ -2258,7 +2258,7 @@ class BodyChecker implements Context, Outer, Sight {
       if (this.f.closure?.self !== undefined) this.outer!.lentPerCall(from);
       return;
     }
-    this.loopChange(String(l.localId), "mutably borrow", at);
+    this.loopChange(String(l.localId), "mutably borrow", l.name, at);
     const from = this.facts.findIndex((f) => f.has(bindingKey(l.localId)));
     const loop = from < 0 ? undefined : this.loops.find((x) => x.facts > from);
     if (loop && this.narrowReads.slice(loop.reads).some((r) => r.local === bindingKey(l.localId) && r.at !== at)) {
@@ -2302,12 +2302,12 @@ class BodyChecker implements Context, Outer, Sight {
   }
   // Whether something is known of the field paths at or below `prefix`. A change there, in a loop
   // that read one of them as narrowed by a check from before the loop, is refused.
-  loopChange(this: Mut<this>, prefix: string, action: string, at: Expr): boolean {
+  loopChange(this: Mut<this>, prefix: string, action: string, shown: string, at: Expr): boolean {
     const from = this.facts.findIndex((f) => [...f.keys()].some((k) => isPath(k) && covers(prefix, k)));
     if (from < 0) return false;
     const loop = this.loops.find((x) => x.facts > from);
     if (loop && this.narrowReads.slice(loop.reads).some((r) => isPath(r.local) && covers(prefix, r.local) && r.at !== at)) {
-      throw new CompileError("E0109", `can't ${action} this here: earlier in this loop a field it reaches was read as narrowed by what was known before the loop, and the next time round it may hold another member; check it inside the loop`, at.start, at.end);
+      throw new CompileError("E0109", `can't ${action} '${shown}' here: earlier in this loop a field it reaches was read as narrowed by what was known before the loop, and the next time round it may hold another member; check it inside the loop`, at.start, at.end);
     }
     return true;
   }
@@ -2324,7 +2324,7 @@ class BodyChecker implements Context, Outer, Sight {
   changesPath(this: Mut<this>, root: Local | "this", path: string, action: string, at: Expr) {
     const cut = path.indexOf("[...]");
     const prefix = `${root === "this" ? root : root.localId}${cut < 0 ? path : path.slice(0, cut)}`;
-    if (!this.loopChange(prefix, action, at)) return;
+    if (!this.loopChange(prefix, action, `${root === "this" ? root : root.name}${path}`, at)) return;
     const kept = action !== "assign to" || this.exprsState.updating === at ? this.facts.findLast((f) => f.has(prefix))?.get(prefix) : undefined;
     const keeps = kept !== undefined && kept === this.types.get(at) && this.cx.recOf(kept)?.kind !== "union";
     if (!keeps) return this.forgetPaths(prefix, at);

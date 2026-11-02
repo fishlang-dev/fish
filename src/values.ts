@@ -4837,6 +4837,8 @@ export class Expressions implements Union {
     if (found.self!.mutable && !this.self!.mutable) {
       throw new CompileError("E0206", `cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);
     }
+    // It may change any of this object's fields, as a method called on `this` may.
+    if (found.self!.mutable) this.changesThis("", `call '${callee.name}' on`, callee.object);
     this.types.set(callee.object, copied ? this.self!.type : base);
     if (found.self!.owned) this.takesOver(callee.object, callee.name);
     return found;

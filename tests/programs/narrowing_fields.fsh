@@ -418,7 +418,7 @@ function main() {
     }
   }
 }
-// error: 23:13: error[E0109]: can't mutably borrow this here: earlier in this loop a field it reaches was read as narrowed by what was known before the loop
+// error: 23:13: error[E0109]: can't mutably borrow 'n' here: earlier in this loop a field it reaches was read as narrowed by what was known before the loop
 // case: narrowing_fields_member_lent_in_loop
 class Node {
   value: i64
@@ -446,7 +446,7 @@ function main() {
     }
   }
 }
-// error: 23:7: error[E0109]: can't call 'cut' on this here
+// error: 23:7: error[E0109]: can't call 'cut' on 'n.next' here
 // case: narrowing_fields_written_in_branch
 class Node {
   value: i64
@@ -554,3 +554,118 @@ function main() {
   }
 }
 // expect: xy 2
+// case: narrowing_fields_super_call
+type Leaf = { kind: "leaf"; v: i64 }
+class Base {
+  item: Leaf | string | null
+  constructor() { this.item = { kind: "leaf", v: 7 } }
+  reset(this: Mut<this>) { this.item = "gone" + "!" }
+}
+class Kid extends Base {
+  constructor() { super() }
+  go2(this: Mut<this>): i64 {
+    if (this.item !== null && typeof this.item !== "string") {
+      super.reset()
+      return this.item.v
+    }
+    return 0
+  }
+}
+function main() {
+  let k = new Kid()
+  print(k.go2())
+}
+// error: 12:14: error[E0502]: property 'v' does not exist on type 'null | string | { kind: "leaf"; v: i64 }'
+// case: narrowing_fields_super_call_in_loop
+type Leaf = { kind: "leaf"; v: i64 }
+class Base {
+  item: Leaf | string | null
+  constructor() { this.item = { kind: "leaf", v: 7 } }
+  reset(this: Mut<this>) { this.item = "gone" + "!" }
+}
+class Kid extends Base {
+  constructor() { super() }
+  go(this: Mut<this>): i64 {
+    let t = 0
+    if (this.item !== null && typeof this.item !== "string") {
+      let i = 0
+      while (i < 2) { t += this.item.v; super.reset(); i++ }
+    }
+    return t
+  }
+}
+function main() {
+  let k = new Kid()
+  print(k.go())
+}
+// error: 13:41: error[E0109]: can't call 'reset' on 'this' here
+// case: narrowing_fields_generator_method
+type Leaf = { kind: "leaf"; v: i64 }
+class Box {
+  item: Leaf | null
+  constructor() { this.item = { kind: "leaf", v: 7 } }
+  *drain(this: Mut<this>): Generator<i64> {
+    this.item = null
+    yield 1
+  }
+  go(this: Mut<this>): i64 {
+    if (this.item !== null) {
+      for (const _x of this.drain()) {}
+      return this.item.v
+    }
+    return 0
+  }
+}
+function main() {
+  let b = new Box()
+  print(b.go())
+}
+// error: 12:14: error[E0502]: property 'v' does not exist on type 'null | { kind: "leaf"; v: i64 }'
+// case: narrowing_fields_awaited
+type Leaf = { kind: "leaf"; v: i64 }
+class Box {
+  item: Leaf | null
+  constructor() { this.item = { kind: "leaf", v: 7 } }
+  async clear(this: Mut<this>): Promise<void> {
+    this.item = null
+  }
+  async go(this: Mut<this>): Promise<i64> {
+    if (this.item !== null) {
+      await sleep(1)
+      const v = this.item.v
+      await this.clear()
+      return v + this.item.v
+    }
+    return 0
+  }
+}
+async function main() {
+  let b = new Box()
+  const v = await b.go()
+  print(v)
+}
+// error: 13:18: error[E0502]: property 'v' does not exist on type 'null | { kind: "leaf"; v: i64 }'
+// case: narrowing_fields_awaited_runs
+type Leaf = { kind: "leaf"; v: i64 }
+class Box {
+  item: Leaf | null
+  constructor() { this.item = { kind: "leaf", v: 7 } }
+  async clear(this: Mut<this>): Promise<void> {
+    this.item = null
+  }
+  async go(this: Mut<this>): Promise<i64> {
+    if (this.item !== null) {
+      await sleep(1)
+      const v = this.item.v
+      await this.clear()
+      return v
+    }
+    return 0
+  }
+}
+async function main() {
+  let b = new Box()
+  const v = await b.go()
+  print(v)
+}
+// expect: 7
