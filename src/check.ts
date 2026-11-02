@@ -2071,7 +2071,7 @@ class BodyChecker implements Context, Outer, Sight {
       const laid = (t: Type) => (this.instance.concrete ? this.cx.typing.lower(t) : t);
       this.cx.typing.rec(this.generatorType).yields = laid(this.yielded);
       this.cx.typing.rec(this.generatorType).params = this.f.params.map((p, i) => ({ name: paramName(p), type: laid(this.params[i]!) }));
-      // An async generator method's frame holds its object, as an async method's future does.
+      // A generator method's frame holds its object, as an async method's future does.
       if (this.f.self && !this.f.self.constructor) this.cx.typing.rec(this.generatorType).params.unshift(receiverField(this.cx.typing, this.f.self, laid));
     }
     const gives = this.declared ?? this.inferred ?? "void";

@@ -876,3 +876,190 @@ function main() {
   if (r.done === false) console.log(r.value);
 }
 // error: generators yielding references are not supported yet
+// case: generator_method
+class Bag {
+  items: string[];
+  counts: Map<string, i64> = new Map();
+  constructor(items: string[]) {
+    this.items = items;
+    for (const s of this.items) this.counts.set(s, s.length as i64);
+  }
+  *each(): Generator<string> {
+    for (const s of this.items) yield s + "!";
+  }
+  *keys(): Generator<string> {
+    for (const k of this.counts.keys()) yield k;
+  }
+  *entries(): Generator<[string, i64]> {
+    for (const [k, v] of this.counts) yield [k, v];
+  }
+  *above(min: i64): Generator<string> {
+    for (const [k, v] of this.counts) if (v > min) yield k;
+  }
+}
+function main() {
+  const b = new Bag(["a", "bb" + 1]);
+  for (const s of b.each()) console.log(s);
+  for (const k of b.keys()) console.log(k);
+  for (const [k, v] of b.entries()) console.log(k, v);
+  for (const k of b.above(1)) console.log("above", k);
+  let g = b.each();
+  const r = g.next();
+  if (r.done === false) console.log("next", r.value);
+  console.log(b.each().map((s) => s + "?").toArray());
+  console.log(b.items.length);
+}
+// expect: a!
+// expect: bb1!
+// expect: a
+// expect: bb1
+// expect: a 1
+// expect: bb1 3
+// expect: above bb1
+// expect: next a!
+// expect: [ 'a!?', 'bb1!?' ]
+// expect: 2
+// case: generator_method_static_and_generic
+class Box<T> {
+  items: T[];
+  constructor(items: T[]) { this.items = items; }
+  *each(): Generator<T> {
+    for (const x of this.items) yield x.clone();
+  }
+  *mapped<U>(f: (x: Ref<T>) => U): Generator<U> {
+    for (const x of this.items) yield f(x);
+  }
+  static *repeat<U>(x: U, n: i64): Generator<U> {
+    for (let i = 0; i < n; i++) yield x.clone();
+  }
+}
+class Count {
+  static *upTo(n: i64): Generator<i64> {
+    for (let i = 0; i < n; i++) yield i;
+  }
+}
+function main() {
+  const b = new Box<i64>([1, 2]);
+  for (const x of b.each()) console.log(x);
+  const c = new Box(["p" + 1]);
+  for (const s of c.each()) console.log(s);
+  for (const s of b.mapped((x) => "v" + x)) console.log(s);
+  for (const s of Box.repeat("z", 2)) console.log(s);
+  for (const i of Count.upTo(3)) console.log(i);
+}
+// expect: 1
+// expect: 2
+// expect: p1
+// expect: v1
+// expect: v2
+// expect: z
+// expect: z
+// expect: 0
+// expect: 1
+// expect: 2
+// case: generator_method_receivers
+class Bag {
+  items: string[] = [];
+  n: i64 = 0;
+  *each(): Generator<string> {
+    for (const s of this.items) yield s;
+  }
+  *bump(this: Mut<this>): Generator<i64> {
+    for (let i = 0; i < 3; i++) {
+      this.n++;
+      yield this.n;
+    }
+  }
+  *eat(this: Own<this>): Generator<string> {
+    for (const s of this.items) yield s + "#";
+  }
+}
+class Sub extends Bag {
+  *more(): Generator<string> {
+    for (const s of this.each()) yield s + "+";
+  }
+  *each(): Generator<string> {
+    for (const s of super.each()) yield s + "^";
+  }
+}
+function main() {
+  let b = new Bag();
+  b.items.push("a" + 1);
+  b.items.push("b");
+  for (const i of b.bump()) console.log(i);
+  console.log(b.n);
+  let s = new Sub();
+  s.items.push("c" + 2);
+  for (const x of s.more()) console.log(x);
+  for (const x of s.each()) console.log(x);
+  for (const x of b.eat()) console.log(x);
+}
+// expect: 1
+// expect: 2
+// expect: 3
+// expect: 3
+// expect: c2^+
+// expect: c2^
+// expect: a1#
+// expect: b#
+// case: generator_method_borrows_for_of
+class Bag {
+  items: string[] = [];
+  *each(): Generator<string> {
+    for (const s of this.items) yield s;
+  }
+  add(this: Mut<this>, s: string) { this.items.push(s); }
+}
+function main() {
+  let b = new Bag();
+  b.add("a");
+  for (const s of b.each()) b.add(s);
+}
+// error: 11:29: error[E0203]: cannot mutably lend 'b' while a 'for...of' loop borrows 'b' and is used later
+// case: generator_method_borrows_field_write
+class Bag {
+  items: string[] = [];
+  *each(): Generator<string> {
+    for (const s of this.items) yield s;
+  }
+}
+function main() {
+  let b = new Bag();
+  let g = b.each();
+  b.items.push("x");
+  g.next();
+}
+// error: 10:3: error[E0203]: cannot change 'b.items' while 'g' borrows 'b' and is used later
+// case: generator_method_borrows_move
+class Bag {
+  items: string[] = [];
+  *each(): Generator<string> {
+    for (const s of this.items) yield s;
+  }
+}
+function main() {
+  const b = new Bag();
+  let g = b.each();
+  const moved = b;
+  g.next();
+  console.log(moved.items.length);
+}
+// error: 10:17: error[E0203]: cannot move 'b' while 'g' borrows 'b' and is used later
+// case: generator_method_borrow_ends
+class Bag {
+  items: string[] = [];
+  *each(): Generator<string> {
+    for (const s of this.items) yield s;
+  }
+}
+function main() {
+  let b = new Bag();
+  b.items.push("a");
+  let g = b.each();
+  const r = g.next();
+  if (r.done === false) console.log(r.value);
+  b.items.push("z");
+  console.log(b.items.length);
+}
+// expect: a
+// expect: 2
