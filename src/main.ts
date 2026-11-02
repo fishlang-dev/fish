@@ -490,7 +490,7 @@ export const callsTls = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*
 
 // What links OpenSSL into a program calling the TLS runtime, when it was found; without it the
 // runtime's TLS calls say how to install it.
-function runtimeLinks(ir: string, target: Target): string[] {
+export function runtimeLinks(ir: string, target: Target): string[] {
   if (!callsTls(ir)) return [];
   const openssl = findOpenSsl(target);
   return "link" in openssl ? openssl.link : [];

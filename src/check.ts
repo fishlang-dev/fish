@@ -2588,12 +2588,13 @@ function checkAll(compilation: Compilation, written: Stmt[], library: boolean, m
       }
     }
 
-    // `for await`: an async generator gives each value it yields, as a generator's loop does, and
-    // a Channel each value it receives until it is closed and drained.
+    // Whether a type is std's ServerWebSocket, which `for await` reads the messages of.
     function webSocket(t: Type): boolean {
       return typeof t !== "string" && t.kind === "class" && t.name === "ServerWebSocket" && classOf(t).constructor.start >= STD_BASE;
     }
 
+    // `for await`: an async generator gives each value it yields, as a generator's loop does, and
+    // a Channel each value it receives until it is closed and drained.
     function awaitLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, name: string, mutable: boolean, through: Type, object: Type) {
       const yields = yieldsOf(object, true);
       const channel = typeof object !== "string" && object.kind === "block" && object.which === "Channel" ? lower(object.of) : undefined;
