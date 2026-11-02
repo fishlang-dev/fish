@@ -625,7 +625,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         }
         const trait = s.kind === "typeAlias" ? traitAlias(this.ids, s) : undefined;
         if (s.kind === "typeAlias" && !trait) {
-          addAlias(aliases, s, this.classes, this.templates, this.interfaces, this.enums);
+          // An alias's lifetimes, like a class's, are checked and erased.
+          if (s.typeParams.some(isLifetime)) this.slots.set(s.name, s.typeParams.map(isLifetime));
+          addAlias(aliases, s.typeParams.some(isLifetime) ? { ...s, typeParams: s.typeParams.filter((p) => !isLifetime(p)) } : s, this.classes, this.templates, this.interfaces, this.enums);
           continue;
         }
         if (trait) {

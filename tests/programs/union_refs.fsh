@@ -447,3 +447,80 @@ function main() {
   if (n !== null) console.log(n.of)
 }
 // error: cannot change 'a.n' while 'n' borrows 'a' and is used later
+// case: union_refs_alias_lifetime
+// An alias names the lifetime of the references it holds, so a function's result borrows only
+// the arguments with that lifetime; written without it, the lifetime is elided.
+class Item {
+  n: i64 = 1
+}
+type View<L extends Lifetime> = { item: Ref<Item, L> | null }
+type Pair<L extends Lifetime> = { of: "one"; x: Ref<Item, L> } | { of: "none" }
+function pick<L extends Lifetime>(a: Ref<Item, L>, _b: Ref<Item>): View<L> {
+  return { item: a }
+}
+function main() {
+  let a = new Item()
+  let b = new Item()
+  const v = pick(a, b)
+  b = new Item()
+  if (v.item !== null) console.log(v.item.n, b.n)
+  const p: Pair = { of: "one", x: a }
+  if (p.of === "one") console.log(p.x.n)
+}
+// expect: 1 1
+// expect: 1
+// case: union_refs_alias_lifetime_wrong
+class Item {
+  n: i64 = 1
+}
+type View<L extends Lifetime> = { item: Ref<Item, L> | null }
+function pick<L extends Lifetime>(_a: Ref<Item, L>, b: Ref<Item>): View<L> {
+  return { item: b }
+}
+function main() {}
+// error: the returned reference points into 'b', but its lifetime ties it to '_a'
+// case: union_refs_alias_lifetime_undeclared
+class Item {
+  n: i64 = 1
+}
+type View<L extends Lifetime> = { item: Ref<Item, L> | null }
+function pick(a: Ref<Item>): View<Q> {
+  return { item: a }
+}
+function main() {}
+// error: cannot find lifetime 'Q'; declare it as '<Q extends Lifetime>'
+// case: union_refs_alias_lifetime_kept
+class Item {
+  n: i64 = 1
+}
+type View<L extends Lifetime> = { item: Ref<Item, L> | null }
+function pick<L extends Lifetime>(a: Ref<Item, L>, _b: Ref<Item>): View<L> {
+  return { item: a }
+}
+function main() {
+  let a = new Item()
+  let b = new Item()
+  const v = pick(a, b)
+  a = new Item()
+  if (v.item !== null) console.log(v.item.n)
+}
+// error: cannot change 'a' while 'v' borrows 'a' and is used later
+// case: union_refs_alias_lifetime_generic
+class Item {
+  n: i64 = 1
+}
+type View<T, L extends Lifetime> = { item: Ref<T, L> | null }
+function pick<L extends Lifetime>(a: Ref<Item, L>, _b: Ref<Item>): View<Item, L> {
+  return { item: a }
+}
+function main() {
+  let a = new Item()
+  let b = new Item()
+  const v = pick(a, b)
+  b = new Item()
+  const w: View<Item> = { item: b }
+  if (v.item !== null) console.log(v.item.n)
+  if (w.item !== null) console.log(w.item.n)
+}
+// expect: 1
+// expect: 1
