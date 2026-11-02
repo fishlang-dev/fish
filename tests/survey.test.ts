@@ -483,6 +483,14 @@ test("pg and postgres are replaced by std's postgres module", () => {
   });
 });
 
+test("ws and the frameworks' WebSocket helpers are replaced by Router.ws", () => {
+  project({ "package.json": JSON.stringify({ dependencies: { ws: "8", "express-ws": "5", "@hono/node-ws": "1" } }), "a.ts": "const x = 1;\n" }, (dir) => {
+    const d = dependencies(dir)!;
+    expect(d.counts).toEqual({ std: 3, planned: 0, native: 0, pure: 0, unknown: 0 });
+    expect(d.list.every((x) => x.equivalent?.name === "Router.ws, for a server")).toBe(true);
+  });
+});
+
 test("node:readline waits on nothing, as readLine and the stdin module replace it", () => {
   project({ "a.ts": "import { createInterface } from \"node:readline\";\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[]]);
