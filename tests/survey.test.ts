@@ -75,8 +75,9 @@ test("the survey counts G2, G3 and G11 through the migration detector, with rows
 });
 
 test("import.meta is counted unless it reads a member Fish fixes while compiling", () => {
-  expect(counts("const a = import.meta.dir;\nconst b = join(import.meta.dirname, import.meta.file);\nif (import.meta.main) run(import.meta.path, import.meta.url);\n")).toEqual({ importMeta: 1 });
+  expect(counts("const a = import.meta.dir;\nconst b = join(import.meta.dirname, import.meta.file, import.meta.env.HOME);\nif (import.meta.main) run(import.meta.path, import.meta.url);\n")).toEqual({ importMeta: 1 });
   expect(counts("const r = import.meta.resolve(\"x\");\nconst m = import.meta;\nconst t = new.target;\n")).toEqual({ importMeta: 2 });
+  expect(counts("const { file, dirname } = import.meta;\nconst p = import.meta[\"filename\"];\n")).toEqual({});
 });
 
 test("the timer forms Fish doesn't take are counted, and the timers it does aren't", () => {

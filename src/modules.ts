@@ -7,7 +7,7 @@ import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
 import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
-import { parse, type ClassMember, type Expr, type Func, type Param, type Pattern, type Span, type Specifier, type Stmt } from "./parser.ts";
+import { parse, type ClassMember, type Expr, type Func, type ObjectProp, type Param, type Pattern, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { fishFiles } from "./fmt.ts";
 import { MANIFEST, type RustDependency } from "./manifest.ts";
 import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.ts";
@@ -651,18 +651,27 @@ function scoped(matters: (name: string) => boolean, visit: (n: Record<string, un
   return walk;
 }
 
-// `import.meta.path`, `file`, `dir`, `url` and `main` as constants: the file's real path where it
-// was built, which the binary keeps as Bun's compiled executables do, and whether it is the entry
-// file. Any other use of `import.meta` is left for the checker to refuse.
+// `import.meta`'s members as constants: the file's real path where it was built, which the binary
+// keeps as Bun's compiled executables do, its name and directory, its file URL, and whether it is
+// the entry file. They are read as members, by a literal key, or by destructuring `import.meta`
+// in a declaration; any other use is left for the checker to refuse.
 function lowerImportMeta(ids: Ids, statements: Stmt[], path: string, entry: boolean) {
-  const values: Record<string, string | boolean> = { path, file: basename(path), dir: dirname(path), url: pathToFileURL(path).href, main: entry };
+  const values: Record<string, string | boolean> = { path, file: basename(path), dir: dirname(path), url: pathToFileURL(path).href, main: entry, dirname: dirname(path), filename: path };
   const rewrites = new Rewrites();
-  walk("stmt", statements, ({ node }) => {
+  const literal = (value: string | boolean, at: Span): Expr => (typeof value === "string" ? { id: nextId(ids), kind: "string", value, ...at } : { id: nextId(ids), kind: "bool", value, ...at });
+  const isMeta = (e: Expr | undefined) => e?.kind === "meta" && e.name === "import.meta";
+  walk("stmt", statements, ({ of, node }) => {
+    if (of === "declarator") {
+      if (node.target.kind !== "object" || !isMeta(node.init)) return;
+      const at = { start: node.init!.start, end: node.init!.end };
+      const props: ObjectProp[] = Object.entries(values).map(([key, value]) => ({ id: nextId(ids), kind: "property", key, value: literal(value, at), ...at }));
+      rewrites.replace(node.init!, { id: nextId(ids), kind: "object", props, ...at });
+      return;
+    }
     const n = node as Expr;
-    if (n.kind !== "member" || n.object.kind !== "meta" || n.object.name !== "import.meta" || !Object.hasOwn(values, n.name)) return;
-    const value = values[n.name]!;
-    const at = { start: n.start, end: n.end };
-    rewrites.replace(n, typeof value === "string" ? { id: nextId(ids), kind: "string", value, ...at } : { id: nextId(ids), kind: "bool", value, ...at });
+    const key = n.kind === "member" && isMeta(n.object) ? n.name : n.kind === "index" && isMeta(n.object) && n.index.kind === "string" ? n.index.value : undefined;
+    if (key === undefined || !Object.hasOwn(values, key)) return;
+    rewrites.replace(n, literal(values[key]!, { start: n.start, end: n.end }));
   });
   rebuiltStmts(statements, rewrites);
 }

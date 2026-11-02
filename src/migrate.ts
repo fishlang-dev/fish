@@ -841,7 +841,7 @@ function guided(program: unknown[], f: File): Hit[] {
     if (n.kind === "ref" && n.name === "any") hit("G1", n.start, n.end);
     if (n.kind === "class" && baseName(n) && typed.has(baseName(n)!)) hit("G4", n.start, n.end);
     if (n.kind === "binary" && n.op === "instanceof" && isNode(n.right) && n.right.kind === "ident" && extended.has(n.right.name as string)) hit("G5", n.start, n.end);
-    if (n.kind === "index" && isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template" || (n.index.kind === "ident" && stringy(n.index))) && !dictionary(n.object)) hit("G6", n.start, n.end);
+    if (n.kind === "index" && isNode(n.index) && (n.index.kind === "string" || n.index.kind === "template" || (n.index.kind === "ident" && stringy(n.index))) && !dictionary(n.object) && !(isNode(n.object) && n.object.kind === "meta")) hit("G6", n.start, n.end);
     if (n.kind === "binary" && n.op === "in" && isNode(n.left) && !["string", "privateName"].includes(n.left.kind as string) && !dictionary(n.right)) hit("G6", n.start, n.end);
     // A call signature in an interface is a `call` too, without arguments.
     if (n.kind !== "call" || !Array.isArray(n.args)) continue;

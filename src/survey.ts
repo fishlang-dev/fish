@@ -8,6 +8,7 @@ import { nextId, renumber } from "./nodes.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
 import { findTypings } from "./typings.ts";
+import { IMPORT_META_MEMBERS } from "./unsupported.ts";
 
 // `fishc survey`: how hard an existing TypeScript project is to port, read from its syntax alone.
 // The grade counts the work a person does, the migration lint's rejected constructs and guided
@@ -84,7 +85,7 @@ const RULES: Rule[] = [
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
-  { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url and main members" },
+  { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url, main, dirname and filename members" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
@@ -98,9 +99,6 @@ const WEIGHTS: Record<Action, usize> = { reject: 10, guided: 3, auto: 0, unsuppo
 // implementation patching prototypes near 90.
 const GRADES: [string, f64][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 const MODULE_FORMS = new Set(["import", "importEquals", "exportAll", "exportAsNamespace", "exportAssign", "exportDefault", "exportNamed"]);
-
-// The members of `import.meta` Fish fixes while compiling.
-const META_MEMBERS = ["path", "file", "dir", "url", "main"];
 
 // Whether a Map's or a Set's type arguments key it by `number`, a float Fish doesn't hash.
 const numberKey = (args: unknown) => Array.isArray(args) && isNode(args[0]) && args[0].kind === "ref" && args[0].name === "number";
@@ -423,7 +421,7 @@ function classify({ path, envKeys, statementDestructures, metaRead }: Scanning, 
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
-      if (isNode(n.object) && n.object.kind === "meta" && META_MEMBERS.includes(n.name as string)) metaRead.add(n.object);
+      if (isNode(n.object) && n.object.kind === "meta" && IMPORT_META_MEMBERS.includes(n.name as string)) metaRead.add(n.object);
       break;
     case "meta":
       if (n.name === "import.meta" && !metaRead.has(n)) push("importMeta");
@@ -441,6 +439,7 @@ function classify({ path, envKeys, statementDestructures, metaRead }: Scanning, 
       break;
     case "index":
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
+      if (isNode(n.object) && n.object.kind === "meta" && isNode(n.index) && n.index.kind === "string" && IMPORT_META_MEMBERS.includes(n.index.value as string)) metaRead.add(n.object);
       break;
     case "ref":
       if (n.name === "null" || n.name === "undefined") push("A2");
@@ -449,6 +448,8 @@ function classify({ path, envKeys, statementDestructures, metaRead }: Scanning, 
       if (["Map", "Set"].includes(n.name as string) && numberKey(n.args)) push("numberKeys");
       break;
     case "let":
+      // `const { file } = import.meta` reads its members.
+      for (const d of n.declarations as Node[]) if (isNode(d.target) && d.target.kind === "object" && isNode(d.init) && d.init.kind === "meta") metaRead.add(d.init);
       letRules(n, ambient, head, push);
       break;
     case "function":

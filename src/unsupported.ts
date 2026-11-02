@@ -29,6 +29,9 @@ export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "
   import: "import types",
 };
 
+// The members of `import.meta` fixed while compiling, each file's own.
+export const IMPORT_META_MEMBERS = ["path", "file", "dir", "url", "main", "dirname", "filename"];
+
 // Declarations that parse but have no meaning yet, wherever they appear.
 export function unsupportedDeclaration(s: Stmt): CompileError | undefined {
   switch (s.kind) {
