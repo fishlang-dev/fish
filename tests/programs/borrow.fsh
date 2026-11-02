@@ -928,3 +928,65 @@ function main() {
   b.items.push("e" + "f");
   console.log(b.items.length);
 }
+// case: borrow_loop_replaces_chosen_field_origin
+// error: borrow_loop_replaces_chosen_field_origin.fsh:14:55: error[E0203]: cannot change 'b' while a 'for...of' loop borrows 'b' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function pickA(b: Ref<string[]>): Ref<string[]> { return b; }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function pickM(m: Ref<Map<string, string>>): Ref<Map<string, string>> { return m; }
+function pickS(m: Ref<Set<string>>): Ref<Set<string>> { return m; }
+function pickT(s: Ref<string>): Ref<string> { return s; }
+function pickP(m: Ref<string[][]>): Ref<string[][]> { return m; }
+
+function main() {
+  let b = new Box(); let c = new Box();
+  for (const x of (true ? pick(b) : pick(c)).items) { b = new Box(); console.log(x); }
+}
+// case: borrow_loop_replaces_chosen_origin
+// error: borrow_loop_replaces_chosen_origin.fsh:13:63: error[E0203]: cannot change 'b' while a 'for...of' loop borrows 'b.items' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+class K { kind: "a" | "b" = "a"; items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function pickA(b: Ref<string[]>): Ref<string[]> { return b; }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function pickK(k: Ref<K>): Ref<K> { return k; }
+function pickM(m: Ref<Map<string, string>>): Ref<Map<string, string>> { return m; }
+function pickTu(t: Ref<[string, string][]>): Ref<[string, string][]> { return t; }
+function main() {
+  let b = new Box(); let c = new Box();
+  for (const x of (true ? pickA(b.items) : pickA(c.items))) { b = new Box(); console.log(x); }
+}
+// case: borrow_match_replaces_chosen_origin
+// error: borrow_match_replaces_chosen_origin.fsh:14:23: error[E0203]: cannot change 'h' while 'v' borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+class K { kind: "a" | "b" = "a"; items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function pickA(b: Ref<string[]>): Ref<string[]> { return b; }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function pickK(k: Ref<K>): Ref<K> { return k; }
+function pickM(m: Ref<Map<string, string>>): Ref<Map<string, string>> { return m; }
+function pickTu(t: Ref<[string, string][]>): Ref<[string, string][]> { return t; }
+function main() {
+  let h = new H(); let g = new H();
+  match ((true ? pickH(h) : pickH(g)).o) {
+    case Some(v) => { h = new H(); console.log(v.items[0]!); },
+    case None => {},
+  };
+}
+// case: borrow_loop_reads_chosen_origin
+// expect: ab 2
+// expect: cd 2
+// expect: 3
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function main() {
+  let b = new Box(); let c = new Box();
+  for (const x of (true ? pick(b) : pick(c)).items) console.log(x, b.items.length);
+  b = new Box();
+  b.items.push("e" + "f");
+  console.log(b.items.length);
+}

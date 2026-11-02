@@ -317,7 +317,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           last.set(loop.localId, s.end);
           inherit(loop, s.right);
           if (typing.holdsRef(each.type)) inherit(each, s.right);
-        } else if (state && !text && borrowsFrom.has(projected(s.right))) {
+        } else if (state && !text && fromCall(projected(s.right))) {
           // Over a reference a call gave, or a field or element of one, the loop keeps what that
           // reference borrows lent until it ends.
           const loop = arenas.localOf(loopHolders.get(s)) ?? arenas.addLocal({ name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 });
@@ -704,7 +704,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
             // Through a reference, the binding holds what that reference borrows, a reference a
             // call gave included.
             inherit(holder, subject);
-            if (place === undefined && borrowsFrom.has(projected(subject))) hold(holder, projected(subject));
+            if (place === undefined && fromCall(projected(subject))) hold(holder, projected(subject));
           }
           if (arm.guard) {
             const at = -arm.guard.start - 1;
@@ -869,7 +869,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A field, element or unwrapped Option of a returned reference reaches into what that
     // reference borrows, so it lends what the reference does.
     const root = projected(e);
-    if (root !== e && key(e) === undefined && borrowsFrom.has(root)) return lent(root);
+    if (root !== e && key(e) === undefined && fromCall(root)) return lent(root);
     // A call's returned reference lends again what it borrows from, a receiver included; a
     // future lends it mutably when it holds a mutable reference.
     const from = borrowsFrom.get(e);
@@ -1456,6 +1456,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`, as are
   // `as`, `satisfies` and `unsafe { }`, which hand on their operand.
+  // Whether an expression is a reference a call gave, or a choice between such references.
+  function fromCall(e: Expr): boolean {
+    e = unwrapped(e);
+    if (e.kind === "conditional") return fromCall(projected(e.then)) || fromCall(projected(e.else));
+    if (choosing(e)) return fromCall(projected(e.left)) || fromCall(projected(e.right));
+    return borrowsFrom.has(e);
+  }
+
   // What a chain of field reads, indexes and `!` starts from.
   function projected(e: Expr): Expr {
     for (e = unwrapped(e); ; ) {
