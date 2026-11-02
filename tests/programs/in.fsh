@@ -106,3 +106,30 @@ function main() {
   print(FAST, SLOW, SWIM)
 }
 // expect: 8 4 7
+
+// case: in_mut_generic
+type A = { a: i64 }
+type B = { b: string }
+
+function bump(x: Mut<A | B>) {
+  if ("a" in x) x.a = x.a + 1
+}
+
+function first<T extends { a: i64 }>(x: T | B): i64 {
+  if ("a" in x) return x.a
+  return -1
+}
+
+function main() {
+  let v: A | B = { a: 1 }
+  bump(v)
+  print("a" in v ? v.a : 0)
+  print(first<A>({ a: 5 }), first<A>({ b: "x" }))
+  let n = 0
+  const w: A | B = { b: "y" }
+  while (!("a" in w)) { n++; if (n > 2) break }
+  print(n)
+}
+// expect: 2
+// expect: 5 -1
+// expect: 3
