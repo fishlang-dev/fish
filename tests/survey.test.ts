@@ -282,7 +282,7 @@ test("unread files are left out of the steps but not the shares, and the self cu
 
 test("imports wait on other files or Node built-ins by how they are written, and npm packages run", () => {
   project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import tty from \"node:tty\";\nimport crypto = require(\"crypto\");\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Hashing", "Terminal detection and styled text"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Terminal detection and styled text", "createHash, createHmac and randomBytes from node:crypto"]]);
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Bun's own modules"], ["Path aliases"], ["Namespace imports"]]);
@@ -502,16 +502,16 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     "a.ts": "import { isatty } from \"node:tty\";\nimport { createHash } from \"crypto\";\n",
     "b.ts": "import { setTimeout } from \"node:timers/promises\";\n",
     "c.ts": "import vm from \"vm\";\nimport d = require(\"tty\");\n",
-    "plan.md": "- [ ] 1. **Terminal detection and styled text**\n- [ ] 2. **Hashing**\n",
+    "plan.md": "- [ ] 1. **Terminal detection and styled text**\n- [ ] 2. **createHash, createHmac and randomBytes from node:crypto**\n",
   }, (dir) => {
     // `timers/promises` is std's sleep, so b.ts waits on nothing.
-    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Hashing", "Terminal detection and styled text"], [], ["Node built-ins", "Terminal detection and styled text"]]);
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Terminal detection and styled text", "createHash, createHmac and randomBytes from node:crypto"], [], ["Node built-ins", "Terminal detection and styled text"]]);
     const steps = rank([dir], undefined, readPlan(join(dir, "plan.md"))).curve.steps;
     expect(steps.map((s) => [s.feature, s.rules, s.plan])).toEqual([
       ["Terminal detection and styled text", ["nodeBuiltins"], { item: "1", done: false }],
       // Each frees one 2-line file, so the tie goes by name.
-      ["Hashing", ["nodeBuiltins"], { item: "2", done: false }],
       ["Node built-ins", ["nodeBuiltins"], null],
+      ["createHash, createHmac and randomBytes from node:crypto", ["nodeBuiltins"], { item: "2", done: false }],
     ]);
     expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["tty", "crypto", "timers/promises"]);
   });
@@ -556,7 +556,7 @@ test("the report lists each Node built-in with its files and what replaces it", 
     const r = survey(dir);
     expect(r.builtins).toEqual([
       { module: "tty", files: 2, equivalent: { name: "Terminal detection and styled text", planned: true } },
-      { module: "crypto", files: 1, equivalent: { name: "Hashing", planned: true } },
+      { module: "crypto", files: 1, equivalent: { name: "createHash, createHmac and randomBytes from node:crypto", planned: true } },
       { module: "dgram", files: 1, equivalent: { name: "UdpSocket", planned: false } },
       { module: "http", files: 1, equivalent: { name: "node:http server shim", planned: true } },
       { module: "net", files: 1, equivalent: { name: "TcpListener, TcpStream, UnixListener and UnixStream", planned: false } },
@@ -625,13 +625,13 @@ test("for await over an array of promises is a guided rewrite, counted as Fish r
   ].join("\n"))).toEqual({ forAwaitArrays: 4 });
 });
 
-test("std's random functions make Math.random, crypto imports of them, and uuid and nanoid portable", () => {
+test("std's random functions and hash make Math.random, crypto imports of them, and uuid and nanoid portable", () => {
   project({
-    "a.ts": "import { randomUUID, getRandomValues } from \"node:crypto\";\nexport const id = randomUUID() + Math.random();\n",
+    "a.ts": "import { randomUUID, getRandomValues, hash } from \"node:crypto\";\nexport const id = randomUUID() + Math.random();\n",
     "b.ts": "import { randomUUID, createHash } from \"crypto\";\n",
     "package.json": JSON.stringify({ dependencies: { uuid: "1", nanoid: "1" } }),
   }, (dir) => {
-    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([[], ["Hashing"]]);
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([[], ["createHash, createHmac and randomBytes from node:crypto"]]);
     expect(Object.fromEntries(dependencies(dir)!.list.map((x) => [x.name, [x.group, x.equivalent?.name]]))).toEqual({
       nanoid: ["std", "crypto.getRandomValues, to build IDs from"], uuid: ["std", "crypto.randomUUID, for v4 only"],
     });
@@ -664,7 +664,7 @@ test("randomBytes waits on typed arrays, since Node's gives a Buffer and std's a
     "b.ts": "import crypto from \"crypto\";\nexport const b = crypto.randomBytes(8).readUInt32BE(0) + crypto.randomUUID().length;\n",
     "c.ts": "import { randomBytes, createHash } from \"crypto\";\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Typed arrays and DataView"], ["Typed arrays and DataView"], ["Hashing", "Typed arrays and DataView"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Typed arrays and DataView"], ["Typed arrays and DataView"], ["Typed arrays and DataView", "createHash, createHmac and randomBytes from node:crypto"]]);
     expect(survey(dir).builtins!.map((b) => b.module)).toEqual(["buffer", "crypto"]);
   });
 });
@@ -687,7 +687,7 @@ test("an import whose missing names wait on different features waits on each, an
     { "b.ts": "import { randomBytes, randomInt } from \"crypto\";\nconsole.log(randomBytes(4), randomInt(3));\n" },
     { "c.ts": "import crypto from \"crypto\";\nconsole.log(crypto.randomBytes(4), crypto.createHash(\"md5\"), crypto.randomUUID());\n" },
   ], ([a, b, c]) => {
-    for (const [dir, other] of [[a!, "Hashing"], [b!, "Node built-ins"], [c!, "Hashing"]] as const) {
+    for (const [dir, other] of [[a!, "createHash, createHmac and randomBytes from node:crypto"], [b!, "Node built-ins"], [c!, "createHash, createHmac and randomBytes from node:crypto"]] as const) {
       expect(scanFiles(dir).map(featuresOf)).toEqual([[other, "Typed arrays and DataView"].sort()]);
       const steps = rank([dir]).curve.steps;
       expect(steps.map((s) => [s.gained.files, s.portable.share])).toEqual([[0, 0], [1, 100]]);
