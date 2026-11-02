@@ -397,7 +397,11 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       if ([this.typing.rec(fn).returns, ...this.typing.rec(fn).params].some((t) => this.typing.holdsPattern(t))) throw unsupported("template literal pattern types in function types", t);
       return fn;
     }
-    if (t.kind === "object") return this.typing.objectType(fields(t.members.map((m) => this.member(m)), t.members));
+    if (t.kind === "object") {
+      const index = t.members.find((m) => m.kind === "index");
+      if (index?.kind === "index") return this.dictionary(index, t.members.length);
+      return this.typing.objectType(fields(t.members.map((m) => this.member(m)), t.members));
+    }
     if (t.kind === "literal") return this.literal(t.value);
     if (t.kind === "union") return this.union(t.types);
     if (t.kind === "intersection") return this.intersection(t.types);
@@ -954,6 +958,16 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     throw unsupported(p.kind === "union" ? "unions holding 'infer'" : `${TYPE_FORMS[p.kind as keyof typeof TYPE_FORMS] ?? "these types"} holding 'infer'`, p);
   }
 
+  // `{ [k: string]: V }`: a dictionary, whose keys are known only when the program runs.
+  private dictionary(this: Mut<this>, index: Extract<TypeMember, { kind: "index" }>, members: usize): MapType {
+    if (members > 1) throw unsupported("index signatures beside other members", index);
+    if (index.readonly) throw unsupported("readonly index signatures", index);
+    const key = index.params[0]!;
+    const keyType = key.type ? this.resolveType(key.type) : undefined;
+    if (keyType !== "string") throw new CompileError("E0116", `an index signature is keyed by 'string' so far; for keys of another type use a 'Map'${keyType !== undefined && isInteger(this.typing.lower(keyType)) ? ", or an array for consecutive numbers" : ""}`, (key.type ?? key).start, (key.type ?? key).end);
+    return collection(this.typing, "string", this.resolveType(index.type), false, index, true);
+  }
+
   private member(this: Mut<this>, m: TypeMember): Field {
     if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
     if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
@@ -1170,7 +1184,7 @@ function keyable(typing: Typing, t: Type): boolean {
 }
 
 // A `Map<K, V>`, or a `Set<K>` when `set`: keys it can hash, and values it can own.
-export function collection(typing: Typing, key: Type, value: Type, set: boolean, at: Span): MapType {
+export function collection(typing: Typing, key: Type, value: Type, set: boolean, at: Span, dict?: true): MapType {
   const what = set ? "a 'Set'" : "a 'Map'";
   if (!keyable(typing, key)) throw new CompileError("E0116", `${what} ${set ? "holds" : "is keyed by"} strings or integers, or unions of their literals, not '${typing.show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
   if (typing.holdsRef(value)) throw unsupported("maps of references", at);
@@ -1179,7 +1193,7 @@ export function collection(typing: Typing, key: Type, value: Type, set: boolean,
   if ((v?.kind === "closure" || v?.kind === "function") && v.generic) throw unsupported("maps of generic functions", at);
   if (v?.kind === "interface") throw new CompileError("E0115", `a 'Map' can't hold the interface type '${v.name}' directly, since its values may each be a different type; use 'Dyn<${v.name}>'`, at.start, at.end);
   unboxedClosure(typing, value, at);
-  return typing.mapType(key, typing.stored(typing.heldArgument(value)), set);
+  return typing.mapType(key, typing.stored(typing.heldArgument(value)), set, dict);
 }
 
 const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);

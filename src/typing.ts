@@ -98,8 +98,9 @@ export type ArrayType = TypeId<ArrayRecord>;
 export type FixedRecord = { kind: "fixed"; element: Type; size: usize; fields: Field[] };
 export type FixedType = TypeId<FixedRecord>;
 // `Map<K, V>` and `Set<T>` (a Set's value is `void`): a pointer to an owned hash table in the
-// runtime, its entries kept in insertion order.
-export type MapRecord = { kind: "map"; key: Type; value: Type; set: boolean; fields: Field[] };
+// runtime, its entries kept in insertion order. A dictionary, `{ [k: string]: V }`, is a Map with
+// string keys that the program sees as an object: no methods, its keys read as properties.
+export type MapRecord = { kind: "map"; key: Type; value: Type; set: boolean; dict?: true; fields: Field[] };
 export type MapType = TypeId<MapRecord>;
 
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
@@ -1041,7 +1042,7 @@ export class Typing {
     if (r.kind === "interface" && this.promised.has(t as InterfaceType)) return this.dynType(t as InterfaceType);
     if (r.kind === "array") return this.arrayType(this.stored(r.element));
     if (r.kind === "fixed") return this.fixedType(this.stored(r.element), r.size);
-    if (r.kind === "map") return this.mapType(r.key, this.stored(r.value), r.set);
+    if (r.kind === "map") return this.mapType(r.key, this.stored(r.value), r.set, r.dict);
     return t;
   }
 
@@ -1693,7 +1694,7 @@ export class Typing {
         const m = this.rec(map);
         if (m.value !== back) continue;
         this.rec(map).value = of;
-        this.maps.set(`${m.set ? "Set" : "Map"}<${this.keyOf(m.key)},${this.keyOf(of)}>`, map);
+        this.maps.set(`${m.set ? "Set" : m.dict ? "Dict" : "Map"}<${this.keyOf(m.key)},${this.keyOf(of)}>`, map);
         this.ties.set(of, back);
       }
     }
@@ -1729,11 +1730,11 @@ export class Typing {
     return typeof t === "string" ? undefined : this.ties.get(t);
   }
 
-  mapType(this: Mut<this>, key: Type, value: Type, set = false): MapType {
-    const id = `${set ? "Set" : "Map"}<${this.keyOf(key)},${this.keyOf(value)}>`;
+  mapType(this: Mut<this>, key: Type, value: Type, set = false, dict?: true): MapType {
+    const id = `${set ? "Set" : dict ? "Dict" : "Map"}<${this.keyOf(key)},${this.keyOf(value)}>`;
     let t = this.maps.get(id);
     if (!t) {
-      t = this.made<MapType>({ kind: "map", key, value, set, fields: [] }, id);
+      t = this.made<MapType>({ kind: "map", key, value, set, ...(dict && { dict }), fields: [] }, id);
       this.maps.set(id, t);
     }
     return t;
@@ -1816,7 +1817,7 @@ export class Typing {
     if (r.kind === "interior") return this.interiorType(r.which, this.lower(r.of));
     if (r.kind === "shared") return this.sharedType(this.lower(r.of), r.which);
     if (r.kind === "block") return this.blockType(r.which, this.lower(r.of));
-    if (r.kind === "map") return this.mapType(this.lower(r.key), this.lower(r.value), r.set);
+    if (r.kind === "map") return this.mapType(this.lower(r.key), this.lower(r.value), r.set, r.dict);
     if (r.kind === "recursive") return r.args.some((a) => this.lower(a) !== a) ? this.remade(t as RecursiveType, () => this.lower(r.of), r.args.map((t) => this.lower(t))) : t;
     // A type holding itself through an array is remade from its type arguments.
     const tied = this.ties.get(t);
@@ -1880,7 +1881,7 @@ export class Typing {
     }
     if (r.kind === "array") return this.arrayType(this.replaced(r.element, swap));
     if (r.kind === "fixed") return this.fixedType(this.replaced(r.element, swap), r.size);
-    if (r.kind === "map") return this.mapType(this.replaced(r.key, swap), this.heldArgument(this.replaced(r.value, swap)), r.set);
+    if (r.kind === "map") return this.mapType(this.replaced(r.key, swap), this.heldArgument(this.replaced(r.value, swap)), r.set, r.dict);
     // What a lock, a shared value or a channel holds is a type argument, boxed as one.
     if (r.kind === "interior" || r.kind === "shared" || (r.kind === "block" && r.which === "Channel")) {
       const of = this.heldArgument(this.replaced(r.of, swap));
@@ -2004,7 +2005,7 @@ export class Typing {
       else if (r.kind === "object") found = `{${r.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${this.shapeKey(f.type)}`).join(",")}}`;
       else if (r.kind === "array") found = `${this.shapeKey(r.element)}[]`;
       else if (r.kind === "fixed") found = `FixedArray<${this.shapeKey(r.element)},${r.size}>`;
-      else if (r.kind === "map") found = r.set ? `Set<${this.shapeKey(r.key)}>` : `Map<${this.shapeKey(r.key)},${this.shapeKey(r.value)}>`;
+      else if (r.kind === "map") found = r.set ? `Set<${this.shapeKey(r.key)}>` : `${r.dict ? "Dict" : "Map"}<${this.shapeKey(r.key)},${this.shapeKey(r.value)}>`;
       else if (r.kind === "union") found = `(${r.members.map((t) => this.shapeKey(t)).join("|")})`;
       else if (r.kind === "ref") found = `${r.mutable ? "mut" : "ref"} ${this.shapeKey(r.to)}${r.life ? ` ${r.life}` : ""}`;
       // A type parameter standing for a concrete type has that type's shape.
@@ -2181,7 +2182,7 @@ export class Typing {
       return wrap ? `(${this.show(e)})[]` : `${this.show(e)}[]`;
     }
     if (r.kind === "fixed") return `FixedArray<${this.show(r.element)}, ${r.size}>`;
-    if (r.kind === "map") return r.set ? `Set<${this.show(r.key)}>` : `Map<${this.show(r.key)}, ${this.show(r.value)}>`;
+    if (r.kind === "map") return r.set ? `Set<${this.show(r.key)}>` : r.dict ? `{ [key: string]: ${this.show(r.value)} }` : `Map<${this.show(r.key)}, ${this.show(r.value)}>`;
     if (r.kind === "generator") return `${r.async ? "Async" : ""}Generator<${this.show(r.yields)}>${r.throws ? ` throws ${this.show(r.throws)}` : ""}`;
     if (r.kind === "future") return `Promise<${this.show(r.gives)}>${r.throws ? ` throws ${this.show(r.throws)}` : ""}${this.describing ? ` ${r.name}(${r.frame.map((f) => this.show(f.type)).join(", ")})` : ""}`;
     if (r.kind === "interior") return `${r.which}<${this.show(r.of)}>`;

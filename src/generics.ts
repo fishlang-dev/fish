@@ -135,12 +135,16 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
   }
   // `Map<K, V>` and `Set<T>` against one match their key and value types.
   if (node.kind === "ref" && (node.name === "Map" || node.name === "Set") && !names.has(node.name)) {
-    if (a?.kind === "map" && a.set === (node.name === "Set")) {
+    if (a?.kind === "map" && a.set === (node.name === "Set") && !a.dict) {
       if (node.args[0]) infer(tables, node.args[0], a.key, names, bindings, at);
       if (node.args[1]) infer(tables, node.args[1], a.value, names, bindings, at);
     }
     return;
   }
+  // `Record<string, V>` and `{ [k: string]: V }` against a dictionary match its value type.
+  const index = node.kind === "object" && node.members.length === 1 ? node.members[0] : undefined;
+  const entry = node.kind === "ref" && node.name === "Record" && node.args.length === 2 && !names.has(node.name) ? node.args[1] : index?.kind === "index" ? index.type : undefined;
+  if (entry && a?.kind === "map" && a.dict) return infer(tables, entry, a.value, names, bindings, at);
   if (node.kind === "ref" && (node.name === "shared" || node.name === "Rc" || node.name === "Weak") && node.args.length === 1 && !names.has(node.name)) {
     if (a?.kind === "shared" && a.which === node.name) infer(tables, node.args[0]!, a.of, names, bindings, at);
     return;
