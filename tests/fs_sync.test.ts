@@ -1,5 +1,5 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,12 +24,13 @@ function compare(name: string, imports: string, body: string, setup: (dir: strin
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out], { cwd: fishDir, env: { ...process.env, FISH_LEAKS: "1" } });
-  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, constants } = fs; const fsp = require("node:fs/promises"); const { access } = fsp; (${async ? "async " : ""}() => {${nodeBody}\n})();`;
+  const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, constants } = fs; const fsp = require("node:fs/promises"); const { access, utimes, lutimes } = fsp; (${async ? "async " : ""}() => {${nodeBody}\n})();`;
   const node = Bun.spawnSync(["node", "-e", script], { cwd: nodeDir });
   expect(fish.stderr.toString()).toBe("");
   expect(node.stderr.toString()).toBe("");
   const shown = (out: Buffer, dir: string) => out.toString().replaceAll(realpathSync(dir), "<dir>");
   expect(shown(fish.stdout, fishDir)).toBe(shown(node.stdout, nodeDir));
+  return [fishDir, nodeDir] as const;
 }
 
 test("readFileSync, writeFileSync and existsSync give what node's give", () => {
@@ -182,4 +183,46 @@ test("accessSync and access give what node's give", () => {
     writeFileSync(join(dir, "f"), "hi");
     writeFileSync(join(dir, "ro"), "hi", { mode: 0o444 });
   });
+});
+
+test("utimesSync, lutimesSync, utimes and lutimes give what node's give", () => {
+  const imports = `import { utimesSync, lutimesSync, statSync, lstatSync } from "node:fs";\nimport * as fsp from "node:fs/promises";\nimport { utimes } from "fs/promises";`;
+  const [fishDir, nodeDir] = compare("utimes", imports, `
+  const zero: f64 = 0;
+  utimesSync("f", 1, 2);
+  console.log(statSync("f").mtimeMs);
+  utimesSync("f", 1000.5, 2.123456789);
+  console.log(statSync("f").mtimeMs);
+  utimesSync("f", 0, -5);
+  console.log(statSync("f").mtimeMs > 1.7e12);
+  utimesSync("d", new Date(5000), new Date(-1500));
+  console.log(statSync("d").mtimeMs);
+  lutimesSync("dl", 7, 8.25);
+  console.log(lstatSync("dl").mtimeMs);
+  const bad: [f64, f64][] = [[zero / zero, 1], [1, 1 / zero], [-1 / zero, zero / zero]];
+  for (const [a, m] of bad) {
+    try { utimesSync("f", a, m); } catch (e) { console.log(e.message, e.code, e.path ?? "none"); }
+    try { await utimes("f", a, m); } catch (e) { console.log(e.message, e.code, e.path ?? "none"); }
+  }
+  for (const p of ["missing", "", "dl", "f/x"]) {
+    try { utimesSync(p, 1, 2); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+    try { lutimesSync(p + "/y", 1, 2); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+    try { await fsp.utimes(p, 1, 2); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+    try { await fsp.lutimes(p, 1, 2); console.log("set", p); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+  }
+  await utimes("g", new Date(1234567), 0.4567891);
+  await fsp.lutimes("ln", 3.5, 4.75);
+  utimesSync("f", 11.000001, 12.9999999);`, (dir) => {
+    mkdirSync(join(dir, "d"));
+    writeFileSync(join(dir, "f"), "hi");
+    writeFileSync(join(dir, "g"), "hi");
+    symlinkSync("nowhere", join(dir, "dl"));
+    symlinkSync("g", join(dir, "ln"));
+  });
+  // Both times of each entry, the atimes the programs can't print among them.
+  const times = (dir: string) => ["f", "g", "d", "dl", "ln"].map((p) => {
+    const s = lstatSync(join(dir, p), { bigint: true });
+    return [p, s.atimeNs, s.mtimeNs];
+  });
+  expect(times(fishDir)).toEqual(times(nodeDir));
 });

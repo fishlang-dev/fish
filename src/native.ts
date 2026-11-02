@@ -6264,6 +6264,38 @@ int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
   return result;
 }
 
+// A time in seconds as libuv 1.51 hands it to utimensat, cut to whole microseconds.
+static struct timespec fsh_utime_spec(double time) {
+  struct timespec ts;
+  ts.tv_sec = time;
+  ts.tv_nsec = (time - ts.tv_sec) * 1e9;
+  ts.tv_nsec -= ts.tv_nsec % 1000;
+  if (ts.tv_nsec < 0) {
+    ts.tv_nsec += 1e9;
+    ts.tv_sec -= 1;
+  }
+  return ts;
+}
+
+// utimesSync, or with follow 0 lutimesSync, its times in seconds; NaN and the infinities are
+// refused first, atime before mtime, as Node refuses them.
+int32_t fsh_rt_fs_utimes(fsh_str *path, double atime, double mtime, int32_t follow, fsh_str **error) {
+  double times[2] = {atime, mtime};
+  for (int i = 0; i < 2; i++) {
+    if (isfinite(times[i])) continue;
+    char message[160];
+    snprintf(message, sizeof message, "The \"time\" argument must be an instance of Date or an Time in seconds. Received type number (%s)", isnan(times[i]) ? "NaN" : times[i] > 0 ? "Infinity" : "-Infinity");
+    return fsh_io_parts(error, message, "ERR_INVALID_ARG_TYPE", "", NULL);
+  }
+  const char *syscall = follow ? "utime" : "lutime";
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, syscall, "");
+  struct timespec ts[2] = {fsh_utime_spec(atime), fsh_utime_spec(mtime)};
+  int32_t result = utimensat(AT_FDCWD, c, ts, follow ? 0 : AT_SYMLINK_NOFOLLOW) == 0 ? 1 : fsh_fs_failed(error, errno, syscall, c);
+  fsh_rt_free(c);
+  return result;
+}
+
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;
