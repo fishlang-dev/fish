@@ -258,7 +258,7 @@ test("x as const", () => {
   }));
 });
 
-// `this` as a type names a method's receiver class, so a function or a static method has none.
+// `this` as a type is refused outside an instance method's return and parameter types.
 for (const [where, src] of [
   ["a function", "function f(): this {\n  return 1;\n}\nfunction main() {}"],
   ["a static method", "class B {\n  static make(): this {\n    return new B();\n  }\n}\nfunction main() {}"],
@@ -266,7 +266,7 @@ for (const [where, src] of [
   test(`'this' as the return type of ${where}`, () => {
     const start = src!.indexOf("this");
     expect(() => checkSource(src!)).toThrow(expect.objectContaining({
-      message: "'this' as a type is the class of a method's receiver, so only a class's instance methods can name it, in their parameters and return type", start, end: start + 4,
+      message: "'this' as a type is supported only in a class's instance methods: in the return type, where it is the receiver's own class, and in parameter types, where it is the class that declares the method", start, end: start + 4,
     }));
   });
 }

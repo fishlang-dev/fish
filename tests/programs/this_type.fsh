@@ -287,7 +287,7 @@ function main() {
 }
 
 // case: static_this
-// error: 'this' as a type is the class of a method's receiver, so only a class's instance methods can name it
+// error: 'this' as a type is supported only in a class's instance methods
 class B {
   static make(): this {
     return new B();
@@ -296,4 +296,45 @@ class B {
 
 function main() {
   B.make();
+}
+
+// case: generic_base_plain_subclass
+// expect: ab 3
+// A subclass naming its generic base's type arguments inherits a chaining method written over them.
+class A<T> {
+  v: T[] = [];
+  put(this: Mut<this>, x: T): Mut<this> {
+    this.v.push(x);
+    return this;
+  }
+}
+
+class B extends A<string> {
+  z: i64 = 3;
+}
+
+function main() {
+  let b = new B();
+  b.put("a").put("b");
+  console.log(b.v.join(""), b.z);
+}
+
+// case: borrowed_chain_on_temporary
+// error: 'r' would keep borrowing this temporary, which is gone once its statement ends
+// A 'Mut<this>' chain lends the object it started on, so it can't outlive a temporary.
+class A {
+  n: i64 = 0;
+  a(this: Mut<this>): Mut<this> {
+    this.n += 1;
+    return this;
+  }
+}
+
+class B extends A {
+  s: string = "hello";
+}
+
+function main() {
+  const r = new B().a().a();
+  console.log(r.n, r.s);
 }

@@ -590,10 +590,11 @@ export function selfTyped(f: Body): boolean {
 
 // A concrete class's copy of a template, made once: its own member when nothing overrides it,
 // and what `super.name()` runs in the class either way.
+// Its body was written in the base, so it reads the base's type arguments.
 export function copyFor({ arenas, ids, typing }: Tables, c: ClassInfo, f: Body): Body {
   const made = c.copies.get(f.bodyId);
   if (made !== undefined) return arenas.bodyOf(made);
-  const copy = arenas.addBody({ ...f, id: nextId(ids), name: `${typing.rec(c.type).name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, scope: c.scope, template: undefined, copyOf: f.bodyId, declared: f.owner! });
+  const copy = arenas.addBody({ ...f, id: nextId(ids), name: `${typing.rec(c.type).name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, scope: new Map([...c.scope, ...(f.scope ?? [])]), template: undefined, copyOf: f.bodyId, declared: f.owner! });
   c.copies.set(f.bodyId, copy.bodyId);
   return copy;
 }
