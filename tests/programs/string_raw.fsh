@@ -50,3 +50,18 @@ function main() { console.log(`a\x`); }
 // error: invalid escape '\u'
 function t(comptime strings: TemplateStringsArray, ...values: string[]): string { return strings[0]; }
 function main() { console.log(t`a\u{zz}`); }
+// case: string_raw_invalid_escape_unterminated
+// error: invalid escape '\x'
+function main() {
+  const s = `a\x b
+}
+// case: string_raw_invalid_escape_pattern
+// error: invalid escape '\x'
+function main() {
+  const s = "q";
+  const r = match (s) { `a\x` => 1, _ => 2 };
+}
+// case: string_raw_invalid_escape_import
+// error: invalid escape '\x'
+import x from `a\x`;
+function main() {}

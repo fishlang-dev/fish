@@ -118,7 +118,7 @@ function template(src: string, from: usize): [string, usize, boolean, CompileErr
   // Where the text not yet added to `value` starts, so plain runs are added in one piece.
   let run = i;
   for (;;) {
-    if (i >= src.length) throw new CompileError("E0002", "unterminated template literal", i);
+    if (i >= src.length) throw invalid ?? new CompileError("E0002", "unterminated template literal", i);
     const c = src.charAt(i as i64);
     if (c === "`") return [value + src.slice(run as i64, i as i64), i + 1, false, invalid];
     if (c === "$" && src.charAt((i + 1) as i64) === "{") return [value + src.slice(run as i64, i as i64), i + 2, true, invalid];
