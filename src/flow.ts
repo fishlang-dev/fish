@@ -56,15 +56,13 @@ export function assignedNames(body: Stmt[] | undefined): Set<string> {
 // function taking it as a parameter, a loop declaring it in its head, a catch binding it. A
 // switch case or other list declaring it is still read whole, which errs toward "assigned".
 export function assignsOwn(body: Stmt[], name: string): boolean {
-  const seen = new Set<unknown>();
   const declares = (list: unknown[]) => list.some((s) => {
     const d = s as { kind?: string; name?: string; declarations?: { target: unknown }[] };
     return (d.kind === "let" && d.declarations!.some((x) => patternNames(x.target).includes(name))) || ((d.kind === "function" || d.kind === "class") && d.name === name);
   });
   const visit = (v: unknown): boolean => {
     if (Array.isArray(v)) return !declares(v) && v.some(visit);
-    if (typeof v !== "object" || v === null || seen.has(v)) return false;
-    seen.add(v);
+    if (typeof v !== "object" || v === null) return false;
     const n = v as { kind?: string; target?: { kind?: string; name?: string }; operand?: { kind?: string; name?: string }; pattern?: unknown; params?: { pattern: unknown }[]; init?: unknown; left?: unknown; param?: unknown };
     if ((n.kind === "assign" && n.target?.kind === "ident" && n.target.name === name) || (n.kind === "update" && n.operand?.kind === "ident" && n.operand.name === name)) return true;
     if (n.kind === "destructure" && patternNames(n.pattern).includes(name)) return true;
