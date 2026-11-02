@@ -12,7 +12,7 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
@@ -1290,6 +1290,7 @@ export class Expressions implements Union {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !this.ctx.lookup("FixedArray") && !this.classes.has("FixedArray")) return this.filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !this.ctx.lookup("Array") && !this.classes.has("Array")) return this.arrayStatic(e, callee);
+    if (callee.kind === "member" && callee.object.kind === "ident" && isTypedName(callee.object.name) && !this.ctx.lookup(callee.object.name) && !this.classes.has(callee.object.name)) return this.typedStatic(e, callee, callee.object.name);
     // `u8.fromBase64(s, options?)` and `u8.fromHex(s)`, TC39's Uint8Array statics on the byte type.
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "u8" && !this.ctx.lookup("u8") && !this.byName.has("u8") && !this.byName.has("const u8")) {
       const helper = Object.hasOwn(BYTE_DECODERS, callee.name) ? BYTE_DECODERS[callee.name] : undefined;
@@ -2223,6 +2224,19 @@ export class Expressions implements Union {
   // An array's method: `push` moves a value in at the end; `pop` takes the last one out, or
   // gives an empty Option. Both change the array.
   private arrayCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
+    const typed = this.typing.typedName(array);
+    if (typed && (callee.name === "subarray" || callee.name === "set")) this.ctx.exprsState.once.add(callee.object);
+    // `subarray` is a copy, as `slice` is: a typed array owns its elements, so a write to it
+    // doesn't reach the array it came from.
+    if (typed && callee.name === "subarray") return this.call(this.become(e, { ...e, callee: { ...callee, id: nextId(this.ids), name: "slice" } }) as Call);
+    // `set(source, offset?)` copies the source's elements in at the offset.
+    if (typed && callee.name === "set") {
+      if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", "'set' takes the array to copy in, and an optional offset", e.start, e.end);
+      const at = { start: e.start, end: e.end };
+      const [source, offset] = e.args as [Expr, Expr | undefined];
+      this.expect(source, array);
+      return this.call(this.become(e, this.typedCall(`array typed set ${TYPED_ARRAYS[typed]}`, [callee.object, source, offset ?? { id: nextId(this.ids), kind: "int", value: 0n, ...at }, { id: nextId(this.ids), kind: "int", value: BigInt(typedSize(typed)), ...at }], at)) as Call);
+    }
     if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, ARRAY_METHODS)}`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
@@ -2890,6 +2904,88 @@ export class Expressions implements Union {
     });
     this.maths.add(e);
     return { type: to, what };
+  }
+
+  // `new Uint8Array(...)` and its siblings: an empty one, n zeros, a copy of an array's elements,
+  // or the elements an ArrayBuffer holds, which it takes, as every typed array owns its own.
+  private typedNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, name: TypedName, list: Expr[]): Type {
+    const typed = this.typing.typedArray(name);
+    const at = { start: e.start, end: e.end };
+    const usage = name === "ArrayBuffer" ? "'new ArrayBuffer(n)' takes its length in bytes" : `'new ${name}' takes a length, an array to copy, or an ArrayBuffer with an optional byte offset and length`;
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}' takes no type arguments`, e.start, e.end);
+    this.refuseSpread(list);
+    if (list.length === 0) return this.typedAs(e, { id: nextId(this.ids), kind: "array", elements: [], ...at }, typed);
+    const [source, ...rest] = list as [Expr, ...Expr[]];
+    if (rest.length > (name === "ArrayBuffer" ? 0 : 2)) throw new CompileError("E0504", usage, e.start, e.end);
+    if (source.kind === "array" && rest.length === 0 && name !== "ArrayBuffer") return this.typedAs(e, source, typed);
+    const t = this.value(source);
+    this.ctx.exprsState.once.add(source);
+    const held = this.isRefType(t) ? this.typing.rec(t).to : t;
+    if (isInteger(t) && rest.length === 0) return this.typedAs(e, this.typedCall("array typed zeros", [this.arrayLength(source, false), this.typedZero(name, source)], at), typed);
+    if (this.typing.typedName(held) === "ArrayBuffer" && name !== "ArrayBuffer") {
+      const int = (value: bigint): Expr => ({ id: nextId(this.ids), kind: "int", value, ...at });
+      const size = BigInt(typedSize(name));
+      return this.typedAs(e, this.typedCall(`array from buffer ${TYPED_ARRAYS[name]}`, [source, rest[0] ?? int(0n), rest[1] ?? int(-1n), int(size), { id: nextId(this.ids), kind: "string", value: name, ...at }], at), typed);
+    }
+    if (this.isArray(held) && rest.length === 0 && name !== "ArrayBuffer") {
+      const element = this.typing.lower(this.typing.rec(held).element);
+      if (element !== TYPED_ARRAYS[name]) throw new CompileError("E0101", `'new ${name}' copies elements of type '${this.typing.show(TYPED_ARRAYS[name])}', not '${this.typing.show(element)}'; convert them first, as in 'xs.map((x) => x as ${TYPED_ARRAYS[name]})'`, source.start, source.end);
+      return this.typedAs(e, { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at }, typed);
+    }
+    throw new CompileError("E0504", usage, e.start, e.end);
+  }
+
+  // `e` rewritten as `to`, which makes a typed array's elements, typed as that typed array.
+  private typedAs(this: Mut<this>, e: Expr, to: Expr, typed: ArrayType): Type {
+    const made = this.become(e, to);
+    this.expect(made, typed);
+    const t = this.value(made);
+    this.coerce(made, t, typed, `type '${this.typing.show(t)}' is not assignable to type '${this.typing.show(typed)}'`);
+    return typed;
+  }
+
+  // A typed array's byte length, byte offset, element size and buffer. It owns its elements from
+  // the start of its own buffer, so its offset is 0 and its buffer is a copy of its bytes.
+  private typedMember(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, name: TypedName): Type {
+    const at = { start: e.start, end: e.end };
+    const size = typedSize(name);
+    const int = (value: bigint): Expr => ({ id: nextId(this.ids), kind: "int", value, ...at });
+    if (this.linked(e)) throw unsupported("optional chains reading a typed array's properties", e);
+    this.ctx.exprsState.once.add(e.object);
+    if (e.name === "BYTES_PER_ELEMENT") return this.typeOf(this.become(e, int(BigInt(size))));
+    if (e.name === "byteOffset") return this.typeOf(this.become(e, { id: nextId(this.ids), kind: "as", expr: int(0n), type: { id: nextId(this.ids), kind: "ref", name: "usize", args: [], ...at }, ...at }));
+    if (e.name === "buffer") return this.typeOf(this.become(e, this.typedCall(`array typed buffer ${TYPED_ARRAYS[name]}`, [e.object, int(BigInt(size))], at)));
+    const length: Expr = { id: nextId(this.ids), kind: "member", object: e.object, name: "length", optional: false, ...at };
+    return this.typeOf(this.become(e, size === 1 ? length : { id: nextId(this.ids), kind: "binary", op: "*", left: length, right: int(BigInt(size)), ...at }));
+  }
+
+  private typedCall(name: string, args: Expr[], at: Span): Expr {
+    return { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at };
+  }
+
+  // A zero of a typed array's element, which picks the helper's instance.
+  private typedZero(name: TypedName, at: Span): Expr {
+    const span = { start: at.start, end: at.end };
+    return { id: nextId(this.ids), kind: "as", expr: { id: nextId(this.ids), kind: "int", value: 0n, ...span }, type: { id: nextId(this.ids), kind: "ref", name: TYPED_ARRAYS[name], args: [], ...span }, ...span };
+  }
+
+  // `Uint8Array.from(xs, f?)` and `Uint8Array.of(...)`: a typed array of the elements given, or of
+  // what f makes of each; `Uint8Array.BYTES_PER_ELEMENT` is its element's size.
+  private typedStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, name: TypedName): { type: Type; what: string } {
+    const typed = this.typing.typedArray(name);
+    const at = { start: e.start, end: e.end };
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}.${callee.name}' takes no type arguments`, e.start, e.end);
+    if (name === "ArrayBuffer" || (callee.name !== "from" && callee.name !== "of")) throw new CompileError("E0502", `'${name}' has no static '${callee.name}'${name === "ArrayBuffer" ? "" : `; make one with 'new ${name}(...)', '${name}.from(xs)' or '${name}.of(...)'`}`, callee.start, callee.end);
+    this.refuseSpread(e.args);
+    if (callee.name === "of") return { type: this.typedAs(e, { id: nextId(this.ids), kind: "array", elements: e.args, ...at }, typed), what: `'${name}.of'` };
+    if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", `'${name}.from' takes the array to copy, and an optional function mapping each value`, e.start, e.end);
+    const [source, f] = e.args as [Expr, Expr | undefined];
+    if (f) {
+      const mapped: Expr = { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
+      return { type: this.typedAs(e, mapped, typed), what: `'${name}.from'` };
+    }
+    const made: Expr = { id: nextId(this.ids), kind: "new", callee: { id: nextId(this.ids), kind: "ident", name, ...at }, args: [source], typeArgs: [], ...at };
+    return { type: this.typedAs(e, made, typed), what: `'${name}.from'` };
   }
 
   private arrayStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
@@ -5375,6 +5471,10 @@ export class Expressions implements Union {
           const declared = m.type ? this.ctx.resolveType(m.type) : this.typing.blockType("JsValue");
           return this.crossing(this.typing.jsView(m.optional ? this.typing.unionType([declared, "null"]) : declared), `'${jsClass.name}.${e.name}' is a`, e);
         }
+        if (e.object.kind === "ident" && isTypedName(e.object.name) && !this.ctx.lookup(e.object.name) && !this.classes.has(e.object.name)) {
+          if (e.name !== "BYTES_PER_ELEMENT" || e.object.name === "ArrayBuffer") throw new CompileError("E0502", `'${e.object.name}' has no static property '${shownName(e.name)}'`, e.start, e.end);
+          return this.typeOf(this.become(e, { id: nextId(this.ids), kind: "int", value: BigInt(typedSize(e.object.name)), start: e.start, end: e.end }));
+        }
         if (this.isMath(e.object)) {
           if (MATH_CONSTANTS[e.name] === undefined) throw new CompileError("E0503", `'Math.${e.name}' is a function, or not in Fish yet; the constants are ${Object.keys(MATH_CONSTANTS).join(", ")}`, e.start, e.end);
           this.maths.add(e);
@@ -5444,6 +5544,8 @@ export class Expressions implements Union {
         // An array's properties are its length and its capacity, the room before a push grows it;
         // capacity isn't JavaScript's.
         if (this.isArray(object)) {
+          const typed = this.typing.typedName(object);
+          if (typed && TYPED_MEMBERS.has(e.name)) return this.typedMember(e, typed);
           if (ARRAY_METHODS.has(e.name)) throw new CompileError("E0503", `array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
           // A shared value's array is read as a copy, which has only the room it needs.
           if (e.name === "capacity" && this.ctx.copiesOut.has(e.object)) throw new CompileError("E0304", `a shared value's array is read as a copy, so read its capacity inside '${this.placeText(e.object).split(".")[0]}.update(...)'`, e.start, e.end);
@@ -5636,6 +5738,7 @@ export class Expressions implements Union {
           if (list.length > 0 || e.typeArgs.length > 0) throw new CompileError("E0504", "'AbortController' takes no arguments", e.start, e.end);
           return this.typing.blockType("AbortController");
         }
+        if (e.callee.kind === "ident" && isTypedName(e.callee.name) && !this.ctx.lookup(e.callee.name) && !this.classes.has(e.callee.name)) return this.typedNew(e, e.callee.name, list);
         const named = e.callee.kind === "ident" && !this.ctx.lookup(e.callee.name) ? this.arenas.classOf(this.classes.get(e.callee.name)) : undefined;
         if (named?.node.abstract) throw new CompileError("E0701", `cannot create an instance of the abstract class '${this.typing.rec(named.type).name}'`, e.start, e.end);
         const written = this.arenas.bodyOf(named?.constructor)?.params ?? (e.callee.kind === "ident" && !this.ctx.lookup(e.callee.name) ? this.ctx.templateParams(e.callee.name) : undefined);
@@ -6842,7 +6945,9 @@ export class Expressions implements Union {
     if (indexed !== undefined && this.typing.isPlainJs(indexed)) throw new CompileError("E1005", "writing a JS value's elements isn't supported yet; a 'JsValue' is read with 'at'", target.start, target.end);
     const holder = target.kind === "member" ? this.types.get(target.object) : undefined;
     if (holder && this.isArray(this.isRefType(holder) ? this.typing.rec(holder).to : holder)) {
-      const capacity = (target as { name: string }).name === "capacity";
+      const { name } = target as { name: string };
+      const capacity = name === "capacity";
+      if (TYPED_MEMBERS.has(name)) throw new CompileError("E0208", `a typed array's '${name}' can't be set`, target.start, target.end);
       throw new CompileError("E0208", capacity ? "an array's 'capacity' can't be set; use 'reserve(n)' to make room, or 'shrinkToFit()' to give it back" : "an array's 'length' can't be set; use 'pop()' to remove elements, or 'push' to add them", target.start, target.end);
     }
     const table = holder && (this.isRefType(holder) ? this.typing.rec(holder).to : holder);
@@ -7567,6 +7672,7 @@ const BYTE_METHODS: Record<string, string> = { toBase64: "array to base64", toHe
 // How many arguments each of a Map's and a Set's methods takes, and those changing it.
 const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
+const TYPED_MEMBERS = new Set(["byteLength", "byteOffset", "buffer", "BYTES_PER_ELEMENT"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...COPYING_METHODS, ...CHANGING_METHODS]);
 
 // Whether `name` is a member of the Map or Set a class embeds.

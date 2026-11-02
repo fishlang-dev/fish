@@ -3,6 +3,7 @@ import type { Source } from "./diag.ts";
 import { AST } from "./ast.ts";
 import { nextId, renumber, shiftSpans, someNode, walk } from "./nodes.ts";
 import { parse, type Pattern, type Stmt } from "./parser.ts";
+import { TYPED_ARRAYS } from "./typing.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
@@ -3790,6 +3791,45 @@ function __arrayFromHex(s: string): u8[] throws TypeError {
 `;
 // btoa and atob, each in a program that names it and doesn't declare it, so a program's own
 // polyfill of one keeps its name and std's other stays.
+// The typed arrays' helpers, in a program that names a typed array or DataView. Every typed array
+// owns its elements, so one made over an ArrayBuffer takes it and copies out the range it views,
+// reading the bytes in the host's order, little-endian on every target Fish builds for.
+const TYPED = String.raw`
+declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, count: i64): void;
+function __arrayTypedZeros<T>(length: i64, zero: T): T[] {
+  assert(length >= 0, "RangeError: Invalid typed array length: " + String(length));
+  return new Array(length).fill(zero);
+}
+${["U8", "I8", "U16", "I16", "U32", "I32", "F32", "F64"].map((name) => {
+  const t = name.toLowerCase();
+  return `function __arrayFromBuffer${name}(buffer: ArrayBuffer, byteOffset: i64, length: i64, size: i64, name: string): ${t}[] {
+  const total = buffer.length as i64;
+  assert(byteOffset % size === 0, "RangeError: start offset of " + name + " should be a multiple of " + String(size));
+  assert(byteOffset >= 0 && byteOffset <= total, "RangeError: Start offset " + String(byteOffset) + " is outside the bounds of the buffer");
+  let n = length;
+  if (n < 0) {
+    assert((total - byteOffset) % size === 0, "RangeError: byte length of " + name + " should be a multiple of " + String(size));
+    n = (total - byteOffset) / size;
+  }
+  assert(byteOffset + n * size <= total, "RangeError: Invalid typed array length: " + String(n));
+  let out: ${t}[] = new Array(n).fill(0 as ${t});
+  if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(out[0]) as MutPtr<u8>, ptrOf(buffer[byteOffset as usize]), n * size) };
+  return out;
+}
+function __arrayTypedBuffer${name}(xs: Ref<${t}[]>, size: i64): ArrayBuffer {
+  const n = (xs.length as i64) * size;
+  let out: ArrayBuffer = new Array(n).fill(0 as u8);
+  if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(out[0]), ptrOf(xs[0]) as Ptr<u8>, n) };
+  return out;
+}
+function __arrayTypedSet${name}(target: Mut<${t}[]>, source: Ref<${t}[]>, offset: i64, size: i64): void {
+  const n = source.length as i64;
+  assert(offset >= 0 && offset + n <= (target.length as i64), "RangeError: offset is out of bounds");
+  if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(target[offset as usize]) as MutPtr<u8>, ptrOf(source[0]) as Ptr<u8>, n * size) };
+}`;
+}).join("\n")}
+`;
+
 const BTOA = `
 // btoa and atob, as the HTML spec has them: base64 of a string's characters as Latin-1 bytes. The
 // UTF-8 the string holds is read back as code points up to U+00FF.
@@ -5510,7 +5550,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB + DATE + STDIN + TLS;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + BTOA + ATOB + DATE + STDIN + TLS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -5543,6 +5583,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const ast = next(AST + AST_HELPERS);
   const js = next(JS_ERROR);
   const bytes = next(BYTES);
+  const typed = next(TYPED);
   const btoa = next(BTOA);
   const atob = next(ATOB);
   const dates = next(DATE);
@@ -5569,7 +5610,9 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const encoding = httpUsed || linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
   const dated = httpUsed || uses(written, dates, ["Date"]);
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
-  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(secure ? tls : [])];
+  // The checker turns typed arrays' constructors and methods into calls of these helpers.
+  const typing = mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && Object.hasOwn(TYPED_ARRAYS, n.name));
+  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(typing ? typed : []), ...(secure ? tls : [])];
 }
 
 // A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.

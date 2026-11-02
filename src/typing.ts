@@ -155,6 +155,11 @@ export const INTEGERS: Record<Integer, { bits: usize; signed: boolean }> = {
 export const TYPED_ARRAYS = { Uint8Array: "u8", Int8Array: "i8", Uint16Array: "u16", Int16Array: "i16", Uint32Array: "u32", Int32Array: "i32", Float32Array: "f32", Float64Array: "f64", ArrayBuffer: "u8" } as const;
 export type TypedName = keyof typeof TYPED_ARRAYS;
 export const isTypedName = (name: string): name is TypedName => Object.hasOwn(TYPED_ARRAYS, name);
+// The bytes each element of a typed array takes, its BYTES_PER_ELEMENT.
+export const typedSize = (name: TypedName): usize => {
+  const e = TYPED_ARRAYS[name];
+  return e === "f32" ? 4 : e === "f64" ? 8 : INTEGERS[e].bits / 8;
+};
 
 export const isInteger = (t: Type): t is Integer => typeof t === "string" && t in INTEGERS;
 

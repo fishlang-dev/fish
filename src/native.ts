@@ -887,6 +887,11 @@ void *fsh_rt_array_zeroed(int64_t bytes) {
   return p;
 }
 
+// Bytes copied between typed arrays, or a number's bits taken as another's, for std's DataView.
+void fsh_rt_bytes_copy(void *to, const void *from, int64_t count) {
+  if (count > 0) memmove(to, from, count);
+}
+
 // A Map or a Set: its entries in insertion order, each a state word (0 never used, 1 live, 2
 // removed), the key's hash, the key's bits, then the key and value as the program lays them out,
 // and an open-addressing index of entry numbers plus one. A key's bits are a sized integer
