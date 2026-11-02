@@ -4,14 +4,43 @@
 
 import type { Id } from "./ids.ts";
 import type { ClassMember, Declarator, Expr, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
-import { forEachChild, type AnyNode, type NodeTypes } from "./walk.ts";
+import { forEachChild as visitChildren, type AnyNode, type NodeTypes, type Visitor } from "./walk.ts";
 
 export { nextId, type Id, type Ids } from "./ids.ts";
-export { forEachChild, type AnyNode } from "./walk.ts";
+export type { AnyNode } from "./walk.ts";
 
 export type NodeOf<K extends keyof NodeTypes> = NodeTypes[K];
 // The node types a walk can start from: nodes, or arrays of them.
 export type RootKind = Exclude<keyof NodeTypes, "stmts">;
+
+// A visitor handing each node it is given to `each`.
+class Each implements Visitor {
+  each: (n: AnyNode) => void;
+  constructor(each: (n: AnyNode) => void) {
+    this.each = each;
+  }
+  node(n: AnyNode) {
+    this.each(n);
+  }
+}
+
+// A visitor calling `each` on every node it is given and walking on into its children, unless
+// `each` gives false. Lists of statements are walked through, not given.
+class Walking implements Visitor {
+  each: (n: AnyNode) => boolean | void;
+  constructor(each: (n: AnyNode) => boolean | void) {
+    this.each = each;
+  }
+  node(this: Mut<this>, n: AnyNode) {
+    if (n.of === "stmts" || this.each(n) !== false) visitChildren(n, this);
+  }
+}
+
+// Calls `visit` on each node `n` holds, in the order its type lists the fields, with a list of
+// statements given whole.
+export function forEachChild(n: AnyNode, visit: (child: AnyNode) => void) {
+  visitChildren(n, new Each(visit));
+}
 
 // The nodes `n` holds, in the order its type lists the fields.
 export function childrenOf(n: AnyNode): AnyNode[] {
@@ -23,11 +52,9 @@ export function childrenOf(n: AnyNode): AnyNode[] {
 // Calls `each` on `roots`, nodes of type `of`, and every node under them, each node before those
 // it holds; `each` returning false skips those. Lists of statements are walked through, not given.
 export function walk<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K>[] | undefined, each: (n: AnyNode) => boolean | void) {
-  function visit(n: AnyNode): void {
-    if (n.of === "stmts" || each(n) !== false) forEachChild(n, visit);
-  }
+  const walking = new Walking(each);
   const list: NodeOf<K>[] = roots === undefined ? [] : Array.isArray(roots) ? roots : [roots];
-  for (const node of list) visit({ of, node } as AnyNode);
+  for (const node of list) walking.node({ of, node } as AnyNode);
 }
 
 // Whether `found` picks out a node under `roots`, nodes of type `of`, themselves included.

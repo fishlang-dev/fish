@@ -1,7 +1,8 @@
 // Writes `src/walk.ts`, which visits the child nodes of every node kind, from the parser's own AST
 // types in `src/parser.ts`, so the compiler can walk a tree without reading arbitrary objects'
-// fields, which Fish can't. A walk hands each child to one callback as an `AnyNode`, a union of
-// references tagged with the node's type. Beside it,
+// fields, which Fish can't. A walk hands each child to its visitor's one method as an `AnyNode`, a
+// union of references tagged with the node's type; the visitor is lent, as Fish can't lend a
+// function. Beside it,
 // `src/rebuild.ts` puts the replacements a rewrite table holds in place in a tree, by the same
 // fields; it is a file of its own, as Fish can't yet move a node out of a list to rebuild it.
 // `tests/walk.test.ts` fails when either file is stale.
@@ -40,11 +41,11 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
       case "bigint":
         return [];
       case "node":
-        return [`each({ of: "${method(f.name)}", node: ${value} });`];
+        return [`v.node({ of: "${method(f.name)}", node: ${value} });`];
       case "union":
-        return holdsNodes(f.members) ? [`${unionName(f.members)}(${value}, each);`] : [];
+        return holdsNodes(f.members) ? [`${unionName(f.members)}(${value}, v);`] : [];
       case "array": {
-        if (ref(f.element, "Stmt")) return [`each({ of: "stmts", node: ${value} });`];
+        if (ref(f.element, "Stmt")) return [`v.node({ of: "stmts", node: ${value} });`];
         const x = `x${++depth}`;
         const inner = visits(f.element, x);
         depth--;
@@ -81,7 +82,7 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
   const expand = (m: TypeNode): TypeNode[] => (m.kind === "ref" && aliases.has(m.name) && !isNode(m.name) && !isWord(m) ? membersOf(aliases.get(m.name)) : [m]);
 
   const fn = (name: string, type: string, body: string[]) => [
-    `export function ${name}(${body.length ? "n" : "_n"}: Ref<${type}>, ${body.length ? "each" : "_each"}: (child: AnyNode) => void): void {`,
+    `export function ${name}<V extends Visitor>(${body.length ? "n" : "_n"}: Ref<${type}>, ${body.length ? "v" : "_v"}: Mut<V>): void {`,
     ...body.map((l) => `  ${l}`),
     `}`,
     ``,
@@ -103,8 +104,8 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
 
   const out: string[] = [];
   for (const name of nodes) out.push(...fn(`childrenOf${name}`, name, children(name)));
-  out.push(...fn("childrenOfStmts", "Stmt[]", ["for (const x of n) {", '  each({ of: "stmt", node: x });', "}"]));
-  // A field of a union type goes to the callback tagged as the member it holds. A kind two node
+  out.push(...fn("childrenOfStmts", "Stmt[]", ["for (const x of n) {", '  v.node({ of: "stmt", node: x });', "}"]));
+  // A field of a union type goes to the visitor tagged as the member it holds. A kind two node
   // types share goes to the first written; as `expr` in `Stmt | Pattern`, their shapes agree.
   for (let i = 0; i < unions.size; i++) {
     const [, { name, members }] = [...unions][i]!;
@@ -117,7 +118,7 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
     }
     if (members.flatMap(expand).some((m) => ref(m, "string"))) body.unshift(`if (typeof n === "string") return;`);
     const owner = (m: TypeNode) => (m.kind === "ref" && m.name === "Extract" && m.args[0]!.kind === "ref" ? m.args[0]!.name : m.kind === "ref" ? m.name : "");
-    if (rest.length === 1) body.push(`each({ of: "${method(owner(rest[0]!))}", node: n });`);
+    if (rest.length === 1) body.push(`v.node({ of: "${method(owner(rest[0]!))}", node: n });`);
     else {
       const seen = new Set<string>();
       body.push(`switch (n.kind) {`);
@@ -125,7 +126,7 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
         const kinds = shapes(m).flatMap((s) => (s.kind === undefined || seen.has(s.kind) ? [] : [s.kind]));
         kinds.forEach((k) => seen.add(k));
         // A case each, as Fish lends a node narrowed to one shape, not to several, as its whole type.
-        for (const k of kinds) body.push(`  case ${JSON.stringify(k)}:`, `    each({ of: "${method(owner(m))}", node: n });`, `    break;`);
+        for (const k of kinds) body.push(`  case ${JSON.stringify(k)}:`, `    v.node({ of: "${method(owner(m))}", node: n });`, `    break;`);
       }
       body.push(`}`);
     }
@@ -226,15 +227,21 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
     ...tagged.map(([of, type], i) => `  | { of: ${JSON.stringify(of)}; node: Ref<${type}> }${i === tagged.length - 1 ? ";" : ""}`),
     ``,
     `// The type of node each tag names.`,
-    `export interface NodeTypes {`,
+    `export type NodeTypes = {`,
     ...tagged.map(([of, type]) => `  ${of}: ${type};`),
+    `};`,
+    ``,
+    `// What a walk does at each node it reaches. Its method visits a node's children by calling`,
+    `// \`forEachChild\`, or skips them by not calling it.`,
+    `export interface Visitor {`,
+    `  node(this: Mut<this>, n: AnyNode): void;`,
     `}`,
     ``,
-    `// Calls \`each\` on each node \`n\` holds, in the order its type lists the fields, with a list of`,
+    `// Hands each node \`n\` holds to \`v\`, in the order its type lists the fields, with a list of`,
     `// statements given whole.`,
-    `export function forEachChild(n: AnyNode, each: (child: AnyNode) => void): void {`,
+    `export function forEachChild<V extends Visitor>(n: AnyNode, v: Mut<V>): void {`,
     `  switch (n.of) {`,
-    ...tagged.flatMap(([of, type]) => [`    case ${JSON.stringify(of)}:`, `      childrenOf${type === "Stmt[]" ? "Stmts" : type}(n.node, each);`, `      break;`]),
+    ...tagged.flatMap(([of, type]) => [`    case ${JSON.stringify(of)}:`, `      childrenOf${type === "Stmt[]" ? "Stmts" : type}(n.node, v);`, `      break;`]),
     `  }`,
     `}`,
     ``,
@@ -242,8 +249,8 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
   const importsOf = (lines: string[]) => [...aliases.keys()].filter((name) => lines.some((l) => new RegExp(`\\b${name}\\b`).test(l)));
   const walk = [
     `// Generated from the parser's AST types by \`bun scripts/walkgen.ts\`; a test fails when it is stale.`,
-    `// Each \`childrenOf\` function hands each node a node holds to \`each\`, tagged, in the order its`,
-    `// type lists the fields.`,
+    `// Each \`childrenOf\` function hands each node a node holds to the visitor, tagged, in the order`,
+    `// its type lists the fields.`,
     `import type { ${importsOf([...visitor, ...out]).join(", ")} } from "./parser.ts";`,
     ``,
     ...visitor,
