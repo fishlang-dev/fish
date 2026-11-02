@@ -1768,7 +1768,8 @@ export class Expressions implements Union {
       if (a.kind !== "arrow" && known && known[i] !== undefined) this.expect(a, target.js ? this.typing.jsTakes(known[i]!) : known[i]!);
       if (a.kind === "arrow" && known && target.js && known[i] !== undefined) this.expect(a, this.typing.jsTakes(known[i]!));
       // A literal for a tuple parameter is a tuple of its parts, in the parameter's shape.
-      const node = target.params[i]?.type;
+      const written = target.params[i]?.type;
+      const node = written?.kind === "operator" && written.op === "readonly" ? written.type : written;
       if (!known && (a.kind === "array" || this.tupleLiterals.has(a)) && node?.kind === "tuple") {
         this.ctx.exprsState.shaped.add(a);
         if (node.elements.some((n) => n.optional || n.rest)) this.ctx.exprsState.shapedBy.set(a, node);
@@ -2336,7 +2337,7 @@ export class Expressions implements Union {
     if (x.kind === "array" && x.elements.length === 0) return this.typing.tupleType([]);
     if (x.kind === "array" && x.elements.every((y) => y !== undefined && y.kind !== "spread")) {
       const parts = (x.elements as Expr[]).map((y) => this.constType(y));
-      return parts.every((p) => this.constWide(p) === this.constWide(parts[0]!)) ? this.typing.arrayType(this.constJoin(parts)) : this.typing.tupleType(parts);
+      return parts.every((p) => this.constWide(p) === this.constWide(parts[0]!)) ? this.typing.arrayType(this.constJoin(parts)) : this.typing.tupleType(parts, undefined, undefined, true);
     }
     const props = x.kind === "object" ? x.props.filter((p): p is Extract<ObjectProp, { kind: "property" }> => p.kind === "property" && typeof p.key === "string") : [];
     if (x.kind === "object" && props.length === x.props.length) return this.typing.objectType(props.map((p) => ({ name: p.key as string, type: this.constType(p.value), readonly: true })));
@@ -7036,6 +7037,7 @@ export class Expressions implements Union {
     const locked = this.typing.field(object as Exclude<Type, string>, e.name)?.readonly || (this.throughMutable(e.object) && this.concreteField(e)?.readonly);
     if (typeof object === "string" || !object || !locked) return;
     if (e === target && e.object.kind === "this" && this.self?.constructor && this.typing.rec(this.self.type).fields.some((f) => f.name === e.name)) return;
+    if (this.typing.isTuple(object)) throw new CompileError("E0208", `cannot ${action} '${this.placeText(target)}' because '${this.placeText(e.object)}' is a '${this.typing.show(object)}', whose elements are read-only`, target.start, target.end);
     const what = e === target ? `'${e.name}' because it is` : `'${this.placeText(target)}' because '${e.name}' is`;
     throw new CompileError("E0208", `cannot ${action} ${what} a read-only property`, target.start, target.end);
   }

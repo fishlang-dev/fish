@@ -381,6 +381,12 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     }
     // `readonly T[]` is a shared borrow of an array.
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return this.typing.refType(this.typing.arrayType(this.resolveType(t.type.element)), false);
+    // `readonly [A, B]` is the tuple with its positions read-only, a value like any tuple.
+    if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "tuple") {
+      const tuple = this.resolveType(t.type) as ObjectType;
+      const { required, rest } = this.typing.rec(tuple);
+      return this.typing.tupleType(this.typing.elementsOf(tuple), required, rest, true);
+    }
     if (t.kind === "operator" && t.op === "keyof") return this.typeFns().keyofType(this.resolveType(t.type), t);
     if (t.kind === "operator") throw unsupported(`'${t.op}' types`, t);
     if (t.kind === "indexed") return this.typeFns().indexedType(this.resolveType(t.object), this.resolveType(t.index), t, t.index);

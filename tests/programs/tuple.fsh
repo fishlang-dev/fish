@@ -454,3 +454,56 @@ function main() { g([1, 2, 3]); g(["a", "b"]); }
 // error: type 'i64' is not assignable to type '[string, i64]'
 function f(x: string | [string, i64][]): void { console.log(x); }
 function main() { f([1, 2]); }
+// case: tuple_readonly
+// expect: 1 x [ 1, 'x' ]
+// expect: [ 1, 'x' ] [ 1, 'x' ]
+// expect: 4 q
+// expect: [ 'z', 1 ]
+function f(p: readonly [i64, string]): void { console.log(p[0], p[1], p); }
+function pair<A, B>(t: readonly [A, B]): [B, A] { return [t[1], t[0]]; }
+function main(): void {
+  const t: [i64, string] = [1, "x"];
+  f(t);
+  const r: readonly [i64, string] = t;
+  let back: [i64, string] = r;
+  back[0] = 2;
+  console.log(r, t);
+  const q: readonly [i64, string] = [4, "q"];
+  const [a, b] = q;
+  console.log(a, b);
+  console.log(pair([1, "z"]));
+}
+// case: tuple_readonly_write
+// error: cannot assign to 'r[0]' because 'r' is a 'readonly [i64, string]', whose elements are read-only
+function main(): void { let r: readonly [i64, string] = [1, "x"]; r[0] = 2; }
+// case: tuple_readonly_deep
+// error: cannot assign to 'r[0].n' because 'r' is a 'readonly [C, string]', whose elements are read-only
+class C { constructor(public n: i64) {} }
+function main(): void { let r: readonly [C, string] = [new C(1), "x"]; r[0].n = 3; }
+// case: tuple_readonly_lent_mutably
+// error: '0' is read-only here, so it can't be lent mutably as '[i64, string]', which could change it
+function g(p: Mut<[i64, string]>): void { p[0] = 5; }
+function main(): void { let r: readonly [i64, string] = [1, "x"]; g(r); }
+// case: tuple_readonly_as_const
+// error: cannot assign to 'c[1]' because 'c' is a 'readonly [1, "a"]', whose elements are read-only
+function main(): void { let c = [1, "a"] as const; c[1] = "a"; }
+// case: tuple_readonly_iterable_entries
+// expect: Map(2) { 'a' => 1, 'b' => 2 }
+// expect: Map(1) { 'c' => 3 }
+// expect: 0
+// expect: a 2
+class Table<K, V> {
+  m: Map<K, V> = new Map();
+  constructor(entries?: Iterable<readonly [K, V]>) {
+    if (entries !== undefined) for (const [k, v] of entries) this.m.set(k, v);
+  }
+}
+function first<K, V>(xs: Iterable<readonly [K, V]>): K | null { for (const [k, _v] of xs) return k; return null; }
+function main(): void {
+  const pairs: [string, i64][] = [["a", 1], ["b", 2]];
+  console.log(new Table(pairs).m);
+  console.log(new Table(new Map<string, i64>([["c", 3]])).m);
+  console.log(new Table<string, i64>().m.size);
+  const ps: [i64, string][] = [[2, "b"]];
+  console.log(first(new Map([["a", 1]])), first(ps));
+}

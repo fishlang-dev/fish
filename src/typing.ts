@@ -2095,12 +2095,13 @@ export class Typing {
   }
 
   // `[A, B]`: laid out as an object of fields `0` and `1`, but a type of its own.
-  tupleType(this: Mut<this>, elements: Type[], required: usize = elements.length, rest?: Type): ObjectType {
-    const key = `tuple ${elements.map((t) => this.keyOf(t)).join(",")}${required < elements.length ? `?${required}` : ""}${rest === undefined ? "" : `...${this.keyOf(rest)}`}`;
+  // A readonly one, `readonly [A, B]`, has every position a readonly field.
+  tupleType(this: Mut<this>, elements: Type[], required: usize = elements.length, rest?: Type, readonly = false): ObjectType {
+    const key = `${readonly ? "readonly " : ""}tuple ${elements.map((t) => this.keyOf(t)).join(",")}${required < elements.length ? `?${required}` : ""}${rest === undefined ? "" : `...${this.keyOf(rest)}`}`;
     let t = this.interned.get(key);
     if (!t) {
-      const fields: Field[] = elements.map((type, i) => ({ name: String(i), type }));
-      if (rest !== undefined) fields.push({ name: "...", type: this.arrayType(rest) });
+      const fields: Field[] = elements.map((type, i) => ({ name: String(i), type, ...(readonly && { readonly }) }));
+      if (rest !== undefined) fields.push({ name: "...", type: this.arrayType(rest), ...(readonly && { readonly }) });
       const shape = this.objectType(fields);
       t = this.made<ObjectType>({ kind: "object", fields: this.rec(shape).fields.map((f) => ({ ...f })), tuple: true, shape }, key);
       if (required < elements.length) this.rec(t).required = required;
@@ -2110,10 +2111,21 @@ export class Typing {
     return t;
   }
 
+  readonlyTuple(t: ObjectType): boolean {
+    return this.rec(t).fields[0]?.readonly === true;
+  }
+
+  // A readonly tuple's writable twin; any other type as it is.
+  writable(this: Mut<this>, t: Type): Type {
+    if (!this.isTuple(t) || !this.readonlyTuple(t as ObjectType)) return t;
+    const { required, rest } = this.rec(t as ObjectType);
+    return this.tupleType(this.elementsOf(t as ObjectType), required, rest);
+  }
+
   // The same tuple shape over elements mapped by `f`.
   retuple(this: Mut<this>, t: ObjectType, f: (e: Type) => Type): ObjectType {
     const { required, rest } = this.rec(t);
-    return this.tupleType(this.elementsOf(t).map(f), required, rest === undefined ? undefined : f(rest));
+    return this.tupleType(this.elementsOf(t).map(f), required, rest === undefined ? undefined : f(rest), this.readonlyTuple(t));
   }
 
   // What `re.exec(s)` gives when it matches: the whole match and each capture, a capture that
@@ -2166,7 +2178,7 @@ export class Typing {
     let found = this.shapeKeys.get(t);
     if (found === undefined) {
       const r = this.rec(t);
-      if (r.kind === "object" && r.tuple) found = `[${this.elementsOf(t as ObjectType).map((t) => this.shapeKey(t)).join(",")}${r.required === undefined ? "" : `?${r.required}`}${r.rest === undefined ? "" : `...${this.shapeKey(r.rest)}`}]`;
+      if (r.kind === "object" && r.tuple) found = `${this.readonlyTuple(t as ObjectType) ? "readonly " : ""}[${this.elementsOf(t as ObjectType).map((t) => this.shapeKey(t)).join(",")}${r.required === undefined ? "" : `?${r.required}`}${r.rest === undefined ? "" : `...${this.shapeKey(r.rest)}`}]`;
       else if (r.kind === "object") found = `{${r.fields.map((f) => `${f.readonly ? "readonly " : ""}${JSON.stringify(f.name)}:${this.shapeKey(f.type)}`).join(",")}}`;
       else if (r.kind === "array") found = `${this.shapeKey(r.element)}[]`;
       else if (r.kind === "fixed") found = `FixedArray<${this.shapeKey(r.element)},${r.size}>`;
@@ -2368,7 +2380,7 @@ export class Typing {
     if (r.kind === "handle") return `${r.joined ? "Promise" : "JoinHandle"}<${this.show(r.gives)}>${r.throws ? ` throws ${this.show(r.throws)}` : ""}`;
     if (r.kind !== "object") return r.name;
     if (r.match && !this.describing) return "RegExpExecArray";
-    if (r.tuple && !r.match) return `[${[...this.elementsOf(t as ObjectType).map((e, i) => (i < (r.required ?? Infinity) ? this.show(e) : `${this.show(this.withoutNull(e))}?`)), ...(r.rest === undefined ? [] : [`...${this.show(this.arrayType(r.rest))}`])].join(", ")}]`;
+    if (r.tuple && !r.match) return `${this.readonlyTuple(t as ObjectType) ? "readonly " : ""}[${[...this.elementsOf(t as ObjectType).map((e, i) => (i < (r.required ?? Infinity) ? this.show(e) : `${this.show(this.withoutNull(e))}?`)), ...(r.rest === undefined ? [] : [`...${this.show(this.arrayType(r.rest))}`])].join(", ")}]`;
     if (r.fields.length === 0) return "{}";
     const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
     return `{ ${r.fields.map((f) =>
