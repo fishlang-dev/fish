@@ -144,7 +144,7 @@ type Frame = { fin: boolean; opcode: number; payload: Buffer };
 
 // A client speaking the protocol by hand: its handshake's response head, frames it sends masked
 // or not, and the server's frames as they arrive, null once the connection ends.
-async function rawClient(port: number, path: string, extra = "") {
+async function rawClient(port: number, path: string, extra = "", requestLine = `GET ${path} HTTP/1.1`) {
   const sock: Socket = connect(port, "127.0.0.1");
   let buf = Buffer.alloc(0);
   let ended = false;
@@ -159,7 +159,7 @@ async function rawClient(port: number, path: string, extra = "") {
   });
   sock.on("error", () => {});
   await new Promise((resolve) => sock.once("connect", resolve));
-  sock.write(`GET ${path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n${extra}\r\n`);
+  sock.write(`${requestLine}\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n${extra}\r\n`);
   const need = async (n: number) => {
     const deadline = Date.now() + 5_000;
     while (buf.length < n && !ended) {
@@ -251,7 +251,7 @@ test("path params, mounted routers and their middleware apply before the upgrade
     expect(inside.events[0]).toBe("inside");
     inside.ws.close();
     await inside.closed;
-    // A plain GET, a wrong version and a bad key are refused without upgrading.
+    // A plain GET, a wrong version, a bad key, a HEAD and HTTP/1.0 are refused without upgrading.
     const plain = await fetch(`http://127.0.0.1:${server.port}/echo`);
     expect(plain.status).toBe(426);
     expect(plain.headers.get("upgrade")).toBe("websocket");
@@ -262,6 +262,12 @@ test("path params, mounted routers and their middleware apply before the upgrade
     const key = await fetch(`http://127.0.0.1:${server.port}/echo`, { headers: { upgrade: "websocket", connection: "Upgrade", "sec-websocket-version": "13", "sec-websocket-key": "short" } });
     expect(key.status).toBe(400);
     await key.text();
+    // RFC 6455 upgrades a GET over HTTP/1.1 only.
+    for (const [line, status] of [["HEAD /echo HTTP/1.1", "405 Method Not Allowed"], ["GET /echo HTTP/1.0", "400 Bad Request"]] as const) {
+      const c = await rawClient(server.port, "/echo", "", line);
+      expect(c.head).toStartWith(`HTTP/1.1 ${status}\r\n`);
+      c.sock.destroy();
+    }
   } finally {
     await server.stop();
   }

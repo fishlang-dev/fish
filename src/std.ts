@@ -929,6 +929,11 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       if (upgrade !== null && res.status === 101 && Http1.fieldsSendable(res)) {
         done.abort();
         const early = await watching;
+        // RFC 6455 upgrades HTTP/1.1 and later only.
+        if (version !== "HTTP/1.1") {
+          await Http1.refuse(conn, 400);
+          return;
+        }
         for (const b of early) buffer.push(b);
         const sent = await Http1.put(conn, Http1.headText(res, "connection: Upgrade\\r\\n", false, "HTTP/1.1"), stop);
         if (sent) await upgrade(conn.clone(), buffer, stop.clone());
@@ -1537,9 +1542,15 @@ class WebSocketSender {
   }
 }
 
-// The handshake's answer: a 101 accepting the key, a 426 to a request that isn't an upgrade to
-// WebSocket version 13, or a 400 for a key that isn't 16 bytes in base64.
+// The handshake's answer: a 101 accepting the key, a 405 to a HEAD request, which reaches GET
+// routes, a 426 to a request that isn't an upgrade to WebSocket version 13, or a 400 for a key
+// that isn't 16 bytes in base64.
 function __wsHandshake(req: Ref<Request>): Response {
+  if (req.method !== "GET") {
+    let allow = new Headers();
+    allow.set("allow", "GET");
+    return new Response("Method Not Allowed\\n", { status: 405, headers: allow });
+  }
   const upgrade = req.headers.get("upgrade");
   const connection = req.headers.get("connection");
   let headers = new Headers();
