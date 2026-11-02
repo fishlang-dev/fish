@@ -9197,6 +9197,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
           return convert(v, union, to);
         }
         if (redundantBang(e)) return value(e.expr);
+        // An optional interface parameter a call left out is only ever empty.
+        if (valueType(e.expr) === "null") {
+          value(e.expr);
+          panicIf("true", (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
+          return "undef";
+        }
         // Through a reference, the Option it points to.
         const option = valueType(e.expr) as UnionType;
         const v = value(e.expr);

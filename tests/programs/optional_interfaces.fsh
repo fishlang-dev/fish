@@ -148,3 +148,37 @@ function main(): void {
   console.log(measure());
 }
 // error: defaults on parameters of type 'Shape' are not supported yet
+
+// case: optional_interfaces_passed_on
+interface Shape { area(): f64; }
+class Sq { constructor(public s: f64) {} area(): f64 { return this.s * this.s; } }
+function g(y: Shape): f64 { return y.area(); }
+function a(x?: Shape): f64 { if (x !== undefined) return g(x); return -1; }
+function b(x?: Shape): f64 { return x === undefined ? -2 : g(x!); }
+function main(): void {
+  console.log(a(new Sq(2)), a(), b(new Sq(3)), b());
+}
+// expect: 4 -1 9 -2
+
+// case: optional_interfaces_bang
+interface Shape { area(): f64; }
+class Sq { constructor(public s: f64) {} area(): f64 { return this.s * this.s; } }
+function b(x?: Shape): f64 { return x!.area(); }
+function main(): void {
+  console.log(b(new Sq(2)));
+  console.log(b());
+}
+// expect: 4
+// panic: called `Option::unwrap()` on a `None` value
+
+// case: optional_interfaces_bang_release
+// mode: release
+interface Shape { area(): f64; }
+class Sq { constructor(public s: f64) {} area(): f64 { return this.s * this.s; } }
+function b(x?: Shape): f64 { return x!.area(); }
+function main(): void {
+  console.log(b(new Sq(2)));
+  console.log(b());
+}
+// expect: 4
+// panic: called `Option::unwrap()` on a `None` value

@@ -812,6 +812,9 @@ export class Instancing {
     }
     // A recursive type's value stands for the type it stands for.
     type = this.typing.unfold(type);
+    // Only an instance where an optional interface parameter was left out holds a 'never', and
+    // that code never runs, so it stands in for any bound.
+    if (this.typing.lower(type) === "never") return "never";
     const message = `argument of type '${this.typing.show(type)}' is not assignable to parameter of type '${this.typing.show(bound)}'`;
     const t = typeof type === "string" ? undefined : this.typing.rec(type);
     const b = this.typing.rec(bound);
