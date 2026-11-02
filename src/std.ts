@@ -4760,6 +4760,29 @@ export async function writeFile(path: string, data: string | u8[]): Promise<void
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
   await fileWrite(path, bytes);
 }
+
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+
+export async function access(path: string, mode: i64 = 0): Promise<void> throws IoError {
+  await spawnBlocking(() => pathAccess(path, mode));
+}
+
+// A time as utimes takes it, as Node's toUnixTimestamp reads one: a Date's seconds, and a
+// negative finite number now; NaN and the infinities pass on to be refused.
+function seconds(time: f64 | Date): f64 {
+  if (time instanceof Date) return (time.getTime() as f64) / 1000;
+  return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
+}
+
+export async function utimes(path: string, atime: f64 | Date, mtime: f64 | Date): Promise<void> throws IoError {
+  const [a, m] = [seconds(atime), seconds(mtime)];
+  await spawnBlocking(() => pathUtimes(path, a, m, true));
+}
+
+export async function lutimes(path: string, atime: f64 | Date, mtime: f64 | Date): Promise<void> throws IoError {
+  const [a, m] = [seconds(atime), seconds(mtime)];
+  await spawnBlocking(() => pathUtimes(path, a, m, false));
+}
 `,
   fs: String.raw`
 export function readFileSync(path: string): u8[] throws IoError {
@@ -4839,7 +4862,7 @@ export function renameSync(oldPath: string, newPath: string): void throws IoErro
   pathRename(oldPath, newPath);
 }
 
-export const constants = { COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
 
 export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
   fileCopy(src, dest, mode);
@@ -4847,6 +4870,26 @@ export function copyFileSync(src: string, dest: string, mode: i64 = 0): void thr
 
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
+}
+
+export function accessSync(path: string, mode: i64 = 0): void throws IoError {
+  pathAccess(path, mode);
+}
+
+// A time as utimes takes it, as Node's toUnixTimestamp reads one: a Date's seconds, and a
+// negative finite number now; NaN and the infinities pass on to be refused.
+function seconds(time: f64 | Date): f64 {
+  if (time instanceof Date) return (time.getTime() as f64) / 1000;
+  return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
+}
+
+export function utimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
+  pathUtimes(path, seconds(atime), seconds(mtime), true);
+}
+
+// A link's own times, not its target's.
+export function lutimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
+  pathUtimes(path, seconds(atime), seconds(mtime), false);
 }
 `,
   child_process: String.raw`

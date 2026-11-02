@@ -7027,6 +7027,15 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       case "pathUnlink":
         emit(`${status} = call i32 @fsh_rt_fs_unlink(ptr ${path}, ptr ${parts})`);
         break;
+      case "pathAccess":
+        emit(`${status} = call i32 @fsh_rt_fs_access(ptr ${path}, i64 ${value(e.args[1]!)}, ptr ${parts})`);
+        break;
+      case "pathUtimes": {
+        const follow = temp();
+        emit(`${follow} = zext i1 ${value(e.args[3]!)} to i32`);
+        emit(`${status} = call i32 @fsh_rt_fs_utimes(ptr ${path}, double ${value(e.args[1]!)}, double ${value(e.args[2]!)}, i32 ${follow}, ptr ${parts})`);
+        break;
+      }
       case "dirMake": {
         const [recursive, out] = [temp(), alloca("ptr")];
         emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);
