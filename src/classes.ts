@@ -1,7 +1,7 @@
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { RustName, RustTables } from "./rust.ts";
-import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { rebuiltParam } from "./rebuild.ts";
 import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
@@ -493,7 +493,7 @@ export function embed(tables: Tables, c: ClassInfo, kind: "Map" | "Set") {
   const at = { start: named.start, end: named.end };
   const typeArgs = named.kind === "instantiation" ? named.typeArgs : [];
   c.embedded = kind;
-  c.fields.unshift({ name: EMBEDDED, type: { id: nextId(ids), kind: "ref", name: kind, args: typeArgs, ...at }, init: undefined, access: "public", readonly: false, ...at });
+  c.fields.unshift({ name: EMBEDDED, type: { id: nextId(ids), kind: "ref", name: kind, args: typeArgs, ...at }, init: undefined, access: "private", readonly: false, ...at });
   c.required.add(EMBEDDED);
   const made = (args: Expr[], s: Span): Stmt => assignField(ids, EMBEDDED, { id: nextId(ids), kind: "new", callee: { id: nextId(ids), kind: "ident", name: kind, ...at }, typeArgs, args, start: s.start, end: s.end }, s);
   const constructor = arenas.bodyOf(c.constructor);
@@ -507,7 +507,21 @@ export function embed(tables: Tables, c: ClassInfo, kind: "Map" | "Set") {
   if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
     throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", constructor.start, constructor.end);
   }
-  constructor.body = [...defaults, made(first.expr.args, first), ...c.prelude, ...rest];
+  // JavaScript's constructor adds each entry through `this.set` or `this.add`, so an override of
+  // it sees them; that runs once the fields are assigned, before the rest of the constructor.
+  const adder = kind === "Set" ? "add" : "set";
+  const [given] = first.expr.args;
+  if (!c.methods.has(adder) || !given) {
+    constructor.body = [...defaults, made(first.expr.args, first), ...c.prelude, ...rest];
+    return;
+  }
+  const s = { start: first.start, end: first.end };
+  const names = kind === "Set" ? ["member"] : ["key", "value"];
+  const target: Pattern = kind === "Set" ? { id: nextId(ids), kind: "ident", name: "member", ...s } : { id: nextId(ids), kind: "array", elements: names.map((name): Pattern => ({ id: nextId(ids), kind: "ident", name, ...s })), rest: undefined, ...s };
+  const left: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target, type: undefined, init: undefined, ...s }], ...s };
+  const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "this", ...s }, name: adder, optional: false, ...s }, typeArgs: [], args: names.map((name): Expr => ({ id: nextId(ids), kind: "ident", name, ...s })), optional: false, ...s };
+  const loop: Stmt = { id: nextId(ids), kind: "forOf", await: false, left, right: given, body: [{ id: nextId(ids), kind: "expr", expr: call, ...s }], ...s };
+  constructor.body = [...defaults, made([], first), ...c.prelude, loop, ...rest];
 }
 
 // The names a type, or the types inside a parameter or statements, refer to without type arguments.

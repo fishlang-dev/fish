@@ -79,3 +79,25 @@ class Sub extends Base {
 
 function main() {}
 // error: 'n' is already a field of 'Base'
+// case: override_signature
+class Base {
+  m(k: i64): i64 { return k }
+}
+
+class P extends Base {
+  override m(k: string): string { return k }
+}
+
+function main() {}
+// error: 'm' overrides 'Base.m', so its parameter 'k' takes 'i64' as that one does, not 'string'
+// case: override_extra_parameter
+class Base {
+  m(k: i64): i64 { return k }
+}
+
+class P extends Base {
+  override m(k: i64, j: i64): i64 { return k + j }
+}
+
+function main() {}
+// error: 'm' overrides 'Base.m', which takes 1 parameter, so its parameter 'j' must be optional

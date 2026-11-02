@@ -10,7 +10,10 @@ import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, TypeNode } from "./parser.ts";
 import { storable } from "./resolve.ts";
-import { type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { EMBEDDED, type MapType, type RefType, type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
+
+// A member a class's `override` replaces: its name as shown, its parameters' types and its result.
+type Replaced = { name: string; params: (Type | undefined)[]; returns: Type | undefined };
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -66,6 +69,7 @@ export class Registry {
   // each through `each`, which may recover from one member's error to check the next.
   settle(this: Mut<this>, c: ClassInfo, each: (run: () => void) => void = (run) => run()) {
     this.layout(c);
+    this.overrideSignatures(c);
     this.implemented(c);
     this.bodiesOf(c).forEach((f) => each(() => this.host.checkBody(this.host.definition(f))));
   }
@@ -104,6 +108,88 @@ export class Registry {
     checkOverrides(this.arenas, this.typing, c);
     checkOverrideModifiers(this.arenas, this.typing, c);
     this.host.registryState.linked.add(c.type);
+  }
+
+  // A member written `override` takes what the member it replaces takes, as TypeScript checks:
+  // each parameter that one is given fits this one's, any further parameter is optional, and its
+  // result fits that one's.
+  private overrideSignatures(this: Mut<this>, c: ClassInfo) {
+    for (const o of c.overrides) {
+      const tables = o.static ? [["statics", o.name], ["statics", `get ${o.name}`], ["statics", `set ${o.name}`]] as const : [["methods", o.name], ["getters", o.name], ["setters", o.name]] as const;
+      for (const [table, key] of tables) {
+        const own = this.arenas.bodyOf(c[table].get(key));
+        if (!own || own.typeParams?.length) continue;
+        const replaced = this.replaced(c, table, key, own);
+        if (replaced) this.fitsOverride(own, replaced);
+      }
+    }
+  }
+
+  // What a member of a class replaces: its nearest base's member, or the embedded Map's or Set's.
+  private replaced(this: Mut<this>, c: ClassInfo, table: "methods" | "getters" | "setters" | "statics", key: string, own: Body): Replaced | undefined {
+    for (let b = this.arenas.classOf(c.base); b; b = this.arenas.classOf(b.base)) {
+      const found = this.arenas.bodyOf(b[table].get(key));
+      if (found && !found.typeParams?.length) return { name: `${this.typing.rec(b.type).name}.${key}`, params: found.params.map((p) => p.type && this.resolveIn(found, p.type)), returns: found.returnType && this.resolveIn(found, found.returnType) };
+      if (found || b[table === "statics" ? "staticFields" : "methods"].has(key) || b.fields.some((f) => f.name === key)) return undefined;
+    }
+    const embedding = this.embedding(c);
+    if (!embedding || table === "statics" || table === "setters") return undefined;
+    const { key: k, value: v, set } = this.typing.rec(embedding);
+    const name = `${set ? "Set" : "Map"}.${key}`;
+    if (table === "getters") return key === "size" ? { name, params: [], returns: "usize" } : undefined;
+    const keyed: Record<string, Replaced> = {
+      get: { name, params: [k], returns: this.typing.unionType([v, "null"]) },
+      has: { name, params: [k], returns: "boolean" },
+      delete: { name, params: [k], returns: "boolean" },
+      clear: { name, params: [], returns: "void" },
+      set: { name, params: set ? [] : [k, v], returns: undefined },
+      add: { name, params: set ? [k] : [], returns: undefined },
+    };
+    return own.name.endsWith(`.${key}`) ? keyed[key] : undefined;
+  }
+
+  // The Map or Set a class or its bases embed.
+  private embedding(c: ClassInfo): MapType | undefined {
+    for (let b: ClassInfo | undefined = c; b; b = this.arenas.classOf(b.base)) {
+      if (!b.embedded) continue;
+      const field = this.typing.rec(b.type).fields.find((f) => f.name === EMBEDDED);
+      return field && (this.typing.lower(field.type) as MapType);
+    }
+    return undefined;
+  }
+
+  private resolveIn(f: Body, t: TypeNode): Type | undefined {
+    try {
+      return this.host.withScope(f.scope ?? new Map(), () => this.host.resolveType(t));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private fitsOverride(this: Mut<this>, own: Body, replaced: Replaced) {
+    const show = (t: Type) => this.typing.show(t);
+    // A parameter naming the class itself, as `Ref<this>` does, names each class in turn.
+    const held = (t: Type): Type => (typeof t !== "string" && this.typing.rec(t).kind === "ref" ? held(this.typing.rec(t as RefType).to) : t);
+    const related = (x: Type, y: Type) => {
+      const [a, b] = [held(x), held(y)];
+      if (typeof a === "string" || typeof b === "string" || this.typing.rec(a).kind !== "class" || this.typing.rec(b).kind !== "class") return false;
+      return this.typing.derives(a as ClassType, b as ClassType) || this.typing.derives(b as ClassType, a as ClassType);
+    };
+    const member = own.name.slice(own.name.lastIndexOf(".") + 1);
+    own.params.forEach((p, i) => {
+      const name = p.pattern.kind === "ident" ? p.pattern.name : `${i + 1}`;
+      if (i >= replaced.params.length) {
+        if (p.optional || p.default || p.rest) return;
+        throw new CompileError("E0704", `'${member}' overrides '${replaced.name}', which takes ${replaced.params.length} parameter${replaced.params.length === 1 ? "" : "s"}, so its parameter '${name}' must be optional`, p.start, p.end);
+      }
+      const want = replaced.params[i];
+      const got = p.type && this.resolveIn(own, p.type);
+      if (want === undefined || got === undefined || related(want, got)) return;
+      if (!this.typing.fits(want, got)) throw new CompileError("E0704", `'${member}' overrides '${replaced.name}', so its parameter '${name}' takes '${show(want)}' as that one does, not '${show(got)}'`, p.start, p.end);
+    });
+    const got = own.returnType && this.resolveIn(own, own.returnType);
+    if (replaced.returns === undefined || got === undefined || related(replaced.returns, got)) return;
+    if (!this.typing.fits(got, replaced.returns)) throw new CompileError("E0704", `'${member}' overrides '${replaced.name}', so it gives '${show(replaced.returns)}' as that one does, not '${show(got)}'`, own.returnType!.start, own.returnType!.end);
   }
 
   // The class `extends` names, a generic one made from the type arguments it is written with,

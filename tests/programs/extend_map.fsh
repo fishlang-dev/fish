@@ -172,3 +172,96 @@ function main() {
   console.log({ deep: { deeper: { p: new P([["a", 1]]), q: new Q(), r: new R() } } })
   console.log(new S([["z", 9]]))
 }
+// case: extend_map_own_members
+// expect: P(1) [Map] { 'a' => 'x', n: '1' } P(2) [Map] { 'a' => 'x', 'b' => 'y', n: '1' }
+// expect: { n: 1 } [ [ 'n', 1 ] ] 1 {}
+// Only the collection's members are delegated: 'clone' copies the whole object, and the hidden
+// collection stays out of spreads, rests and Object.entries.
+class P extends Map<string, string> {
+  n: string = "1"
+}
+
+class Q extends Map<string, i64> {
+  n: i64 = 1
+}
+
+function main() {
+  let p = new P()
+  p.set("a", "x")
+  let q = p.clone()
+  q.set("b", "y")
+  console.log(p, q)
+  const r = new Q()
+  const { n, ...rest } = r
+  console.log({ ...r }, Object.entries(r), n, rest)
+}
+// case: extend_map_chain
+// expect: 100
+// expect: P(2) [Map] { 'a' => 1, 'b' => 2 }
+// expect: 2 S(2) [Map] { 'a' => 1, 'b' => 2, tag: 's' }
+// expect: Lower(2) [Set] { 'a', 'b', seen: 3 } 3
+// 'set' and 'add' give back the object itself, as JavaScript's return 'this', and the constructor
+// adds its entries through an overriding 'set' or 'add'.
+class P extends Map<string, i64> {
+  override get(_k: string): i64 | null { return 100 }
+}
+
+class S extends Map<string, i64> {
+  tag: string = "s"
+}
+
+class Lower extends Set<string> {
+  seen: i64 = 0
+  constructor(xs: string[]) { super(xs) }
+  override add(this: Mut<this>, x: string): Mut<this> {
+    this.seen++
+    super.add(x.toLowerCase())
+    return this
+  }
+}
+
+function main() {
+  let p = new P()
+  console.log(p.set("a", 1).get("a"))
+  console.log(p.set("b", 2))
+  let s = new S()
+  console.log(s.set("a", 1).set("b", 2).size, s)
+  let l = new Lower(["A", "b", "a"])
+  console.log(l, l.seen)
+}
+// case: extend_map_derive_eq
+@derive(Eq)
+class P extends Map<string, i64> {}
+
+function main() {}
+// error: 'derive(Eq)' can't compare a class extending 'Map': a Map isn't compared by value
+// case: extend_map_override_signature
+class P extends Map<string, i64> {
+  override get(k: i64): string { return "no" }
+}
+
+function main() {}
+// error: 'get' overrides 'Map.get', so its parameter 'k' takes 'string' as that one does, not 'i64'
+// case: extend_map_override_result
+class P extends Map<string, i64> {
+  override has(_k: string): i64 { return 1 }
+}
+
+function main() {}
+// error: 'has' overrides 'Map.has', so it gives 'boolean' as that one does, not 'i64'
+// case: extend_map_unknown
+class P extends Map<string, i64> {}
+
+function main() {
+  let p = new P()
+  p.foo()
+}
+// error: 'P' has no method 'foo'
+// case: extend_map_loop_borrow
+class P extends Map<string, i64> {}
+
+function main() {
+  let p = new P()
+  for (const [k, _v] of p) p.set(k, 1)
+}
+// error: cannot change 'p' while a 'for...of' loop is reading 'p'

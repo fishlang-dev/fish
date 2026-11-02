@@ -1341,7 +1341,16 @@ export class Expressions implements Union {
     if (callee.kind === "member" && recv?.kind === "map" && recv.dict && callee.name !== "clone" && !this.dictCalls.has(e)) {
       throw new CompileError("E0502", `a dictionary has no methods, as a plain object has none; its keys are read as properties, like '${this.placeText(callee.object)}[k]'`, callee.start, callee.end);
     }
-    if (callee.kind === "member" && recv?.kind === "map" && callee.name !== "clone") return this.mapCall(e, callee, receiver as MapType);
+    if (callee.kind === "member" && recv?.kind === "map" && callee.name !== "clone") {
+      const result = this.mapCall(e, callee, receiver as MapType);
+      // A class extending Map or Set gets itself back from `set` and `add`, as JavaScript's
+      // `this`: the collection is its first field, so a pointer to one points at the other.
+      const holder = callee.object.kind === "member" && callee.object.name === EMBEDDED ? callee.object.object : undefined;
+      if (!holder || (callee.name !== "set" && callee.name !== "add")) return result;
+      this.borrowsFrom.set(e, [holder]);
+      const held = this.types.get(holder)!;
+      return { type: this.typing.refType(this.isRefType(held) ? this.typing.rec(held).to : held, true), what: result.what };
+    }
     if (callee.kind === "member" && receiver !== undefined && this.typing.yieldsOf(receiver) !== undefined) return this.generatorCall(e, callee, receiver, this.typing.yieldsOf(receiver)!);
     if (callee.kind === "member" && receiver !== undefined && this.typing.yieldsOf(receiver, true) !== undefined && recv?.kind !== "dyn") return this.generatorCall(e, callee, receiver, this.typing.yieldsOf(receiver, true)!, true);
     if (callee.kind === "member" && recv?.kind === "pointer") return this.pointerCall(e, callee, receiver as PointerType);
@@ -3202,7 +3211,9 @@ export class Expressions implements Union {
     if (this.isRefType(held)) this.coercions.set(callee.object, t);
     if (MAP_CHANGES.has(name)) {
       if (this.readCopy(callee.object)) throw new CompileError("E0211", `'${name}' changes its ${kind}, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
-      const lent = this.isRefType(held) && this.typing.rec(held).mutable;
+      // A class extending Map or Set lends its collection where it is lent.
+      const holder = callee.object.kind === "member" && callee.object.name === EMBEDDED ? this.types.get(callee.object.object) : undefined;
+      const lent = (this.isRefType(held) && this.typing.rec(held).mutable) || (holder !== undefined && this.isRefType(holder) && this.typing.rec(holder).mutable);
       if (!this.place(callee.object) && !lent) throw new CompileError("E0212", `'${name}' changes its ${kind}, so call it on a variable or a field`, callee.start, callee.end);
       if (!lent) this.changeable(callee.object, name === "clear" ? "clear" : name === "delete" ? "delete from" : name === "update" ? "update" : "add to");
     }
@@ -4694,8 +4705,10 @@ export class Expressions implements Union {
   }
 
   // Whether `name` on a class reaches the Map or Set it embeds: neither it nor its bases declare it.
+  // Only the collection's own members are: `clone`, `equals` and the like stay the class's.
   private delegated(t: Type | undefined, name: string): boolean {
-    if (!this.embeddedOf(t)) return false;
+    const embedding = this.embeddedOf(t);
+    if (!embedding || !collectionMember(embedding, name)) return false;
     const c = this.ctx.classOf(t as ClassType);
     return !this.typing.field(t as ClassType, name) && !(["methods", "getters", "setters"] as const).some((table) => inherited(this.arenas, c, table, name));
   }
@@ -4703,7 +4716,8 @@ export class Expressions implements Union {
   // Whether `super.name` reaches the embedded Map or Set: no base between declares it.
   private superDelegated(name: string): boolean {
     const self = this.self?.type;
-    if (!self || !this.embeddedOf(self)) return false;
+    const embedding = self && this.embeddedOf(self);
+    if (!embedding || !collectionMember(embedding, name)) return false;
     const base = this.arenas.classOf(this.ctx.classOf(self).base);
     return !base || !(this.typing.field(base.type, name) || (["methods", "getters", "setters"] as const).some((table) => inherited(this.arenas, base, table, name)));
   }
@@ -4905,7 +4919,8 @@ export class Expressions implements Union {
   // TypeScript's access rules: a private member is reachable only from inside its class, and
   // a protected one also from the classes that embed it.
   private visible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string, at: Span) {
-    if (this.accessible(access, declaring, name)) return;
+    // Only delegation reads the embedded collection, from wherever the class is used.
+    if (name === EMBEDDED || this.accessible(access, declaring, name)) return;
     const message = name.startsWith("#")
       ? `property '${shownName(name)}' is not accessible outside class '${this.typing.rec(declaring).name}' because it has a private identifier`
       : `property '${name}' is ${access} and only accessible within class '${this.typing.rec(declaring).name}'${access === "protected" ? " and its subclasses" : ""}`;
@@ -7321,6 +7336,9 @@ const BYTE_METHODS: Record<string, string> = { toBase64: "array to base64", toHe
 const MAP_ARGUMENTS: Record<string, usize> = { set: 2, add: 1, get: 1, has: 1, delete: 1, clear: 0, update: 2, keys: 0, values: 0, entries: 0, forEach: 1 };
 export const MAP_CHANGES = new Set(["set", "add", "delete", "clear", "update"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...CHANGING_METHODS]);
+
+// Whether `name` is a member of the Map or Set a class embeds.
+const collectionMember = (c: ClassInfo, name: string) => name === "size" || (c.embedded === "Set" ? SET_METHODS : MAP_METHODS).has(name);
 
 // A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.
 const shownPath = (path: string) => path.replaceAll(`.${EMBEDDED}`, "");

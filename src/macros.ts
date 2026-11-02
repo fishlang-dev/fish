@@ -134,6 +134,10 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
       if (m.kind === "constructor") return m.params.flatMap((p) => (p.modifiers.length > 0 && p.pattern.kind === "ident" ? [p.pattern.name] : []));
       return [];
     });
+    const base = decl.extends?.kind === "instantiation" ? decl.extends.expr : decl.extends;
+    if (base?.kind === "ident" && (base.name === "Map" || base.name === "Set")) {
+      throw new CompileError("E1104", `'derive(Eq)' can't compare a class extending '${base.name}': a ${base.name} isn't compared by value; write the class's 'equals', comparing its entries`, at.start, at.end);
+    }
     // A base's fields compare through the base's own `equals`.
     const parts = [...(decl.extends ? ["super.equals(other)"] : []), ...fields.map((f) => `this.${f} === other.${f}`)];
     const test = parts.length === 0 ? "true" : parts.join(" && ");
