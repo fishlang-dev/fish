@@ -185,7 +185,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // `fetch` and `serve` are the client and the server, but importing `http` itself needs its shim.
   ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
-  ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("createHash, createHmac and randomBytes from node:crypto")],
+  ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative, normalize, isAbsolute, parse and format")], ["crypto", PLANNED("createHash, createHmac and randomBytes from node:crypto")],
   // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
   // Node's own connect and its sockets with events.
   ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],

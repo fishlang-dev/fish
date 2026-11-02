@@ -14,16 +14,20 @@ const PATHS = ["", ".", "..", "/", "//", "///a//b", "a", "a/", "/a", "/a/", "a/b
 const PAIRS: [string, string][] = [["/a/b/c", "/a/d"], ["/data/orandea/test/aaa", "/data/orandea/impl/bbb"], ["/", "/foo"], ["/foo", "/"], ["/foo/bar", "/foo/bar/baz"], ["/foo/bar/baz", "/foo/bar"], ["a", "b"], ["a/b", "a"], ["", ""], ["/a", "/a"], ["a/b/c", "a/x/y"]];
 const SUFFIXES: [string, string][] = [["/a/b.txt", ".txt"], ["b.txt", "b.txt"], ["/a/b.txt/", ".txt"], ["aaa", "a"], ["file.js", ".ts"], ["x", ""]];
 
+const FORMATS = ["{}", "{ root: \"/\", dir: \"/home\", base: \"f.txt\" }", "{ root: \"/\", base: \"f.txt\" }", "{ root: \"/x/\", name: \"f\", ext: \".t\" }", "{ name: \"f\", ext: \"t\" }", "{ name: \"f\", ext: \".\" }", "{ dir: \"d\", base: \"b\", name: \"n\", ext: \"e\" }", "{ dir: \"/\", base: \"a\" }", "{ dir: \"/\", root: \"/r\" }", "{ root: \"/\", dir: \"/\" }", "{ dir: \"\", root: \"/\", name: \"n\" }"];
+
 const calls: string[] = [
   ...PATHS.flatMap((p) => [`normalize(${JSON.stringify(p)})`, `dirname(${JSON.stringify(p)})`, `basename(${JSON.stringify(p)})`, `extname(${JSON.stringify(p)})`, `join(${JSON.stringify(p)}, "x")`, `resolve("/root", ${JSON.stringify(p)})`]),
   ...PAIRS.flatMap(([a, b]) => [`relative(${JSON.stringify(a)}, ${JSON.stringify(b)})`, `join(${JSON.stringify(a)}, ${JSON.stringify(b)})`, `resolve(${JSON.stringify(a)}, ${JSON.stringify(b)})`]),
   ...SUFFIXES.map(([p, s]) => `basename(${JSON.stringify(p)}, ${JSON.stringify(s)})`),
+  ...PATHS.flatMap((p) => [`isAbsolute(${JSON.stringify(p)})`, `[parse(${JSON.stringify(p)}).root, parse(${JSON.stringify(p)}).dir, parse(${JSON.stringify(p)}).base, parse(${JSON.stringify(p)}).ext, parse(${JSON.stringify(p)}).name]`, `format(parse(${JSON.stringify(p)}))`]),
+  ...FORMATS.map((f) => `format(${f})`),
   `join()`, `join("", "")`, `join("a", "", "b")`, `resolve("/x", "y", "/z", "w")`,
 ];
 
 test("path gives what node's path.posix gives", () => {
   const program = join(tmp, "main.fsh");
-  writeFileSync(program, `import { join, normalize, dirname, basename, extname, resolve, relative, sep, delimiter } from "node:path";
+  writeFileSync(program, `import { join, normalize, dirname, basename, extname, resolve, relative, isAbsolute, parse, format, sep, delimiter } from "node:path";
 function main() {
 ${calls.map((c) => `  console.log(JSON.stringify(${c}));`).join("\n")}
   console.log(sep, delimiter);
@@ -33,7 +37,7 @@ ${calls.map((c) => `  console.log(JSON.stringify(${c}));`).join("\n")}
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const fish = Bun.spawnSync([out]).stdout.toString();
-  const script = `const { join, normalize, dirname, basename, extname, resolve, relative, sep, delimiter } = require("node:path").posix;\n${calls.map((c) => `console.log(JSON.stringify(${c}));`).join("\n")}\nconsole.log(sep, delimiter);`;
+  const script = `const { join, normalize, dirname, basename, extname, resolve, relative, isAbsolute, parse, format, sep, delimiter } = require("node:path").posix;\n${calls.map((c) => `console.log(JSON.stringify(${c}));`).join("\n")}\nconsole.log(sep, delimiter);`;
   const node = Bun.spawnSync(["node", "-e", script]).stdout.toString();
   expect(fish).toBe(node);
 });

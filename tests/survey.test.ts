@@ -89,7 +89,8 @@ test("forms that look alike are told apart", () => {
   expect(counts("export * as system from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
   expect(counts("import { connect } from \"node:tls\";\nimport * as tls from \"tls\";\nexport const s = tls.connect(443, \"x\");\nimport https from \"node:https\";\n")).toEqual({ nodeBuiltins: 3 });
   expect([featureOf("nodeBuiltins", "tls"), featureOf("nodeBuiltins", "https")]).toEqual(["node:tls", "node:http server shim"]);
-  expect(counts("import path from \"path\";\nimport { sep } from \"path\";\nexport function f(x: string) {\n  return path.join(x, sep) + path.parse(x).base;\n}\n")).toEqual({ nodeBuiltins: 1 });
+  expect(counts("import path from \"path\";\nimport { sep } from \"path\";\nexport function f(x: string) {\n  return path.join(x, sep) + path.toNamespacedPath(x);\n}\n")).toEqual({ nodeBuiltins: 1 });
+  expect(counts("import path from \"node:path\";\nexport const b = path.isAbsolute(x) ? path.format(path.parse(x)) : x;\n")).toEqual({});
   expect(counts("function f() {\n  console.error(1);\n  console.warn(2);\n  console.info(3);\n  const t = Date.now() + performance.now();\n}\n")).toEqual({ console: 1 });
   expect(counts("function f() {\n  const a = process.argv[2];\n  const h = process.env.HOME;\n  process.exit(1);\n}\n")).toEqual({});
   expect(counts("function f() {\n  process.env.X = \"y\";\n  delete process.env.Y;\n  const p = process.pid;\n}\n")).toEqual({ process: 3, R3: 1 });
