@@ -819,10 +819,12 @@ class Interpreter {
     if (e.op === "await") this.refuse("'await'", e);
     const held = this.expr(f, e.operand);
     const v = unwrap(held);
-    // A negative literal in a literal type, as `as const` gives it, negates in its base type.
+    // A negative literal typed as a literal, or a union of them as `as const` gives it, negates
+    // in their base type.
     const given = this.typeOf(f, e);
-    const literal = typeof given === "string" ? undefined : this.typing.rec(given);
-    const type = literal?.kind === "literal" ? this.typing.baseOf(given as LiteralType) : given;
+    const r = typeof given === "string" ? undefined : this.typing.rec(given);
+    const literals = r?.kind === "literal" ? [given] : r?.kind === "union" && r.members.every((m) => this.typing.recOf(m)?.kind === "literal") ? r.members : [];
+    const type = literals.length > 0 ? this.typing.baseOf(literals[0] as LiteralType) : given;
     if (e.op === "!") return !v;
     if (e.op === "typeof") {
       const from = this.typeOf(f, e.operand);

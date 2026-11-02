@@ -252,6 +252,6 @@ test("x as const", () => {
   const src = "function main() {\n  const x = 1;\n  const y = x as const;\n}";
   const start = src.indexOf("x as");
   expect(() => checkSource(src)).toThrow(expect.objectContaining({
-    message: "a 'const' assertion can only be applied to a string, number, boolean, array or object literal", start, end: start + 1,
+    message: "a 'const' assertion can only be applied to an enum member, or a string, number, boolean, array or object literal", start, end: start + 1,
   }));
 });

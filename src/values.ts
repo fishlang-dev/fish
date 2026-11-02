@@ -2277,13 +2277,12 @@ export class Expressions implements Union {
     return { type: "void", what };
   }
 
-  // `[a, b]` written where a tuple is expected: each element checked against its own type, then
-  // the literal becomes the object of fields `0`, `1` and on that the tuple is laid out as.
   // `x as const`: a literal checked as its literal type, deeply, as TypeScript gives it.
   private constAssertion(this: Mut<this>, x: Expr): Type {
     x = this.rewrites.current(x);
-    const literal = ["string", "template", "int", "bool", "array", "object"].includes(x.kind) || (x.kind === "unary" && x.op === "-" && x.operand.kind === "int");
-    if (!literal) throw new CompileError("E0111", "a 'const' assertion can only be applied to a string, number, boolean, array or object literal", x.start, x.end);
+    const enumMember = x.kind === "member" && x.object.kind === "ident" && !this.ctx.lookup(x.object.name) && this.enums.has(x.object.name);
+    const literal = ["string", "template", "int", "float", "bool", "array", "object"].includes(x.kind) || (x.kind === "unary" && x.op === "-" && (x.operand.kind === "int" || x.operand.kind === "float")) || enumMember;
+    if (!literal) throw new CompileError("E0111", "a 'const' assertion can only be applied to an enum member, or a string, number, boolean, array or object literal", x.start, x.end);
     const t = this.constType(x);
     this.expect(x, t);
     this.coerce(x, this.value(x), t, `type '${this.typing.show(this.types.get(x) ?? t)}' is not assignable to type '${this.typing.show(t)}'`);
@@ -2300,7 +2299,8 @@ export class Expressions implements Union {
     if (x.kind === "int" && x.value <= I64_MAX) return this.typing.literalType(x.value);
     if (x.kind === "unary" && x.op === "-" && x.operand.kind === "int" && x.operand.value <= I64_MAX) return this.typing.literalType(-x.operand.value);
     if (x.kind === "bool") return this.typing.literalType(x.value);
-    if (x.kind === "array" && x.elements.length > 0 && x.elements.every((y) => y !== undefined && y.kind !== "spread")) {
+    if (x.kind === "array" && x.elements.length === 0) return this.typing.tupleType([]);
+    if (x.kind === "array" && x.elements.every((y) => y !== undefined && y.kind !== "spread")) {
       const parts = (x.elements as Expr[]).map((y) => this.constType(y));
       return parts.every((p) => this.constWide(p) === this.constWide(parts[0]!)) ? this.typing.arrayType(this.constJoin(parts)) : this.typing.tupleType(parts);
     }
@@ -2320,15 +2320,17 @@ export class Expressions implements Union {
     return t;
   }
 
-  // One type holding each of parts, which widen alike: the union of their literals, or tuples and
-  // objects joined element by element.
+  // One type holding each of parts, which widen alike: the union of their literals or objects, as
+  // TypeScript gives, so an object's fields stay linked; tuples are joined position by position,
+  // since a union of tuples can't be destructured.
   private constJoin(this: Mut<this>, parts: Type[]): Type {
     const r = this.recOf(parts[0]!);
     if (r?.kind === "object" && r.tuple) return this.typing.tupleType(this.typing.elementsOf(parts[0] as ObjectType).map((_, i) => this.constJoin(parts.map((p) => this.typing.elementsOf(p as ObjectType)[i]!))));
-    if (r?.kind === "object") return this.typing.objectType(r.fields.map((f) => ({ ...f, type: this.constJoin(parts.map((p) => this.typing.field(p as ObjectType, f.name)!.type)) })));
     return this.typing.unionType(parts);
   }
 
+  // `[a, b]` written where a tuple is expected: each element checked against its own type, then
+  // the literal becomes the object of fields `0`, `1` and on that the tuple is laid out as.
   private tupleLiteral(this: Mut<this>, e: Expr, tuple: ObjectType): Type {
     const elements = this.typing.elementsOf(tuple);
     // Once a literal became an object, its rest elements are its field `...`, checked again.
@@ -5270,6 +5272,16 @@ export class Expressions implements Union {
         }
         if (isRef(then) || isRef(otherwise)) [then, otherwise] = [this.loaded(e.then, then), this.loaded(e.else, otherwise)];
         if (then === otherwise) return then;
+        // A tuple of literals, as `as const` writes one, beside a tuple it fits is that tuple, since a
+        // union of tuples can't be destructured.
+        if (this.typing.isTuple(then) && this.typing.isTuple(otherwise)) {
+          const wider = this.typing.fits(otherwise, then) ? then : this.typing.fits(then, otherwise) ? otherwise : undefined;
+          if (wider !== undefined) {
+            this.coerce(e.then, then, wider, "");
+            this.coerce(e.else, otherwise, wider, "");
+            return wider;
+          }
+        }
         return bothSides(this.typing, e, then, otherwise, (v, from, to, message) => this.coerce(v, from, to, message));
       }
       case "binary":

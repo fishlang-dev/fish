@@ -133,7 +133,12 @@ export class TypeFunctions {
       if (isNumeric(k)) return this.typing.unionType([...this.typing.elementsOf(t as ObjectType), ...(r.rest === undefined ? [] : [r.rest])]);
       const kr = this.recOf(k);
       const positions = (kr?.kind === "union" ? kr.members : [k]).map((m) => this.recOf(m));
-      if (positions.every((m) => m?.kind === "literal" && typeof m.value === "bigint")) return this.typing.unionType(this.fieldTypes(t, positions.map((m) => String((m as { value: bigint }).value)), at, keyAt));
+      if (positions.every((m) => m?.kind === "literal" && typeof m.value === "bigint")) {
+        const elements = this.typing.elementsOf(t as ObjectType);
+        // A position past the fixed elements of a tuple with a rest element is the rest's type.
+        const past = (m: { value: bigint }) => r.rest !== undefined && m.value >= BigInt(elements.length);
+        return this.typing.unionType(positions.flatMap((m) => (past(m as { value: bigint }) ? [r.rest!] : this.fieldTypes(t, [String((m as { value: bigint }).value)], at, keyAt))));
+      }
     }
     const names = this.keysOf(k, "an indexed access type", keyAt);
     // As in TypeScript, a union gives the union of each member's field, which every member must have.
