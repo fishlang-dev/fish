@@ -688,8 +688,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       // test the place.
       case "match": {
         expr(e.subject);
-        let subject = e.subject;
-        while (subject.kind === "nonNull") subject = subject.expr;
+        const subject = through(e.subject);
         const place = key(subject);
         let entry = join(state, null);
         let after: State = null;
@@ -857,6 +856,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places an expression lends a reference to, and how: a place borrowed, a reference
   // passed on, which lends what it points to again, or either side of a `?:`.
   function lent(e: Expr): [string, Expr, boolean][] {
+    const lentAs = coercionOf(e);
     e = unwrapped(e);
     if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
     if (choosing(e)) return [...lent(e.left), ...lent(e.right)];
@@ -874,11 +874,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // future lends it mutably when it holds a mutable reference.
     const from = borrowsFrom.get(e);
     if (from) {
-      const result = coercions.get(e) ?? types.get(e)!;
+      const result = lentAs ?? types.get(e)!;
       return from.flatMap((s) => source(s, isRef(result) ? typing.rec(result).mutable : typing.holdsMut(result)));
     }
     const type = types.get(e)!;
-    const to = coercions.get(e) ?? type;
+    const to = lentAs ?? type;
     const place = key(e);
     // A shared reference passed on is just another pointer, which needs nothing lent; a
     // mutable one lends itself, shared or mutably as it is passed on.
@@ -1020,23 +1020,26 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // the reference it copies, or the reference it borrows through, holds.
   function hold(holder: Local, e: Expr) {
     if (!state) return;
+    const outer = e;
+    const heldAs = coercionOf(e);
     e = unwrapped(e);
     if (e.kind === "conditional" || choosing(e)) {
       hold(holder, e.kind === "conditional" ? e.then : e.left);
       hold(holder, e.kind === "conditional" ? e.else : e.right);
       return;
     }
-    if (lentTemporary(e)) throw outlived(e, `'${holder.name}'`);
+    if (lentTemporary(outer)) throw outlived(e, `'${holder.name}'`);
     // A call's returned reference holds what its sources do: a receiver where it lives.
     const from = borrowsFrom.get(e);
     if (from) {
-      const result = coercions.get(e) ?? types.get(e)!;
+      const result = heldAs ?? types.get(e)!;
       // A future holding a mutable reference, or a Dyn's async method declaring `Mut<this>`,
       // lends what it borrows mutably until it is done.
       const mutable = isRef(result) ? typing.rec(result).mutable : typing.holdsMut(result) || dynCalls.get(e)?.mutable === true;
       for (const s of from) {
         if (lentTemporary(s)) throw outlived(s, `'${holder.name}'`);
-        if (typing.holdsRef(coercions.get(s) ?? types.get(s)!) && (isRef(coercions.get(s) ?? types.get(s)!) || key(s) === undefined)) hold(holder, s);
+        const t = coercionOf(s) ?? types.get(s)!;
+        if (typing.holdsRef(t) && (isRef(t) || key(s) === undefined)) hold(holder, s);
         else if (key(s) !== undefined) {
           lend(key(s)!, mutable, s, holder);
           inherit(holder, s);
@@ -1046,7 +1049,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       return;
     }
     const type = types.get(e)!;
-    const to = coercions.get(e) ?? type;
+    const to = heldAs ?? type;
     // A closure holds what it captures.
     if (e.kind === "arrow" || instance.envs?.has(e)) {
       captured(e).forEach(([place, use, from, mutable, held], i) => {
@@ -1074,7 +1077,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           }
         }
       } else {
-        lent(e).forEach(([lentPlace, part, mutable], i) => lend(lentPlace, mutable, part, holder, undefined, undefined, part.start, partKey(part, i)));
+        lent(outer).forEach(([lentPlace, part, mutable], i) => lend(lentPlace, mutable, part, holder, undefined, undefined, part.start, partKey(part, i)));
         inherit(holder, e);
       }
       return;
@@ -1082,7 +1085,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A place borrowed, or a reference copied, is lent to the holder: a mutable reference
     // copied lends itself mutably, so only one of them is used at a time. A copy keeps its
     // source borrowed too, so it can't be told apart from the original while held.
-    lent(e).forEach(([lentPlace, part, mutable], i) => lend(lentPlace, mutable, part, holder, undefined, undefined, part.start, partKey(part, i)));
+    lent(outer).forEach(([lentPlace, part, mutable], i) => lend(lentPlace, mutable, part, holder, undefined, undefined, part.start, partKey(part, i)));
     inherit(holder, e);
     if (!inPlace(e, to)) temporary(holder, e);
   }
@@ -1103,9 +1106,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // `x!` is lent where `x` holds it. A string literal lives for the whole program, so only a
   // body that can stop, losing the slot its pointer is kept in, can't hold one.
   function lentTemporary(s: Expr, across = false): boolean {
-    const lent = coercions.get(s);
-    let at = s;
-    while (at.kind === "nonNull") at = at.expr;
+    const lent = coercionOf(s);
+    const at = through(s);
     if (s.kind === "string" && !across && !f.generator && !f.async) return false;
     // A JsValue read out of JS is made for the statement, though it names a variable.
     return lent !== undefined && isRef(lent) && !isRef(types.get(s)!) && (key(at) === undefined || instance.copiesOut.has(at));
@@ -1200,6 +1202,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The places a reference value points into: places it borrows where they live, what the
   // reference variables it reads through hold, what calls' results borrow, or a temporary.
   function pointsInto(e: Expr): string[] {
+    const pointsAs = coercionOf(e);
     e = unwrapped(e);
     if (e.kind === "conditional") return [...pointsInto(e.then), ...pointsInto(e.else)];
     if (choosing(e)) return [...pointsInto(e.left), ...pointsInto(e.right)];
@@ -1208,13 +1211,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const from = borrowsFrom.get(e);
     if (from) {
       return from.flatMap((s) => {
-        const t = coercions.get(s) ?? types.get(s)!;
+        const t = coercionOf(s) ?? types.get(s)!;
         if (isRef(t) || (typing.holdsRef(t) && key(s) === undefined)) return pointsInto(s);
         return key(s) !== undefined && !throughUnion(s) ? within(s) : [TEMPORARY];
       });
     }
     const type = types.get(e)!;
-    const to = coercions.get(e) ?? type;
+    const to = pointsAs ?? type;
     if (!isRef(to)) {
       // A value holding references points wherever its parts, or the value it copies, do.
       if (!typing.holdsRef(to)) return [];
@@ -1357,8 +1360,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // The place an expression names: a variable or `this`, then fields, but not through a getter.
   function key(e: Named): string | undefined {
-    // `x!` is what `x` holds, so it is borrowed and changed as `x` is.
-    if (e.kind === "nonNull") return key(e.expr);
+    // `x!` is what `x` holds, so it is borrowed and changed as `x` is, as is `x as T`.
+    if (projection(e)) return key(e.expr);
     if (e.kind === "shorthand" || e.kind === "ident") {
       const local = localAt(e);
       return local && String(local.id);
@@ -1450,7 +1453,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   function rootOf(e: Named): Named {
-    if ((e.kind === "nonNull" && (typing.optionRef(types.get(e.expr)) || redundantBang(e))) || transparent(e)) return rootOf((e as { expr: Expr }).expr);
+    if (projection(e)) return rootOf(e.expr);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
@@ -1473,12 +1476,32 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`, as are
   // `as`, `satisfies` and `unsafe { }`, which hand on their operand.
+  // The coercion a value meets, which the checker records on the outermost of its wrappers, so
+  // it is read before `unwrapped` takes them off.
+  function coercionOf(e: Expr): Type | undefined {
+    for (; ; e = (e as { expr: Expr }).expr) {
+      const c = coercions.get(e);
+      if (c !== undefined || unwrapped(e) === e) return c;
+    }
+  }
+
   function unwrapped(e: Expr): Expr {
     return (e.kind === "nonNull" && typing.optionRef(types.get(e.expr))) || transparent(e) ? unwrapped((e as { expr: Expr }).expr) : e;
   }
 
-  function transparent(e: Named): boolean {
+  function transparent(e: Named): e is Extract<Expr, { kind: "as" | "satisfies" | "unsafe" }> {
     return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe";
+  }
+
+  // Forms that read the place their operand names: `x!`, whatever the Option holds, and the
+  // transparent ones. `unwrapped` follows fewer, since it reads a value's own type and coercion.
+  function projection(e: Named): e is Extract<Expr, { kind: "nonNull" | "as" | "satisfies" | "unsafe" }> {
+    return e.kind === "nonNull" || transparent(e);
+  }
+
+  function through(e: Expr): Expr {
+    while (projection(e)) e = e.expr;
+    return e;
   }
 
   // The indexes into arrays along a place's path, outermost first.

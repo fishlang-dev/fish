@@ -990,3 +990,124 @@ function main() {
   b.items.push("e" + "f");
   console.log(b.items.length);
 }
+// case: borrow_loop_replaces_origin_through_bang
+// error: borrow_loop_replaces_origin_through_bang.fsh:6:33: error[E0203]: cannot change 'h' while a 'for...of' loop borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function main() {
+  let h = new H(); const y: Ref<H> = h;
+  for (const x of y.o!.items) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_replaces_returned_origin_through_bang
+// error: borrow_loop_replaces_returned_origin_through_bang.fsh:7:33: error[E0203]: cannot change 'h' while a 'for...of' loop borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let h = new H(); const y = pickH(h);
+  for (const x of y.o!.items) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_replaces_chosen_origin_through_bang
+// error: borrow_loop_replaces_chosen_origin_through_bang.fsh:7:33: error[E0203]: cannot change 'h' while a 'for...of' loop borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let h = new H(); let g = new H(); const y = true ? pickH(h) : pickH(g);
+  for (const x of y.o!.items) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_reads_origin_through_bang
+// expect: ab 2
+// expect: cd 2
+// expect: ab
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let h = new H(); const y = pickH(h);
+  for (const x of y.o!.items) console.log(x, h.o!.items.length);
+  h = new H();
+  console.log(h.o!.items[0]!);
+}
+// case: borrow_loop_replaces_origin_through_satisfies
+// error: borrow_loop_replaces_origin_through_satisfies.fsh:6:53: error[E0203]: cannot change 'h' while a 'for...of' loop is reading 'h.b.items'
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function main() {
+  let h = new H();
+  for (const x of (h.b.items satisfies string[])) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_replaces_reference_origin_through_as
+// error: borrow_loop_replaces_reference_origin_through_as.fsh:6:46: error[E0203]: cannot change 'h' while a 'for...of' loop borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function main() {
+  let h = new H(); const y: Ref<H> = h;
+  for (const x of (y.b.items as string[])) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_replaces_origin_through_bang_satisfies
+// error: borrow_loop_replaces_origin_through_bang_satisfies.fsh:6:54: error[E0203]: cannot change 'h' while a 'for...of' loop is reading 'h.o.items'
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function main() {
+  let h = new H();
+  for (const x of (h.o!.items satisfies string[])) { h = new H(); console.log(x); }
+}
+// case: borrow_loop_reads_origin_through_satisfies
+// expect: ab 2
+// expect: cd 2
+// expect: ab
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function main() {
+  let h = new H();
+  for (const x of (h.b.items satisfies string[])) console.log(x, h.b.items.length);
+  h = new H();
+  console.log(h.b.items[0]!);
+}
+// case: borrow_reference_through_as_held
+// error: borrow_reference_through_as_held.fsh:6:3: error[E0203]: cannot change 'h' while 'r' borrows 'h.b.items' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function main() {
+  let h = new H(); const r: Ref<string[]> = (h.b.items as string[]);
+  h = new H();
+  console.log(r[0]!);
+}
+// case: borrow_reference_through_bang_as_held
+// error: borrow_reference_through_bang_as_held.fsh:6:3: error[E0203]: cannot change 'h' while 'r' borrows 'h.o' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function main() {
+  let h = new H(); const r: Ref<Box> = h.o! as Box;
+  h = new H();
+  console.log(r.items[0]!);
+}
+// case: borrow_argument_through_as_lent_for_call
+// error: borrow_argument_through_as_lent_for_call.fsh:7:39: error[E0203]: cannot mutably lend 'h' while 'h.b.items' is lent to 'each' for this call
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function each(xs: Ref<string[]>, f: () => void) { f(); console.log(xs[0]!); }
+function main() {
+  let h = new H();
+  each(h.b.items as string[], () => { h = new H(); });
+}
+// case: borrow_returned_reference_through_as_argument
+// error: borrow_returned_reference_through_as_argument.fsh:7:3: error[E0203]: cannot change 'h' while 'r' borrows 'h.b.items' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function pick(xs: Ref<string[]>): Ref<string[]> { return xs; }
+function main() {
+  let h = new H(); const r = pick(h.b.items as string[]);
+  h = new H();
+  console.log(r[0]!);
+}
+// case: borrow_return_local_through_as
+// error: borrow_return_local_through_as.fsh:6:11: error[E0209]: can't return a reference to 'local.b', which belongs to this function and is gone once it returns
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { b: Box = new Box(); }
+function first(h: Ref<H>): Ref<Box> {
+  const local = new H();
+  return (local.b as Box);
+}
+function main() { const h = new H(); console.log(first(h).items[0]!); }
