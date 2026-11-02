@@ -91,9 +91,9 @@ function main() {
 }
 // case: computed_keys_symbol_iterator
 // error: '[Symbol.iterator]' members are not supported yet
-// `Symbol.iterator` names no field; iterating a class through it is a feature of its own.
+// `Symbol.iterator` names no field; only a method takes it as its key.
 class Bag {
-  *[Symbol.iterator](): Generator<i64> { yield 1; }
+  [Symbol.iterator]: i64 = 1;
 }
 function main() {
   console.log(new Bag());

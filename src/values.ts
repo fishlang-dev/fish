@@ -16,7 +16,7 @@ import { TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type Fut
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
-import { knownKey, unknownKey } from "./keys.ts";
+import { ITERATOR, isIteratorKey, knownKey, unknownKey } from "./keys.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
@@ -1167,6 +1167,9 @@ export class Expressions implements Union {
   }
 
   private callee(this: Mut<this>, e: Call): { type: Type; what: string } {
+    // `c[Symbol.iterator]()` calls the method that key names.
+    const key = this.rewrites.current(e.callee);
+    if (key.kind === "index" && isIteratorKey(key.index)) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.replace(key, { id: 0, kind: "member", object: key.object, name: ITERATOR, optional: key.optional, start: key.start, end: key.end }) });
     // `t[0](x)` calls a tuple's element, as a field holding a callable is called.
     this.untuple(e.callee);
     if (this.rewrites.current(e.callee) !== e.callee) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.current(e.callee) });
