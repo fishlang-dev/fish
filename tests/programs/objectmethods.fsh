@@ -93,3 +93,36 @@ function main(): void {}
 // error: duplicate member 'a'
 function f(x: { a: i64; a(): i64 }): void {}
 function main(): void {}
+// case: objectmethods_same_shape
+// expect: 4
+// expect: 1
+class B { constructor(public v: i64) {} get(): i64 { return this.v; } }
+function use(d: Dyn<{ get(): i64 }>): i64 { return d.get(); }
+function main(): void {
+  const d: Dyn<{ get(): i64 }> = new B(4);
+  console.log(use(d));
+  const xs: Dyn<{ get(): i64 }>[] = [new B(1)];
+  const ys: Dyn<{ get(): i64 }>[] = xs;
+  console.log(ys.length);
+}
+// case: objectmethods_same_shape_generic
+// expect: 6
+class B { get(): i64 { return 6; } }
+function f<T>(d: Dyn<{ get(): T }>): T { return d.get(); }
+function main(): void {
+  const d: Dyn<{ get(): i64 }> = new B();
+  console.log(f<i64>(d));
+}
+// case: objectmethods_same_shape_option
+// expect: 9
+class B { constructor(public v: i64) {} get(): i64 { return this.v; } }
+function mk(): Dyn<{ get(): i64 }> { return new B(9); }
+function main(): void {
+  const o: Option<Dyn<{ get(): i64 }>> = mk();
+  if (o !== null) console.log(o.get());
+}
+// case: objectmethods_keyof
+// error: 'keyof' takes an object type or a class, not the interface 'Shape', whose methods aren't values in Fish; any type with a method is an interface, so move its fields into a 'type' with no methods and use that
+type Shape = { name: string; area(): f64 };
+type K = keyof Shape;
+function main(): void { const k: K = "name"; console.log(k); }

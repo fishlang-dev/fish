@@ -103,6 +103,8 @@ export class ResolverState {
   combined = new Map<string, InterfaceType>();
   // Each object type with a method written in place, as the interface it stands for.
   inline = new Map<string, Interface>();
+  // The interface standing for each shape of inline object type with a method.
+  shapes = new Map<string, InterfaceType>();
   // The type parameters in scope, bound to what they stand for in the body being checked.
   scope = new Map<string, Type>();
   // Above zero while a generic alias is checked with placeholders, before any use.
@@ -182,7 +184,8 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // The instance of a generic interface for other type arguments.
   interfaceInstance(this: Mut<this>, t: InterfaceType, args: Type[]) {
     const name = this.typing.rec(t).generic!.name;
-    return this.interfaceOf(this.interfaces.get(name) ?? this.host.resolverState.inline.get(name)!, args);
+    const named = this.interfaces.get(name);
+    return named ? this.interfaceOf(named, args) : this.sameShape(this.interfaceOf(this.host.resolverState.inline.get(name)!, args));
   }
   // A recursive alias's type made again with other type arguments.
   remakeRecursive(this: Mut<this>, t: RecursiveType, args: Type[]): RecursiveType {
@@ -717,8 +720,18 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const typeParams = scope.map(([k]) => ({ id: nextId(this.ids), name: k, constraint: undefined, default: undefined, modifiers: [], start: t.start, end: t.end }));
       this.host.resolverState.inline.set(name, i = { id: nextId(this.ids), kind: "interface", name, typeParams, extends: [], members: t.members, start: t.start, end: t.end });
     }
-    const made = this.interfaceOf(i, scope.map(([, v]) => v), t);
+    return this.sameShape(this.interfaceOf(i, scope.map(([, v]) => v), t));
+  }
+
+  // Inline object types with the same members are one type wherever they are written, as in
+  // TypeScript, so the first interface made with a shape stands for every other.
+  private sameShape(this: Mut<this>, made: InterfaceType): InterfaceType {
     const r = this.typing.rec(made);
+    const key = (t: Type) => this.typing.shapeKey(t);
+    const shape = [...r.fields.map((f) => `${f.name}${f.optional ? "?" : ""}:${key(f.type)}${f.readonly ? " readonly" : ""}`), ...r.methods.map((m) => `${m.name}(${m.params.map((p) => key(p)).join(",")}):${key(m.returns)}${m.mutable ? " mut" : ""}${m.owned ? " owned" : ""}`)].join(";");
+    const found = this.host.resolverState.shapes.get(shape);
+    if (found) return found;
+    this.host.resolverState.shapes.set(shape, made);
     const parts = [...r.fields.map((f) => `${f.name}${f.optional ? "?" : ""}: ${this.typing.show(f.type)}`), ...r.methods.map((m) => `${m.name}(${m.params.map((p) => this.typing.show(p)).join(", ")}): ${this.typing.show(m.returns)}`)];
     r.name = `{ ${parts.join("; ")} }`;
     return made;
