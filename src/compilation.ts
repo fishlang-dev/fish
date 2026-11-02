@@ -7,7 +7,7 @@ import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, 
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
 import type { RustTables } from "./rust.ts";
-import type { Locking, Unit } from "./program.ts";
+import type { Locking } from "./program.ts";
 import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
@@ -43,29 +43,22 @@ export type Compilation = {
 export type Counts = { enums: usize; lifts: usize; destructures: usize; expansions: usize; constants: usize };
 
 // What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
-// the caches that spare later compilations the work earlier ones did.
+// the caches that spare later compilations the work earlier ones did. The caches only building
+// objects reads are on `mathlib.ts`'s `BuildSession`, out of the checker's reach.
 // `locking`: whether the lockfile may be rewritten, and which dependencies `fishc update` moves.
 // `engineHook`: whether programs may import `fish:engine`, which only the compiler's own tests do.
-// `clang`: `clang --version`, which names the target as well as the compiler.
-// `digests`: each source a cached object depends on, hashed, by path, size and modification time.
-// `compiling`: the objects being compiled without blocking, so each is compiled once.
-// `mathUnits`: the Math runtime's objects to compile.
 // `std`: what gives std's statements, each call a fresh copy, without which each compilation parses
 // std's source; and how many times std was parsed rather than loaded.
 // `timings`: each build stage's time, kept only when `--timings` asks.
 export type Session = {
   locking: Locking;
   engineHook: boolean;
-  clang?: string;
-  digests: Map<string, string>;
-  compiling: Map<string, Promise<string>>;
-  mathUnits?: Unit[];
   std: { load?: () => Stmt[]; parses: usize };
   timings?: Timings;
 };
 
 export function newSession(): Session {
-  return { locking: { locked: false }, engineHook: false, digests: new Map(), compiling: new Map(), std: { parses: 0 } };
+  return { locking: { locked: false }, engineHook: false, std: { parses: 0 } };
 }
 
 export function newCompilation(session: Session): Compilation {

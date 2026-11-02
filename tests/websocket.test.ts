@@ -4,6 +4,7 @@ import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { newSession } from "../src/compilation.ts";
+import { buildSession } from "../src/mathlib.ts";
 import { buildAsync } from "../src/main.ts";
 
 // A Fish WebSocket server driven by Bun's WebSocket client, and by a raw socket for the frames
@@ -11,7 +12,7 @@ import { buildAsync } from "../src/main.ts";
 setDefaultTimeout(60_000);
 
 const tmp = mkdtempSync(join(tmpdir(), "fish-websocket-"));
-const session = newSession();
+const session = buildSession(newSession());
 const fixtures = join(import.meta.dir, "fixtures", "tls");
 
 const SERVER = `import { readFileSync } from "node:fs";

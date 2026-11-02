@@ -2,7 +2,7 @@ import type { Compilation } from "./compilation.ts";
 import type { Span } from "./parser.ts";
 
 // What the checker shares with the loader and the build without importing either: where each of
-// a program's files sits in the program's offsets, and the session's lockfile and object types.
+// a program's files sits in the program's offsets, and the session's lockfile option.
 
 // Each file after the entry starts at its own multiple of this, room for a 16 MiB file.
 export const FILE_SPAN = 2 ** 24;
@@ -29,7 +29,3 @@ export function textAt(files: Compilation["files"], at: Span): string {
 // Whether a build may change `fish.lock`, as `fishc build --locked` says it may not, for CI;
 // and which registry packages `fishc update` moves past their locked versions, "all" for every one.
 export type Locking = { locked: boolean; update?: Set<string> | "all" };
-
-// One object clang compiles and the cache keeps: `args` are its flags and input, `stdin` its source
-// when the input is `-`, and `inputs` the other files its text depends on, such as headers.
-export type Unit = { name: string; args: string[]; stdin?: string; inputs: string[] };

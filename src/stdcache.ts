@@ -2,8 +2,8 @@ import { deserialize, serialize } from "bun:jsc";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { newSession, type Session } from "./compilation.ts";
-import { cacheDir, partial } from "./mathlib.ts";
+import { newSession } from "./compilation.ts";
+import { buildSession, cacheDir, partial, type BuildSession } from "./mathlib.ts";
 import { renumber } from "./nodes.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_SOURCE } from "./std.ts";
@@ -27,8 +27,8 @@ export function stdKey(source: string, dir: string): string | null {
 // A session that loads std's parsed tree, serialized: kept in memory, else read from the cache,
 // else parsed and written there, the session counting the parse. A cache that can't be read or
 // written only costs the parse, and without a key the cache isn't touched at all.
-export function cachedSession(): Session {
-  const session = newSession();
+export function cachedSession(): BuildSession {
+  const session = buildSession(newSession());
   let key: string | null | undefined;
   let tree: { path: string | null; bytes: Uint8Array } | undefined;
   const bytes = (): Uint8Array => {

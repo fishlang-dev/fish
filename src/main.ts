@@ -20,9 +20,8 @@ import { parse, parseWithComments, type Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE, TLS_NATIVE, tlsStub } from "./native.ts";
-import { cachedObject, cachedObjectAsync, files, MATH_RUNTIME, mathObjects, mathObjectsAsync } from "./mathlib.ts";
+import { cachedObject, cachedObjectAsync, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, type BuildSession, type Unit } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
-import type { Unit } from "./program.ts";
 import { dockerfile, dockerfilePath, findOpenSsl, HOST_TARGET, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
@@ -154,7 +153,7 @@ export const RUNTIME_NAMES = new Set([
 
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
-export function buildLibrary(session: Session, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, debug = false): CompileError[] {
+export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, debug = false): CompileError[] {
   const src = readFileSync(file, "utf8");
   const compilation = newCompilation(session);
   const loaded = load(compilation, file, src);
@@ -236,7 +235,7 @@ function cType(typing: Typing, t: Type): string {
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
 // program reports at exit what it never freed, by where it was allocated. `loaded` is given the
 // files the program was read from, or looked for, even when it doesn't build. Gives the warnings.
-export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
+export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
   const made = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
   const { checked, shim, warnings } = made;
   const ir = instrumented(made.ir, target);
@@ -263,7 +262,7 @@ function parts(ir: string, checked: Checked, release: boolean, target: Target = 
 }
 
 // Builds the IR `ir`, of the checked program, into the executable `out`.
-function linked(session: Session, ir: string, checked: Checked, out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false, debug = false) {
+function linked(session: BuildSession, ir: string, checked: Checked, out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false, debug = false) {
   const { timings } = session;
   const { std, program } = parts(ir, checked, release, target);
   const objects = timed(timings, "runtime", () => [...[...runtimeUnits(ir, release, false, target, leaks), ...std].map((u) => cachedObject(session, u)), ...mathObjects(session, target.compile)]);
@@ -293,7 +292,7 @@ function linked(session: Session, ir: string, checked: Checked, out: string, rel
 }
 
 // `build`, with clang run without blocking, so several builds can go at once.
-export async function buildAsync(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
+export async function buildAsync(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
   const { ir, checked, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false);
   const { std, program } = parts(ir, checked, release);
   const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map((u) => cachedObjectAsync(session, u)), mathObjectsAsync(session)])).flat();
@@ -306,7 +305,7 @@ export async function buildAsync(session: Session, file: string, out: string, re
 // Builds the tests of the package at `dir` into one program at `out`, unless it has none, and gives
 // them in declaration order. Every `.fsh` file of the package is loaded through a generated entry,
 // the harness, whose `main` runs one test by its index.
-export function buildTests(session: Session, dir: string, out: string): Test[] {
+export function buildTests(session: BuildSession, dir: string, out: string): Test[] {
   const files = fishFiles(dir, (message) => console.error(message.replace(/^fishc fmt/, "fishc test")));
   // The harness is read as the manifest's path, which every package has and no `.fsh` file is, so
   // the files' names are written from the package's directory.
@@ -327,7 +326,7 @@ export function buildTests(session: Session, dir: string, out: string): Test[] {
 
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
 // Gives the exit code.
-async function testPackage(session: Session, dir: string, filter: string | undefined): Promise<i64> {
+async function testPackage(session: BuildSession, dir: string, filter: string | undefined): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
   const running = new Set<i32>();
   // Interrupted, the tests running and what they started end, and the build is removed.
