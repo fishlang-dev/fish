@@ -351,7 +351,7 @@ test("no Map, WeakMap, Set or WeakSet in the checker is keyed by anything but st
 
 
 // The passes that lower the tree, before checking and while it runs.
-const LOWERING = ["check", "values", "narrow", "classes", "generics", "overloads", "defaults", "modules", "js", "locals", "macros", "quote", "tests", "parseargs"];
+const LOWERING = ["check", "values", "narrow", "classes", "generics", "overloads", "defaults", "keys", "modules", "js", "locals", "macros", "quote", "tests", "parseargs"];
 // Fields that hold a node's children, as the generated rebuild writes them; a `name` holds a node
 // only when computed, and a rename writes a string.
 const CHILDREN = [...new Set([...readFileSync(join(src, "rebuild.ts"), "utf8").matchAll(/^\s+m\.(\w+)/gm)].map((m) => m[1]!))].filter((f) => f !== "name").join("|");

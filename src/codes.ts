@@ -159,6 +159,7 @@ function main() {
   E0117: { title: "a tuple's length or element index doesn't match" },
   E0118: { title: "a 'void' used as a value" },
   E0119: { title: "a value that can't be looped over or spread" },
+  E0120: { title: "a computed key that isn't known while compiling" },
 
   E0201: {
     title: "use of a moved value",

@@ -16,6 +16,7 @@ import { TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type Fut
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
+import { knownKey, unknownKey } from "./keys.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
@@ -640,7 +641,7 @@ export class Expressions implements Union {
   // What a closure or a generic enum's member is expected to be, from where it goes, since
   // neither can always tell its own type: a closure its parameters', an enum its type arguments.
   expect(this: Mut<this>, e: Expr, t: Type) {
-    e = this.rewrites.current(e);
+    e = this.keyed(this.rewrites.current(e));
     // Callers pass what a parameter list has, which may run out.
     if (t !== undefined) t = this.typing.unfolded(t);
     // A literal lent to a reference is a temporary of the type it refers to.
@@ -2293,7 +2294,7 @@ export class Expressions implements Union {
   // their union, a mixed array a tuple, and an object's fields readonly. Anything else is
   // checked here, once, and keeps its type.
   private constType(this: Mut<this>, written: Expr): Type {
-    const x = this.rewrites.current(written);
+    const x = this.keyed(this.rewrites.current(written));
     if (x.kind === "string") return this.typing.literalType(x.value);
     if (x.kind === "template" && x.exprs.length === 0) return this.typing.literalType(x.quasis[0]!);
     if (x.kind === "int" && x.value <= I64_MAX) return this.typing.literalType(x.value);
@@ -2399,7 +2400,7 @@ export class Expressions implements Union {
     const held = this.isRefType(through) ? this.typing.rec(through).to : through;
     const r = this.recOf(held);
     const object = r?.kind === "shared" ? this.typing.lower(r.of) : held;
-    if (!this.typing.isTuple(object)) return false;
+    if (!this.typing.isTuple(object)) return this.keyRead(e, object);
     const count = this.typing.elementsOf(object as ObjectType).length;
     if (e.index.kind !== "int") throw new CompileError("E0117", `a tuple's element is named by a number written in place, like '[0]'; '${this.typing.show(object)}' has no element for a computed index`, e.index.start, e.index.end);
     const n = e.index.value;
@@ -2414,6 +2415,16 @@ export class Expressions implements Union {
     if (n >= BigInt(count)) throw new CompileError("E0117", `tuple type '${this.typing.show(object)}' of length ${count} has no element at index ${n}`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
     this.rewrites.replace(e, { id: 0, kind: "member", object: e.object, name: String(n), optional: false, start: e.start, end: e.end });
+    return true;
+  }
+
+  // `o[K]` on an object or an instance, with a key known while compiling, reads the field it names.
+  private keyRead(this: Mut<this>, e: Extract<Expr, { kind: "index" }>, object: Type): boolean {
+    const r = this.recOf(object);
+    if (r?.kind !== "object" && r?.kind !== "class") return false;
+    const name = this.knownKey(e.index);
+    if (e.optional) throw unsupported("optional index expressions", e);
+    this.rewrites.replace(e, { id: 0, kind: "member", object: e.object, name, optional: false, start: e.start, end: e.end });
     return true;
   }
 
@@ -4717,7 +4728,7 @@ export class Expressions implements Union {
   }
 
   value(this: Mut<this>, written: Expr): Type {
-    const e = this.rewrites.current(written);
+    const e = this.keyed(this.rewrites.current(written));
     if (this.ctx.exprsState.once.delete(e)) return this.types.get(e)!;
     const type = this.typeOf(e);
     // An abstract class's code sees `this` as the abstract class, which exists only embedded in
@@ -4727,6 +4738,24 @@ export class Expressions implements Union {
     }
     this.types.set(e, type);
     return type;
+  }
+
+  // An object literal with computed keys, as the same literal with each key's name written.
+  private keyed(this: Mut<this>, e: Expr): Expr {
+    if (e.kind !== "object" || e.props.every((p) => !("key" in p) || typeof p.key === "string")) return e;
+    const props = e.props.map((p) => ("key" in p && typeof p.key !== "string" ? this.rewrites.replace(p, { ...p, key: this.knownKey(p.key) }) : p));
+    return this.rewrites.replace(e, { ...e, props });
+  }
+
+  // The name a computed key gives: a literal's, or one a const, an `as const` value or an enum
+  // member holds, as its literal type says.
+  knownKey(this: Mut<this>, key: Expr): string {
+    return knownKey(key, (leaf) => {
+      const t = this.value(leaf);
+      const r = this.recOf(t);
+      if (r?.kind === "literal") return String(r.value);
+      throw unknownKey(leaf, `this is a '${this.typing.show(t)}'`);
+    });
   }
 
   private typeOf(this: Mut<this>, e: Expr): Type {
@@ -6070,15 +6099,14 @@ export class Expressions implements Union {
 
   private propertyField(this: Mut<this>, p: ObjectProp): Field {
     if (p.kind === "property") {
-      if (typeof p.key !== "string") throw unsupported("computed property names", p.key);
       // An object stores its fields, so an arrow written in one owns what it captures.
       if (p.value.kind === "arrow") this.ctx.exprsState.owning.add(p.value);
       const type = this.value(p.value);
       // A value written `as const` keeps its literal type.
-      if (isConstAssertion(this.rewrites.current(p.value))) return { name: p.key, type };
+      if (isConstAssertion(this.rewrites.current(p.value))) return { name: p.key as string, type };
       const widened = this.typing.widenLet(type);
       if (widened !== type) this.coerce(p.value, type, widened, "");
-      return { name: p.key, type: widened };
+      return { name: p.key as string, type: widened };
     }
     if (p.kind !== "shorthand") {
       throw unsupported(p.kind === "spread" ? "spread elements" : p.kind === "method" ? "methods in object literals" : "accessors in object literals", p);

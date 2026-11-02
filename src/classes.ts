@@ -5,6 +5,7 @@ import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeN
 import { rebuiltParam } from "./rebuild.ts";
 import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
+import { symbolKey } from "./keys.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
 import { nextId, NodeSet, type Ids, childrenOf, walk, type AnyNode, type NodeOf, type RootKind } from "./nodes.ts";
 
@@ -160,7 +161,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
       continue;
     }
     if (m.kind !== "field") throw unsupported(MEMBER_FORMS[m.kind], m);
-    if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+    if (typeof m.name !== "string") throw symbolKey(m.name);
     if (m.modifiers.includes("static")) {
       staticField(m, m.name);
       continue;
@@ -249,7 +250,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     if (!node.abstract) throw new CompileError("E0701", "abstract members can only appear in an abstract class", m.start, m.end);
     if (m.kind === "field") throw unsupported("abstract fields", m);
     if (m.kind !== "method" && m.kind !== "get" && m.kind !== "set") throw unsupported(MEMBER_FORMS[m.kind as keyof typeof MEMBER_FORMS] ?? "abstract members", m);
-    if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+    if (typeof m.name !== "string") throw symbolKey(m.name);
     if (m.modifiers.includes("static")) throw new CompileError("E0701", "'static' can't be used with 'abstract'", m.start, m.end);
     if (m.modifiers.includes("private") || m.name.startsWith("#")) throw new CompileError("E0701", "an abstract member can't be private, since subclasses must implement it", m.start, m.end);
     if (m.body) throw new CompileError("E0701", `'${m.name}' can't have a body because it is marked abstract`, m.start, m.end);
@@ -268,7 +269,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
     const isStatic = m.modifiers.includes("static");
     if (isStatic && node.typeParams.length > 0) throw unsupported("static accessors in generic classes", m);
-    if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+    if (typeof m.name !== "string") throw symbolKey(m.name);
     const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
     if (m.name === "constructor") throw new CompileError("E0705", "'constructor' can't be the name of an accessor", m.start, m.end);
     if (!m.body) throw unsupported("accessors without a body", m);
@@ -299,7 +300,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   function method(m: Extract<ClassMember, { kind: "method" }>) {
     const isStatic = m.modifiers.includes("static");
     if (isStatic && shared) return;
-    if (typeof m.name !== "string") throw unsupported("computed property names", m.name);
+    if (typeof m.name !== "string") throw symbolKey(m.name);
     const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
     if (m.optional) throw unsupported("optional methods", m);
     if (m.generator && !m.modifiers.includes("async")) throw unsupported("generator methods", m);
