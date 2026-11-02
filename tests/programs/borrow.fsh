@@ -775,3 +775,218 @@ function main() {
   console.log(r as i32);
 }
 // error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
+// case: borrow_callback_replaces_returned_reference_origin
+// error: borrow_callback_replaces_returned_reference_origin.fsh:5:29: error[E0203]: cannot mutably lend 'xs' while 'xs' is lent to 'forEach' for this call
+function pick(l: Ref<string[]>): Ref<string[]> { return l; }
+function main() {
+  let xs = ["a" + "b", "c" + "d"];
+  pick(xs).forEach((x) => { xs = ["q" + "r"]; console.log(x); });
+}
+// case: borrow_mut_method_through_returned_reference
+// expect: ab 1
+// expect: 4
+class C { n: i64 = 0; add(this: Mut<this>, k: i64) { this.n += k; } get(): i64 { return this.n; } }
+function pick(c: Mut<C>): Mut<C> { return c; }
+function look(l: Ref<string[]>): Ref<string[]> { return l; }
+function main() {
+  let xs = ["a" + "b"];
+  let c = new C();
+  pick(c).add(2);
+  pick(c).add(c.n);
+  look(xs).forEach((x) => console.log(x, xs.length));
+  console.log(c.get());
+}
+// case: borrow_callback_replaces_element_origin
+// error: borrow_callback_replaces_element_origin.fsh:5:33: error[E0203]: cannot mutably lend 'xs' while 'xs' is lent to 'forEach' for this call
+function pick(l: Ref<string[][]>): Ref<string[][]> { return l; }
+function main() {
+  let xs = [["a" + "b", "c" + "d"]];
+  pick(xs)[0]!.forEach((x) => { xs = [["q" + "r"]]; console.log(x); });
+}
+// case: borrow_callback_replaces_field_origin
+// error: borrow_callback_replaces_field_origin.fsh:6:34: error[E0203]: cannot mutably lend 'b' while 'b' is lent to 'forEach' for this call
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function main() {
+  let b = new Box();
+  pick(b).items.forEach((x) => { b = new Box(); console.log(x); });
+}
+// case: borrow_callback_replaces_chained_origin
+// error: borrow_callback_replaces_chained_origin.fsh:7:38: error[E0203]: cannot mutably lend 'r' while 'r' is lent to 'forEach' for this call
+class B { xs: string[] = ["a" + "b", "c" + "d"]; }
+class A { b: B = new B(); get2(): Ref<B> { return this.b; } }
+class R { a: A = new A(); get(): Ref<A> { return this.a; } }
+function main() {
+  let r = new R();
+  r.get().get2().xs.forEach((x) => { r = new R(); console.log(x); });
+}
+// case: borrow_callback_replaces_this_origin
+// error: borrow_callback_replaces_this_origin.fsh:6:60: error[E0203]: cannot mutably lend 'this' while 'this' is lent to 'forEach' for this call
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class C {
+  b: Box = new Box();
+  get(): Ref<Box> { return this.b; }
+  run(this: Mut<this>) { this.get().items.forEach((x) => { this.b = new Box(); console.log(x); }); }
+}
+function main() { let c = new C(); c.run(); }
+// case: borrow_argument_replaces_field_origin
+// error: borrow_argument_replaces_field_origin.fsh:8:26: error[E0203]: cannot mutably lend 'a' while 'a' is lent to 'add' for this call
+class C { xs: string[] = ["a" + "b"]; add(this: Mut<this>, k: string) { this.xs.push(k); } }
+class B { c: C = new C(); }
+class A { b: B = new B(); }
+function pick(a: Mut<A>): Mut<B> { return a.b; }
+function main() {
+  let a = new A();
+  pick(a).c.add((() => { a = new A(); return "z" + "z"; })());
+  console.log(a.b.c.xs.length);
+}
+// case: borrow_projection_reads_origin
+// expect: ab! 2
+// expect: cd! 2
+// expect: 1
+class C { n: i64 = 1; add(this: Mut<this>, k: i64) { this.n += k; } }
+function pick(c: Mut<C>): Mut<C> { return c; }
+function look(c: Ref<C>): Ref<C> { return c; }
+function main() {
+  let c = new C();
+  let xs = ["a" + "b", "c" + "d"];
+  look(c).n;
+  xs.filter((x) => x.length > 0).map((x) => x + "!").forEach((x) => console.log(x, xs.length));
+  const l = new Lock<i64>(1);
+  console.log(look(c).n);
+}
+// case: borrow_returned_reference_read_in_callback
+// expect: ab 2 ab
+// expect: cd 2 ab
+function pick(a: Ref<string[]>): Ref<string[]> { return a; }
+function main() { let xs = ["a" + "b", "c" + "d"]; pick(xs).forEach((x) => console.log(x, xs.length, xs[0]!)); }
+// case: borrow_loop_replaces_field_origin
+// error: borrow_loop_replaces_field_origin.fsh:6:36: error[E0203]: cannot change 'b' while a 'for...of' loop borrows 'b' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function main() {
+  let b = new Box();
+  for (const x of pick(b).items) { b = new Box(); console.log(x); }
+}
+// case: borrow_loop_replaces_returned_origin
+// error: borrow_loop_replaces_returned_origin.fsh:5:31: error[E0203]: cannot change 'xs' while a 'for...of' loop borrows 'xs' and is used later
+function pick(b: Ref<string[]>): Ref<string[]> { return b; }
+function main() {
+  let xs = ["a" + "b", "c" + "d"];
+  for (const x of pick(xs)) { xs = ["q" + "r"]; console.log(x); }
+}
+// case: borrow_loop_replaces_method_origin
+// error: borrow_loop_replaces_method_origin.fsh:6:36: error[E0203]: cannot change 'c' while a 'for...of' loop borrows 'c' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class C { b: Box = new Box(); get(): Ref<Box> { return this.b; } }
+function main() {
+  let c = new C();
+  for (const x of c.get().items) { c = new C(); console.log(x); }
+}
+// case: borrow_match_callback_replaces_origin
+// error: borrow_match_callback_replaces_origin.fsh:8:48: error[E0203]: cannot mutably lend 'h' while 'v' borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pick(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let h = new H();
+  match (pick(h).o) {
+    case Some(v) => { v.items.forEach((x) => { h = new H(); console.log(x); }); },
+    case None => {},
+  };
+}
+// case: borrow_match_replaces_origin
+// error: borrow_match_replaces_origin.fsh:8:23: error[E0203]: cannot change 'h' while 'v' borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pick(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let h = new H();
+  match (pick(h).o) {
+    case Some(v) => { h = new H(); console.log(v.items[0]!); },
+    case None => {},
+  };
+}
+// case: borrow_loop_reads_returned_origin
+// expect: ab 2 ab
+// expect: cd 2 ab
+// expect: ab 1
+// expect: 3
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function look(h: Ref<H>): Ref<H> { return h; }
+function main() {
+  let b = new Box();
+  for (const x of pick(b).items) console.log(x, b.items.length, b.items[0]!);
+  let h = new H();
+  match (look(h).o) {
+    case Some(v) => { console.log(v.items[0]!, h.o === null ? 0 : 1); },
+    case None => {},
+  };
+  b = new Box();
+  b.items.push("e" + "f");
+  console.log(b.items.length);
+}
+// case: borrow_loop_replaces_chosen_field_origin
+// error: borrow_loop_replaces_chosen_field_origin.fsh:14:55: error[E0203]: cannot change 'b' while a 'for...of' loop borrows 'b' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function pickA(b: Ref<string[]>): Ref<string[]> { return b; }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function pickM(m: Ref<Map<string, string>>): Ref<Map<string, string>> { return m; }
+function pickS(m: Ref<Set<string>>): Ref<Set<string>> { return m; }
+function pickT(s: Ref<string>): Ref<string> { return s; }
+function pickP(m: Ref<string[][]>): Ref<string[][]> { return m; }
+
+function main() {
+  let b = new Box(); let c = new Box();
+  for (const x of (true ? pick(b) : pick(c)).items) { b = new Box(); console.log(x); }
+}
+// case: borrow_loop_replaces_chosen_origin
+// error: borrow_loop_replaces_chosen_origin.fsh:13:63: error[E0203]: cannot change 'b' while a 'for...of' loop borrows 'b.items' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+class K { kind: "a" | "b" = "a"; items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function pickA(b: Ref<string[]>): Ref<string[]> { return b; }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function pickK(k: Ref<K>): Ref<K> { return k; }
+function pickM(m: Ref<Map<string, string>>): Ref<Map<string, string>> { return m; }
+function pickTu(t: Ref<[string, string][]>): Ref<[string, string][]> { return t; }
+function main() {
+  let b = new Box(); let c = new Box();
+  for (const x of (true ? pickA(b.items) : pickA(c.items))) { b = new Box(); console.log(x); }
+}
+// case: borrow_match_replaces_chosen_origin
+// error: borrow_match_replaces_chosen_origin.fsh:14:23: error[E0203]: cannot change 'h' while 'v' borrows 'h' and is used later
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+class H { o: Box | null = new Box(); }
+class K { kind: "a" | "b" = "a"; items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function pickA(b: Ref<string[]>): Ref<string[]> { return b; }
+function pickH(h: Ref<H>): Ref<H> { return h; }
+function pickK(k: Ref<K>): Ref<K> { return k; }
+function pickM(m: Ref<Map<string, string>>): Ref<Map<string, string>> { return m; }
+function pickTu(t: Ref<[string, string][]>): Ref<[string, string][]> { return t; }
+function main() {
+  let h = new H(); let g = new H();
+  match ((true ? pickH(h) : pickH(g)).o) {
+    case Some(v) => { h = new H(); console.log(v.items[0]!); },
+    case None => {},
+  };
+}
+// case: borrow_loop_reads_chosen_origin
+// expect: ab 2
+// expect: cd 2
+// expect: 3
+class Box { items: string[] = ["a" + "b", "c" + "d"]; }
+function pick(b: Ref<Box>): Ref<Box> { return b; }
+function main() {
+  let b = new Box(); let c = new Box();
+  for (const x of (true ? pick(b) : pick(c)).items) console.log(x, b.items.length);
+  b = new Box();
+  b.items.push("e" + "f");
+  console.log(b.items.length);
+}

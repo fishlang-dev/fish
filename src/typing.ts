@@ -328,7 +328,9 @@ export const isLock = (r: Ref<InteriorRecord>) => r.which === "Lock" || r.which 
 
 // `shared<T>`: a counted pointer to a block holding the count, a lock word and the value, so
 // every clone is the same value, read and changed from any thread.
-export type SharedRecord = { kind: "shared"; of: Type; fields: Field[] };
+// `shared<T>` counts its owners atomically for every thread; `Rc<T>` counts them for one, and
+// `Weak<T>` reaches an Rc's value without keeping it alive.
+export type SharedRecord = { kind: "shared"; which: "shared" | "Rc" | "Weak"; of: Type; fields: Field[] };
 export type SharedType = TypeId<SharedRecord>;
 
 // `Dyn<I>`: a value of any type implementing interface I, owned in a heap block, with a vtable
@@ -703,12 +705,13 @@ export class Typing {
   }
 
   // Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock, a
-  // shared value, or a Dyn, whose hidden value may hold them. Readers of a shared value borrow
-  // such fields without its lock.
+  // Cell, a shared value, or a Dyn, whose hidden value may hold them. Readers of a shared value
+  // or an Rc borrow such fields without its lock. An Rc or a Weak is copied out instead, its
+  // copy one more count, so an `update` may replace it.
   interiorMutable(t: Type) {
     return this.holdsPart(t, (u) => {
     const r = this.recOf(u);
-    return r !== undefined && (r.kind === "shared" || r.kind === "dyn" || (r.kind === "interior" && r.which !== "Cell") || (r.kind === "block" && r.which !== "Permit"));
+    return r !== undefined && ((r.kind === "shared" && r.which === "shared") || r.kind === "dyn" || r.kind === "interior" || (r.kind === "block" && r.which !== "Permit"));
   });
   }
 
@@ -855,11 +858,11 @@ export class Typing {
 
   private shareds = new Map<string, SharedType>();
 
-  sharedType(this: Mut<this>, of: Type): SharedType {
-    const key = `shared ${this.keyOf(of)}`;
+  sharedType(this: Mut<this>, of: Type, which: SharedRecord["which"] = "shared"): SharedType {
+    const key = `${which} ${this.keyOf(of)}`;
     let t = this.shareds.get(key);
     if (!t) {
-      t = this.made<SharedType>({ kind: "shared", of, fields: [] }, key);
+      t = this.made<SharedType>({ kind: "shared", which, of, fields: [] }, key);
       this.shareds.set(key, t);
     }
     return t;
@@ -1694,6 +1697,17 @@ export class Typing {
         this.ties.set(of, back);
       }
     }
+    // An Rc, a Weak or a shared value already points at a block, so one that leads back holds the
+    // type inline too, and is the one written with the type.
+    if (typeof of !== "string") {
+      for (const which of ["shared", "Rc", "Weak"] as const) {
+        const held = this.shareds.get(`${which} ${this.keyOf(back)}`);
+        if (held === undefined) continue;
+        this.rec(held).of = of;
+        this.shareds.set(`${which} ${this.keyOf(of)}`, held);
+        this.ties.set(of, back);
+      }
+    }
     const array = this.arrays.get(`[${this.keyOf(back)}]`);
     // A type that is itself an array, as `type T = T[]`, has no other part to hold, so its
     // elements stay blocks.
@@ -1768,6 +1782,8 @@ export class Typing {
   // of those changing a shared value, whose interior-mutable parts others borrow unlocked.
   lockCallbacks = new TypeMap<FunctionType, string>();
   sharedCallbacks = new TypeSet<FunctionType>();
+  // Those of an Rc's `update` and `read`, which only this thread runs.
+  rcCallbacks = new TypeSet<FunctionType>();
 
   // A type parameter as an instance sees it: standing for `concrete`, which has no type
   // parameter in it.
@@ -1798,7 +1814,7 @@ export class Typing {
     if (r.kind === "pointer") return this.pointerType(this.lower(r.to), r.mutable);
     if (r.kind === "handle") return r.joined ? this.joinedType(this.lower(r.joined.base) as HandleType, r.joined.panic) : this.handleType(this.lower(r.gives), r.throws && this.lower(r.throws));
     if (r.kind === "interior") return this.interiorType(r.which, this.lower(r.of));
-    if (r.kind === "shared") return this.sharedType(this.lower(r.of));
+    if (r.kind === "shared") return this.sharedType(this.lower(r.of), r.which);
     if (r.kind === "block") return this.blockType(r.which, this.lower(r.of));
     if (r.kind === "map") return this.mapType(this.lower(r.key), this.lower(r.value), r.set);
     if (r.kind === "recursive") return r.args.some((a) => this.lower(a) !== a) ? this.remade(t as RecursiveType, () => this.lower(r.of), r.args.map((t) => this.lower(t))) : t;
@@ -1869,7 +1885,7 @@ export class Typing {
     if (r.kind === "interior" || r.kind === "shared" || (r.kind === "block" && r.which === "Channel")) {
       const of = this.heldArgument(this.replaced(r.of, swap));
       if (of === r.of) return t;
-      return r.kind === "interior" ? this.interiorType(r.which, of) : r.kind === "shared" ? this.sharedType(of) : this.blockType("Channel", of);
+      return r.kind === "interior" ? this.interiorType(r.which, of) : r.kind === "shared" ? this.sharedType(of, r.which) : this.blockType("Channel", of);
     }
     if (r.kind === "variant") {
       const args = r.args.map((a) => this.heldArgument(this.replaced(a, swap)));
@@ -2169,7 +2185,7 @@ export class Typing {
     if (r.kind === "generator") return `${r.async ? "Async" : ""}Generator<${this.show(r.yields)}>${r.throws ? ` throws ${this.show(r.throws)}` : ""}`;
     if (r.kind === "future") return `Promise<${this.show(r.gives)}>${r.throws ? ` throws ${this.show(r.throws)}` : ""}${this.describing ? ` ${r.name}(${r.frame.map((f) => this.show(f.type)).join(", ")})` : ""}`;
     if (r.kind === "interior") return `${r.which}<${this.show(r.of)}>`;
-    if (r.kind === "shared") return `shared<${this.show(r.of)}>`;
+    if (r.kind === "shared") return `${r.which}<${this.show(r.of)}>`;
     // A JS handle shows the shape its declaration gives it.
     // A package's shape is shown by the name the package gives it, not the one linking gave it.
     if (r.kind === "block") return r.which === "Channel" ? `Channel<${this.show(r.of)}>` : r.which === "JsValue" && r.of !== "void" ? this.show(r.of).replace(/-fsh\d+/g, "") : r.which;

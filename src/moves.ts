@@ -317,6 +317,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           last.set(loop.localId, s.end);
           inherit(loop, s.right);
           if (typing.holdsRef(each.type)) inherit(each, s.right);
+        } else if (state && !text && fromCall(projected(s.right))) {
+          // Over a reference a call gave, or a field or element of one, the loop keeps what that
+          // reference borrows lent until it ends.
+          const loop = arenas.localOf(loopHolders.get(s)) ?? arenas.addLocal({ name: "for...of", type: "void", mutable: false, param: false, id: -s.start - 2_000_000 });
+          loopHolders.set(s, loop.localId);
+          last.set(loop.localId, s.end);
+          hold(loop, projected(s.right));
+          if (typing.holdsRef(each.type)) hold(each, projected(s.right));
         }
         // Each pass may end the loop, like a condition that may be false.
         loop(s, () => ({ id: nextId(ids), kind: "bool", value: false, start: s.start, end: s.start }), () => {
@@ -514,9 +522,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           // below zero and between whole numbers, one per capture, so no other loan can replace
           // these.
           const built = instance.envs?.get(e);
-          const lent = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias: arenas.localOf(alias), changes: instance.changed?.has(alias) === true }))
+          const using = selfCalls.has(e) ? [...(instance.captures ?? [])].map(([alias]) => ({ alias: arenas.localOf(alias), changes: instance.changed?.has(alias) === true }))
             : built ? built.env.map((alias, i) => ({ alias: arenas.localOf(alias), changes: arenas.instanceOf(built.of).changed?.has([...arenas.instanceOf(built.of).captures!.keys()][i]!) === true })) : [];
-          const captures = lent.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start + (i + 1) / 8192), at: { id: nextId(ids), kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
+          const captures = using.map(({ alias, changes }, i) => ({ alias, changes, key: -(e.callee.start + (i + 1) / 8192), at: { id: nextId(ids), kind: "ident", name: alias.name, start: e.callee.start, end: e.callee.end } as Named }));
           for (const c of captures) {
             try {
               usable(c.at, String(c.alias.id));
@@ -564,8 +572,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const changes = builtin && (generator(object) || (array(object) && ARRAY_CHANGES.has(method)) || (mapped(object) && MAP_CHANGES.has(method)));
           // Any other array, Map or Set method reads it, lent shared while its callback runs, as
           // a string is while a regex goes through it.
-          const reads = builtin && !changes && (array(object) || mapped(object) || regexStringCalls.has(e));
+          // A shared value's, an Rc's or a lock's `update` and `read` hand their callback a pointer
+          // into the value the receiver reaches, so the callback can't replace or drop the receiver.
+          const reads = builtin && !changes && (array(object) || mapped(object) || regexStringCalls.has(e) || (locking(object) && (method === "update" || method === "read")));
           if (object && place !== undefined && (self || changes || reads)) lend(place, false, object, undefined, name, e);
+          // A receiver that is a reference a call gave lends again what that reference borrows
+          // from, for the whole call, so its callback can't replace what the reference reaches.
+          const origins = object && place === undefined && (self || changes || reads) ? lent(object) : [];
+          origins.forEach(([p, part], i) => lend(p, false, part, undefined, name, e, part.start, partKey(part, i)));
           handOver(e.args, name, e);
           for (const c of captures) {
             if (!c.changes || !state) continue;
@@ -579,6 +593,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           if (object && place !== undefined && self?.mutable && state) {
             state.loans.delete(object.start);
             lend(place, true, object, undefined, name, e, e.end - 1);
+          }
+          const loans = state?.loans;
+          if (self?.mutable && loans) {
+            origins.forEach(([p, part, mutable], i) => {
+              loans.delete(partKey(part, i));
+              lend(p, mutable, part, undefined, name, e, e.end - 1, partKey(part, i));
+            });
           }
           // A method that changes its object, or a base's constructor, may keep what is lent,
           // when the object has somewhere to keep a reference.
@@ -680,8 +701,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const borrowing = bound.filter((l) => isRef(l.type));
           for (const holder of borrowing) {
             if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holder.localId]) });
-            // Through a reference, the binding holds what that reference borrows.
+            // Through a reference, the binding holds what that reference borrows, a reference a
+            // call gave included.
             inherit(holder, subject);
+            if (place === undefined && fromCall(projected(subject))) hold(holder, projected(subject));
           }
           if (arm.guard) {
             const at = -arm.guard.start - 1;
@@ -843,6 +866,10 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (e.kind === "arrow" || instance.envs?.has(e)) {
       return captured(e).filter(([, , from, , held]) => !held || reborrows(from!)).map(([place, use, , mutable, held]) => [place, use as Expr, mutable || held]);
     }
+    // A field, element or unwrapped Option of a returned reference reaches into what that
+    // reference borrows, so it lends what the reference does.
+    const root = projected(e);
+    if (root !== e && key(e) === undefined && fromCall(root)) return lent(root);
     // A call's returned reference lends again what it borrows from, a receiver included; a
     // future lends it mutably when it holds a mutable reference.
     const from = borrowsFrom.get(e);
@@ -1427,6 +1454,23 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
+  // Whether an expression is a reference a call gave, or a choice between such references.
+  function fromCall(e: Expr): boolean {
+    e = unwrapped(e);
+    if (e.kind === "conditional") return fromCall(projected(e.then)) || fromCall(projected(e.else));
+    if (choosing(e)) return fromCall(projected(e.left)) || fromCall(projected(e.right));
+    return borrowsFrom.has(e);
+  }
+
+  // What a chain of field reads, indexes and `!` starts from.
+  function projected(e: Expr): Expr {
+    for (e = unwrapped(e); ; ) {
+      if ((e.kind === "member" && !calls.has(e)) || e.kind === "index") e = unwrapped(e.object);
+      else if (e.kind === "nonNull") e = unwrapped(e.expr);
+      else return e;
+    }
+  }
+
   // `x!` of a reference or nothing borrows what `x` does, so it is followed as `x`, as are
   // `as`, `satisfies` and `unsafe { }`, which hand on their operand.
   function unwrapped(e: Expr): Expr {
@@ -1470,6 +1514,12 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const t = types.get(e);
     const held = t && deref(t);
     return held !== undefined && (typing.yieldsOf(held) !== undefined || typing.yieldsOf(held, true) !== undefined);
+  }
+
+  function locking(e: Expr): boolean {
+    const t = types.get(e);
+    const r = t && record(deref(t));
+    return r?.kind === "shared" || (r?.kind === "interior" && (r.which === "Lock" || r.which === "RwLock"));
   }
 
   function mapped(e: Expr): boolean {

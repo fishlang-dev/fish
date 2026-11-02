@@ -1751,6 +1751,7 @@ class BodyChecker implements Context, Outer, Sight {
   runtime: boolean;
   locked: string | undefined;
   sharing: boolean;
+  counting: boolean;
   async: boolean;
   unsafe: boolean;
   exprsState: ExpressionsState;
@@ -1841,6 +1842,7 @@ class BodyChecker implements Context, Outer, Sight {
     this.runtime = !this.cx.library && this.cx.funcs.some((g) => g.name === "main" && g.async === true);
     this.locked = this.f.closure?.expected === undefined ? undefined : this.cx.typing.lockCallbacks.get(this.f.closure.expected);
     this.sharing = this.f.closure?.expected !== undefined && this.cx.typing.sharedCallbacks.has(this.f.closure.expected);
+    this.counting = this.f.closure?.expected !== undefined && this.cx.typing.rcCallbacks.has(this.f.closure.expected);
     this.async = this.f.async === true;
     this.unsafe = this.f.closure?.unsafe === true;
     this.exprsState = new ExpressionsState(this.unsafe);
@@ -2656,7 +2658,10 @@ class BodyChecker implements Context, Outer, Sight {
         const held = from === "this" ? undefined : ref?.kind === "ref" ? ref.to : from.type;
         if (from !== "this" && from.param && held !== undefined && this.cx.typing.interiorMutable(held)) {
           const at = inner.captureUses.get(alias.localId) ?? e;
-          throw new CompileError("E0304", `a closure inside a shared value's 'update' can't capture '${alias.name}': other tasks borrow its interior-mutable parts without the lock`, at.start, at.end);
+          const message = this.cx.typing.rcCallbacks.has(this.f.closure.expected)
+            ? `a closure inside an Rc's 'update' can't capture '${alias.name}': its interior-mutable parts are borrowed where they live, outside 'update'`
+            : `a closure inside a shared value's 'update' can't capture '${alias.name}': other tasks borrow its interior-mutable parts without the lock`;
+          throw new CompileError("E0304", message, at.start, at.end);
         }
       }
     }

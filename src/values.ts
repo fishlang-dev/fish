@@ -10,7 +10,7 @@ import { didYouMean } from "./suggest.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { channel, collection, fields, interior, shareable, tagStrings } from "./resolve.ts";
+import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
@@ -164,6 +164,8 @@ export type Context = {
   // shared value's.
   locked: string | undefined;
   sharing: boolean;
+  // Whether that value is an Rc's, which only this thread reaches.
+  counting: boolean;
   // Whether the body is an async function's, and the awaits written where it can stop at them.
   async: boolean;
   awaitable: NodeSet<Expr>;
@@ -721,7 +723,7 @@ export class Expressions implements Union {
     if (e.kind === "object" && typeof t !== "string" && (this.typing.rec(t).kind === "object" || this.typing.rec(t).kind === "class")) {
       for (const p of e.props) if (p.kind === "property" && typeof p.key === "string" && this.typing.field(t, p.key)) this.expect(p.value, this.typing.field(t, p.key)!.type);
     }
-    if (e.kind === "new" && typeof t !== "string" && (this.typing.rec(t).kind === "interior" || this.typing.rec(t).kind === "block" || this.typing.rec(t).kind === "map")) this.ctx.exprsState.wanted.set(e, t);
+    if (e.kind === "new" && typeof t !== "string" && (this.typing.rec(t).kind === "interior" || this.typing.rec(t).kind === "block" || this.typing.rec(t).kind === "map" || this.typing.rec(t).kind === "shared")) this.ctx.exprsState.wanted.set(e, t);
     if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "shared" && typeof t !== "string" && this.typing.rec(t).kind === "shared") this.ctx.exprsState.wanted.set(e, t);
     const built = e.kind === "call" ? e.callee : e;
     if (built.kind === "member" && built.object.kind === "ident" && !this.ctx.lookup(built.object.name) && this.enums.get(built.object.name)?.data) this.ctx.exprsState.wanted.set(built, t);
@@ -1236,6 +1238,7 @@ export class Expressions implements Union {
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Object" && !this.ctx.lookup("Object") && !this.classes.has("Object") && !this.byName.has("Object") && !this.byName.has("const Object") && !this.enums.has("Object")) return this.objectStatic(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "String" && !this.ctx.lookup("String") && !this.classes.has("String") && !this.byName.has("String") && !this.byName.has("const String") && !this.enums.has("String")) return this.stringStatic(e, callee);
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Rc" && !this.ctx.lookup("Rc") && !this.classes.has("Rc") && !this.byName.has("Rc")) return this.ptrEq(e, callee);
     if (callee.kind === "member" && this.isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("E0505", "'Math' is always there, so its functions are called without '?.'", e.start, e.end);
       return this.mathCall(e, callee.name);
@@ -1430,7 +1433,7 @@ export class Expressions implements Union {
       if (r?.kind !== "future" || t === YIELD_NOW || t === SLEEP || this.typing.leafOf.has(t as FutureType)) throw new CompileError("E0305", `'spawn' needs a Promise from an async function's call, not '${this.typing.show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       const blocker = this.unsent(t);
       if (blocker) {
-        throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${this.typing.show(blocker)}', which ${typeof blocker !== "string" && this.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
+        throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${this.typing.show(blocker)}', which ${typeof blocker !== "string" && this.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "shared" ? COUNTED_UNLOCKED : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
       }
       return { type: this.typing.handleType(r.gives, r.throws), what: "'spawn'" };
     }
@@ -3001,6 +3004,24 @@ export class Expressions implements Union {
     return interior(this.typing, which, of, e);
   }
 
+  // `new Rc(v)`: v moved into a new block with one count. `new Weak<T>()` reaches no value, so it
+  // never upgrades, for a back-reference made before what it points to.
+  private countedNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, which: "Rc" | "Weak", list: Expr[]): Type {
+    const expected = this.ctx.exprsState.wanted.get(e);
+    const r = this.recOf(expected);
+    const given = e.typeArgs[0] ? this.typing.heldArgument(this.ctx.resolveType(e.typeArgs[0])) : r?.kind === "shared" && r.which === which ? r.of : undefined;
+    if (which === "Weak") {
+      if (list.length !== 0 || e.typeArgs.length > 1 || given === undefined) throw new CompileError("E0504", "'new Weak<T>()' takes no value and reaches none; make a Weak that reaches one with 'rc.downgrade()'", e.start, e.end);
+      return counted(this.typing, given, which, e);
+    }
+    if (list.length !== 1 || e.typeArgs.length > 1) throw new CompileError("E0504", "'Rc' takes the value it starts with, as in 'new Rc(node)'", e.start, e.end);
+    if (given) this.expect(list[0]!, given);
+    const t = this.value(list[0]!);
+    const of = given ?? this.typing.heldArgument(this.typing.widenLet(t));
+    this.coerce(list[0]!, t, of, `argument of type '${this.typing.show(t)}' is not assignable to parameter of type '${this.typing.show(of)}'`);
+    return counted(this.typing, of, which, e);
+  }
+
   // An Atomic's methods, JavaScript's `Atomics` on one value: each changes it in one step, seen
   // the same by every thread, and gives what it held before, except `store`.
   private interiorCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
@@ -3997,17 +4018,68 @@ export class Expressions implements Union {
 
   // A shared value's `update`, a Lock's: the callback changes the value under the block's lock.
   private sharedCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
+    const which = this.typing.rec(t).which;
+    if (which === "Weak") return this.weakCall(e, callee, t);
+    if (which === "Rc" && callee.name === "downgrade") {
+      if (e.args.length > 0) throw new CompileError("E0504", "'downgrade' takes no arguments", e.start, e.end);
+      return { type: this.typing.sharedType(this.typing.rec(t).of, "Weak"), what: "'downgrade'" };
+    }
     const inner = this.typing.lower(this.typing.rec(t).of);
     const stored = typeof inner !== "string" && (this.typing.rec(inner).kind === "object" || this.typing.rec(inner).kind === "class") ? this.typing.field(inner, callee.name) : undefined;
     if (stored && this.isCallable(this.typing.lower(stored.type))) return this.callableCall(e, callee, this.typing.lower(stored.type) as DynType);
-    if (callee.name !== "update") throw new CompileError("E0502", `'shared' has no method '${callee.name}'; read its fields, change it with 'update', or share it again with 'clone'`, callee.start, callee.end);
-    return this.lockCall(e, callee, this.typing.interiorType("Lock", this.typing.rec(t).of), true);
+    if (which === "Rc" && callee.name === "read") return this.lockCall(e, callee, this.typing.interiorType("RwLock", this.typing.rec(t).of), true, true);
+    const method = which === "Rc" && this.recOf(inner)?.kind === "class" ? inherited(this.arenas, this.ctx.classOf(inner as ClassType), "methods", callee.name) : undefined;
+    if (method) return this.rcMethod(e, callee, method);
+    if (callee.name !== "update") throw new CompileError("E0502", `'${which}' has no method '${callee.name}'; read its fields, change it with 'update', ${which === "Rc" ? "read it in place with 'read', share it again with 'clone', or reach it weakly with 'downgrade'" : "or share it again with 'clone'"}`, callee.start, callee.end);
+    return this.lockCall(e, callee, this.typing.interiorType("Lock", this.typing.rec(t).of), true, which === "Rc");
+  }
+
+  // `rc.m(args)` for a method that only reads: `rc.read((v) => v.m(args))`, so its call counts as
+  // a read of the value, which nested reads may share and an update may not.
+  private rcMethod(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, method: Body): { type: Type; what: string } {
+    if (method.self?.mutable || method.self?.owned) {
+      throw new CompileError("E0304", `'${callee.name}' changes its object, so on an Rc it runs inside 'update', as in '${this.placeText(this.bare(callee.object))}.update((v) => v.${callee.name}(...))'`, callee.start, callee.end);
+    }
+    if (this.linked(callee)) throw unsupported("optional chains calling methods through an Rc", callee);
+    const at = { start: e.start, end: e.end };
+    const name = "rc value";
+    const param: Param = { ...at, id: nextId(this.ids), pattern: { id: nextId(this.ids), kind: "ident", name, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false };
+    const inner: Expr = { ...e, id: nextId(this.ids), callee: { ...callee, id: nextId(this.ids), object: { id: nextId(this.ids), kind: "ident", name, start: callee.object.start, end: callee.object.end } } };
+    const arrow: Expr = { id: nextId(this.ids), kind: "arrow", move: false, async: false, typeParams: [], params: [param], returnType: undefined, body: inner, ...at };
+    const read = this.rewrites.replace(e, { ...e, callee: { ...callee, id: nextId(this.ids), name: "read" }, args: [arrow], typeArgs: [] });
+    return this.call(read);
+  }
+
+  // `Rc.ptrEq(a, b)`: whether two Rcs share one block, which `===` doesn't ask, since it
+  // compares values. Each is borrowed for the test.
+  private ptrEq(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    if (callee.name !== "ptrEq") throw new CompileError("E0502", `'Rc' has no '${callee.name}'; it has 'ptrEq', which tells whether two Rcs share one value`, callee.start, callee.end);
+    if (callee.optional || e.optional) throw new CompileError("E0505", "'Rc' is always there, so 'Rc.ptrEq' is called without '?.'", e.start, e.end);
+    if (e.args.length !== 2 || e.typeArgs.length > 0 || e.args.some((a) => a.kind === "spread")) throw new CompileError("E0504", "'Rc.ptrEq' takes the two Rcs to compare, as in 'Rc.ptrEq(a, b)'", e.start, e.end);
+    const held = e.args.map((a) => {
+      const t = this.value(a);
+      const r = this.recOf(this.isRefType(t) ? this.typing.rec(t as RefType).to : t);
+      if (r?.kind !== "shared" || r.which !== "Rc") throw new CompileError("E0504", `'Rc.ptrEq' compares two Rcs, not '${this.typing.show(t)}'`, a.start, a.end);
+      if (!this.isRefType(t)) this.coerce(a, t, this.typing.refType(t, false), "");
+      return this.typing.lower(r.of);
+    });
+    if (held[0] !== held[1]) throw new CompileError("E0504", `'Rc.ptrEq' compares two Rcs of one type, not '${this.typing.show(this.types.get(e.args[0]!)!)}' and '${this.typing.show(this.types.get(e.args[1]!)!)}'`, e.start, e.end);
+    return { type: "boolean", what: "'Rc.ptrEq'" };
+  }
+
+  // `w.upgrade()`: an Rc of the value a Weak reaches while any Rc of it is left, or else null.
+  private weakCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
+    if (callee.name !== "upgrade") throw new CompileError("E0502", `'Weak' has no method '${callee.name}'; reach its value with 'upgrade', which gives an 'Rc' or null, or copy it with 'clone'`, callee.start, callee.end);
+    if (this.linked(callee)) throw unsupported("optional chains calling 'Weak' methods", callee);
+    if (e.args.length > 0) throw new CompileError("E0504", "'upgrade' takes no arguments", e.start, e.end);
+    return { type: this.typing.unionType([this.typing.sharedType(this.typing.rec(t).of, "Rc"), "null"]), what: "'upgrade'" };
   }
 
   // `s.f` on a shared value: an interior-mutable field is borrowed where it lives, unlocked,
   // since it changes only through its own methods; any other is copied out under the lock.
   private sharedField(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, t: SharedType): Type {
     if (this.linked(e)) throw unsupported("optional chains through shared values", e);
+    if (this.typing.rec(t).which === "Weak") throw new CompileError("E0502", `a 'Weak' reaches its value only through 'upgrade()', which gives an 'Rc' while one is left, as in 'const p = ${this.placeText(this.bare(e.object))}.upgrade()'`, e.start, e.end);
     const inner = this.typing.lower(this.typing.rec(t).of);
     const ir = this.recOf(inner);
     if (ir?.kind === "class") this.ctx.classOf(inner as ClassType);
@@ -4027,7 +4099,7 @@ export class Expressions implements Union {
   // gives what the callback gives; an RwLock's `read` lends it read-only, beside other readers.
   // A closure can't return a reference, so nothing it gives borrows from the value once the
   // lock is released.
-  private lockCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, sharing = false): { type: Type; what: string } {
+  private lockCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, sharing = false, counting = false): { type: Type; what: string } {
     const method = callee.name;
     const which = this.typing.rec(t).which;
     if (method !== "update" && !(method === "read" && which === "RwLock")) {
@@ -4042,6 +4114,7 @@ export class Expressions implements Union {
     const signature = this.typing.functionType(["value"], [held], "void");
     this.typing.lockCallbacks.set(signature, method);
     if (sharing) this.typing.sharedCallbacks.add(signature);
+    if (counting) this.typing.rcCallbacks.add(signature);
     this.expect(callback, signature);
     const c = this.recOf(this.value(callback));
     if (c?.kind !== "closure" || c.params.length > 1) throw new CompileError("E0506", `'${method}' passes its callback a '${this.typing.show(held)}'`, callback.start, callback.end);
@@ -4052,6 +4125,7 @@ export class Expressions implements Union {
   // `await p`: the future runs to completion, the async function stopping while it is pending,
   // and gives its value, or raises its error as a call would. It moves into the await.
   private awaited(this: Mut<this>, e: Extract<Expr, { kind: "unary" }>): Type {
+    if (this.ctx.locked && this.ctx.counting) throw new CompileError("E0304", `an Rc's '${this.ctx.locked}' callback can't 'await': the value stays marked as ${this.ctx.locked === "read" ? "read" : "changed"} until the callback returns, and code running meanwhile would find it so; finish the ${this.ctx.locked}, then await`, e.start, e.end);
     if (this.ctx.locked) throw new CompileError("E0304", `'${this.ctx.locked}' holds its lock while the callback runs, so the callback can't 'await': every task needing the lock would wait too; finish the ${this.ctx.locked}, then await`, e.start, e.end);
     if (!this.ctx.async || this.ctx.syncMain) throw new CompileError("E0301", "'await' can only be used inside an 'async' function", e.start, e.end);
     if (!this.ctx.awaitable.has(e)) throw new CompileError("E0801", "'await' inside an expression isn't supported yet; give its value a name first, as in 'const x = await ...;'", e.start, e.end);
@@ -4119,13 +4193,14 @@ export class Expressions implements Union {
   }
 
   // What keeps a value from moving to another thread: a reference, which borrows from the
-  // thread that made it, a raw pointer, which nothing checks, or a Cell, which changes unlocked.
+  // thread that made it, a raw pointer, which nothing checks, a Cell, which changes unlocked, or
+  // an Rc or a Weak, whose counts do.
   private unsent(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
     // A type holding itself is looked into once.
     if (typeof t === "string" || seen.has(t)) return undefined;
     seen.add(t);
     const r = this.typing.rec(t);
-    if (r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "dyn" && this.typing.borrowing.has(r.of))) return t;
+    if (r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "shared" && r.which !== "shared") || (r.kind === "dyn" && this.typing.borrowing.has(r.of))) return t;
     // A Rust type is Send, which the shim asserts.
     if (rustClassOf(this.typing, t)) return undefined;
     const parts = r.kind === "interior" ? [r.of] : r.kind === "future" || r.kind === "generator" ? r.params.map((f) => f.type)
@@ -4816,7 +4891,7 @@ export class Expressions implements Union {
         const lr = this.recOf(local.type);
         const held = lr?.kind === "ref" ? lr.to : local.type;
         if (this.ctx.sharing && local.param && !this.ctx.exprsState.objects.has(e) && this.typing.interiorMutable(held)) {
-          throw new CompileError("E0304", `inside a shared value's 'update', use '${e.name}' only through its fields: other tasks borrow its interior-mutable parts without the lock, and another name for it could replace them`, e.start, e.end);
+          throw new CompileError("E0304", this.ctx.counting ? `inside an Rc's 'update', use '${e.name}' only through its fields: its interior-mutable parts are borrowed where they live, and another name for it could replace them` : `inside a shared value's 'update', use '${e.name}' only through its fields: other tasks borrow its interior-mutable parts without the lock, and another name for it could replace them`, e.start, e.end);
         }
         const read = this.ctx.narrowed(local);
         // A JsValue narrowed by `typeof` to one kind of value is read out of JS, as a new value
@@ -5114,6 +5189,9 @@ export class Expressions implements Union {
         let list = e.args ?? [];
         if (e.callee.kind === "ident" && INTERIORS.has(e.callee.name) && !this.ctx.lookup(e.callee.name) && !this.classes.has(e.callee.name)) {
           return this.interiorNew(e, e.callee.name as InteriorRecord["which"], list);
+        }
+        if (e.callee.kind === "ident" && (e.callee.name === "Rc" || e.callee.name === "Weak") && !this.ctx.lookup(e.callee.name) && !this.classes.has(e.callee.name)) {
+          return this.countedNew(e, e.callee.name, list);
         }
         if (e.callee.kind === "ident" && (e.callee.name === "Semaphore" || e.callee.name === "Channel") && !this.ctx.lookup(e.callee.name) && !this.classes.has(e.callee.name)) {
           return this.blockNew(e, e.callee.name, list);
@@ -5536,6 +5614,7 @@ export class Expressions implements Union {
     if (r?.kind === "class") return `a class compares through 'equals(other: Ref<this>): boolean', which '${r.name}' doesn't have; add one, or '@derive(Eq)'`;
     if (r?.kind === "variant") return "an enum holding values compares when it has '@derive(Eq)'";
     if (r?.kind === "map") return `a ${r.set ? "Set" : "Map"} isn't compared by value; compare its entries`;
+    if (r?.kind === "shared" && r.which === "Rc") return "it has no value equality; 'Rc.ptrEq(a, b)' tells whether two Rcs share one value";
     return "it has no value equality";
   }
 
@@ -6287,10 +6366,12 @@ export class Expressions implements Union {
       const holder = this.types.get(root.object);
       const referred = typeof holder !== "string" && this.recOf(holder)?.kind === "ref" ? this.typing.rec(holder as RefType).to : holder;
       if (typeof referred !== "string" && this.recOf(referred)?.kind === "shared") {
-        throw new CompileError("E0304", `cannot ${action} '${this.placeText(target)}' because '${this.placeText(this.bare(root.object))}' is shared between threads; change it inside '${this.placeText(this.bare(root.object))}.update(...)'`, target.start, target.end);
+        const why = (this.typing.rec(referred as SharedType)).which === "shared" ? "is shared between threads" : "is an 'Rc', whose value every clone of it reads";
+        throw new CompileError("E0304", `cannot ${action} '${this.placeText(target)}' because '${this.placeText(this.bare(root.object))}' ${why}; change it inside '${this.placeText(this.bare(root.object))}.update(...)'`, target.start, target.end);
       }
       if (this.ctx.sharing && this.typing.interiorMutable(this.types.get(root)!) && this.isParamPath(root)) {
-        throw new CompileError("E0304", `cannot ${action} '${this.placeText(target)}' inside 'update': other tasks borrow '${this.placeText(root)}' without the lock, so it changes only through its own methods`, target.start, target.end);
+        const why = this.ctx.counting ? `'${this.placeText(root)}' is borrowed where it lives, outside 'update'` : `other tasks borrow '${this.placeText(root)}' without the lock`;
+        throw new CompileError("E0304", `cannot ${action} '${this.placeText(target)}' inside 'update': ${why}, so it changes only through its own methods`, target.start, target.end);
       }
       if (typeof holder !== "string" && this.recOf(holder)?.kind === "ref" && this.typing.rec(holder as RefType).mutable) throughMut = true;
       else if (typeof holder !== "string" && this.recOf(holder)?.kind === "ref") {
@@ -6305,7 +6386,8 @@ export class Expressions implements Union {
       const whole = this.types.get(root)!;
       const wr = this.recOf(whole);
       if (this.typing.interiorMutable(wr?.kind === "ref" ? wr.to : whole)) {
-        throw new CompileError("E0304", `cannot ${action} '${this.placeText(target)}' as a whole inside 'update': other tasks borrow its interior-mutable fields without the lock; change its other fields one by one`, target.start, target.end);
+        const why = this.ctx.counting ? "its interior-mutable fields are borrowed where they live, outside 'update'" : "other tasks borrow its interior-mutable fields without the lock";
+        throw new CompileError("E0304", `cannot ${action} '${this.placeText(target)}' as a whole inside 'update': ${why}; change its other fields one by one`, target.start, target.end);
       }
     }
     if (root.kind === "this" || root.kind === "super") return this.changesThis(path, action, target);
@@ -6333,7 +6415,7 @@ export class Expressions implements Union {
     if (reason) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
     const blocker = this.unsent(held);
     if (blocker) {
-      const why = typeof blocker !== "string" && this.typing.rec(blocker).kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made";
+      const why = typeof blocker !== "string" && this.typing.rec(blocker).kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made";
       throw new CompileError("E0303", `a '${this.typing.show(to)}' may cross to another thread, so it can't hold a '${this.typing.show(blocker)}', which ${why}`, e.start, e.end);
     }
     // A Dyn of a generic interface made in a generic body is keyed as codegen finds it, lowered.

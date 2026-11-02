@@ -964,18 +964,21 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return narrow;
   }
 
-  // Gives up a shared value's count; the last drops the value and frees the block.
+  // Gives up a shared value's count; the last drops the value and frees the block. An Rc's last
+  // strong count gives up the strongs' weak count instead, which frees it once no Weak is left.
   function dropShared(t: SharedType) {
+    const which = typing.rec(t).which;
+    if (which === "Weak") return void emit("call void @fsh_rt_weak_release(ptr %v)");
     const [last, held, at, value] = [temp(), temp(), temp(), temp()];
     const [free, done] = [label(), label()];
-    emit(`${last} = call i32 @fsh_rt_shared_release(ptr %v)`);
+    emit(`${last} = call i32 @fsh_rt_${which === "Rc" ? "rc" : "shared"}_release(ptr %v)`);
     emit(`${held} = icmp ne i32 ${last}, 0`);
     emit(`br i1 ${held}, label %${free}, label %${done}`);
     startBlock(free);
     emit(`${at} = getelementptr ${sharedBlock(t)}, ptr %v, i32 0, i32 1, i32 1`);
     emit(`${value} = load ${llvm(typing.rec(t).of)}, ptr ${at}`);
     dispose(value, typing.rec(t).of);
-    emit("call void @fsh_rt_free(ptr %v)");
+    emit(which === "Rc" ? "call void @fsh_rt_weak_release(ptr %v)" : "call void @fsh_rt_free(ptr %v)");
     emit(`br label %${done}`);
     startBlock(done);
   }
@@ -990,6 +993,17 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     panicIf(held, `this lock is already held by ${holder} running here; use the value its callback is given`, at);
     emit(`${poisoned} = icmp eq i32 ${taken}, 2`);
     panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
+  }
+
+  // Marks an Rc's value read or changed for a callback, panicking where the two would overlap.
+  function borrowRc(word: string, at: Span, reading: boolean) {
+    const [taken, changing, read] = [temp(), temp(), temp()];
+    emit(`${taken} = call i32 @fsh_rt_rc_${reading ? "read" : "write"}(ptr ${word})`);
+    emit(`${changing} = icmp eq i32 ${taken}, 1`);
+    panicIf(changing, reading ? "this Rc's value is being changed by an `update` running here, so it can't be read until that returns" : "this Rc's value is already being changed by an `update` running here; use the value its callback is given", at);
+    if (reading) return;
+    emit(`${read} = icmp eq i32 ${taken}, 2`);
+    panicIf(read, "this Rc's value is being read by a `read` or a method running here, so `update` can't change it until that returns", at);
   }
 
   // 'AbortSignal.any's handles and their count: a literal's, lent one by one, in a stack array,
@@ -2602,28 +2616,48 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return name;
   }
 
-  // A shared value's block: its count, then what a Lock of its value would be.
+  // A shared value's block: its count, an Rc's its strong and weak counts, then what a Lock of
+  // its value would be.
   function sharedBlock(t: SharedType): string {
-    return `{ i64, ${llvm(typing.interiorType("Lock", typing.rec(t).of))} }`;
+    return `{ ${typing.rec(t).which === "shared" ? "i64" : "[2 x i64]"}, ${llvm(typing.interiorType("Lock", typing.rec(t).of))} }`;
   }
 
-  // `shared(v)`: a new block with one count, holding v.
-  function sharedNew(e: Extract<Expr, { kind: "call" }>): string {
-    const t = valueType(e) as SharedType;
-    const v = owned(e.args[0]!);
+  // `shared(v)` or `new Rc(v)`: a new block with one count, holding v. `new Weak<T>()` has none.
+  function sharedNew(e: Extract<Expr, { kind: "call" | "new" }>, t: SharedType): string {
+    if (typing.rec(t).which === "Weak") return "null";
+    const v = owned(e.args![0]!);
     const [end, size, block, at] = [temp(), temp(), temp(), temp()];
     emit(`${end} = getelementptr ${sharedBlock(t)}, ptr null, i64 1`);
     emit(`${size} = ptrtoint ptr ${end} to i64`);
-    emit(`${block} = call ptr @fsh_rt_shared_new(i64 ${size})`);
+    emit(`${block} = call ptr @fsh_rt_${typing.rec(t).which === "Rc" ? "rc" : "shared"}_new(i64 ${size})`);
     emit(`${at} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 1`);
     emit(`store ${llvm(typing.rec(t).of)} ${v}, ptr ${at}`);
     return block;
   }
 
+  // `rc.downgrade()`, a Weak sharing the block, and `w.upgrade()`, an Rc of it while its value
+  // is alive, or else null.
+  function countedCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string {
+    const block = temp();
+    emit(`${block} = load ptr, ptr ${receiver(callee.object)}`);
+    if (callee.name === "downgrade") {
+      emit(`call void @fsh_rt_weak_retain(ptr ${block})`);
+      return block;
+    }
+    const option = types.get(e) as UnionType;
+    const [rc, alive, result] = [temp(), temp(), temp()];
+    emit(`${rc} = call ptr @fsh_rt_rc_upgrade(ptr ${block})`);
+    emit(`${alive} = icmp ne ptr ${rc}, null`);
+    const some = convert(rc, typing.rec(option).members.find((m) => m !== "null")!, option);
+    const none = convert("zeroinitializer", "null", option);
+    emit(`${result} = select i1 ${alive}, ${llvm(option)} ${some}, ${llvm(option)} ${none}`);
+    return result;
+  }
+
   // `update`: the callback runs with a pointer to what the Lock holds, between taking and
   // releasing its word; an RwLock's `read` or `update` takes its word's read or write side.
   // The callback's captures are made before the lock is taken.
-  function lockUpdate(e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string): string | undefined {
+  function lockUpdate(e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string, rc = false): string | undefined {
     const callback = e.args[0]!;
     // The callback's value lives in a slot it is called through; what it leaves of its captures
     // is dropped after it, as at any closure's call.
@@ -2632,12 +2666,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     emit(`store ${llvm(made)} ${owned(callback)}, ptr ${env}`);
     const leftovers = needsDrop(made) ? () => dispose(unstash(env, made), made) : undefined;
     const reading = e.callee.kind === "member" && e.callee.name === "read";
-    takeLock(at, e, typing.rec(t).which === "Lock" ? "fsh_rt_lock" : reading ? "fsh_rt_read_lock" : "fsh_rt_write_lock");
+    if (rc) borrowRc(at, e, reading);
+    else takeLock(at, e, typing.rec(t).which === "Lock" ? "fsh_rt_lock" : reading ? "fsh_rt_read_lock" : "fsh_rt_write_lock");
     const inside = temp();
     emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = callOf(callback)!;
     const result = invoke(target, env, bodyOf(target).params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
-    emit(`call void @${reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
+    emit(`call void @${rc ? (reading ? "fsh_rt_rc_read_end" : "fsh_rt_rc_write_end") : reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
     if (result && !types.has(e) && needsDrop(target.returns)) pending.push({ v: result, type: target.returns });
     return result;
   }
@@ -3724,7 +3759,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     } else if (r.kind === "recursive") {
       result = kind === "drop" ? dropBlock(type as RecursiveType) : copyBlock(type as RecursiveType);
     } else if (r.kind === "shared") {
-      if (kind === "copy") emit("call void @fsh_rt_shared_retain(ptr %v)");
+      if (kind === "copy") emit(`call void @fsh_rt_${{ shared: "shared", Rc: "rc", Weak: "weak" }[typing.rec(type as SharedType).which]}_retain(ptr %v)`);
       else dropShared(type as SharedType);
     } else if (r.kind === "dyn") {
       // Through the vtable: its drop frees the block; its copy gives a new block. A Dyn moved
@@ -6856,7 +6891,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       if (e.callee.kind === "ident" && e.callee.name === "yieldNow") return "zeroinitializer";
       if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!), e);
       if (e.callee.kind === "ident" && e.callee.name === "shared" && !locals.has(e.callee)) {
-        const made = sharedNew(e);
+        const made = sharedNew(e, valueType(e) as SharedType);
         if (!types.has(e)) pending.push({ v: made, type: valueType(e) });
         return made;
       }
@@ -6914,17 +6949,26 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (!types.has(e)) pending.push({ v: made, type: "string" });
         return made;
       }
+      // `Rc.ptrEq(a, b)` is given each Rc borrowed, a pointer to its handle.
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "Rc" && !types.has(e.callee.object)) {
+        const [a, b, result] = [temp(), temp(), temp()];
+        emit(`${a} = load ptr, ptr ${value(e.args[0]!)}`);
+        emit(`${b} = load ptr, ptr ${value(e.args[1]!)}`);
+        emit(`${result} = icmp eq ptr ${a}, ${b}`);
+        return result;
+      }
       if (e.callee.kind === "member" && recOf(valueType(e.callee.object))?.kind === "pointer") return pointerCall(e, e.callee);
       if (e.callee.kind === "member" && recOf(referent(valueType(e.callee.object)))?.kind === "interior") return atomicCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && recOf(referent(valueType(e.callee.object)))?.kind === "block") return blockCall(e, e.callee);
       if (dynCalls.has(e)) return dynCall(e, e.callee);
-      if (e.callee.kind === "member" && e.callee.name === "update" && recOf(referent(valueType(e.callee.object)))?.kind === "shared") {
+      if (e.callee.kind === "member" && (e.callee.name === "downgrade" || e.callee.name === "upgrade") && recOf(referent(valueType(e.callee.object)))?.kind === "shared") return countedCall(e, e.callee);
+      if (e.callee.kind === "member" && (e.callee.name === "update" || e.callee.name === "read") && recOf(referent(valueType(e.callee.object)))?.kind === "shared") {
         const t = referent(valueType(e.callee.object)) as SharedType;
         const block = temp();
         emit(`${block} = load ptr, ptr ${receiver(e.callee.object)}`);
         const lock = temp();
         emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
-        return lockUpdate(e, typing.interiorType("Lock", typing.rec(t).of), lock);
+        return lockUpdate(e, typing.interiorType("Lock", typing.rec(t).of), lock, typing.rec(t).which === "Rc");
       }
       // `BigInt(x)`: a new bigint of an integer, extended to 128 bits by its sign.
       if (e.callee.kind === "ident" && e.callee.name === "BigInt" && !calls.has(e)) {
@@ -7429,13 +7473,20 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   // A shared value's plain field, copied out while its lock is held.
+  // An Rc's field is copied without its word: only this thread reaches it, and between two of its
+  // steps an `update` running here has left the value whole.
   function copyOut(e: Extract<Expr, { kind: "member" }>): string {
     const [block, t, at] = sharedField(e);
+    const type = types.get(e)!;
+    if (typing.rec(t).which === "Rc") {
+      const read = temp();
+      emit(`${read} = load ${llvm(type)}, ptr ${at}`);
+      return copied(read, type);
+    }
     const lock = temp();
     emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
     takeLock(lock, e);
     const read = temp();
-    const type = types.get(e)!;
     emit(`${read} = load ${llvm(type)}, ptr ${at}`);
     const copy = copied(read, type);
     emit(`call void @fsh_rt_unlock(ptr ${lock})`);
@@ -9171,6 +9222,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (newed?.kind === "interior") return interiorNew(e, types.get(e) as InteriorType);
         if (newed?.kind === "block") return blockNew(e, types.get(e) as BlockType);
         if (newed?.kind === "map") return mapNew(types.get(e) as MapType, e.args?.[0]);
+        if (newed?.kind === "shared") return sharedNew(e, types.get(e) as SharedType);
         // A Rust type's constructor gives the handle to the value it boxed.
         if (bodyOf(callOf(e)!).rust) return invoke(callOf(e)!, undefined, argValues(e.args ?? [], callOf(e)!), e)!;
         // The constructor fills in a slot, which then holds the new instance. The slot starts

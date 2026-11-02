@@ -474,6 +474,10 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       if (t.args.length !== 1) throw new CompileError("E0116", "'shared' takes the type it holds, like 'shared<State>'", t.start, t.end);
       return shareable(this.typing, this.resolveType(t.args[0]!), t);
     }
+    if (t.name === "Rc" || t.name === "Weak") {
+      if (t.args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it holds, like '${t.name}<Node>'`, t.start, t.end);
+      return counted(this.typing, this.resolveType(t.args[0]!), t.name, t);
+    }
     // A `JoinHandle<T>` written out is one whose task can't throw.
     if (t.name === "JoinHandle") {
       if (t.args.length !== 1) throw new CompileError("E0116", "'JoinHandle' takes the type its task gives, like 'JoinHandle<i64>'", t.start, t.end);
@@ -1096,10 +1100,21 @@ export function shareable(typing: Typing, given: Type, at: Span): SharedType {
   });
   if (typing.holdsHandle(held)) throw new CompileError("E0303", "a 'shared' value can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only", at.start, at.end);
   if (blocker) {
-    const why = kindOf(blocker) === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from one place, which other threads can't keep alive";
+    const why = kindOf(blocker) === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from one place, which other threads can't keep alive";
     throw new CompileError("E0303", `a 'shared' value is used from many threads at once, so it can't hold a '${typing.show(blocker)}', which ${why}`, at.start, at.end);
   }
   return typing.sharedType(of);
+}
+
+// An `Rc<T>` or `Weak<T>`: one thread's counted handle, whose T every clone reads in place, so
+// it can't borrow from one of them or hold a task's result one of them could await.
+export function counted(typing: Typing, given: Type, which: "Rc" | "Weak", at: Span): SharedType {
+  unboxedClosure(typing, given, at);
+  const of = typing.heldArgument(given);
+  abstractless(typing, of, `an '${which}'`, at);
+  if (typing.holdsRef(of)) throw new CompileError("E0801", `an '${which}' can't hold a reference ('${typing.show(of)}'), which borrows from one place that every clone would outlive`, at.start, at.end);
+  if (typing.holdsHandle(typing.lower(of))) throw new CompileError("E0303", `an '${which}' can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only`, at.start, at.end);
+  return typing.sharedType(of, which);
 }
 
 // A `Channel<T>` carrying values from one task to another: nothing in them borrows, points
@@ -1121,15 +1136,19 @@ export function channel(typing: Typing, given: Type, at: Span): BlockType {
     blocker = u;
     return true;
   });
-  if (blocker) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made"}`, at.start, at.end);
+  if (blocker) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made"}`, at.start, at.end);
   return typing.blockType("Channel", of);
 }
 
-// Whether a part of a value can't cross to another thread: a reference, a raw pointer or a Cell.
+// Why an Rc or a Weak can't cross to another thread.
+export const COUNTED_UNLOCKED = "counts its owners without atomics, so only one thread may use it; use a 'shared' value instead";
+
+// Whether a part of a value can't cross to another thread: a reference, a raw pointer, a Cell,
+// an Rc or a Weak.
 function unlocked(typing: Typing, u: Type): boolean {
   if (typeof u === "string") return false;
   const r = typing.rec(u);
-  return r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell");
+  return r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "shared" && r.which !== "shared");
 }
 
 // A key a Map or a Set hashes: a string or a sized integer, or a union of literals of one of
@@ -1163,7 +1182,7 @@ export function collection(typing: Typing, key: Type, value: Type, set: boolean,
   return typing.mapType(key, typing.stored(typing.heldArgument(value)), set);
 }
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {
