@@ -175,6 +175,13 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
       return eachMember(a, aType as UnionType, "boolean", (part, m) => equals(part, m, b, bType));
     }
     if (br?.kind === "union") return equals(b, bType, a, aType);
+    // A reference held in a value is compared through, as a reference on its own is.
+    if (ar?.kind === "ref") {
+      const loaded = temp();
+      emit(`${loaded} = load ${llvm(ar.to)}, ptr ${a}`);
+      return equals(loaded, ar.to, b, bType);
+    }
+    if (br?.kind === "ref") return equals(b, bType, a, aType);
     const literal = (t: Type) => {
       const r = typeof t === "string" ? undefined : typing.rec(t);
       return r?.kind === "literal" ? r : undefined;

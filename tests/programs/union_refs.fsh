@@ -524,3 +524,90 @@ function main() {
 }
 // expect: 1
 // expect: 1
+// case: union_refs_tagged_shorthand
+// A shorthand property lends its variable to the member the tag picks.
+class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+type N = { of: "e"; node: Ref<Expr> } | { of: "n"; n: i64 }
+function main() {
+  const node = new Expr("x")
+  const a: N = { of: "e", node }
+  if (a.of === "e") console.log(a.node.text)
+}
+// expect: x
+// case: union_refs_tagged_shorthand_change
+class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+type N = { of: "e"; node: Ref<Expr> } | { of: "n"; n: i64 }
+function main() {
+  let node = new Expr("x")
+  const a: N = { of: "e", node }
+  node = new Expr("y")
+  if (a.of === "e") console.log(a.node.text)
+}
+// error: cannot change 'node' while 'a' borrows 'node' and is used later
+// case: union_refs_equality
+// Values holding references compare what the references point to, as a reference on its own does.
+@derive(Eq)
+class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+type N = { of: "e"; node: Ref<Expr> } | { of: "n"; n: i64 }
+type R = { r: Ref<Expr> }
+function main() {
+  const e = new Expr("x")
+  const same = new Expr("x")
+  const other = new Expr("y")
+  const a: N = { of: "e", node: e }
+  const b: N = { of: "e", node: e }
+  const c: N = { of: "e", node: same }
+  const d: N = { of: "e", node: other }
+  console.log(a === b, a === c, a === d, a !== d)
+  const k = 5
+  const k2 = 5
+  const o1: R = { r: e }
+  const o2: R = { r: same }
+  const i1: { n: Ref<i64> } = { n: k }
+  const i2: { n: Ref<i64> } = { n: k2 }
+  console.log(o1 === o2, i1 === i2)
+}
+// expect: true true false true
+// expect: true true
+// case: union_refs_tagged_no_tag
+class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+type N = { node: Ref<Expr>; k: i64 } | { node: Ref<Expr>; j: string }
+function main() {
+  const e = new Expr("o")
+  const a: N = { node: e, k: 1 }
+}
+// error: can't choose which member of '{ j: string; node: Ref<Expr> } | { k: i64; node: Ref<Expr> }' this object goes into: a member holding references is chosen by its literal fields
+// case: union_refs_tagged_tag_not_literal
+class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+type N = { of: "e"; node: Ref<Expr> } | { of: "n"; n: i64 }
+function main() {
+  const e = new Expr("x")
+  const t: "e" = "e"
+  const a: N = { of: t, node: e }
+}
+// error: can't choose which member of

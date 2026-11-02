@@ -6080,7 +6080,14 @@ export class Expressions implements Union {
       }
       const member = e.kind === "object" ? this.lentMember(e, to as UnionType) : undefined;
       if (member) type = this.lendFields(e as Extract<Expr, { kind: "object" }>, member, message);
-      intoUnion(e, type, to as UnionType, message, this);
+      const lending = e.kind === "object" && !member && tr.members.some((m) => this.recOf(m)?.kind === "object" && this.typing.holdsRef(m));
+      try {
+        intoUnion(e, type, to as UnionType, message, this);
+      } catch (err) {
+        // A literal that could have lent to a member holding references fails for want of a tag.
+        if (!lending || !(err instanceof CompileError) || err.code !== "E0101") throw err;
+        throw new CompileError("E0101", `can't choose which member of '${this.typing.show(to)}' this object goes into: a member holding references is chosen by its literal fields, like 'of: "a"', so give each member one and write its value here as a literal`, e.start, e.end);
+      }
       return;
     }
     // A literal type takes exactly its value, so only a literal expression of that value fits.
