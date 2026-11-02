@@ -163,6 +163,7 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   for (const m of typing.rec(trait).methods) {
     const found = t?.kind === "interface" ? t.methods.find((x) => x.name === m.name) : undefined;
     if (found) {
+      if (found.omittable && !m.omittable) return `method '${m.name}' is optional in type '${typing.show(type)}' but required in type '${typing.rec(trait).name}'`;
       // Generic methods are compared with their type parameters standing for each other.
       let swap = new TypeMap<Type, Type>();
       if (m.generic || found.generic) {
@@ -177,6 +178,8 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
       continue;
     }
     const method = c ? inherited(members.arenas, c, "methods", m.name) : undefined;
+    // An optional method may be left out, but not stood in for by a field.
+    if (!method && m.omittable && (typeof type === "string" || !typing.field(type, m.name))) continue;
     // An object's fields hold values, and a callable held in one isn't a method yet.
     if (t?.kind === "object") return `${missing("method", m.name)}; an object can't supply a method yet, so use a class`;
     if (!method || method.access !== "public") return missing("method", m.name);

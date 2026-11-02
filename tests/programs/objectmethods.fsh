@@ -86,9 +86,11 @@ type T = { get(): i64 };
 class A implements T {}
 function main(): void {}
 // case: objectmethods_optional
-// error: optional methods are not supported yet
+// expect: 1
 type T = { a: i64; get?(): i64 };
-function main(): void {}
+class A { a: i64 = 1; }
+function f(x: T): i64 { return x.a; }
+function main(): void { console.log(f(new A())); }
 // case: objectmethods_duplicate
 // error: duplicate member 'a'
 function f(x: { a: i64; a(): i64 }): void {}

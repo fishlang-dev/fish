@@ -6894,7 +6894,9 @@ export class Expressions implements Union {
       return { methods: [body.id], fields: [], clone: fixed ? undefined : "copy" };
     }
     const methods = this.typing.rec(this.typing.rec(to).of).methods.map((m) => {
-      const body = inherited(this.arenas, c!, "methods", m.name)!;
+      const body = c && inherited(this.arenas, c, "methods", m.name);
+      // An optional method the type leaves out has an empty slot.
+      if (!body) return undefined;
       // A generic method has no one function for the table; calls of it through a Dyn are refused.
       if (m.generic) return undefined;
       if (body.params.some((p) => p.comptime)) throw new CompileError("E1102", `'${this.typing.show(type)}' can't be a '${this.typing.show(to)}': its method '${m.name}' takes a comptime parameter, so it has a version per value and no one method a Dyn could call`, e.start, e.end);
