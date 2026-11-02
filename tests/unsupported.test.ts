@@ -153,16 +153,35 @@ for (const [expr, what, part] of PROPERTIES) {
 }
 
 // Operators that parse but have no meaning yet.
-for (const expr of ["a in b", "typeof 1"]) {
-  test(expr, () => {
-    const src = `function main() {\n  let x = ${expr}\n}`;
-    const op = expr.match(/\bin\b|typeof/)![0];
-    const start = src.indexOf(expr);
-    expect(() => checkSource(src)).toThrow(expect.objectContaining({
-      message: `operator '${op}' is not supported yet`, start, end: start + expr.length,
-    }));
+test("typeof 1", () => {
+  const src = "function main() {\n  let x = typeof 1\n}";
+  const start = src.indexOf("typeof 1");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "operator 'typeof' is not supported yet", start, end: start + "typeof 1".length,
+  }));
+});
+
+// `in` takes a key written as a string literal, and an object, an instance, or a union of them.
+const IN: [string, string, string][] = [
+  ["const k = \"a\"\n  const o = { a: 1 }\n  let x = k in o", "k", "'in' tests a key written as a string literal, as in '\"name\" in v'; for a key known only at run time, keep the keys in a Set or the values in a Map"],
+  ["const o: { a: i64 } | null = null\n  let x = \"a\" in o", "o", "'in' tests an object or a class instance for a key, and a 'null' has none to test; narrow the value to an object first"],
+  ["const xs = [1]\n  let x = \"length\" in xs", "xs", "'in' tests an object or a class instance for a key, and a 'i64[]' has none to test; narrow the value to an object first"],
+];
+for (const [body, part, message] of IN) {
+  test(`in: ${part}`, () => {
+    const src = `function main() {\n  ${body}\n}`;
+    const start = src.lastIndexOf(part);
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({ message, start, end: start + part.length }));
   });
 }
+
+test("in on a Dyn", () => {
+  const src = "interface S { a(): i64 }\nclass C { a(): i64 { return 1 } }\nfunction f(s: Dyn<S>): boolean {\n  return \"a\" in s\n}\nfunction main() {\n  print(f(new C()))\n}";
+  const start = src.indexOf("\"a\" in s");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({
+    message: "a 'Dyn<S>' keeps no record of its value's class, so 'in' can't test it; add a method to the interface that says", start, end: start + "\"a\" in s".length,
+  }));
+});
 
 // Parentheses aren't part of the node, so the span covers what is inside them.
 test("(1, 2)", () => {
