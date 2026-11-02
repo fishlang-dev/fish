@@ -947,6 +947,32 @@ function main() {
   console.log(copy.size, SQUARES.size);
   console.log(OPS);
 }
+// case: comptime_map_float_keys
+// expect: Map(3) { 0 => 'y', NaN => 'b', 1.5 => 'c' } 3 b y true
+// expect: Set(2) { 0, 2.5 } true
+// expect: [ 0, NaN, 1.5 ]
+// Float keys made while compiling compare as at run time: every NaN is one key, and -0 is 0.
+function table(): Map<number, string> {
+  const nan: number = 0.0 / 0.0;
+  let m = new Map<number, string>();
+  m.set(-0.0, "z");
+  m.set(nan, "a");
+  m.set(-nan, "b");
+  m.set(0, "y");
+  m.set(1.5, "c");
+  return m;
+}
+function members(): Set<f32> {
+  return new Set<f32>([-0.0, 0, 2.5, 2.5]);
+}
+const T = comptime table();
+const S = comptime members();
+function main() {
+  const nan: number = 0.0 / 0.0;
+  console.log(T, T.size, T.get(nan), T.get(0), T.has(-0.0));
+  console.log(S, S.has(0));
+  console.log(comptime table().keys());
+}
 // case: comptime_map_const_is_constant
 // error: 'set' changes its Map, so call it on a variable or a field
 const M = new Map<string, i64>([["a", 1]]);
