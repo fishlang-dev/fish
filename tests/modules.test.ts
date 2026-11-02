@@ -176,16 +176,23 @@ test("no module that calls back into its host keeps state of its own", () => {
 });
 
 // Fish checks a file with everything it imports, so a checker file reaching the CLI, the package
-// manager or codegen fails on their imports before its own code.
-test("the checker's files import no CLI, package, cargo-shim or codegen module", () => {
+// manager or codegen fails on their imports before its own code. A module joining this list is a
+// choice: it is checked with the checker from then on.
+const CHECKER_REACHES = [
+  "arenas", "ast", "check", "classes", "compilation", "comptime", "declarations", "defaults", "diag", "enums", "expressions", "flow", "generics", "ids",
+  "interfaces", "keys", "lexer", "locals", "match", "moves", "narrow", "nodes", "operators", "overloads", "parseargs", "parser", "patterns", "program",
+  "quote", "rebuild", "regex", "registry", "resolve", "rust", "sizes", "std", "suggest", "typefns", "types", "typing", "unions", "unsupported", "values",
+  "walk", "warnings",
+];
+test("the checker's files reach only the modules meant to be checked with them", () => {
   const reached = new Set<string>();
-  const visit = (file: string) => {
-    if (reached.has(file)) return;
-    reached.add(file);
-    const text = readFileSync(join(import.meta.dir, "..", "src", file), "utf8");
-    for (const m of text.matchAll(/^(?:import|export)[^;]*?from "\.\/([^"]+)"/gms)) visit(m[1]!);
+  const visit = (name: string) => {
+    if (reached.has(name)) return;
+    reached.add(name);
+    const text = readFileSync(join(import.meta.dir, "..", "src", `${name}.ts`), "utf8");
+    // `from "./m.ts"`, a side-effect `import "./m.ts"`, and `import("./m.ts")`, dynamic or in a type.
+    for (const m of text.matchAll(/(?:\bfrom|\bimport)\s*\(?\s*["']\.\/([\w.-]+)\.ts["']/g)) visit(m[1]!);
   };
-  CHECKER.forEach((name) => visit(`${name}.ts`));
-  const outside = ["main.ts", "modules.ts", "dependencies.ts", "manifest.ts", "mathlib.ts", "rustshim.ts", "codegen.ts", "layout.ts", "runtime.ts", "native.ts", "arithmetic.ts"];
-  expect(outside.filter((f) => reached.has(f))).toEqual([]);
+  CHECKER.forEach(visit);
+  expect([...reached].sort()).toEqual(CHECKER_REACHES);
 });

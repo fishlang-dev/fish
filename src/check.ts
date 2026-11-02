@@ -335,7 +335,7 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
 // Resolves every name and gives every value expression a type. Codegen trusts the result.
 // A function body is checked when first needed, so return types can be inferred in any order.
 // Names an export can't take in C: its and C++'s keywords and the standard type names a header
-// uses. The C functions the runtime and its IR call come in as `check`'s `library`.
+// uses. The C functions the runtime and its IR call come in as `check`'s `exportsToC`.
 export const C_KEYWORDS = new Set(["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool", "true", "false", "size_t", "ptrdiff_t", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "class", "namespace", "template", "this", "new", "delete", "public", "private", "protected", "virtual", "operator", "friend", "using", "try", "catch", "throw", "typename", "explicit", "mutable", "nullptr", "decltype", "constexpr", "noexcept", "export", "and", "or", "not", "xor"]);
 
 // A program setting timers runs on the async runtime, as Node's does, so a sync `main` runs as
@@ -418,14 +418,14 @@ function macroShape(f: Func) {
   if (!f.returnType) throw new CompileError("E1103", `a macro gives the declarations it makes, so it says so, ${shape}`, f.start, f.end);
 }
 
-// A library is checked with `library` holding the names C and the Fish runtime already use, which
-// its exports can't take: it needs no `main`, and its exports cross to C.
+// A library is checked with `exportsToC` holding the names C and the Fish runtime already use,
+// which its exports can't take: it needs no `main`, and its exports cross to C.
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 // With `module`, it may be a file another imports, checked on its own, so `main` is optional.
 // An error it throws names local declarations as they were written.
-export function check(compilation: Compilation, written: Stmt[], library: ReadonlySet<string> | false = false, macros = false, module = false): Checked {
+export function check(compilation: Compilation, written: Stmt[], exportsToC: ReadonlySet<string> | false = false, macros = false, module = false): Checked {
   try {
-    const checked = checkAll(compilation, written, library, macros, module);
+    const checked = checkAll(compilation, written, exportsToC, macros, module);
     for (const w of checked.warnings) named(w, compilation.names);
     return checked;
   } catch (e) {
@@ -433,8 +433,8 @@ export function check(compilation: Compilation, written: Stmt[], library: Readon
   }
 }
 
-function checkAll(compilation: Compilation, written: Stmt[], library: ReadonlySet<string> | false, macros: boolean, module: boolean): Checked {
-  return new Checker(compilation, written, library, macros, module).run();
+function checkAll(compilation: Compilation, written: Stmt[], exportsToC: ReadonlySet<string> | false, macros: boolean, module: boolean): Checked {
+  return new Checker(compilation, written, exportsToC, macros, module).run();
 }
 
 class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost, InstanceMaker {
@@ -536,11 +536,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // The error each failed body's check gave, which a call of it gives again rather than another.
   failed = new Map<BodyId, CompileError>();
 
-  constructor(compilation: Compilation, written: Stmt[], library: ReadonlySet<string> | false, macros: boolean, module: boolean) {
+  constructor(compilation: Compilation, written: Stmt[], exportsToC: ReadonlySet<string> | false, macros: boolean, module: boolean) {
     this.compilation = compilation;
     this.written = written;
-    this.library = library !== false;
-    this.takenInC = library || new Set();
+    this.library = exportsToC !== false;
+    this.takenInC = exportsToC || new Set();
     this.macros = macros;
     this.module = module;
     this.arenas = this.compilation.arenas;

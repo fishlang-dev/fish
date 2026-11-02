@@ -35,6 +35,7 @@ export type Package = { specifier: string; dir: string; at: Span };
 export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[] };
 export type RustCrate = { dependency: RustDependency; dir: string };
 
+// Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
 // `read`: an editor's unsaved text is newer than the disk's. The program's files are noted in the
 // compilation's `files`.
 export function load(compilation: Compilation, entry: string, src: string = readFileSync(entry, "utf8"), read: (path: string) => string = (path: string) => readFileSync(path, "utf8"), fish: FishPackage[] | undefined = resolvePackages(entry, compilation.session.locking)): Loaded {

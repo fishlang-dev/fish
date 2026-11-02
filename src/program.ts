@@ -26,7 +26,6 @@ export function textAt(files: Compilation["files"], at: Span): string {
   return f && at.end - f.base <= f.src.length ? f.src.slice(at.start - f.base, at.end - f.base) : "";
 }
 
-// Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
 // Whether a build may change `fish.lock`, as `fishc build --locked` says it may not, for CI;
 // and which registry packages `fishc update` moves past their locked versions, "all" for every one.
 export type Locking = { locked: boolean; update?: Set<string> | "all" };
