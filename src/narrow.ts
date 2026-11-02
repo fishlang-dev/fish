@@ -7,9 +7,14 @@ import { NodeMap } from "./nodes.ts";
 
 // Narrowing: what a condition proves about a variable's type, for the code it guards. A union
 // narrows to the members a check leaves, and reading the variable there gives that narrower
-// type, which codegen takes out of the union. Only a variable that never changes can narrow.
+// type, which codegen takes out of the union. A field path narrows too, keyed by its root's id or
+// `this` and its field names, as `3.next.value`, until something could change it.
 
-export type Facts = Map<LocalId, Type>;
+// A binding is keyed by its id, written as a string, so both kinds of key share one table.
+export type Facts = Map<string, Type>;
+export const bindingKey = (id: LocalId): string => String(id);
+// Whether a key is a field path's, or `this` as the root of some, rather than a binding's.
+export const isPath = (key: string): boolean => !/^\d+$/.test(key);
 export type Guard = { yes: Facts; no: Facts };
 
 // What `typeof` says for a value of each type. Every sized number is "number", as in
@@ -63,11 +68,12 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // `narrows` hears whether its true and its false answers narrow, which codegen then checks.
 export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usize; type: Type; narrows(yes: boolean, no: boolean): void } | undefined;
 
-export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, LocalId>, narrowable: (l: Local) => boolean, predicate?: Predicate): Guard {
+// `path` gives the key a field path narrows under, if it may.
+export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, LocalId>, narrowable: (l: Local) => boolean, path: (e: Expr) => string | undefined, predicate?: Predicate): Guard {
   const { kindTests, typing, rewrites } = tables;
   const e = rewrites.current(written);
   const nothing: Guard = { yes: new Map(), no: new Map() };
-  const of = (x: Expr) => guard(tables, x, types, locals, narrowable, predicate);
+  const of = (x: Expr) => guard(tables, x, types, locals, narrowable, path, predicate);
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
   const proved = e.kind === "call" && predicate ? predicate(e) : undefined;
   if (proved && e.kind === "call" && e.args[proved.index]) {
@@ -103,7 +109,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     const read = name && JS_READS[name];
     const tested = types.get(test.operand);
     if (local && read && tested && typing.holdsPlainJs(tested) && narrowable(local)) {
-      const facts: Guard = { yes: new Map([[local.localId, read]]), no: new Map() };
+      const facts: Guard = { yes: new Map([[bindingKey(local.localId), read]]), no: new Map() };
       return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
     }
     if (local && tested && typing.holdsPlainJs(tested)) return nothing;
@@ -111,14 +117,16 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
   }
   for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
     // `x === null` leaves x's empty member, and `x !== null` the rest.
-    if (isEmpty(other, locals) && subject.kind === "ident") return split(subject, (m) => (m === "null" ? "yes" : "no"), e.op === "===");
+    if (isEmpty(other, locals) && (subject.kind === "ident" || subject.kind === "member")) return split(subject, (m) => (m === "null" ? "yes" : "no"), e.op === "===");
     const value = literalValue(other);
     if (value === undefined) continue;
     // `x === "up"` leaves x's member for that literal. `x.kind === "up"` leaves the members
-    // whose `kind` is that literal, and any whose `kind` might be.
-    if (subject.kind === "ident") return split(subject, (m) => (is(m, value) ? "yes" : "no"), e.op === "===");
+    // whose `kind` is that literal, and any whose `kind` might be; a field of an object or a class
+    // is a path that narrows itself. Through `?.`, an empty object has no `kind` to match.
+    if (subject.kind === "ident" || (subject.kind === "member" && path(subject) !== undefined)) return split(subject, (m) => (is(m, value) ? "yes" : "no"), e.op === "===");
     if (subject.kind === "member") {
       return split(subject.object, (m) => {
+        if (m === "null" && subject.optional) return "no";
         const kind = typeof m === "string" ? undefined : typing.fieldsOf(m).find((f) => f.name === subject.name)?.type;
         if (kind && is(kind, value)) return "yes";
         const r = kind === undefined || typeof kind === "string" ? undefined : typing.rec(kind);
@@ -138,11 +146,12 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
     return r.kind === "literal" && r.value === value;
   }
 
-  // Splits a narrowable variable's members by whether a check holds for them.
+  // Splits a narrowable variable's or field path's members by whether a check holds for them.
   function split(subject: Expr, check: (m: Type) => "yes" | "no" | "both", positive: boolean): Guard {
     const local = subject.kind === "ident" ? tables.arenas.localOf(locals.get(subject)) : undefined;
+    const key = local && narrowable(local) ? bindingKey(local.localId) : subject.kind === "member" ? path(subject) : undefined;
     const type = types.get(subject);
-    if (!local || !type || !narrowable(local)) return nothing;
+    if (key === undefined || !type) return nothing;
     // A reference narrows to a reference to fewer members; a mutable one only to a single
     // member, which it can point to inside the union.
     const t = typeof type === "string" ? undefined : typing.rec(type);
@@ -163,7 +172,7 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
       if (left.length === 0) return new Map();
       // A mutable reference can point at one member inside the union, but to several only
       // through a shared copy.
-      return new Map([[local.localId, ref ? typing.refType(typing.unionType(left), ref.mutable && left.length === 1) : typing.unionType(left)]]);
+      return new Map([[key, ref ? typing.refType(typing.unionType(left), ref.mutable && left.length === 1) : typing.unionType(left)]]);
     };
     const [yes, no] = [facts("no"), facts("yes")];
     return positive ? { yes, no } : { yes: no, no: yes };
@@ -173,6 +182,12 @@ export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>,
 // `null`, or `undefined` where no variable takes the name.
 export const isEmpty = (e: Expr, locals: NodeMap<Expr, LocalId>) => e.kind === "null" || (e.kind === "ident" && e.name === "undefined" && !locals.has(e));
 
+
+// Whether a change under `changed` reaches what `key` narrows: the same binding or path, or a path
+// below it.
+export function covers(changed: string, key: string): boolean {
+  return changed === key || (isPath(key) && (key.startsWith(`${changed}.`) || key.startsWith(`${changed}[`)));
+}
 
 // A variable either of two branches narrowed has, after them, whichever type it had.
 export function either(typing: Typing, x: Facts, y: Facts): Facts {

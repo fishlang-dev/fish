@@ -141,6 +141,12 @@ export type Context = {
   lendsWhole(l: Local, at: Expr): void;
   // Notes a read of a variable as narrowed.
   narrowRead(l: Local, at: Expr): void;
+  // A field's type where a check narrowed its path, noting the read; and a change at a path
+  // inside a binding or `this`, which forgets what was known below it.
+  narrowedField(e: Expr): Type | undefined;
+  changesPath(root: Local | "this", path: string, action: string, at: Expr): void;
+  // The instance being checked.
+  instance: Instance;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
   // Records an error a call raises, and what the instance called may throw.
@@ -310,6 +316,8 @@ export class ExpressionsState {
   fixedLiterals = new NodeMap<Expr, FixedType>();
   // The place an assignment is checking as its target, while it does.
   writing: Expr | undefined;
+  // That place, when the write reads it first, as `+=` and `++` do, keeping its member.
+  updating: Expr | undefined;
   // The assignment an expression statement is, whose value nothing uses.
   statementAssign: Expr | undefined;
   // Objects of index expressions already checked, which their next read takes as checked.
@@ -4830,6 +4838,8 @@ export class Expressions implements Union {
     if (found.self!.mutable && !this.self!.mutable) {
       throw new CompileError("E0206", `cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);
     }
+    // It may change any of this object's fields, as a method called on `this` may.
+    if (found.self!.mutable) this.changesThis("", `call '${callee.name}' on`, callee.object);
     this.types.set(callee.object, copied ? this.self!.type : base);
     if (found.self!.owned) this.takesOver(callee.object, callee.name);
     return found;
@@ -5208,7 +5218,14 @@ export class Expressions implements Union {
           this.calls.set(e, instance.id);
         }
         if (!this.calls.has(e)) load();
-        return this.linked(e) ? this.optional(this.typing.unfolded(found.type), e) : this.typing.unfolded(found.type);
+        if (this.linked(e)) return this.optional(this.typing.unfolded(found.type), e);
+        const narrowed = this.calls.has(e) || this.ctx.exprsState.asDeclared.has(e) ? undefined : this.ctx.narrowedField(e);
+        if (narrowed === undefined) {
+          this.ctx.instance.narrowedFields?.delete(e);
+          return this.typing.unfolded(found.type);
+        }
+        (this.ctx.instance.narrowedFields ??= new NodeMap()).set(e, this.typing.unfolded(found.type));
+        return narrowed;
       }
       case "object": {
         const tuple = this.ctx.exprsState.tuples.get(e);
@@ -6156,6 +6173,13 @@ export class Expressions implements Union {
       this.types.set(e, lent.type);
       type = lent.type;
     }
+    // So is a narrowed field.
+    const whole = e.kind === "member" && this.typing.rec(to).mutable && this.isNarrowedField(e) ? this.typing.unfolded(this.stored(e)) : undefined;
+    if (whole !== undefined && this.typing.sameLowered(whole, this.typing.rec(to).to)) {
+      this.ctx.instance.narrowedFields!.delete(e);
+      this.types.set(e, whole);
+      type = whole;
+    }
     const exact = this.typing.sameLowered(type, this.typing.rec(to).to);
     // A type that holds itself may lend a part of a parameter's value as the parameter's type,
     // which each instance checks against the type it is made for.
@@ -6205,17 +6229,25 @@ export class Expressions implements Union {
     return e.kind === "this" || (e.kind === "ident" && this.ctx.lookup(e.name) !== undefined);
   }
 
+  // Whether a check narrowed a field read.
+  private isNarrowedField(e: Expr): boolean {
+    return this.ctx.instance.narrowedFields?.has(e) ?? false;
+  }
+
   // Whether lending a place to `to` points to where it lives, rather than to a copy: it holds
-  // exactly that type, and isn't a variable narrowed to part of a union.
+  // exactly that type, and isn't a variable or field narrowed to part of a union.
   private inPlace(e: Expr, to: RefType): boolean {
     const type = this.types.get(e)!;
     const local = e.kind === "ident" ? this.localAt(e) : undefined;
     const ref = this.recOf(type);
     const held = ref?.kind === "ref" ? ref.to : type;
     if (local && local.type !== type && this.recOf(held)?.kind === "union") return false;
+    // A field narrowed to one member lives inside its union, where it is stored as declared.
+    const declared = this.ctx.instance.narrowedFields?.get(e);
+    if (declared !== undefined && (this.recOf(type)?.kind === "union" || this.typing.lower(this.typing.unfolded(this.stored(e))) !== this.typing.lower(declared))) return false;
     // A field read through a type parameter may be stored as a different type by the concrete
     // type; at a definition, where nothing is concrete, each instance decides.
-    if (e.kind === "member" && this.typing.lower(this.stored(e)) !== this.typing.lower(type)) return false;
+    if (e.kind === "member" && declared === undefined && this.typing.lower(this.stored(e)) !== this.typing.lower(type)) return false;
     return typeof type !== "string" && this.typing.rec(type).kind === "ref" ? this.typing.fits(type, to) : (this.typing.sameLowered(type, this.typing.rec(to).to) && this.typing.sameLowered(this.typing.rec(to).to, type)) || this.typing.partOfItself(type, this.typing.rec(to).to);
   }
 
@@ -6476,14 +6508,27 @@ export class Expressions implements Union {
   // The type an assignment stores. Through an accessor that is the setter's parameter, and
   // an assignment that also reads, like `+=`, needs the getter too.
   private assignable(this: Mut<this>, target: Expr, reads: boolean): Type {
-    const outer = this.ctx.exprsState.writing;
+    const [outer, updating] = [this.ctx.exprsState.writing, this.ctx.exprsState.updating];
+    const written = this.rewrites.current(target);
+    const place = written.kind === "nonNull" ? this.rewrites.current(written.expr) : written;
     this.ctx.exprsState.writing = target;
+    this.ctx.exprsState.updating = reads ? place : undefined;
     try {
       const type = this.assignableTo(target, reads);
+      // A field narrowed to one member, read and written back as `+=` does, keeps that member in
+      // its union's payload; any other write is of the place as declared.
+      const declared = reads ? this.ctx.instance.narrowedFields?.get(place) : undefined;
+      const kept = declared === undefined ? undefined : this.ctx.narrowedField(place);
+      if (kept !== undefined && this.recOf(kept)?.kind !== "union" && this.typing.lower(this.typing.unfolded(this.stored(place))) === this.typing.lower(declared!)) {
+        this.types.set(place, kept);
+        return kept;
+      }
+      this.ctx.instance.narrowedFields?.delete(place);
       if (reads && this.jsMembers.has(target)) throw unsupported("compound assignments to a package's properties", target);
       return type;
     } finally {
       this.ctx.exprsState.writing = outer;
+      this.ctx.exprsState.updating = updating;
     }
   }
 
@@ -6586,7 +6631,7 @@ export class Expressions implements Union {
     if (reads && this.value(target) !== type) {
       throw new CompileError("E0705", `the getter and setter of '${target.name}' must have the same type`, target.start, target.end);
     }
-    this.changeable(target, "assign to");
+    this.changeable(target, "assign to", true);
     this.setters.set(target, this.ctx.instanceOf(setter).id);
     this.types.set(target, type);
     return type;
@@ -6596,8 +6641,9 @@ export class Expressions implements Union {
   // in an instance it is stored as the concrete type's field, which may be narrower.
   private stored(target: Expr): Type {
     if (target.kind !== "member") return this.types.get(target)!;
-    // Through a reference, what it points to stores the field.
-    const holder = this.typing.lower(this.stored(target.object));
+    // Through a reference, what it points to stores the field; a field a check narrowed holds
+    // its member inside the union.
+    const holder = this.typing.lower(this.isNarrowedField(target.object) ? this.types.get(target.object)! : this.stored(target.object));
     const hr = this.recOf(holder);
     const object = hr?.kind === "ref" ? this.typing.lower(hr.to) : holder;
     if (stringLike(this.typing, object)) throw new CompileError("E0802", `a string's '${target.name}' can't be changed; strings can't be changed, so build a new one instead`, target.start, target.end);
@@ -6644,12 +6690,15 @@ export class Expressions implements Union {
   // Checks that a place, already typed, may change. `const` is deeply immutable, so no field
   // of a constant can change, and `this` changes only in a constructor or a method declared
   // `this: Mut<this>`.
-  private changeable(this: Mut<this>, target: Expr, action: string) {
+  // A setter changes its whole object, whatever field it is named for: `setter` says one runs.
+  private changeable(this: Mut<this>, target: Expr, action: string, setter = false) {
     target = this.rewrites.current(target);
     // Below a read through a Dyn, the place is part of a copy.
     if (this.readCopy(target) && !this.computed.has(target)) throw new CompileError("E0211", `cannot ${action} this: it is part of a value read through a Dyn, which gives a copy, so the change would be lost; change it through a method`, target.start, target.end);
     let root = this.bare(target);
     let path = "";
+    // The part of the path naming the field the setter is for.
+    let named: string | undefined;
     // Through a mutable reference anything below it may change, whatever variable holds the
     // reference, as long as nothing above it is shared.
     let throughMut = false;
@@ -6672,6 +6721,8 @@ export class Expressions implements Union {
       // A rest tuple's element is named by its place in the tuple, its array left unsaid.
       if (root.kind === "index" && root.index.kind === "int" && this.restStarts.has(root.object)) path = `[${BigInt(this.restStarts.get(root.object)!) + root.index.value}]${path}`;
       else if (!(root.kind === "member" && this.restStarts.has(root))) path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${shownName(root.name)}`) : "[...]"}${path}`;
+      // The last part, the field the setter is named for.
+      named ??= path;
       root = this.bare(root.object);
     }
     if (this.ctx.sharing && path === "" && this.isParamPath(root)) {
@@ -6682,6 +6733,8 @@ export class Expressions implements Union {
         throw new CompileError("E0304", `cannot ${action} '${this.placeText(target)}' as a whole inside 'update': ${why}; change its other fields one by one`, target.start, target.end);
       }
     }
+    // A setter may change any field of its object, as a method taking `Mut<this>` may.
+    if (setter && target.kind === "member") this.ctx.changesPath(root.kind === "ident" ? this.localAt(root)! : "this", path.slice(0, path.length - named!.length), `call the setter of '${target.name}' on`, target.object);
     if (root.kind === "this" || root.kind === "super") return this.changesThis(path, action, target);
     this.changesLocal(this.localAt(root)!, path, action, target, throughMut);
   }
@@ -6917,6 +6970,7 @@ export class Expressions implements Union {
 
   // Whether `this` may change here. A closure changing it changes it where it was made.
   changesThis(this: Mut<this>, path: string, action: string, target: Expr) {
+    this.ctx.changesPath("this", path, action, target);
     if (this.closing) return this.ctx.changesCapture(undefined, path, action, target, false);
     if (this.self?.mutable) return;
     throw new CompileError("E0206", `cannot ${action} 'this${path}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
@@ -6925,6 +6979,7 @@ export class Expressions implements Union {
   // Whether a variable may change here, at `path` inside it, possibly through a mutable
   // reference. A closure changing what it captures changes the variable where it was made.
   changesLocal(this: Mut<this>, local: Local, path: string, action: string, target: Expr, throughMut: boolean) {
+    this.ctx.changesPath(local, path, action, target);
     if (this.ctx.captured(local)) return this.ctx.changesCapture(local, path, action, target, throughMut);
     if (throughMut) return;
     // A shared reference never changes what it points to; a mutable one may, whatever holds
