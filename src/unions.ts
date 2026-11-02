@@ -324,6 +324,8 @@ export function typeofComparison(e: Expr, host: Union): Type | undefined {
 // equal.
 export function unionComparison(e: Extract<Expr, { kind: "binary" }>, host: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
   let [left, right] = [host.read(e.left), host.read(e.right)];
+  // An `unknown` equals a value of the type it holds, compared as that type.
+  if (host.typing.isUnknown(left) || host.typing.isUnknown(right)) return "boolean";
   // A literal compared with a union holding one number type takes that type.
   const number = (t: Type) => numberMembers(host.typing, t, (u) => opened(host.typing, u));
   if (number(left).length === 1 && adapt(e.right, number(left)[0]!)) right = number(left)[0]!;

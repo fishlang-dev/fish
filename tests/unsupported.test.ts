@@ -323,3 +323,20 @@ test("for...of over a tuple of differing owned types", () => {
     message: "'for...of' loops over a tuple whose elements differ in type and don't all copy are not supported yet", start, end: start + 1,
   }));
 });
+
+// `String.raw` called as a function takes its strings as literals and no value past the last one.
+const RAW_CALLS: [string, string, string][] = [
+  ["String.raw(s, 1)", "s", "'String.raw' called as a function takes '{ raw: [...] }' holding an array of string literals first, so its text is known while compiling"],
+  ["String.raw({ raw: [s] })", "{ raw: [s] }", "'String.raw' called as a function takes '{ raw: [...] }' holding an array of string literals first, so its text is known while compiling"],
+  ["String.raw({ raw: [\"a\", \"b\"] }, 1, 2, 3)", "2, 3", "'String.raw' has 2 string(s) here, so it takes at most 1 value(s) after them"],
+  ["String.raw({ raw: [\"a\", \"b\"] }, ...xs)", "...xs", "'String.raw' takes its values one by one, not spread"],
+  ["String.raw<i64>`a`", "String.raw<i64>`a`", "'String.raw' takes no type arguments"],
+];
+
+for (const [call, at, message] of RAW_CALLS) {
+  test(call, () => {
+    const src = `function main() {\n  const s = "a";\n  const xs = [1];\n  console.log(${call});\n}`;
+    const start = src.indexOf(call) + call.indexOf(at);
+    expect(() => checkSource(src)).toThrow(expect.objectContaining({ message, start, end: start + at.length }));
+  });
+}

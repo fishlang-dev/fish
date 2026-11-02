@@ -792,7 +792,7 @@ function markers(src: string, comments: Comment[]): Hit[] {
 
 // What each guided rule suggests, as the hit's message says it.
 const GUIDES: Record<string, string> = {
-  G1: "'any' turns type checking off, which Fish doesn't do; choose a concrete type, a union, or the dynamic 'Json' value",
+  G1: "'any' turns type checking off, which Fish doesn't do; choose a concrete type, a union, 'unknown' narrowed with 'typeof' or 'instanceof' before use, or the dynamic 'Json' value",
   G2: "the promise this call gives is dropped, and a Fish future runs only when it is awaited; add 'await', or wrap the call in 'spawn()' to run it on its own",
   G3: "this 'number' counts or indexes, and a Fish 'number' is a float; make it 'i64', or 'usize' for an index",
   G4: "this class extends one that is also used as a type, so a subclass stands in for its base, which Fish's embedded bases don't allow; extract an interface for what they share, and hold the base as a field",

@@ -36,6 +36,35 @@ type Call = Extract<Expr, { kind: "call" }>;
 
 const I64_MAX = (1n << 63n) - 1n;
 
+// `String.raw`'s text: the parts as written, each value between two, as a template; a literal
+// value is folded into the text, so a template of literals is a constant.
+function rawTemplate(parts: string[], values: Expr[], at: Span): Expr {
+  const quasis = [parts[0] ?? ""];
+  const exprs: Expr[] = [];
+  values.forEach((x, i) => {
+    const after = parts[i + 1] ?? "";
+    const text = literalText(x);
+    if (text === undefined) {
+      exprs.push(x);
+      quasis.push(after);
+    } else {
+      quasis[quasis.length - 1] += text + after;
+    }
+  });
+  // Parts with no value between them, which only the call form gives, run together.
+  quasis[quasis.length - 1] += parts.slice(values.length + 1).join("");
+  return { id: 0, kind: "template", quasis, raw: quasis, exprs, start: at.start, end: at.end };
+}
+
+// The text of a literal as a template would splice it in.
+function literalText(x: Expr): string | undefined {
+  if (x.kind === "string") return x.value;
+  if (x.kind === "bool") return String(x.value);
+  if (x.kind === "int" && x.value <= I64_MAX) return String(x.value);
+  if (x.kind === "template" && x.exprs.length === 0) return x.quasis[0];
+  return undefined;
+}
+
 const isConstAssertion = (e: Expr) => e.kind === "as" && e.type.kind === "ref" && e.type.name === "const" && e.type.args.length === 0;
 
 // The operators an expression of only literals may use and still take its type from context.
@@ -1272,7 +1301,7 @@ export class Expressions implements Union {
       return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: helper, start: callee.start, end: callee.end } }));
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Object" && !this.ctx.lookup("Object") && !this.classes.has("Object") && !this.byName.has("Object") && !this.byName.has("const Object") && !this.enums.has("Object")) return this.objectStatic(e, callee);
-    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "String" && !this.ctx.lookup("String") && !this.classes.has("String") && !this.byName.has("String") && !this.byName.has("const String") && !this.enums.has("String")) return this.stringStatic(e, callee);
+    if (callee.kind === "member" && this.isString(callee.object)) return this.stringStatic(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Rc" && !this.ctx.lookup("Rc") && !this.classes.has("Rc") && !this.byName.has("Rc")) return this.ptrEq(e, callee);
     if (callee.kind === "member" && this.isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("E0505", "'Math' is always there, so its functions are called without '?.'", e.start, e.end);
@@ -1746,6 +1775,11 @@ export class Expressions implements Union {
   // array of its values for the tag's rest parameter.
   private untag(this: Mut<this>, e: Extract<Expr, { kind: "tagged" }>): Expr {
     const { tag, template } = e;
+    if (tag.kind === "member" && tag.name === "raw" && this.isString(tag.object)) {
+      if (e.typeArgs.length > 0) throw new CompileError("E0106", "'String.raw' takes no type arguments", e.start, e.end);
+      if (template.kind !== "template") throw new CompileError("E1107", "a tag is followed by a template literal", template.start, template.end);
+      return this.rewrites.replace(e, rawTemplate(template.raw, template.exprs, e));
+    }
     const target = tag.kind === "ident" && !this.ctx.lookup(tag.name) ? this.bodyNamed(tag.name) : undefined;
     if (tag.kind === "ident" && !target && !this.ctx.lookup(tag.name)) throw new CompileError("E0401", `unknown function '${tag.name}'${didYouMean(tag.name, this.ctx.names(tag.start))}`, tag.start, tag.end);
     if (!target || tag.kind !== "ident") throw new CompileError("E1107", "a tag has to be the name of a top-level function; methods, closures and other values as tags aren't supported yet", tag.start, tag.end);
@@ -1761,6 +1795,11 @@ export class Expressions implements Union {
     const called = this.rewrites.replace(e, { id: 0, kind: "call", callee: tag, typeArgs: e.typeArgs, args: [strings, values], optional: false, start: e.start, end: e.end });
     this.tagCalls.add(called);
     return called;
+  }
+
+  // Whether `e` names the global `String`, which nothing in the program shadows.
+  private isString(this: Mut<this>, e: Expr): boolean {
+    return e.kind === "ident" && e.name === "String" && !this.ctx.lookup("String") && !this.classes.has("String") && !this.byName.has("String") && !this.byName.has("const String") && !this.enums.has("String");
   }
 
   // An arrow passed where a function type is declared takes its parameter types from it.
@@ -2057,8 +2096,9 @@ export class Expressions implements Union {
   // of arrays among them, become one array of `u16` or `u32`.
   private stringStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const kinds: Record<string, ["units" | "points", Type]> = { fromCharCode: ["units", "u16"], fromCodePoint: ["points", "u32"] };
+    if (callee.name === "raw") return this.rawCall(e);
     const kind = kinds[callee.name];
-    if (!kind) throw new CompileError("E0502", `'String' has no '${callee.name}' yet; it has 'fromCharCode' and 'fromCodePoint'`, callee.start, callee.end);
+    if (!kind) throw new CompileError("E0502", `'String' has no '${callee.name}' yet; it has 'fromCharCode', 'fromCodePoint' and 'raw'`, callee.start, callee.end);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'String.${callee.name}' takes no type arguments`, e.start, e.end);
     const at = { start: e.args[0]?.start ?? e.end, end: e.args.at(-1)?.end ?? e.end };
     const gathered: Expr = e.args.length === 1 && this.stringBuilds.has(e) ? e.args[0]! : { id: nextId(this.ids), kind: "array", elements: e.args, ...at };
@@ -2068,6 +2108,26 @@ export class Expressions implements Union {
     this.coerce(gathered, t, many, `'String.${callee.name}' takes ${kind[1]} values, and these are '${this.typing.show(t)}'`);
     this.stringBuilds.set(this.rewrites.replace(e, { ...e, args: [gathered] }), kind[0]);
     return { type: "string", what: `'String.${callee.name}'` };
+  }
+
+  // `String.raw({ raw: ["a", "b"] }, x)`: the strings with the values between them, as the tag
+  // gives them, missing values empty as in JavaScript.
+  private rawCall(this: Mut<this>, e: Call): { type: Type; what: string } {
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", "'String.raw' takes no type arguments", e.start, e.end);
+    const [first, ...values] = e.args;
+    const prop = first?.kind === "object" && first.props.length === 1 ? first.props[0] : undefined;
+    const parts = prop?.kind === "property" && prop.key === "raw" && prop.value.kind === "array" ? prop.value.elements : undefined;
+    const strings = parts?.flatMap((p) => (p?.kind === "string" ? [p.value] : []));
+    if (!strings || strings.length !== parts!.length) {
+      const at = first ?? e;
+      throw new CompileError("E0504", "'String.raw' called as a function takes '{ raw: [...] }' holding an array of string literals first, so its text is known while compiling", at.start, at.end);
+    }
+    // JavaScript evaluates the values it drops, so a value past the last string is refused rather than left out.
+    const extra = values[Math.max(strings.length - 1, 0)];
+    if (extra) throw new CompileError("E0504", `'String.raw' has ${strings.length} string(s) here, so it takes at most ${Math.max(strings.length - 1, 0)} value(s) after them`, extra.start, e.args.at(-1)!.end);
+    const spread = values.find((v) => v.kind === "spread");
+    if (spread) throw new CompileError("E0504", "'String.raw' takes its values one by one, not spread", spread.start, spread.end);
+    return { type: this.typeOf(this.rewrites.replace(e, rawTemplate(strings, values, e))), what: "'String.raw'" };
   }
 
   // A call of one of a string's methods, which takes its arguments as the method's parameters.
@@ -2768,6 +2828,11 @@ export class Expressions implements Union {
 
   // Refuses a type with a part JSON can't hold, saying why.
   private jsonable(t: Type, at: Span, verb: string) {
+    // What an unknown holds is known once the whole program is checked, and checked then.
+    if (this.typing.holdsPart(t, (u) => this.typing.isUnknown(u), true)) {
+      if (verb !== "written as") throw new CompileError("E0509", "'JSON.parse' can't read into an 'unknown', which holds only what the program puts in one; read into 'Json' to take any JSON", at.start, at.end);
+      this.ctx.tables.unknownJson.push(at);
+    }
     const part = this.typing.unjson(t, (c) => this.derivesJson(c));
     if (!part) return;
     const r = this.recOf(part);
@@ -3569,7 +3634,7 @@ export class Expressions implements Union {
     // where a T is wanted gives that T and may.
     const stored = expected === undefined ? undefined : this.promiseMet(expected);
     const gives = e.typeArgs[0] ? this.ctx.resolveType(e.typeArgs[0]) : stored ?? this.ctx.exprsState.awaitedAs.get(e);
-    if (gives === undefined) throw new CompileError("E0305", `can't tell what this Promise gives; write it, ${example}, since Fish has no 'unknown'`, e.start, e.end);
+    if (gives === undefined) throw new CompileError("E0305", `can't tell what this Promise gives; write it, ${example}`, e.start, e.end);
     const declared = executor.kind === "arrow" ? executor : executor.kind === "ident" && !this.ctx.lookup(executor.name) ? this.bodyNamed(executor.name) : undefined;
     const raw = declared === undefined ? this.typing.lower(this.value(executor)) : undefined;
     const held = (raw && this.boundFunction(raw)) ?? raw;
@@ -3691,7 +3756,7 @@ export class Expressions implements Union {
   private promiseResolvers(this: Mut<this>, e: Call): Call {
     if (e.args.length > 0) throw new CompileError("E0305", "'Promise.withResolvers' takes no arguments", e.start, e.end);
     if (e.typeArgs.length > 1) throw new CompileError("E0305", "'Promise.withResolvers' takes one type argument, what its Promise gives", e.start, e.end);
-    if (e.typeArgs.length === 0) throw new CompileError("E0305", "can't tell what this Promise gives; write it, as in 'Promise.withResolvers<i64>()', since Fish has no 'unknown'", e.start, e.end);
+    if (e.typeArgs.length === 0) throw new CompileError("E0305", "can't tell what this Promise gives; write it, as in 'Promise.withResolvers<i64>()'", e.start, e.end);
     const gives = this.ctx.resolveType(e.typeArgs[0]!);
     const error = this.ctx.throwsDeclared() ?? this.arenas.classOf(this.classes.get("Error")!).type;
     const at = { start: e.start, end: e.end };
@@ -4138,6 +4203,11 @@ export class Expressions implements Union {
       chain.push(base);
       at = base;
     }
+  }
+
+  // A property or method of an `unknown`, which has none until a check says what it holds.
+  private unnarrowed(e: Extract<Expr, { kind: "member" }>): CompileError {
+    return new CompileError("E0502", `an 'unknown' could hold anything, so it has no property '${shownName(e.name)}' until it is narrowed; check what it holds first, with 'typeof', 'instanceof' or a type predicate`, e.start, e.end);
   }
 
   // A package's class's static member: a property read, or a method called.
@@ -5004,6 +5074,7 @@ export class Expressions implements Union {
     if (!found && tr?.kind === "class" && tr.name === "RequestCookies" && this.arenas.bodyOf(this.ctx.classOf(type as ClassType).constructor).start >= STD_BASE && (name === "set" || name === "delete")) {
       throw new CompileError("E0502", `a request's cookies can't be changed, so 'RequestCookies' has no method '${name}'; ${name} the cookie on the response instead, as 'res.cookies.${name}(...)'`, callee.start, callee.end);
     }
+    if (tr?.kind === "unknown") throw this.unnarrowed(callee);
     if (!found) throw new CompileError("E0502", `'${this.typing.show(type)}' has no method '${name}'${didYouMean(name, this.memberNames(type))}`, callee.start, callee.end);
     this.visible(found.access, found.declared ?? found.owner!, name, callee);
     if (found.self!.owned) this.takesOver(object, name);
@@ -5328,6 +5399,7 @@ export class Expressions implements Union {
         if (object === "never") return "never";
         const or = this.recOf(object);
         // A field read through a reference loads what it points to; a getter gets the pointer.
+        if (or?.kind === "unknown") throw this.unnarrowed(e);
         if (or?.kind === "shared") return this.sharedField(e, object as SharedType);
         if (or?.kind === "block") return this.blockProperty(e, object as BlockType);
         if (or?.kind === "dyn") return this.dynField(e, object as DynType);
@@ -5908,8 +5980,10 @@ export class Expressions implements Union {
       this.value(e.right);
       return option;
     }
-    if (!this.typing.isOption(option)) throw new CompileError("E0108", `the left side of '??' is a '${this.typing.show(option)}', which is never empty; '??' gives a default for an Option`, e.left.start, e.left.end);
-    const inner = this.held(option);
+    // An unknown may hold null, and is still an unknown once a default replaces it.
+    const unknown = this.typing.isUnknown(option);
+    if (!this.typing.isOption(option) && !unknown) throw new CompileError("E0108", `the left side of '??' is a '${this.typing.show(option)}', which is never empty; '??' gives a default for an Option`, e.left.start, e.left.end);
+    const inner = unknown ? option : this.held(option as UnionType);
     // A parameter's default is checked as an argument for it would be; a nullable one's is null.
     const declared = this.fallbacks.get(e);
     if (declared) {
@@ -6531,7 +6605,7 @@ export class Expressions implements Union {
   excess(e: Expr, to: Type) {
     e = this.rewrites.current(e);
     to = this.typing.unfold(to);
-    if (e.kind !== "object" || typeof to === "string") return;
+    if (e.kind !== "object" || typeof to === "string" || this.typing.isUnknown(to)) return;
     // Against a union, a name no member has is excess, and the literal is checked as the one
     // member that has all its names, when one does.
     const u = this.typing.rec(to);

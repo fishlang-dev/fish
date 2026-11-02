@@ -38,7 +38,7 @@ const RULES: Rule[] = [
   { id: "R5", action: "reject", title: "the arguments object: use rest parameters" },
   { id: "R6", action: "reject", title: "Symbol: Fish has no runtime reflection" },
   { id: "R7", action: "reject", title: "declaration merging and module augmentation: Fish types are closed after they are declared" },
-  { id: "G1", action: "guided", title: "any: choose a concrete type, a union, or the dynamic Json value" },
+  { id: "G1", action: "guided", title: "any: choose a concrete type, a union, unknown narrowed before use, or the dynamic Json value" },
   { id: "G2", action: "guided", title: "a promise dropped un-awaited: add await, or spawn() it to run on its own" },
   { id: "G3", action: "guided", title: "a number used as a count or an index: make it i64, or usize for an index" },
   { id: "G4", action: "guided", title: "class extends with the base used as a type: Fish embeds the base, so a polymorphic hierarchy becomes an interface" },
@@ -473,7 +473,9 @@ function classify({ path, envKeys, statementDestructures }: Scanning, n: Node, d
   if (n.kind === "expr" && isNode(n.expr) && n.expr.kind === "destructure") statementDestructures.add(n.expr);
   if (n.kind === "destructure" && !statementDestructures.has(n)) push("destructuringAssignment");
   const simple: Record<string, string> = { tagged: "tagged", forIn: "forIn", namespace: "namespaces", privateName: "classForms" };
-  if (Object.hasOwn(simple, n.kind)) push(simple[n.kind]!);
+  // `String.raw` is a tag Fish has.
+  const raw = n.kind === "tagged" && isNode(n.tag) && n.tag.kind === "member" && n.tag.name === "raw" && named(n.tag.object, "String");
+  if (Object.hasOwn(simple, n.kind) && !raw) push(simple[n.kind]!);
   if (n.kind === "tuple") {
     const elements = n.elements as Node[];
     const rest = elements.findIndex((e) => e.rest);
