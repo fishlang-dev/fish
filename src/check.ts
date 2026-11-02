@@ -1,4 +1,4 @@
-import { declareClass, extend, inherited, isLifetime, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
+import { declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
 import { newTables, timed, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError, CompileErrors, named } from "./diag.ts";
@@ -3120,7 +3120,9 @@ class BodyChecker implements Context, Outer, Sight {
         // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
         if (!this.declared && this.cx.recOf(this.inferred)?.kind === "regex" && r?.kind === "regex" && this.inferred !== type) this.inferred = ANY_REGEX;
         const expected = this.declared ?? this.inferred;
-        const message = `type '${this.cx.typing.show(type)}' is not assignable to return type '${this.cx.typing.show(expected ?? type)}'`;
+        // A subclass's copy of a member returning `this` must give back the subclass.
+        const inherits = this.f.copyOf !== undefined && selfTyped(this.f) ? `: '${this.cx.typing.show(this.f.self!.type)}' inherits this method, and its 'this' return type is the receiver's own class, so return 'this'` : "";
+        const message = `type '${this.cx.typing.show(type)}' is not assignable to return type '${this.cx.typing.show(expected ?? type)}'${inherits}`;
         if (expected && s.value) this.exprs().coerce(s.value, type, expected, message);
         else if (expected && type !== expected) throw new CompileError("E0101", message, s.start, s.end);
         const bound = r?.kind === "param" ? this.cx.recOf(r.bound) : undefined;

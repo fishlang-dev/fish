@@ -566,6 +566,29 @@ export function implementAbstracts(tables: Tables, c: ClassInfo) {
   }
 }
 
+// A member whose return type names `this` gives the receiver's own class, so a subclass that
+// doesn't override it gets its own copy, checked with `this` as the subclass.
+export function copySelfTyped(tables: Tables, c: ClassInfo) {
+  const { arenas } = tables;
+  if (c.node.abstract) return;
+  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
+    for (const table of TABLES) {
+      for (const [name, f] of b[table]) {
+        const nearest = inherited(arenas, c, table, name)!;
+        if (selfTyped(arenas.bodyOf(f)) && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c, arenas.bodyOf(f)).bodyId);
+      }
+    }
+  }
+}
+
+export function selfTyped(f: Body): boolean {
+  let found = false;
+  walk("typeNode", f.self && !f.self.constructor ? f.returnType : undefined, ({ of, node }) => {
+    if (of === "typeNode" && node.kind === "ref" && node.name === "this" && node.args.length === 0) found = true;
+  });
+  return found;
+}
+
 // A concrete class's copy of a template, made once: its own member when nothing overrides it,
 // and what `super.name()` runs in the class either way.
 export function copyFor({ arenas, ids, typing }: Tables, c: ClassInfo, f: Body): Body {
