@@ -1,4 +1,4 @@
-import { declareClass, extend, inherited, isLifetime, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
+import { declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
 import { newTables, timed, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError, CompileErrors, named } from "./diag.ts";
@@ -12,7 +12,7 @@ import { nextId, NodeMap, NodeSet, WeakNodeMap, renumber, Rewrites, walk, type I
 import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
-import { alwaysReturns, assignedNames } from "./flow.ts";
+import { alwaysReturns, assignedNames, assignsOwn } from "./flow.ts";
 import { declareEnum, type EnumInfo, type EnumInstance } from "./enums.ts";
 import { either, guard, type Facts } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
@@ -1738,6 +1738,12 @@ class BodyChecker implements Context, Outer, Sight {
   // The expression an expression statement being checked consists of.
   whole: Expr | undefined;
   assigned: Set<string>;
+  // The parameters the body changes, and those an async nested function takes a copy of, which
+  // are checked against each other once the whole body is seen.
+  changedParams: Set<LocalId>;
+  // The parameters the body assigns, an inner binding of the same name aside.
+  assignedParams: Set<LocalId>;
+  copiedParams: { local: Local; nested: string; at: Span }[];
   // How many scopes enclose each binding's declaration.
   depths: Map<LocalId, usize>;
   // Bindings declared directly in a switch case body whose checking has finished.
@@ -1836,6 +1842,9 @@ class BodyChecker implements Context, Outer, Sight {
     this.floors = [];
     this.changed = [];
     this.assigned = assignedNames(this.f.body);
+    this.changedParams = new Set();
+    this.assignedParams = new Set();
+    this.copiedParams = [];
     this.depths = new Map<LocalId, usize>();
     this.caseOnly = new Set<LocalId>();
     this.unset = new Set(this.f.self?.constructor ? this.cx.registry().classOf(this.f.self.type).required : []);
@@ -1883,7 +1892,12 @@ class BodyChecker implements Context, Outer, Sight {
     // Advancing a generator runs its body, so that is what throws, not calling it.
     if (this.generatorType && this.errorType) this.cx.typing.rec(this.generatorType).throws = this.instance.concrete ? this.cx.typing.lower(this.errorType) : this.errorType;
     this.params = this.f.closure ? this.f.params.map((p, i) => this.closureParam(p, i, this.f.closure!.expected)) : this.cx.instancing().paramTypes(this.instance, this.cx.instancing().scopeOf(this.instance));
-    this.f.params.forEach((p, i) => this.declare(paramName(p), this.params[i]!, false, true, p));
+    // An owned parameter is the body's own, as a `let` is; one holding a reference keeps the
+    // caller's lifetime, which a new value could outlive.
+    this.f.params.forEach((p, i) => {
+      this.declare(paramName(p), this.params[i]!, !this.cx.typing.holdsRef(this.params[i]!), true, p);
+      if (assignsOwn(this.f.body, paramName(p))) this.assignedParams.add(this.locals.get(p)!);
+    });
     this.hidden = false;
   }
   // The expression checker, made over this body where it is used.
@@ -2076,6 +2090,8 @@ class BodyChecker implements Context, Outer, Sight {
       return after;
     });
     this.exprs().finish();
+    const stale = this.copiedParams.find((c) => this.changedParams.has(c.local.localId));
+    if (stale) throw new CompileError("E0210", `the async nested function '${stale.nested}' takes its own copy of '${stale.local.name}' when it is made, so a change to it wouldn't reach the function; pass '${stale.local.name}' as a parameter, or leave it unchanged`, stale.at.start, stale.at.end);
     // An inferred error is every one the body lets out, widened as a `let` is.
     if (this.inferring && this.inferring.length > 0) {
       this.errorType = this.cx.typing.unionType(this.inferring.map(([, t]) => this.cx.typing.widenLet(t)));
@@ -2150,7 +2166,7 @@ class BodyChecker implements Context, Outer, Sight {
   // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
   // A capture narrows as a variable of the closure's would.
   narrowable(this: Mut<this>, l: Local) {
-    return (this.captures?.has(l.localId) ? !this.assigned.has(l.name) : l.param || !l.mutable || !this.assigned.has(l.name)) || (this.cx.isRef(l.type) && this.cx.typing.rec(l.type).mutable);
+    return (this.captures?.has(l.localId) ? !this.assigned.has(l.name) : l.param ? !this.assignedParams.has(l.localId) : !l.mutable || !this.assigned.has(l.name)) || (this.cx.isRef(l.type) && this.cx.typing.rec(l.type).mutable);
   }
   // A call of a function whose result is `x is T` narrows its argument for x to T.
   predicate(this: Mut<this>, call: Extract<Expr, { kind: "call" }>) {
@@ -2670,8 +2686,9 @@ class BodyChecker implements Context, Outer, Sight {
       if (self) throw new CompileError("E0708", `'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, (inner.captureUses.get(self[0].localId) ?? e).start, (inner.captureUses.get(self[0].localId) ?? e).end);
       // An async one takes its own copy of what it uses when it is made, which a later change
       // to a `let` wouldn't reach, as it would in JavaScript.
-      const changing = e.async ? captured.find(([, from]) => from !== "this" && from.mutable) : undefined;
+      const changing = e.async ? captured.find(([, from]) => from !== "this" && from.mutable && !from.param) : undefined;
       if (changing) throw new CompileError("E0210", `the async nested function '${nested}' takes its own copy of '${changing[0].name}' when it is made, so a later change to it wouldn't reach the function; pass '${changing[0].name}' as a parameter, or make it a 'const'`, (inner.captureUses.get(changing[0].localId) ?? e).start, (inner.captureUses.get(changing[0].localId) ?? e).end);
+      if (e.async) for (const [alias, from] of captured) if (from !== "this" && from.param && from.mutable) this.copiedParams.push({ local: from, nested, at: inner.captureUses.get(alias.localId) ?? e });
       const first = moved[0];
       if (first) throw new CompileError("E0202", `the nested function '${nested}' moves '${first.name}' out of the variables it uses, which a second call couldn't do again; take it as a parameter instead`, (inner.captureUses.get(first.localId) ?? e).start, (inner.captureUses.get(first.localId) ?? e).end);
     }
@@ -3163,7 +3180,9 @@ class BodyChecker implements Context, Outer, Sight {
         // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
         if (!this.declared && this.cx.recOf(this.inferred)?.kind === "regex" && r?.kind === "regex" && this.inferred !== type) this.inferred = ANY_REGEX;
         const expected = this.declared ?? this.inferred;
-        const message = `type '${this.cx.typing.show(type)}' is not assignable to return type '${this.cx.typing.show(expected ?? type)}'`;
+        // A subclass's copy of a member returning `this` must give back the subclass.
+        const inherits = this.f.copyOf !== undefined && selfTyped(this.f) ? `: '${this.cx.typing.show(this.f.self!.type)}' inherits this method, and its 'this' return type is the receiver's own class, so return 'this'` : "";
+        const message = `type '${this.cx.typing.show(type)}' is not assignable to return type '${this.cx.typing.show(expected ?? type)}'${inherits}`;
         if (expected && s.value) this.exprs().coerce(s.value, type, expected, message);
         else if (expected && type !== expected) throw new CompileError("E0101", message, s.start, s.end);
         const bound = r?.kind === "param" ? this.cx.recOf(r.bound) : undefined;
@@ -3408,7 +3427,7 @@ class BodyChecker implements Context, Outer, Sight {
   constant(this: Mut<this>, l: Local): boolean {
     const from = this.captures?.get(l.localId);
     if (from && from !== "this") return this.outer!.constant(this.cx.localOf(from));
-    return !l.mutable || l.param;
+    return !l.mutable;
   }
 
   // `throw` returns an error of the type the function declares, or goes to a catch. A value

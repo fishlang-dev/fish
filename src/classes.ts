@@ -7,7 +7,7 @@ import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts"
 import { unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
-import { nextId, NodeSet, type Ids, childrenOf, walk, type AnyNode, type NodeOf, type RootKind } from "./nodes.ts";
+import { nextId, NodeSet, renumber, type Ids, childrenOf, walk, type AnyNode, type NodeOf, type RootKind } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
@@ -114,6 +114,8 @@ export type ClassInfo = {
   node: ClassNode;
   // For an instance of a generic class: what its type parameters stand for.
   scope: Map<string, Type>;
+  // For a class that extends another: the program's types its own type parameters hide.
+  globals?: Map<string, Type>;
 };
 
 // Collects a class declaration's fields and builds the constructor it compiles to. A generic
@@ -417,6 +419,14 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   const { arenas, defaulted, prologues, ids, typing } = tables;
   c.base = base.classId;
   typing.rec(c.type).base = base.type;
+  // A name that isn't one of the program's types hides nothing.
+  c.globals = new Map([...c.scope.keys()].flatMap((n): [string, Type][] => {
+    try {
+      return [[n, global(n)]];
+    } catch {
+      return [];
+    }
+  }));
   const constructor = arenas.bodyOf(c.constructor);
   const baseConstructor = arenas.bodyOf(base.constructor);
   for (let b: ClassInfo | undefined = base; b; b = arenas.classOf(b.base)) {
@@ -443,7 +453,7 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   // such name is renamed apart into this constructor's own scope, standing for what it means there.
   const outer = baseConstructor.scope ?? new Map<string, Type>();
   const names = new Map([...new Set(baseConstructor.params.flatMap((p) => refNames(p.type)))]
-    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, `${n} of ${typing.rec(base.type).name}`]));
+    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, apartName(n, typing.rec(base.type).name)]));
   if (names.size > 0) constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
   // Copies, so each constructor has its own parameters, and none of them is a property here.
   const params = baseConstructor.params.map((p) => {
@@ -462,14 +472,24 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   constructor.body = [{ id: nextId(ids), kind: "expr", expr: call, ...at }, ...c.prelude];
 }
 
-// The names a type refers to without type arguments.
-function refNames(t: TypeNode | undefined): string[] {
+// The names a type, or the types inside a parameter or statements, refer to without type arguments.
+function refNames(t: TypeNode | Param | Stmt[] | undefined): string[] {
   const found: string[] = [];
-  walk("typeNode", t, ({ of, node }) => {
+  const each = ({ of, node }: AnyNode) => {
     if (of === "typeNode" && node.kind === "ref" && node.args.length === 0) found.push(node.name);
-  });
+  };
+  if (Array.isArray(t)) walk("stmt", t, each);
+  else if (t && "pattern" in t) walk("param", t, each);
+  else walk("typeNode", t, each);
   return found;
 }
+
+// A name a base's member is renamed to in a derived class, apart from that class's own type
+// parameters. It stands for a type the base names, an interface included, rather than for a type
+// argument, so it never makes an instance a definition check.
+const APART = " of ";
+const apartName = (name: string, base: string) => `${name}${APART}${base}`;
+export const isApart = (name: string) => name.includes(APART);
 
 // A copy of a type with the type parameters `names` maps renamed.
 function renamed<T>(t: T, names: Map<string, string>): T {
@@ -565,12 +585,56 @@ export function implementAbstracts(tables: Tables, c: ClassInfo) {
   }
 }
 
+// A member whose return type names `this` gives the receiver's own class, so a subclass that
+// doesn't override it gets its own copy, checked with `this` as the subclass.
+export function copySelfTyped(tables: Tables, c: ClassInfo) {
+  const { arenas } = tables;
+  if (c.node.abstract) return;
+  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
+    for (const table of TABLES) {
+      for (const [name, f] of b[table]) {
+        const nearest = inherited(arenas, c, table, name)!;
+        if (selfTyped(arenas.bodyOf(f)) && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c, arenas.bodyOf(f)).bodyId);
+      }
+    }
+  }
+}
+
+export function selfTyped(f: Body): boolean {
+  let found = false;
+  walk("typeNode", f.self && !f.self.constructor ? f.returnType : undefined, ({ of, node }) => {
+    if (of === "typeNode" && node.kind === "ref" && node.name === "this" && node.args.length === 0) found = true;
+  });
+  return found;
+}
+
 // A concrete class's copy of a template, made once: its own member when nothing overrides it,
-// and what `super.name()` runs in the class either way.
-export function copyFor({ arenas, ids, typing }: Tables, c: ClassInfo, f: Body): Body {
+// and what `super.name()` runs in the class either way. Its body was written in the base, so a
+// type name there that this class's own type parameter would hide, one of the base's type
+// parameters or a type of the program, is renamed apart in a copy of the body, standing for what
+// it means in the base. Only `this`, through `self`, means this class.
+export function copyFor({ arenas, ids, typing, defaulted, prologues }: Tables, c: ClassInfo, f: Body): Body {
   const made = c.copies.get(f.bodyId);
   if (made !== undefined) return arenas.bodyOf(made);
-  const copy = arenas.addBody({ ...f, id: nextId(ids), name: `${typing.rec(c.type).name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type, scope: c.scope, template: undefined, copyOf: f.bodyId, declared: f.owner! });
+  const outer = f.scope ?? new Map<string, Type>();
+  const used = new Set([...refNames(f.returnType), ...f.params.flatMap((p) => refNames(p)), ...refNames(f.body)]);
+  const names = new Map([...used].filter((n) => c.scope.has(n) && (outer.has(n) || c.globals?.has(n))).map((n) => [n, apartName(n, typing.rec(f.owner!).name)]));
+  const scope = new Map([...outer].filter(([n]) => !c.scope.has(n)));
+  for (const [n, to] of names) scope.set(to, outer.get(n) ?? c.globals!.get(n)!);
+  const apart = names.size > 0 ? renumber("stmt", renamed(f.body, names), () => nextId(ids)) : f.body;
+  const params = names.size > 0 ? f.params.map((p) => renumber("param", renamed(p, names), () => nextId(ids))) : f.params;
+  f.params.forEach((p, i) => {
+    const declared = defaulted.get(p);
+    if (declared && params[i] !== p) defaulted.set(params[i]!, declared);
+  });
+  f.body.forEach((st, i) => {
+    if (apart[i] !== st && prologues.has(st)) prologues.add(apart[i]!);
+  });
+  const copy = arenas.addBody({
+    ...f, id: nextId(ids), name: `${typing.rec(c.type).name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type,
+    params, body: apart, ...(f.returnType && names.size > 0 && { returnType: renamed(f.returnType, names) }),
+    scope: new Map([...c.scope, ...scope]), template: undefined, copyOf: f.bodyId, declared: f.owner!,
+  });
   c.copies.set(f.bodyId, copy.bodyId);
   return copy;
 }

@@ -6,7 +6,7 @@ import { rebuiltStmts } from "./rebuild.ts";
 import type { Type, Typing } from "./typing.ts";
 
 // Default parameter values, lowered before checking. A parameter `x: T = v` becomes an optional
-// parameter under a name no source can write, and the body starts with `const x: T = <it> ?? v`,
+// parameter under a name no source can write, and the body starts with `let x: T = <it> ?? v`,
 // so the default runs in the callee each time the argument is left out, after the parameters
 // before it, which it may read. The checker holds calls and defaults to `T` itself.
 
@@ -30,7 +30,7 @@ function lowered(tables: Tables, rewrites: Rewrites, f: Id & { kind?: string; pa
     if ((p.pattern.kind === "object" || p.pattern.kind === "array") && !p.default && !p.rest) {
       const at = { start: p.pattern.start, end: p.pattern.end };
       const hidden = `argument ${i}`;
-      const binding: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: p.pattern, type: undefined, init: { id: nextId(ids), kind: "ident", name: hidden, ...at }, ...at }], ...at };
+      const binding: Stmt = { id: nextId(ids), kind: "let", keyword: "let", declarations: [{ id: nextId(ids), target: p.pattern, type: undefined, init: { id: nextId(ids), kind: "ident", name: hidden, ...at }, ...at }], ...at };
       prologues.add(binding);
       firsts.push(binding);
       renamed.set(p, "_");
@@ -55,7 +55,7 @@ function lowered(tables: Tables, rewrites: Rewrites, f: Id & { kind?: string; pa
     const given: Expr = { id: nextId(ids), kind: "ident", name: hidden, ...at };
     const init: Expr = { id: nextId(ids), kind: "binary", op: "??", left: given, right: p.default, start: p.default.start, end: p.default.end };
     fallbacks.set(init, type);
-    const binding: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name, ...at }, type, init, ...at }], ...at };
+    const binding: Stmt = { id: nextId(ids), kind: "let", keyword: "let", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name, ...at }, type, init, ...at }], ...at };
     prologues.add(binding);
     firsts.push(binding);
     rewrites.replace(p, { ...p, pattern: { ...p.pattern, id: nextId(ids), name: hidden }, type, optional: true, default: undefined });

@@ -280,7 +280,7 @@ export class TypeMap<K extends Type, V> {
     return this.table.has(idOf(type));
   }
 
-  set(type: K, value: V): this {
+  set(this: Mut<this>, type: K, value: V): Mut<this> {
     this.table.set(idOf(type), value);
     return this;
   }
@@ -330,7 +330,7 @@ export class TypeSet<K extends Type> {
     return this.table.has(idOf(type));
   }
 
-  add(type: K): this {
+  add(this: Mut<this>, type: K): Mut<this> {
     this.table.add(idOf(type));
     return this;
   }

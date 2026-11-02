@@ -46,12 +46,16 @@ class Counter {
   }
 }
 
-function grow(c: Counter) {
+// An owned parameter is the body's own, so its mutating methods may be called.
+function grow(c: Counter): i64 {
   c.bump()
+  return c.count
 }
 
-function main() {}
-// error: calling a mutating method on a parameter is not supported yet; copy it into a 'let'
+function main() {
+  console.log(grow(new Counter()))
+}
+// expect: 1
 // case: method_readonly_call
 class Counter {
   count = 0
