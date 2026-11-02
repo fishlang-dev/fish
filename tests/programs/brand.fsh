@@ -395,3 +395,132 @@ function main() {
 // expect: 3 3 3
 // expect: nine
 // expect: 9 6 7 1.5
+// case: brand_channel_send
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+async function main() {
+  const c = new Channel<UserId>(1)
+  await c.send(1 as OrderId)
+}
+// error: 6:16: error[E0101]: argument of type 'Brand<usize, "OrderId">' is not assignable to parameter of type 'Brand<usize, "UserId">'
+// case: brand_await_result
+type LU = usize & { readonly __b?: "u" }
+type LO = usize & { readonly __b?: "o" }
+
+async function f(): Promise<LU> {
+  return 1 as LU
+}
+
+async function main() {
+  const o: LO = await f()
+  console.log(o)
+}
+// error: 9:17: error[E0101]: type 'usize & { __b?: "u" }' is not assignable to type 'usize & { __b?: "o" }'
+// case: brand_generator_yield
+type LU = usize & { readonly __b?: "u" }
+type LO = usize & { readonly __b?: "o" }
+
+function* g(): Generator<LU> {
+  yield 1 as LU
+}
+
+function main() {
+  for (const x of g()) {
+    const o: LO = x
+    console.log(o)
+  }
+}
+// error: 10:19: error[E0101]: type 'usize & { __b?: "u" }' is not assignable to type 'usize & { __b?: "o" }'
+// case: brand_spread
+type LU = usize & { readonly __b?: "u" }
+type LO = usize & { readonly __b?: "o" }
+
+function main() {
+  const ids: LU[] = [1 as LU]
+  const o: LO[] = [...ids]
+  console.log(o)
+}
+// error: 6:20: error[E0101]: type 'usize & { __b?: "u" }' is not assignable to type 'usize & { __b?: "o" }'
+// case: brand_object_spread_other
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+function main() {
+  const r = { id: 1 as UserId, n: 2 }
+  const o: { id: OrderId; n: i64 } = { ...r }
+  console.log(o)
+}
+// error: 6:38: error[E0101]: type '{ id: Brand<usize, "UserId">; n: i64 }' is not assignable to type '{ id: Brand<usize, "OrderId">; n: i64 }'
+// case: brand_async_kept
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+
+async function f(n: usize): Promise<UserId> {
+  await sleep(1)
+  return n as UserId
+}
+
+async function* ids(): AsyncGenerator<UserId> {
+  yield 1 as UserId
+  yield 2 as UserId
+}
+
+function* more(): Generator<UserId | null> {
+  yield 3 as UserId
+  yield null
+}
+
+async function main() {
+  const a: UserId = await f(4)
+  const [b, c] = await Promise.all([f(5), f(6)])
+  const h = spawn(async () => 7 as UserId)
+  const d: UserId = await h
+  console.log(a, b, c, d)
+  for await (const x of ids()) {
+    const u: UserId = x
+    console.log(u)
+  }
+  let g = more()
+  console.log(g.next(), g.next(), g.next())
+  const ch = new Channel<UserId>(2)
+  await ch.send(8 as UserId)
+  ch.close()
+  for await (const v of ch) {
+    const u: UserId = v
+    console.log(u)
+  }
+  const ch2 = new Channel<UserId>(1)
+  await ch2.send(9 as UserId)
+  const r = await ch2.receive()
+  const o: UserId | null = r
+  console.log(o)
+} 
+// expect: 4 5 6 7
+// expect: 1
+// expect: 2
+// expect: { done: false, value: 3 } { done: false, value: null } { done: true }
+// expect: 8
+// expect: 9
+// case: brand_spreads_kept
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+function* g(): Generator<UserId> {
+  yield 1 as UserId
+}
+
+function main() {
+  for (const x of g()) {
+    const u: UserId = x
+    console.log(u)
+  }
+  const ids: UserId[] = [1 as UserId]
+  const o: UserId[] = [...ids]
+  const r = { id: 1 as UserId, n: 2 }
+  const s: { id: UserId; n: i64 } = { ...r }
+  console.log(o, s)
+}
+// expect: 1
+// expect: [ 1 ] { id: 1, n: 2 }

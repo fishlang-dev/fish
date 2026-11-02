@@ -2917,7 +2917,7 @@ export class Expressions implements Union {
       x = this.rewrites.replace(x, { ...x, value: from });
     }
     const array = from ? this.value(from) : t;
-    const lowered = this.typing.lower(this.isRefType(array) ? this.typing.rec(array).to : array) as ArrayType;
+    const lowered = this.typing.lowerKeepingBrands(this.isRefType(array) ? this.typing.rec(array).to : array) as ArrayType;
     if (this.isRefType(array)) this.coercions.set(x.value, lowered);
     this.clonable(this.typing.rec(lowered).element, x, "a spread");
     // Codegen converts each element from this type.
@@ -3082,7 +3082,7 @@ export class Expressions implements Union {
     if (!(callee.name in takes)) throw new CompileError("E0502", `'Atomic' has no method '${callee.name}'; it has 'load', 'store', 'add', 'sub', 'exchange' and 'compareExchange'`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling 'Atomic' methods", callee);
     if (e.args.length !== takes[callee.name]) throw new CompileError("E0504", `'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : `${takes[callee.name]} arguments`}`, e.start, e.end);
-    const of = this.typing.lower(this.typing.rec(t).of);
+    const of = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
     if ((callee.name === "add" || callee.name === "sub") && !isInteger(of)) throw new CompileError("E0504", `'${callee.name}' needs an integer 'Atomic', not '${this.typing.show(t)}'`, callee.start, callee.end);
     for (const a of e.args) {
       this.expect(a, of);
@@ -3121,7 +3121,7 @@ export class Expressions implements Union {
     if (!(callee.name in takes)) throw new CompileError("E0502", `'Cell' has no method '${callee.name}'; it has 'get', 'set' and 'replace'`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling 'Cell' methods", callee);
     if (e.args.length !== takes[callee.name]) throw new CompileError("E0504", `'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
-    const of = this.typing.lower(this.typing.rec(t).of);
+    const of = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
     if (callee.name === "get" && !this.typing.isCopy(of)) throw new CompileError("E0504", `'get' copies what a Cell holds, which a '${this.typing.show(of)}' can't be; use 'replace' to take it out and put another in`, callee.start, callee.end);
     for (const a of e.args) {
       this.expect(a, of);
@@ -3305,7 +3305,7 @@ export class Expressions implements Union {
     if (signalled) this.signalArgument(e.args.at(-1)!, `'${callee.name}'`);
     // The std's own non-waiting send, which a promise's resolve and reject make.
     if (callee.name === "send" || callee.name === "settle") {
-      const of = this.typing.lower(this.typing.rec(t).of);
+      const of = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
       this.expect(e.args[0]!, of);
       const given = this.value(e.args[0]!);
       this.coerce(e.args[0]!, given, of, `argument of type '${this.typing.show(given)}' is not assignable to parameter of type '${this.typing.show(of)}'`);
@@ -3336,7 +3336,7 @@ export class Expressions implements Union {
       return { type: "void", what: "'throwIfAborted'" };
     }
     if (callee.name === "close" || callee.name === "settle") return { type: "void", what: `'${callee.name}'` };
-    return { type: this.typing.leafFuture(callee.name as "acquire" | "send" | "receive", this.typing.lower(this.typing.rec(t).of), signalled ? this.abortError() : undefined, signalled), what: `'${callee.name}'` };
+    return { type: this.typing.leafFuture(callee.name as "acquire" | "send" | "receive", this.typing.lowerKeepingBrands(this.typing.rec(t).of), signalled ? this.abortError() : undefined, signalled), what: `'${callee.name}'` };
   }
 
   // A UdpSocket's `sendTo(bytes, host, port)`, `receiveFrom()`, `connect(host, port)`, `send(bytes)`
@@ -4073,7 +4073,7 @@ export class Expressions implements Union {
       if (e.args.length > 0) throw new CompileError("E0504", "'downgrade' takes no arguments", e.start, e.end);
       return { type: this.typing.sharedType(this.typing.rec(t).of, "Weak"), what: "'downgrade'" };
     }
-    const inner = this.typing.lower(this.typing.rec(t).of);
+    const inner = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
     const stored = typeof inner !== "string" && (this.typing.rec(inner).kind === "object" || this.typing.rec(inner).kind === "class") ? this.typing.field(inner, callee.name) : undefined;
     if (stored && this.isCallable(this.typing.lower(stored.type))) return this.callableCall(e, callee, this.typing.lower(stored.type) as DynType);
     if (which === "Rc" && callee.name === "read") return this.lockCall(e, callee, this.typing.interiorType("RwLock", this.typing.rec(t).of), true, true);
@@ -4129,7 +4129,7 @@ export class Expressions implements Union {
   private sharedField(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, t: SharedType): Type {
     if (this.linked(e)) throw unsupported("optional chains through shared values", e);
     if (this.typing.rec(t).which === "Weak") throw new CompileError("E0502", `a 'Weak' reaches its value only through 'upgrade()', which gives an 'Rc' while one is left, as in 'const p = ${this.placeText(this.bare(e.object))}.upgrade()'`, e.start, e.end);
-    const inner = this.typing.lower(this.typing.rec(t).of);
+    const inner = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
     const ir = this.recOf(inner);
     if (ir?.kind === "class") this.ctx.classOf(inner as ClassType);
     const found = ir === undefined || ir.kind === "closure" ? undefined : this.typing.field(inner as Exclude<Type, string>, e.name);
@@ -4159,7 +4159,7 @@ export class Expressions implements Union {
     if (e.args.length !== 1) throw new CompileError("E0506", `'${method}' takes 1 argument, a callback like 'v => ...'`, e.start, e.end);
     const callback = e.args[0]!;
     if (callback.kind !== "arrow") throw unsupported(`callbacks passed to '${method}' by name; write the arrow function in place`, callback);
-    const held = this.typing.refType(this.typing.lower(this.typing.rec(t).of), method === "update");
+    const held = this.typing.refType(this.typing.lowerKeepingBrands(this.typing.rec(t).of), method === "update");
     const signature = this.typing.functionType(["value"], [held], "void");
     this.typing.lockCallbacks.set(signature, method);
     if (sharing) this.typing.sharedCallbacks.add(signature);
@@ -6297,7 +6297,7 @@ export class Expressions implements Union {
         continue;
       }
       const t = this.value(p.value);
-      const low = this.typing.lower(this.isRefType(t) ? this.typing.rec(t).to : t);
+      const low = this.typing.lowerKeepingBrands(this.isRefType(t) ? this.typing.rec(t).to : t);
       // An object-typed parameter stands for any type with its fields, which its bound names.
       const lr = this.recOf(low);
       const br = lr?.kind === "param" ? this.recOf(lr.bound) : undefined;

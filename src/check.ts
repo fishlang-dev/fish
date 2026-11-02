@@ -994,6 +994,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     };
     const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
     const compiledIds = compiledInstances.map((i) => i.id);
+    this.typing.layOutForCodegen();
     return { instances: compiledIds, tables: this.tables, compilation: this.compilation, warnings: warnings(this.tables, compiledIds, required) };
   }
 
@@ -1807,7 +1808,7 @@ class BodyChecker implements Context, Outer, Sight {
     this.yielded = this.generatorType && this.declared ? this.cx.typing.generatorElement(this.declared, this.f.async === true) : undefined;
     // What `next(x)` sends, which a `yield` whose value is used gives.
     this.sends = this.generatorType && this.declared ? this.cx.typing.generatorSends(this.declared) : undefined;
-    if (this.generatorType && this.sends !== undefined) this.cx.typing.rec(this.generatorType).sends = this.instance.concrete ? this.cx.typing.lower(this.sends) : this.sends;
+    if (this.generatorType && this.sends !== undefined) this.cx.typing.rec(this.generatorType).sends = this.instance.concrete ? this.cx.typing.lowerKeepingBrands(this.sends) : this.sends;
     if (this.generatorType && this.declared && !this.yielded) throw new CompileError("E0606", `${this.f.async ? "an async" : "a"} generator function's return type is '${this.generatorName}<T>', the type of what it yields`, this.f.returnType!.start, this.f.returnType!.end);
     if (this.generatorType) this.declared = undefined;
     if (this.yielded && this.cx.typing.holdsRef(this.yielded)) throw unsupported("generators yielding references", this.f.returnType!);
@@ -2087,7 +2088,7 @@ class BodyChecker implements Context, Outer, Sight {
     if (this.generatorType) {
       if (!this.yielded) throw new CompileError("E0606", `this generator never yields, so what it gives can't be told; declare it as '${this.generatorName}<T>'`, (this.f.returnType ?? this.f).start, (this.f.returnType ?? this.f).end);
       const laid = (t: Type) => (this.instance.concrete ? this.cx.typing.lower(t) : t);
-      this.cx.typing.rec(this.generatorType).yields = laid(this.yielded);
+      this.cx.typing.rec(this.generatorType).yields = this.instance.concrete ? this.cx.typing.lowerKeepingBrands(this.yielded) : this.yielded;
       this.cx.typing.rec(this.generatorType).params = this.f.params.map((p, i) => ({ name: paramName(p), type: laid(this.params[i]!) }));
       // A generator method's frame holds its object, as an async method's future does.
       if (this.f.self && !this.f.self.constructor) this.cx.typing.rec(this.generatorType).params.unshift(receiverField(this.cx.typing, this.f.self, laid));
@@ -2101,7 +2102,8 @@ class BodyChecker implements Context, Outer, Sight {
       if (this.cx.typing.holdsRef(gives)) throw unsupported("async functions giving references", this.f.returnType ?? this.f);
       const laid = (t: Type) => (this.instance.concrete ? this.cx.typing.lower(t) : t);
       // An inferred result widens as a `let` does: an async `return "x"` gives a string.
-      this.cx.typing.rec(this.future).gives = laid(this.f.returnType ? gives : this.cx.typing.widenLet(gives));
+      const given = this.f.returnType ? gives : this.cx.typing.widenLet(gives);
+      this.cx.typing.rec(this.future).gives = this.instance.concrete ? this.cx.typing.lowerKeepingBrands(given) : given;
       this.cx.typing.rec(this.future).throws = this.errorType && laid(this.errorType);
       this.cx.typing.rec(this.future).params = this.f.params.map((p, i) => ({ name: paramName(p), type: laid(this.params[i]!) }));
       // An async method's future holds its object: borrowed, or owned under `Own<this>`.
@@ -3179,7 +3181,7 @@ class BodyChecker implements Context, Outer, Sight {
   awaitLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, name: string, mutable: boolean, through: Type, object: Type) {
     const yields = this.cx.typing.yieldsOf(object, true);
     const o = this.cx.recOf(object);
-    const channel = o?.kind === "block" && o.which === "Channel" ? this.cx.typing.lower(o.of) : undefined;
+    const channel = o?.kind === "block" && o.which === "Channel" ? this.cx.typing.lowerKeepingBrands(o.of) : undefined;
     if (yields === undefined && channel === undefined) {
       throw new CompileError("E0119", `'for await' loops over an async generator or a Channel, not '${this.cx.typing.show(through)}'`, s.right.start, s.right.end);
     }

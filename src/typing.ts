@@ -1970,6 +1970,19 @@ export class Typing {
 
   private lowered = new TypeMap<Exclude<Type, string>, Type>();
 
+  // Once every body is checked, what futures give and generators yield and take are laid out as
+  // codegen holds values, a brand as its base; the checker kept the brands to check them.
+  layOutForCodegen(this: Mut<this>): void {
+    for (let i = 0, n = this.arena.length; i < n; i++) {
+      const r = this.arena[i]!;
+      if (r.kind === "future") r.gives = this.lower(r.gives);
+      else if (r.kind === "generator") {
+        r.yields = this.lower(r.yields);
+        if (r.sends !== undefined) r.sends = this.lower(r.sends);
+      }
+    }
+  }
+
   // A type lowered as `lower` does, except that its brands stay, through the forms that hold a
   // value directly: what a function type checks its arguments and result against.
   lowerKeepingBrands(this: Mut<this>, t: Type): Type {
@@ -1985,6 +1998,7 @@ export class Typing {
     if (r.kind === "map") return this.mapType(kept(r.key), kept(r.value), r.set, r.dict);
     if (r.kind === "object" && r.tuple && !r.match) return this.retuple(t as ObjectType, kept);
     if (r.kind === "object" && !r.match) return this.objectType(r.fields.map(({ optional: _, ...f }) => ({ ...f, type: kept(f.type) })));
+    if (r.kind === "class" && r.generic) return r.generic.args.some((a) => kept(a) !== a) ? this.instanceClass(t as ClassType, r.generic.args.map(kept)) : t;
     return this.lower(t);
   }
 
