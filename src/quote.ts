@@ -1,7 +1,7 @@
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
-import { FILE_SPAN } from "./modules.ts";
+import { FILE_SPAN } from "./program.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
 import { nextId, renumber, Rewrites, walk as walkTree, type Ids } from "./nodes.ts";
 import { rebuiltExpr, rebuiltStmt, rebuiltTypeNode } from "./rebuild.ts";

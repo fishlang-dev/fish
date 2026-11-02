@@ -4,7 +4,7 @@ import { newTables, timed, type Compilation, type Tables } from "./compilation.t
 import { CompileError, CompileErrors, named } from "./diag.ts";
 import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
-import { FILE_SPAN } from "./modules.ts";
+import { FILE_SPAN } from "./program.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";

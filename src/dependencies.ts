@@ -8,6 +8,7 @@ import { openIndex, registryUrl, resolveVersions, Unresolved, type Index, type I
 import { parseRange, parseVersion, satisfies } from "./semver.ts";
 import { untar } from "./tar.ts";
 import { cacheDir } from "./mathlib.ts";
+import type { Locking } from "./program.ts";
 import { fieldError, findManifest, inManifest, loadManifest, MANIFEST, parseToml, type Dependency, type Manifest, type Table } from "./manifest.ts";
 
 // A Fish package of a program: its manifest, its real directory, the packages its dependencies
@@ -80,10 +81,6 @@ export function resolvePackages(entry: string, locking: Locking): Package[] | un
 }
 
 export const LOCKFILE = "fish.lock";
-
-// Whether a build may change `fish.lock`, as `fishc build --locked` says it may not, for CI;
-// and which registry packages `fishc update` moves past their locked versions, "all" for every one.
-export type Locking = { locked: boolean; update?: Set<string> | "all" };
 
 // Writes `fish.lock` beside the root package's manifest when what it resolves to has changed,
 // after checking that each git package's files still hash to what the lock recorded.

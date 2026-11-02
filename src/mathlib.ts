@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Session } from "./compilation.ts";
+import type { Unit } from "./program.ts";
 
 // The runtime's `Math` functions: src/runtime/math.cpp over LLVM libc's correctly rounded ones,
 // and CORE-MATH's hyperbolic ones, both vendored. Compiling them takes seconds, so each clang
@@ -40,10 +41,6 @@ export function files(dir: string): string[] {
       return statSync(path).isDirectory() ? files(path) : [path];
     });
 }
-
-// One object clang compiles and the cache keeps: `args` are its flags and input, `stdin` its source
-// when the input is `-`, and `inputs` the other files its text depends on, such as headers.
-export type Unit = { name: string; args: string[]; stdin?: string; inputs: string[] };
 
 // `clang --version`, which names the target as well as the compiler, run once a session.
 function clangVersion(session: Session): string {

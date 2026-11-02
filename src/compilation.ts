@@ -7,8 +7,7 @@ import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, 
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
 import type { RustTables } from "./rust.ts";
-import type { Locking } from "./dependencies.ts";
-import type { Unit } from "./mathlib.ts";
+import type { Locking, Unit } from "./program.ts";
 import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 

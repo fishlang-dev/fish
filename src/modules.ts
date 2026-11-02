@@ -16,12 +16,10 @@ import { unsupported } from "./unsupported.ts";
 import type { Id } from "./ids.ts";
 import { forEachChild, nextId, NodeMap, Rewrites, shiftSpans, walk, type AnyNode, type Ids } from "./nodes.ts";
 import { rebuiltStmts } from "./rebuild.ts";
+import { FILE_SPAN } from "./program.ts";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
 // offset range, so a position anywhere in the program says which file it is in.
-
-// Each file after the entry starts at its own multiple of this, room for a 16 MiB file.
-export const FILE_SPAN = 2 ** 24;
 
 // `targets` is the file each import and re-export names.
 // `globals`: the std modules a file names as globals, as `os` in `os.hostname()`, without
@@ -37,26 +35,6 @@ export type Package = { specifier: string; dir: string; at: Span };
 export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[] };
 export type RustCrate = { dependency: RustDependency; dir: string };
 
-// The file a source offset is in, among a compilation's `files`, as written relative to the
-// entry's directory.
-export function fileAt(files: Compilation["files"], offset: usize): string {
-  return files.findLast((f) => offset >= f.base)?.file ?? "";
-}
-
-// The name std's module holding a source offset is shown by, as "node:fs", or nothing when the
-// offset is in a file of the program's own, whatever that file is named.
-export function stdModuleAt(files: Compilation["files"], offset: usize): string | undefined {
-  const f = files.findLast((f) => offset >= f.base);
-  return f?.std ? f.file : undefined;
-}
-
-// The source text a span covers in the program last loaded; std's prelude is in none of its files.
-export function textAt(files: Compilation["files"], at: Span): string {
-  const f = files.findLast((f) => at.start >= f.base);
-  return f && at.end - f.base <= f.src.length ? f.src.slice(at.start - f.base, at.end - f.base) : "";
-}
-
-// Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
 // `read`: an editor's unsaved text is newer than the disk's. The program's files are noted in the
 // compilation's `files`.
 export function load(compilation: Compilation, entry: string, src: string = readFileSync(entry, "utf8"), read: (path: string) => string = (path: string) => readFileSync(path, "utf8"), fish: FishPackage[] | undefined = resolvePackages(entry, compilation.session.locking)): Loaded {

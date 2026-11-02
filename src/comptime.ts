@@ -1,7 +1,7 @@
 import type { Instance } from "./check.ts";
 import { bodyOf, type LocalId } from "./arenas.ts";
 import { CompileError } from "./diag.ts";
-import { fileAt, stdModuleAt } from "./modules.ts";
+import { fileAt, stdModuleAt } from "./program.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";

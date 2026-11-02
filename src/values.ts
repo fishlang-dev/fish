@@ -1,5 +1,5 @@
 import type { Tables } from "./compilation.ts";
-import { stdModuleAt, textAt } from "./modules.ts";
+import { stdModuleAt, textAt } from "./program.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
 import { abstractIn, copyFor, inherited, selfTyped, shownName, isLifetime, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
