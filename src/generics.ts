@@ -445,7 +445,13 @@ export class Instancing {
   // type, which is what an interface's method signature is compared with.
   declaredParams(this: Mut<this>, f: Body): Type[] {
     const implicit = this.implicitOf(f);
-    return this.host.signing(f, () => this.host.withScope(f.scope ?? new Map(), () => f.params.map((p, i) => this.lentAs(f, i, implicit.get(i)) ?? this.host.paramType(p, f.self?.constructor))));
+    return this.host.signing(f, () => this.host.withScope(f.scope ?? new Map(), () => f.params.map((p, i) => this.implicitParam(f, i, implicit.get(i)) ?? this.host.paramType(p, f.self?.constructor))));
+  }
+
+  // An implicit parameter's type as the body and its callers see it: borrowed when it is a
+  // reference, and empty when it is optional and left out.
+  private implicitParam(f: Body, i: usize, t: Type | undefined): Type | undefined {
+    return t !== undefined && f.params[i]!.optional ? this.typing.unionType([t, "null"]) : this.lentAs(f, i, t);
   }
 
   // An implicit parameter's type, borrowed when the parameter is a reference to it.
@@ -580,6 +586,10 @@ export class Instancing {
     ]);
     for (const [i, bound] of this.implicitOf(f)) {
       const meant = this.rebound(bound, decided);
+      if (f.params[i]!.optional) {
+        own.set(`#${i}`, this.presentArgument(args[i], argTypes[i], meant));
+        continue;
+      }
       own.set(`#${i}`, this.implicitArgument(args[i]!, argTypes[i]!, meant, this.host.instancingState.lent.get(f.bodyId)!.get(i)));
       const given = argTypes[i]!;
       const r = typeof given === "string" ? undefined : this.typing.rec(given);
@@ -636,7 +646,7 @@ export class Instancing {
     const outer = classPlaceholders(this.host.tables, this.host.classParams(f), (t, s) => this.host.withScope(s, () => this.host.resolveType(t)));
     const decided = new TypeMap([...outer].flatMap(([name, held]): [Type, Type][] => (scope.has(name) && scope.get(name) !== held ? [[held, scope.get(name)!]] : [])));
     return this.host.signing(f, () => this.host.withScope(scope, () => f.params.map((p, i) =>
-      this.lentAs(f, i, scope.get(`#${i}`) ?? (implicit.has(i) ? this.rebound(implicit.get(i)!, decided) : undefined)) ?? this.host.paramType(p, f.self?.constructor))));
+      this.implicitParam(f, i, scope.get(`#${i}`) ?? (implicit.has(i) ? this.rebound(implicit.get(i)!, decided) : undefined)) ?? this.host.paramType(p, f.self?.constructor))));
   }
 
   // An implicit parameter's bound with the type parameters a call or a class instance decided
@@ -747,9 +757,13 @@ export class Instancing {
       // A reference to an interface or object type is one over what it borrows.
       const w = written && typeof written !== "string" ? this.typing.rec(written) : undefined;
       const type = w?.kind === "ref" ? w.to : written;
-      // An optional parameter is an Option of its type, not a type parameter. A function-typed
-      // parameter property takes a closure as a declared field assigned from a parameter does.
-      if (!type || typeof type === "string" || p.optional) return;
+      // An optional parameter is an Option of its type, not a type parameter, save one of an
+      // interface type, which is an Option of a type parameter. One with a default holds the
+      // default's type when left out, which differs from an argument's, so it stays refused. A
+      // function-typed parameter property takes a closure as a declared field assigned from a
+      // parameter does.
+      const optional = p.optional && (written !== type || this.typing.recOf(type)?.kind !== "interface" || this.host.tables.defaulted.has(p));
+      if (!type || typeof type === "string" || optional) return;
       const t = this.typing.rec(type);
       if (p.modifiers.length > 0 && t.kind !== "function") return;
       if (f.accessor && t.kind === "interface") {
@@ -764,6 +778,20 @@ export class Instancing {
       }
     }));
     return found;
+  }
+
+  // What an optional interface parameter stands for in a call: what the argument holds besides
+  // null. A call leaving it out or passing null makes an instance where it is always empty, whose
+  // type only needs to satisfy the bound: an array for an `Iterable`, so loops over it check, and
+  // otherwise `never`.
+  private presentArgument(arg: Expr | undefined, type: Type | undefined, bound: Bound): Type {
+    const element = this.typing.iterableElement(bound);
+    const absent = element !== undefined ? this.typing.arrayType(element) : "never";
+    if (arg === undefined || type === undefined || type === "null") return absent;
+    const r = typeof type === "string" ? undefined : this.typing.rec(type);
+    const held = r?.kind === "union" && r.members.includes("null") ? this.typing.unionType(r.members.filter((m) => m !== "null")) : type;
+    if (this.typing.lower(held) === "never") return absent;
+    return this.implicitArgument(arg, held, bound, undefined);
   }
 
   // What an implicit type parameter stands for in a call: the argument's own type, which must
@@ -784,6 +812,9 @@ export class Instancing {
     }
     // A recursive type's value stands for the type it stands for.
     type = this.typing.unfold(type);
+    // Only an instance where an optional interface parameter was left out holds a 'never', and
+    // that code never runs, so it stands in for any bound.
+    if (this.typing.lower(type) === "never") return "never";
     const message = `argument of type '${this.typing.show(type)}' is not assignable to parameter of type '${this.typing.show(bound)}'`;
     const t = typeof type === "string" ? undefined : this.typing.rec(type);
     const b = this.typing.rec(bound);

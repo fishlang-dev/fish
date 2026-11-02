@@ -103,7 +103,7 @@ export class NodeMap<K extends Id, V> {
   private table = new Map<usize, { node: K; value: V }>();
 
   constructor(entries?: Iterable<readonly [K, V]>) {
-    if (entries) for (const [node, value] of entries) this.set(node, value);
+    if (entries !== undefined) for (const [node, value] of entries) this.set(node, value);
   }
 
   get size(): usize {
@@ -157,7 +157,7 @@ export class NodeSet<K extends Id> {
   private table = new Map<usize, K>();
 
   constructor(nodes?: Iterable<K>) {
-    if (nodes) for (const n of nodes) this.add(n);
+    if (nodes !== undefined) for (const n of nodes) this.add(n);
   }
 
   get size(): usize {
