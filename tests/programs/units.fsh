@@ -91,3 +91,8 @@ function main() {
   console.log(n << 1, d, t)
 }
 // error: operator '<<' can't be applied to 'Unit<i64, "n">', a unit
+// case: units_cancelled
+function main() {
+  const x: Unit<f64, "m^0"> = 1
+}
+// error: 2:12: error[E0116]: the unit 'm^0' cancels to none, so this is a plain 'number'; write that instead

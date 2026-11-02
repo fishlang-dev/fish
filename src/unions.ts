@@ -355,7 +355,7 @@ export function objectsMeet(typing: Typing, a: Type, b: Type): boolean {
     const r = typeof t === "string" ? undefined : typing.rec(t);
     return r?.kind === "union" ? r.members : [t];
   };
-  const object = (t: Type) => typeof t !== "string" && !["literal", "pattern"].includes(typing.rec(t).kind);
+  const object = (t: Type) => typeof t !== "string" && !["literal", "pattern", "brand"].includes(typing.rec(t).kind);
   return members(a).some(object) && members(b).some(object);
 }
 

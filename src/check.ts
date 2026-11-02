@@ -70,6 +70,9 @@ export type Instance = {
   depth: usize;
   // Its return type, written or inferred.
   returns: Type;
+  // Its parameters' and return types with their brands kept, which lowering forgets, for the
+  // type of a closure made from it.
+  branded?: { params: Map<LocalId, Type>; returns: Type };
   // Every value expression's type.
   types: NodeMap<Expr, Type>;
   // Each `JSON.stringify` argument's type before lowering, which keeps how fields were spelled.
@@ -1275,6 +1278,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     instance.caught.forEach((t, s) => instance.caught.set(s, this.typing.lower(t)));
     instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: this.typing.lower(p.type) }));
     if (instance.throws) instance.throws = this.typing.lower(instance.throws);
+    const kept = (t: Type) => this.typing.lowerKeepingBrands(t);
+    const params = new Map([...new Set(instance.locals.values())].filter((l) => this.arenas.localOf(l).param).map((l): [LocalId, Type] => [l, kept(this.arenas.localOf(l).type)]));
+    instance.branded = { params, returns: kept(instance.returns) };
     for (const local of new Set(instance.locals.values())) this.arenas.localOf(local).type = lowered(this.arenas.localOf(local).type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, this.counterpart(this.arenas.instanceOf(target)).id));
     instance.returns = this.typing.lower(instance.returns);
@@ -2691,7 +2697,7 @@ class BodyChecker implements Context, Outer, Sight {
     // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
     // An async arrow's call only makes its future, which carries what it throws.
     const throws = inner.future ? undefined : inner.throws && laid(inner.throws);
-    const type = madeBy(this.cx.typing.closureType(e.params.map((p) => writtenName(this.cx.tables, p)), e.params.map((p) => this.cx.localOf(inner.locals.get(p)!).type), inner.future ?? inner.returns, fields, moved[0]?.name, inner.concrete, throws), inner);
+    const type = madeBy(this.cx.typing.closureType(e.params.map((p) => writtenName(this.cx.tables, p)), e.params.map((p) => inner.branded?.params.get(inner.locals.get(p)!) ?? this.cx.localOf(inner.locals.get(p)!).type), inner.future ?? inner.branded?.returns ?? inner.returns, fields, moved[0]?.name, inner.concrete, throws), inner);
     // One throwing what the function type it is given as doesn't take can't be given as it.
     const given = expected && this.cx.typing.rec(expected);
     if (expected && given && throws && e.throws && !this.cx.typing.openThrows.has(expected) && !(given.throws && this.cx.typing.fits(throws, given.throws))) {
@@ -3026,7 +3032,7 @@ class BodyChecker implements Context, Outer, Sight {
         const type = this.exprs().read(s.discriminant);
         const r = this.cx.recOf(type);
         const union = r?.kind === "union" ? (type as UnionType) : undefined;
-        if (r && !union && r.kind !== "literal") throw unsupported("comparisons of objects", s.discriminant);
+        if (r && !union && r.kind !== "literal" && r.kind !== "brand") throw unsupported("comparisons of objects", s.discriminant);
         const defaults = s.cases.filter((c) => !c.test);
         if (defaults.length > 1) throw new CompileError("E0608", "a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
         // The case bodies share one scope, as in JavaScript, but any case may be entered
@@ -3042,7 +3048,8 @@ class BodyChecker implements Context, Outer, Sight {
             const before = new Set(shared.values());
             let test = c.test && this.exprs().value(c.test);
             // A literal case takes the discriminant's type, or its union's one number type.
-            const numbers = union ? numberMembers(this.cx.tables.typing, union) : [type];
+            // A brand's cases are its base's values, as `===` compares them.
+            const numbers = union ? numberMembers(this.cx.tables.typing, union) : [this.cx.typing.unbranded(type)];
             if (test && test !== type && numbers.length === 1 && this.exprs().adapt(c.test!, numbers[0]!)) test = numbers[0]!;
             // A discriminant whose type is still open takes an integer case's.
             if (test && test !== type && isInteger(test) && !this.exprs().literalOnly(s.discriminant, false) && this.exprs().adapt(s.discriminant, test)) test = type;

@@ -2738,7 +2738,7 @@ export class Expressions implements Union {
     if (arity !== undefined) {
       if (e.args.length !== arity) throw new CompileError("E0504", `${what} takes ${arity === 1 ? "one number" : "two numbers"}`, e.start, e.end);
       for (const a of e.args) {
-        const t = this.read(a);
+        const t = this.brandBase(this.read(a));
         if (t === "f64" || this.adapt(a, "f64")) continue;
         throw new CompileError("E0111", isNumeric(t) ? `${what} takes a '${this.typing.show("f64")}', an f64, not '${this.typing.show(t)}'; convert it with 'as', as in 'n as f64'` : `${what} takes a number, not '${this.typing.show(t)}'`, a.start, a.end);
       }
@@ -2748,7 +2748,7 @@ export class Expressions implements Union {
     if (!["abs", "sign", "min", "max"].includes(name)) throw new CompileError("E0801", `'Math' has no '${name}' in Fish yet`, e.start, e.end);
     const many = name === "min" || name === "max";
     if (many ? e.args.length === 0 : e.args.length !== 1) throw new CompileError("E0504", many ? `${what} takes one or more numbers` : `${what} takes one number`, e.start, e.end);
-    const given = e.args.map((a) => this.read(a));
+    const given = e.args.map((a) => this.brandBase(this.read(a)));
     given.forEach((t, i) => {
       if (!isNumeric(t)) throw new CompileError("E0504", `${what} takes numbers, not '${this.typing.show(t)}'`, e.args[i]!.start, e.args[i]!.end);
     });
@@ -5478,7 +5478,7 @@ export class Expressions implements Union {
         // A variable whose type is still open takes the integer type assigned to it.
         if (op === "=" && isInteger(assigned) && assigned !== target && this.ctx.infer(place, assigned)) return assigned;
         const type = op === "=" ? assigned
-          : op === "+" && target === "string" ? this.join(place, target, e.value, this.widen(e.value, assigned))
+          : op === "+" && this.typing.unbranded(target) === "string" ? this.join(place, target, e.value, this.widen(e.value, assigned))
           : op === "**" ? this.power(place, target, e.value, this.widen(e.value, assigned), e)
           : binaryType(this.typing, op, ...this.sameNumbers(place, target, e.value, this.widen(e.value, assigned)), e);
         this.coerce(e.value, type, target, `type '${this.typing.show(type)}' is not assignable to type '${this.typing.show(target)}'`);
@@ -5499,6 +5499,12 @@ export class Expressions implements Union {
         const entry = this.dictEntry(e.operand);
         if (entry) throw this.dictWrite(entry.place);
         const target = this.assignable(e.operand, true);
+        // A loose brand takes back the base `++` gives; a strict one or a unit only through `as`.
+        const brand = this.recOf(target);
+        if (brand?.kind === "brand" && isNumeric(brand.base)) {
+          if (brand.loose) return target;
+          throw new CompileError("E0103", `operator '${e.op}' gives a '${this.typing.show(brand.base)}', which a '${this.typing.show(target)}' is made from only with 'as'; write it as an assignment, like 'x = (x ${e.op[0]} 1) as ${this.typing.show(target)}'`, e.start, e.end);
+        }
         if (!isNumeric(target) && target !== "bigint") throw new CompileError("E0103", `operator '${e.op}' cannot be applied to type '${this.typing.show(target)}'`, e.start, e.end);
         return target;
       }
@@ -5713,6 +5719,13 @@ export class Expressions implements Union {
     const to = this.typing.fits(fallback, inner) || this.adaptable(e.right, inner) || (this.isRefType(inner) && this.typing.fits(fallback, this.typing.rec(inner).to)) ? inner : option;
     this.coerce(e.right, fallback, to, `type '${this.typing.show(fallback)}' is not assignable to type '${this.typing.show(to)}', what '${this.typing.show(option)}' holds`);
     return to;
+  }
+
+  // A brand's base, which `Math` works on as it would on any of its values; a unit stays, since
+  // what `Math` gives would lose it.
+  private brandBase(t: Type): Type {
+    const r = this.recOf(t);
+    return r?.kind === "brand" && !r.unit ? r.base : t;
   }
 
   // Whether an expression of only literals could take this number type.
@@ -6537,9 +6550,10 @@ export class Expressions implements Union {
       throw new CompileError("E0109", `can't assign to '${target.name}' through '${this.typing.show(object)}'; narrow it to one member first`, target.start, target.end);
     }
     const found = typeof object !== "string" && this.typing.field(object, target.name)?.type;
-    // A pattern the field was declared with is what a write must match, though lowering made it a string.
+    // A pattern or brand the field was declared with is what a write must match, though lowering
+    // made it a string or the brand's base.
     const declared = this.types.get(target)!;
-    if (found && this.typing.holdsPattern(declared) && this.typing.lower(declared) === this.typing.lower(found)) return declared;
+    if (found && (this.typing.holdsPattern(declared) || this.typing.holdsBrand(declared)) && this.typing.lower(declared) === this.typing.lower(found)) return declared;
     return found || declared;
   }
 
@@ -6979,7 +6993,7 @@ export class Expressions implements Union {
   condition(this: Mut<this>, e: Expr) {
     const type = this.operand(e);
     if (this.typing.isOption(type)) throw new CompileError("E0102", `condition must be a boolean, not the Option '${this.typing.show(type)}'; check it with '!== null'`, e.start, e.end);
-    if (type !== "boolean") {
+    if (this.typing.unbranded(type) !== "boolean") {
       throw new CompileError("E0102", `condition must be a boolean, not '${this.typing.show(type)}'; compare explicitly, e.g. 'n !== 0'`, e.start, e.end);
     }
   }

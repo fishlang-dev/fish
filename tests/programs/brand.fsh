@@ -190,7 +190,7 @@ function main() {
   const o = 3 as OrderId
   console.log(a === o)
 }
-// error: this comparison appears to be unintentional because the types 'Brand<usize, "UserId">' and 'Brand<usize, "OrderId">' have no overlap
+// error: operator '===' can't mix 'Brand<usize, "UserId">' and 'Brand<usize, "OrderId">'; convert one side with 'as'
 // case: brand_compound_assign
 type A = Brand<usize, "A">
 
@@ -284,3 +284,114 @@ function main() {
   console.log(id, new Unit().n)
 }
 // expect: 3 1
+// case: brand_closure_argument
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+function main() {
+  const o = 1 as OrderId
+  const f = (x: UserId): usize => x
+  console.log(f(o))
+}
+// error: 7:17: error[E0101]: argument of type 'Brand<usize, "OrderId">' is not assignable to parameter of type 'Brand<usize, "UserId">'
+// case: brand_closure_result
+type UserId = Brand<usize, "UserId">
+
+function main() {
+  const n: usize = 5
+  const f: () => UserId = () => n
+  console.log(f())
+}
+// error: 5:27: error[E0101]: type '() => usize' is not assignable to type '() => Brand<usize, "UserId">'
+// case: brand_function_value
+type UserId = Brand<usize, "UserId">
+type OrderId = Brand<usize, "OrderId">
+
+function idf(x: UserId): usize {
+  return x
+}
+
+function main() {
+  const o = 1 as OrderId
+  const f = idf
+  console.log(f(o))
+}
+// error: 11:17: error[E0101]: argument of type 'Brand<usize, "OrderId">' is not assignable to parameter of type 'Brand<usize, "UserId">'
+// case: brand_field_write
+type UserId = Brand<usize, "UserId">
+type R = { id: UserId }
+
+function main() {
+  let o: R = { id: 2 as UserId }
+  o.id = 7
+}
+// error: 6:10: error[E0101]: type 'i64' is not assignable to type 'Brand<usize, "UserId">'
+// case: brand_optional_field_write
+type UserId = Brand<usize, "UserId">
+
+function main() {
+  const n: usize = 1
+  let o: { id: UserId | null } = { id: null }
+  o.id = n
+}
+// error: 6:10: error[E0101]: type 'usize' is not assignable to type 'null | Brand<usize, "UserId">'
+// case: brand_loose_to_strict
+type L = usize & { readonly __b?: "X" }
+type S = usize & { readonly __b: "X" }
+
+function main() {
+  const l: L = 5
+  const s: S = l
+}
+// error: 6:16: error[E0101]: type 'usize & { __b?: "X" }' is not assignable to type 'usize & { __b: "X" }'
+// case: brand_increment
+type UserId = Brand<usize, "UserId">
+
+function main() {
+  let u = 1 as UserId
+  u++
+}
+// error: 5:3: error[E0103]: operator '++' gives a 'usize', which a 'Brand<usize, "UserId">' is made from only with 'as'; write it as an assignment, like 'x = (x + 1) as Brand<usize, "UserId">'
+// case: brand_string_append
+type E = Brand<string, "E">
+
+function main() {
+  let e = "a" as E
+  e += "b"
+}
+// error: type 'string' is not assignable to type 'Brand<string, "E">'; make one with 'as Brand<string, "E">'
+// case: brand_callbacks
+type UserId = Brand<usize, "UserId">
+type M = Unit<f64, "m">
+type L = usize & { readonly __b?: "X" }
+type Flag = Brand<boolean, "Flag">
+
+function app(f: (x: UserId) => UserId, n: UserId): UserId {
+  return f(n)
+}
+
+function add(a: M, b: M): M {
+  return a + b
+}
+
+function main() {
+  const id = app((x) => x, 3 as UserId)
+  let xs: M[] = [1 as M, 2 as M]
+  console.log(id, xs.reduce((a: M, b: M): M => a + b, 0 as M), xs.reduce(add, 0 as M))
+  let mut: { id: UserId } = { id }
+  mut.id = 9 as UserId
+  switch (mut.id) {
+    case 9:
+      console.log("nine")
+      break
+    default:
+      console.log("other")
+  }
+  let l: L = 5
+  l++
+  const f = true as Flag
+  if (f) console.log(mut.id, l, Math.max(id, 7), Math.sqrt(2.25 as Brand<f64, "F">))
+}
+// expect: 3 3 3
+// expect: nine
+// expect: 9 6 7 1.5

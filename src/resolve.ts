@@ -544,6 +544,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       const base = of && args[0];
       const powers = text?.kind === "literal" && text.value.kind === "string" ? unitPowers(text.value.value) : undefined;
       if (t.args.length !== 2 || !isNumeric(base!) || !powers) throw new CompileError("E0116", "'Unit' takes a number type and its unit, like 'Unit<f64, \"m/s\">', the unit names with powers over at most one '/'", t.start, t.end);
+      if (Object.values(powers).every((p) => p === 0)) throw new CompileError("E0116", `the unit '${(text as { value: { value: string } }).value.value}' cancels to none, so this is a plain '${this.typing.show(base!)}'; write that instead`, t.start, t.end);
       return this.typing.unitType(base!, powers);
     }
     if (t.name === "Brand") {

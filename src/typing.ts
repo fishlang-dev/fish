@@ -1079,8 +1079,9 @@ export class Typing {
 
   // The stored callable of a signature, which may be one no type has, spelled as a closure was.
   callableFrom(this: Mut<this>, f: FunctionRecord): DynType {
-    // In an instance, what its type parameters stand for decides the layout.
-    const [params, returns, throws] = [f.params.map((t) => this.lower(t)), this.lower(f.returns), f.throws && this.lower(f.throws)];
+    // In an instance, what its type parameters stand for decides the layout; brands stay, for
+    // checking what is passed and given.
+    const [params, returns, throws] = [f.params.map((t) => this.lowerKeepingBrands(t)), this.lowerKeepingBrands(f.returns), f.throws && this.lower(f.throws)];
     // Keyed by types alone, as parameter names don't make another function type, so
     // `Box<(n: i64) => i64>` and `Box<(m: i64) => i64>` are one class; the first spelling met is shown.
     const key = `${params.map((t) => this.keyOf(t)).join(", ")} => ${this.keyOf(returns)}${throws ? ` throws ${this.keyOf(throws)}` : ""}`;
@@ -1100,6 +1101,11 @@ export class Typing {
     return spelled;
   }
 
+  // Whether two types are one once lowered, with the brands either holds the same.
+  private sameKept(this: Mut<this>, a: Type, b: Type): boolean {
+    return this.sameLowered(a, b) && this.sameLowered(b, a);
+  }
+
   // Whether two stored callables take and give the same types, so either holds the other's value.
   sameCallable(this: Mut<this>, a: Type, b: Type): boolean {
     const [f, g] = [a, b].map((t) => {
@@ -1107,7 +1113,7 @@ export class Typing {
       const fn = r?.kind === "dyn" ? this.callableOf.get(r.of) : undefined;
       return fn && this.rec(fn);
     });
-    return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => this.lower(p) === this.lower(g.params[i]!)) && this.lower(f.returns) === this.lower(g.returns)
+    return f !== undefined && g !== undefined && f.params.length === g.params.length && f.params.every((p, i) => this.sameKept(p, g.params[i]!)) && this.sameKept(f.returns, g.returns)
       && (f.throws && this.lower(f.throws)) === (g.throws && this.lower(g.throws));
   }
 
@@ -1964,6 +1970,24 @@ export class Typing {
 
   private lowered = new TypeMap<Exclude<Type, string>, Type>();
 
+  // A type lowered as `lower` does, except that its brands stay, through the forms that hold a
+  // value directly: what a function type checks its arguments and result against.
+  lowerKeepingBrands(this: Mut<this>, t: Type): Type {
+    if (!this.holdsBrand(t)) return this.lower(t);
+    const r = this.rec(t as Exclude<Type, string>);
+    const kept = (u: Type) => this.lowerKeepingBrands(u);
+    if (r.kind === "brand") return t;
+    if (r.kind === "param" && r.concrete) return kept(r.concrete);
+    if (r.kind === "union") return this.unionType(r.members.map(kept), r.name);
+    if (r.kind === "array") return this.arrayType(kept(r.element));
+    if (r.kind === "fixed") return this.fixedType(kept(r.element), r.size);
+    if (r.kind === "ref") return this.refType(kept(r.to), r.mutable, r.life);
+    if (r.kind === "map") return this.mapType(kept(r.key), kept(r.value), r.set, r.dict);
+    if (r.kind === "object" && r.tuple && !r.match) return this.retuple(t as ObjectType, kept);
+    if (r.kind === "object" && !r.match) return this.objectType(r.fields.map(({ optional: _, ...f }) => ({ ...f, type: kept(f.type) })));
+    return this.lower(t);
+  }
+
   // A type with some of its parts swapped for others, looking inside objects and unions.
   replaced(this: Mut<this>, t: Type, swap: TypeMap<Type, Type>): Type {
     const found = swap.get(t);
@@ -2199,7 +2223,7 @@ export class Typing {
     // A brand fits one of the same kind whose tag its tag fits, as `Brand<usize, "A">` fits
     // `Brand<usize, string>`; its base fits only a loose one.
     if (tr?.kind === "brand") {
-      if (fr?.kind === "brand") return fr.base === tr.base && !fr.unit === !tr.unit && fr.field === tr.field && this.fits(fr.tag, tr.tag);
+      if (fr?.kind === "brand") return fr.base === tr.base && !fr.unit === !tr.unit && fr.field === tr.field && (!fr.loose || tr.loose === true) && this.fits(fr.tag, tr.tag);
       return tr.loose === true && (from === tr.base || (fr?.kind === "literal" && !fr.owner && this.baseOf(from as LiteralType) === tr.base));
     }
     if (tr?.kind === "union") {
@@ -2227,7 +2251,7 @@ export class Typing {
       const throws = sig?.kind === "closure" || sig?.kind === "function" ? sig.throws : undefined;
       const caught = throws === undefined || (tr.throws !== undefined && this.fits(throws, tr.throws));
       return (sig?.kind === "closure" || sig?.kind === "function") && sig.params.length <= tr.params.length
-        && sig.params.every((p, i) => this.lower(p) === this.lower(tr.params[i]!) || this.sameCallable(p, tr.params[i]!)) && (tr.returns === "void" || this.fits(sig.returns, tr.returns)) && caught;
+        && sig.params.every((p, i) => this.sameKept(p, tr.params[i]!) || this.sameCallable(p, tr.params[i]!)) && (tr.returns === "void" || this.fits(sig.returns, tr.returns)) && caught;
     }
     if (fr?.kind === "ref") return false;
     // A tuple fits only a tuple of its length, element by element.
