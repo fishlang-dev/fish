@@ -152,6 +152,14 @@ test("a user file named like a std module gets no std allowances", async () => {
   }
 });
 
+test("a user file named like a std module can't reach std's internal functions", async () => {
+  const dir = mkdtempSync(join(tmp, "internal-"));
+  for (const [name, call] of [["fileReadSync", 'fileReadSync("x")'], ["fileRead", 'fileRead("x")'], ["shutdownSignal", "shutdownSignal()"]]) {
+    writeFileSync(join(dir, "node:x.fsh"), `function main() {\n  const v = ${call};\n  console.log(v);\n}\n`);
+    await expect(buildAsync(session, join(dir, "node:x.fsh"), join(dir, "out"))).rejects.toMatchObject({ code: "E0401", message: expect.stringContaining(`'${name}'`) });
+  }
+});
+
 // One message: its type byte, its length, its body.
 const message = (kind: string, ...parts: Buffer[]) => {
   const body = Buffer.concat(parts);

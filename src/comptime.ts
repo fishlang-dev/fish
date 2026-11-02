@@ -1,7 +1,7 @@
 import type { Instance } from "./check.ts";
 import type { Narrowing } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
-import { fileAt } from "./modules.ts";
+import { fileAt, stdModuleAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
@@ -291,7 +291,7 @@ function interpreter(tables: Tables) {
   function call(callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
-      if (RANDOM.has(callee.body.name) && fileAt(files, callee.body.start) === "node:crypto") random(`'crypto.${callee.body.name}'`, at);
+      if (RANDOM.has(callee.body.name) && stdModuleAt(files, callee.body.start) === "node:crypto") random(`'crypto.${callee.body.name}'`, at);
       if (callee.body.async) refuse("an async function", at);
       if (callee.body.generator) unsupported("a generator", at);
       if (callee.body.foreign) refuse(`the ${callee.body.rust ? "Rust" : "C"} function '${callee.body.name}'`, at);

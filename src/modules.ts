@@ -41,6 +41,13 @@ export function fileAt(files: Compilation["files"], offset: number): string {
   return files.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
+// The name std's module holding a source offset is shown by, as "node:fs", or nothing when the
+// offset is in a file of the program's own, whatever that file is named.
+export function stdModuleAt(files: Compilation["files"], offset: number): string | undefined {
+  const f = files.findLast((f) => offset >= f.base);
+  return f?.std ? f.file : undefined;
+}
+
 // The source text a span covers in the program last loaded; std's prelude is in none of its files.
 export function textAt(files: Compilation["files"], at: Span): string {
   const f = files.findLast((f) => at.start >= f.base);
