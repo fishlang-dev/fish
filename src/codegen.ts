@@ -12,7 +12,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { EMBEDDED, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walk } from "./nodes.ts";
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
@@ -4140,6 +4140,17 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return typing.rec(c).base ? [...jsonFields(typing.rec(c).base!).map((f) => ({ ...f, path: [0, ...f.path] })), ...ownJsonFields(c, 1)] : ownJsonFields(c, 0);
   }
 
+  // Where an instance of a class extending Map or Set, itself or through its bases, holds the
+  // collection, which it prints as.
+  function embeddedField(c: ClassType): { path: usize[]; type: MapType } | undefined {
+    const r = typing.rec(c);
+    const offset = r.base ? 1 : 0;
+    const i = r.fields.findIndex((f) => f.name === EMBEDDED);
+    if (i >= 0) return { path: [offset + i], type: typing.lower(r.fields[i]!.type) as MapType };
+    const inner = r.base && embeddedField(r.base);
+    return inner && { ...inner, path: [0, ...inner.path] };
+  }
+
   function ownJsonFields(c: ClassType, offset: usize) {
     const { fields } = typing.rec(c);
     return fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i], omit: f.optional !== undefined }]));
@@ -4660,8 +4671,14 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const fields = r.kind === "class" ? jsonFields((writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)) : objectJsonFields(object, as);
     if (r.kind === "class" && errorClass(t as ClassType)) return errorTree(v, t as ClassType, fields, next);
     const name = r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "";
-    const node = temp();
-    emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(name)})`);
+    const embedded = r.kind === "class" ? embeddedField(t as ClassType) : undefined;
+    let node = temp();
+    if (embedded) {
+      const x = temp();
+      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${embedded.path.join(", ")}`);
+      node = inspectEntries(x, embedded.type, typing.rec(embedded.type).value, next);
+      emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${cString(name)})`);
+    } else emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(name)})`);
     for (const f of fields) {
       const x = temp();
       emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
@@ -4776,7 +4793,14 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const fields = r.kind === "class" ? jsonFields((spelled as ClassType | undefined) ?? (t as ClassType)) : objectJsonFields(object, as);
     // Past the depth, an Error is its header alone, or its class's name when it has more to show.
     if (r.kind === "class" && errorClass(t as ClassType)) return errorTree(v, t as ClassType, fields, "0", true);
-    emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "")})`);
+    const embedded = r.kind === "class" ? embeddedField(t as ClassType) : undefined;
+    if (embedded) {
+      const [x, size] = [temp(), temp()];
+      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${embedded.path.join(", ")}`);
+      emit(`${size} = call i64 @fsh_rt_map_size(ptr ${x})`);
+      emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${typing.rec(embedded.type).set ? 5 : 4}, i64 ${size})`);
+      emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${cString((r as { name: string }).name.replace(/[@<].*$/, ""))})`);
+    } else emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "")})`);
     for (const f of fields) {
       const after = label();
       if (f.omit) {

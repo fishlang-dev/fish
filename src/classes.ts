@@ -1,9 +1,9 @@
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { RustName, RustTables } from "./rust.ts";
-import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { rebuiltParam } from "./rebuild.ts";
-import type { Access, ClassType, FunctionType, Type, Typing } from "./typing.ts";
+import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
@@ -79,6 +79,9 @@ export const isLifetime = (p: TypeParam) => p.constraint?.kind === "ref" && p.co
 // written `T | undefined`.
 export type FieldDecl = Span & { name: string; type: TypeNode | undefined; init: Expr | undefined; access: Access; readonly: boolean; written?: TypeNode; undefinedSpelled?: true };
 
+// A member written `override`, by its name and whether it is static.
+export type Overridden = Span & { name: string; static: boolean };
+
 // A member an abstract class declares without a body, for each concrete class to implement.
 export type AbstractMember = Span & { name: string; table: "methods" | "getters" | "setters"; access: Access };
 
@@ -104,8 +107,13 @@ export type ClassInfo = {
   // A getter borrows `this` and returns a value; a setter takes `Mut<this>` and the value.
   getters: Map<string, BodyId>;
   setters: Map<string, BodyId>;
+  // The members written `override`, each checked to replace one its bases have.
+  overrides: Overridden[];
   // The class this one embeds and delegates to, named by `extends`.
   baseName: string | undefined;
+  // A Map or Set named by `extends`, held in the field `EMBEDDED`, which members the class and
+  // its bases don't declare are delegated to.
+  embedded?: "Map" | "Set";
   base?: ClassId;
   // The initializers and parameter properties a derived constructor runs after `super(...)`.
   prelude: Stmt[];
@@ -230,9 +238,13 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     ...(ctor?.throws && { throws: ctor.throws }),
   }).bodyId;
   const required = new Set(fields.map((f) => f.name));
+  const overrides = [
+    ...node.members.flatMap((m): Overridden[] => ("name" in m && m.modifiers.includes("override") && typeof m.name === "string" ? [{ name: m.name, static: m.modifiers.includes("static"), start: m.start, end: m.end }] : [])),
+    ...(ctor?.params ?? []).flatMap((p): Overridden[] => (p.modifiers.includes("override") && p.pattern.kind === "ident" ? [{ name: p.pattern.name, static: false, start: p.start, end: p.end }] : [])),
+  ];
   const named = node.extends?.kind === "instantiation" ? node.extends.expr : node.extends;
   const baseName = named?.kind === "ident" ? named.name : undefined;
-  return arenas.addClass({ type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] });
+  return arenas.addClass({ type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, overrides, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] });
 
   // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
   function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
@@ -472,6 +484,46 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   constructor.body = [{ id: nextId(ids), kind: "expr", expr: call, ...at }, ...c.prelude];
 }
 
+// Links a class to the Map or Set it extends, held in the field `EMBEDDED`. Its constructor's
+// `super(...)` makes the collection, as `new Map<K, V>(...)` would; without a constructor of
+// its own it makes an empty one.
+export function embed(tables: Tables, c: ClassInfo, kind: "Map" | "Set") {
+  const { arenas, ids, prologues } = tables;
+  const named = c.node.extends!;
+  const at = { start: named.start, end: named.end };
+  const typeArgs = named.kind === "instantiation" ? named.typeArgs : [];
+  c.embedded = kind;
+  c.fields.unshift({ name: EMBEDDED, type: { id: nextId(ids), kind: "ref", name: kind, args: typeArgs, ...at }, init: undefined, access: "private", readonly: false, ...at });
+  c.required.add(EMBEDDED);
+  const made = (args: Expr[], s: Span): Stmt => assignField(ids, EMBEDDED, { id: nextId(ids), kind: "new", callee: { id: nextId(ids), kind: "ident", name: kind, ...at }, typeArgs, args, start: s.start, end: s.end }, s);
+  const constructor = arenas.bodyOf(c.constructor);
+  if (!c.node.members.some((m) => m.kind === "constructor")) {
+    constructor.body = [made([], at), ...c.prelude];
+    return;
+  }
+  const written = constructor.body.slice(c.prelude.length);
+  const defaults = written.filter((s) => prologues.has(s));
+  const [first, ...rest] = written.slice(defaults.length);
+  if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
+    throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", constructor.start, constructor.end);
+  }
+  // JavaScript's constructor adds each entry through `this.set` or `this.add`, so an override of
+  // it sees them; that runs once the fields are assigned, before the rest of the constructor.
+  const adder = kind === "Set" ? "add" : "set";
+  const [given] = first.expr.args;
+  if (!c.methods.has(adder) || !given) {
+    constructor.body = [...defaults, made(first.expr.args, first), ...c.prelude, ...rest];
+    return;
+  }
+  const s = { start: first.start, end: first.end };
+  const names = kind === "Set" ? ["member"] : ["key", "value"];
+  const target: Pattern = kind === "Set" ? { id: nextId(ids), kind: "ident", name: "member", ...s } : { id: nextId(ids), kind: "array", elements: names.map((name): Pattern => ({ id: nextId(ids), kind: "ident", name, ...s })), rest: undefined, ...s };
+  const left: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target, type: undefined, init: undefined, ...s }], ...s };
+  const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "this", ...s }, name: adder, optional: false, ...s }, typeArgs: [], args: names.map((name): Expr => ({ id: nextId(ids), kind: "ident", name, ...s })), optional: false, ...s };
+  const loop: Stmt = { id: nextId(ids), kind: "forOf", await: false, left, right: given, body: [{ id: nextId(ids), kind: "expr", expr: call, ...s }], ...s };
+  constructor.body = [...defaults, made([], first), ...c.prelude, loop, ...rest];
+}
+
 // The names a type, or the types inside a parameter or statements, refer to without type arguments.
 function refNames(t: TypeNode | Param | Stmt[] | undefined): string[] {
   const found: string[] = [];
@@ -548,6 +600,29 @@ export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
       }
     }
   }
+}
+
+// TypeScript's rule: a member written `override` must replace one of its bases'.
+export function checkOverrideModifiers(arenas: Arenas, typing: Typing, c: ClassInfo) {
+  const name = typing.rec(c.type).name;
+  for (const o of c.overrides) {
+    if (c.baseName === undefined && !c.embedded) throw new CompileError("E0704", `'${o.name}' can't be marked 'override': class '${name}' doesn't extend another class`, o.start, o.end);
+    if (!hasMember(arenas, c, o)) {
+      throw new CompileError("E0704", `'${o.name}' can't be marked 'override': '${c.embedded ?? c.baseName}' has no ${o.static ? "static " : ""}member '${o.name}' for it to replace`, o.start, o.end);
+    }
+  }
+}
+
+function hasMember(arenas: Arenas, c: ClassInfo, o: Overridden): boolean {
+  for (let b = c.embedded ? c : arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
+    if (b.embedded && !o.static && (o.name === "size" || (b.embedded === "Set" ? SET_METHODS : MAP_METHODS).has(o.name))) return true;
+    if (b === c) continue;
+    const found = o.static
+      ? b.statics.has(o.name) || b.statics.has(`get ${o.name}`) || b.statics.has(`set ${o.name}`) || b.staticFields.has(o.name)
+      : b.methods.has(o.name) || b.getters.has(o.name) || b.setters.has(o.name) || b.fields.some((f) => f.name === o.name);
+    if (found) return true;
+  }
+  return false;
 }
 
 const TABLES = ["methods", "getters", "setters"] as const;
@@ -730,9 +805,9 @@ function assignField(ids: Ids, name: string, value: Expr, at: Span): Stmt {
 
 // A member's access, from its modifiers or a `#` name. `readonly` is read by the caller.
 function modifiers(list: string[], at: Span, name: string): Access {
-  const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly");
+  const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly" && m !== "override");
   if (other) throw unsupported(`'${other}' modifiers`, at);
-  list = list.filter((m) => m !== "readonly");
+  list = list.filter((m) => m !== "readonly" && m !== "override");
   if (list.length > 1) throw new CompileError("E0709", "a member can have only one accessibility modifier", at.start, at.end);
   if (name.startsWith("#") && list.length > 0) {
     throw new CompileError("E0709", "an accessibility modifier can't be used with a private identifier", at.start, at.end);
