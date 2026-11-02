@@ -12,7 +12,7 @@ import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } f
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walk } from "./nodes.ts";
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
@@ -34,6 +34,14 @@ const UNWINDS = "uwtable personality ptr @__gcc_personality_v0";
 // boolean's value, a float's, a string or String(x), and an inspect tree.
 const FARG = "{ i32, i64, double, ptr, ptr }";
 const FARG_KINDS = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, parts: 6, digits: 7, bigint: 8 };
+
+// Whether a socket future's address is a path rather than a host and port: a Unix socket's, or
+// std's own TCP-typed socket on a path, whose leaf gives the socket type where TCP's gives void.
+function onPath(typing: Typing, of: Type): boolean {
+  if (typeof of === "string") return false;
+  const r = typing.rec(of);
+  return r.kind === "block" && r.which !== "UdpSocket";
+}
 
 // A float constant as LLVM writes one exactly: the bits of the double holding it, which for
 // an f32 must be a float's value.
@@ -2082,6 +2090,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       startBlock(done);
       return undefined;
     }
+    if (callee.name === "startTls" || callee.name === "listenTls") {
+      const made = temp();
+      emit(`${made} = call ptr @fsh_rt_tls_${callee.name === "startTls" ? "client" : "listen"}(ptr ${handle}, ptr ${value(e.args[0]!)}, ptr ${value(e.args[1]!)})`);
+      if (!types.has(e)) pending.push({ v: made, type: "string" });
+      return made;
+    }
     if (callee.name === "available" || callee.name === "close") {
       const result = temp();
       if (callee.name === "close") return void emit(`call void @fsh_rt_channel_close(ptr ${handle})`);
@@ -2089,6 +2103,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       return result;
     }
     const future = types.get(e) as FutureType;
+    if (typing.rec(t).which === "UdpSocket") return udpFrame(e, handle, future);
     // What a send, read or write carries: the value going in, the most bytes, or the bytes.
     const carried = ["send", "read", "write"].includes(callee.name) ? typing.rec(future).frame[2]!.type : undefined;
     const given = carried === undefined ? undefined : carried === "i64" ? value(e.args[0]!) : owned(e.args[0]!);
@@ -2099,6 +2114,22 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${llvm(carried!)} ${given}, 2`);
       frame = next;
     }
+    return signalled(e, future, frame);
+  }
+
+  // A UdpSocket's wait: a count on the socket, then what its leaf's frame carries in order, the
+  // bytes and address of a send, a connect's address, or nothing for a receive.
+  function udpFrame(e: Extract<Expr, { kind: "call" }>, handle: string, future: FutureType): string {
+    let frame = temp();
+    emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${copied(handle, typing.blockType("UdpSocket"))}, 1`);
+    const name = (e.callee as Extract<Expr, { kind: "member" }>).name;
+    const args = e.args.slice(0, { sendTo: 3, connect: 2, send: 1 }[name] ?? 0);
+    args.forEach((arg, i) => {
+      const type = typing.rec(future).frame[2 + i]!.type;
+      const [v, next] = [type === "i64" ? value(arg) : owned(arg), temp()];
+      emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${llvm(type)} ${v}, ${2 + i}`);
+      frame = next;
+    });
     return signalled(e, future, frame);
   }
 
@@ -3722,7 +3753,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${from} ]`);
       }
     } else if (r.kind === "block") {
-      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release", JsValue: "fsh_rt_js_release" }[r.which];
+      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", UnixListener: "fsh_rt_socket_release", UnixStream: "fsh_rt_socket_release", UdpSocket: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release", JsValue: "fsh_rt_js_release" }[r.which];
       emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (r.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
@@ -4462,6 +4493,15 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const held = temp();
       emit(`${held} = load ${llvm(typing.lower(to))}, ptr ${v}`);
       return inspectTree(held, writtenPart(written, t, (x) => { const held = typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to, "%d");
+    }
+    // std's Date prints as its ISO string at any depth, as Node prints one.
+    const iso = r.kind === "class" ? instances.find((i) => bodyOf(i).name === `${r.name}.toISOString` && bodyOf(i).start >= STD_BASE) : undefined;
+    if (iso) {
+      const [self, text, node] = [alloca(llvm(t)), temp(), temp()];
+      emit(`store ${llvm(t)} ${v}, ptr ${self}`);
+      emit(`${text} = call ptr ${symbol(iso)}(ptr ${self})`);
+      emit(`${node} = call ptr @fsh_rt_insp_raw(ptr ${text})`);
+      return node;
     }
     // Past depth 2 Node prints a value with parts as `[Object]`, or `{}` when it has none, so
     // only its size and keys are kept, which also bounds how deep this goes.
@@ -6820,13 +6860,15 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (!types.has(e)) pending.push({ v: made, type: valueType(e) });
         return made;
       }
-      // `TcpListener.bind` and `TcpStream.connect` make a future holding the address; connect's
-      // frame also keeps the socket while it connects.
-      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && (e.callee.object.name === "TcpListener" || e.callee.object.name === "TcpStream") && !types.has(e.callee.object)) {
+      // `TcpListener.bind` and `TcpStream.connect` make a future holding the address, and the Unix
+      // ones the path in the host's place; connect's frame also keeps the socket while it connects.
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && ["TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket"].includes(e.callee.object.name) && !types.has(e.callee.object)) {
         const future = types.get(e) as FutureType;
-        const first = e.callee.object.name === "TcpStream" ? 2 : 1;
-        const [host, port, made, frame] = [owned(e.args[0]!), value(e.args[1]!), temp(), temp()];
+        const first = typing.leafOf.get(future)!.method === "connect" ? 2 : 1;
+        const [host, made] = [owned(e.args[0]!), temp()];
         emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, ptr ${host}, ${first}`);
+        if (onPath(typing, typing.leafOf.get(future)!.of)) return signalled(e, future, made);
+        const [port, frame] = [value(e.args[1]!), temp()];
         emit(`${frame} = insertvalue ${llvm(future)} ${made}, i64 ${port}, ${first + 1}`);
         return signalled(e, future, frame);
       }
@@ -6848,6 +6890,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (!types.has(e)) pending.push({ v: made, type: typing.blockType("AbortSignal") });
         return made;
       }
+      if (e.callee.kind === "ident" && e.callee.name === "unixUnlink" && !calls.has(e)) return void emit(`call void @fsh_rt_unix_unlink(ptr ${value(e.args[0]!)})`);
       if (e.callee.kind === "ident" && e.callee.name === "httpDate" && !calls.has(e)) {
         const made = temp();
         emit(`${made} = call ptr @fsh_rt_http_date()`);
@@ -8217,7 +8260,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (t === SLEEP || leaf?.method === "sleep") emit(`call void @fsh_rt_sleep_cancel(ptr %cx, ptr ${at})`);
     else if (leaf?.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
     else if (leaf?.method === "send" || leaf?.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
-    else if (leaf && ["connect", "accept", "read", "write"].includes(leaf.method)) emit(`call void @fsh_rt_socket_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+    else if (leaf && ["connect", "accept", "read", "write", "sendTo", "receiveFrom"].includes(leaf.method)) emit(`call void @fsh_rt_socket_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
     else if (leaf?.method === "next") {
       const instance = generatorOf.get(leaf.of as GeneratorType)!;
       cancelled.add(instance.id);
@@ -8346,7 +8389,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       if (leaf.method !== "sleep" && leaf.method !== "timerNext") emit(`${handle} = load ptr, ptr ${slot}`);
       // A socket's poll gives its result through `made`, and on failure the system's reason
       // through `reason`, for the IoError its awaiter is thrown; an abort leaves it null.
-      const socket = ["bind", "connect", "accept", "read", "write"].includes(leaf.method);
+      const socket = ["bind", "connect", "accept", "read", "write", "sendTo", "receiveFrom", "udpConnect"].includes(leaf.method);
       const file = leaf.method === "readFile" || leaf.method === "writeFile";
       if (socket || file) {
         reason = alloca("[4 x ptr]");
@@ -8375,13 +8418,38 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         signal = [sig, flag];
       }
       if (socket) {
-        const [made, field] = [alloca(leaf.method === "read" ? ARRAY : "ptr"), (i: usize) => {
+        const [made, field] = [alloca(leaf.method === "read" || leaf.method === "receiveFrom" ? ARRAY : "ptr"), (i: usize) => {
           const [ptr, v] = [temp(), temp()];
           emit(`${ptr} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
           return [ptr, v] as const;
         }];
         if (leaf.method === "accept") emit(`${outcome} = call i32 @fsh_rt_tcp_accept(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${reason})`);
-        else if (leaf.method === "read") {
+        else if (leaf.method === "sendTo" || leaf.method === "udpConnect") {
+          const first = leaf.method === "sendTo" ? 3 : 2;
+          const [hostAt, host] = field(first);
+          const [portAt, port] = field(first + 1);
+          emit(`${host} = load ptr, ptr ${hostAt}`);
+          emit(`${port} = load i64, ptr ${portAt}`);
+          if (leaf.method === "udpConnect") emit(`${outcome} = call i32 @fsh_rt_udp_connect(ptr ${handle}, ptr ${host}, i64 ${port}, ptr ${reason})`);
+          else emit(`${outcome} = call i32 @fsh_rt_udp_send(ptr ${handle}, ptr ${field(2)[0]}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${reason})`);
+        } else if (leaf.method === "receiveFrom") {
+          // `receive()` gives the bytes alone; `receiveFrom()` the sender's address with them.
+          const from = leaf.of === "void";
+          const [hostAt, portAt] = [alloca("ptr"), alloca("i64")];
+          emit(`${outcome} = call i32 @fsh_rt_udp_receive(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${from ? hostAt : "null"}, ptr ${portAt}, ptr ${reason})`);
+          const bytes = temp();
+          emit(`${bytes} = load ${ARRAY}, ptr ${made}`);
+          given = bytes;
+          if (from) {
+            const [host, port, withBytes, withHost, withPort] = [temp(), temp(), temp(), temp(), temp()];
+            emit(`${host} = load ptr, ptr ${hostAt}`);
+            emit(`${port} = load i64, ptr ${portAt}`);
+            emit(`${withBytes} = insertvalue ${llvm(typing.rec(shape).gives)} undef, ${ARRAY} ${bytes}, 0`);
+            emit(`${withHost} = insertvalue ${llvm(typing.rec(shape).gives)} ${withBytes}, ptr ${host}, 1`);
+            emit(`${withPort} = insertvalue ${llvm(typing.rec(shape).gives)} ${withHost}, i64 ${port}, 2`);
+            given = withPort;
+          }
+        } else if (leaf.method === "read") {
           const [maxAt, max] = field(2);
           emit(`${max} = load i64, ptr ${maxAt}`);
           emit(`${outcome} = call i32 @fsh_rt_tcp_read(ptr ${handle}, i64 ${max}, ptr %cx, ptr ${made}, ptr ${reason})`);
@@ -8395,10 +8463,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
           const [portAt, port] = field(first + 1);
           emit(`${host} = load ptr, ptr ${hostAt}`);
           emit(`${port} = load i64, ptr ${portAt}`);
-          if (leaf.method === "bind") emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
+          if (leaf.method === "bind" && leaf.of !== "void" && !onPath(typing, leaf.of)) emit(`${outcome} = call i32 @fsh_rt_udp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.method === "bind" && onPath(typing, leaf.of)) emit(`${outcome} = call i32 @fsh_rt_unix_bind(ptr ${host}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.method === "bind") emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.of !== "void") emit(`${outcome} = call i32 @fsh_rt_unix_connect(ptr ${slot}, ptr ${host}, ptr %cx, ptr ${made}, ptr ${reason})`);
           else emit(`${outcome} = call i32 @fsh_rt_tcp_connect(ptr ${slot}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${made}, ptr ${reason})`);
         }
-        if (leaf.method !== "write") {
+        if (!["write", "sendTo", "udpConnect", "receiveFrom"].includes(leaf.method)) {
           given = temp();
           emit(`${given} = load ${leaf.method === "read" ? ARRAY : "ptr"}, ptr ${made}`);
         }

@@ -1,11 +1,11 @@
 import type { Instance } from "./check.ts";
 import { bodyOf, type LocalId } from "./arenas.ts";
 import { CompileError } from "./diag.ts";
-import { fileAt } from "./modules.ts";
+import { fileAt, stdModuleAt } from "./modules.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
-import type { Tables } from "./compilation.ts";
+import { timed, type Tables } from "./compilation.ts";
 import { INTEGERS, range, redundantBang, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
@@ -201,7 +201,7 @@ export function comptimeBody(instance: Instance): Value {
 // comptime site, noting where inside it happened.
 function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): Value {
   try {
-    return go(new Interpreter(tables));
+    return timed(tables.timings, "comptime", () => go(new Interpreter(tables)));
   } catch (e) {
     let stop = e;
     if (e instanceof Thrown) stop = new Stop(`this comptime code threw an error it didn't catch: ${described(tables.typing, e.value)}`, e.at, false);
@@ -330,7 +330,7 @@ class Interpreter {
   call(this: Mut<this>, callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++this.depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
-      if (RANDOM.has(bodyOf(callee).name) && fileAt(this.files, bodyOf(callee).start) === "node:crypto") this.random(`'crypto.${bodyOf(callee).name}'`, at);
+      if (RANDOM.has(bodyOf(callee).name) && stdModuleAt(this.files, bodyOf(callee).start) === "node:crypto") this.random(`'crypto.${bodyOf(callee).name}'`, at);
       if (bodyOf(callee).async) this.refuse("an async function", at);
       if (bodyOf(callee).generator) this.unsupported("a generator", at);
       if (bodyOf(callee).foreign) this.refuse(`the ${bodyOf(callee).rust ? "Rust" : "C"} function '${bodyOf(callee).name}'`, at);

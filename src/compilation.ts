@@ -23,7 +23,8 @@ import type { DynTable } from "./values.ts";
 // reference to the class points at, though Fish code can't upcast it itself. A span outlives the
 // copies macros make.
 // `files` are the program's files once loaded, by the offset each starts at, for naming where a
-// declaration is. `rust` holds the Rust names its `rust:` modules declare.
+// declaration is, each marked when it is one of std's modules. `rust` holds the Rust names its
+// `rust:` modules declare.
 // `enumInits` are the computed enum initializers being evaluated, innermost last, as the span and
 // member name an error about one points at.
 // `fileNames`: for a linked program, each file's top-level names by its base offset: the name each
@@ -32,7 +33,7 @@ import type { DynTable } from "./values.ts";
 // `rewrites`: the nodes lowering replaced, by id, until each body's rebuild puts them in place.
 // `looked`: every source file loading read or looked for, as an absolute path, missing ones included.
 export type Compilation = {
-  session: Session; ids: Ids; rewrites: Rewrites; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string }[]; rust: RustTables;
+  session: Session; ids: Ids; rewrites: Rewrites; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string; std: boolean }[]; rust: RustTables;
   enumInits: [usize, usize, string][]; fileNames: WeakMap<Stmt[], Map<usize, Map<string, string>>>; generated: WeakNodeSet<Id>; looked: string[];
 };
 
@@ -52,6 +53,7 @@ export type Counts = { enums: usize; lifts: usize; destructures: usize; expansio
 // `mathUnits`: the Math runtime's objects to compile.
 // `std`: what gives std's statements, each call a fresh copy, without which each compilation parses
 // std's source; and how many times std was parsed rather than loaded.
+// `timings`: each build stage's time, kept only when `--timings` asks.
 export type Session = {
   locking: Locking;
   engineHook: boolean;
@@ -60,6 +62,7 @@ export type Session = {
   compiling: Map<string, Promise<string>>;
   mathUnits?: Unit[];
   std: { load?: () => Stmt[]; parses: usize };
+  timings?: Timings;
 };
 
 export function newSession(): Session {
@@ -76,7 +79,7 @@ export function newCompilation(session: Session): Compilation {
 export type Tables = {
   // What every check of the program shares: its types, its instances, bodies, locals and classes,
   // the upcasts its macros wrote, the counter for the nodes checking makes, its counts, its regex
-  // tables, files and Rust names, and the nodes lowering replaced.
+  // tables, files and Rust names, the nodes lowering replaced, and the session's timings.
   typing: Typing;
   arenas: Arenas;
   upcasts: Set<string>;
@@ -87,6 +90,7 @@ export type Tables = {
   files: Compilation["files"];
   rust: RustTables;
   generated: Compilation["generated"];
+  timings?: Timings;
   // The `let` statements and parameters that declare a name, as the checker meets them; every
   // other node an instance's `locals` holds is a use of one.
   declarations: WeakNodeSet<Expr | Stmt | Param | ObjectProp>;
@@ -118,6 +122,9 @@ export type Tables = {
   substituted: WeakNodeSet<Expr>;
   // The element types written on `Array.of<T>(...)` calls, which became array literals.
   ofElements: WeakNodeMap<Expr, TypeNode>;
+  // The array literals `Object.keys`, `values` and `entries` calls became, with which it was and the
+  // object it reads, so a generic body's next instance types the literal as the call did.
+  objectReads: WeakNodeMap<Expr, { name: "keys" | "values" | "entries"; object: Expr }>;
   // `new Array(n).fill(x)` calls, rewritten into calls of the prelude's `array filled`.
   fills: WeakNodeSet<Expr>;
   filling: WeakNodeSet<Expr>;
@@ -303,8 +310,9 @@ export type Tables = {
   computing: Set<InstanceId>;
 };
 
-export function newTables({ typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ session, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
+    timings: session.timings,
     typing,
     arenas,
     upcasts,
@@ -327,6 +335,7 @@ export function newTables({ typing, arenas, upcasts, ids, rewrites, counts, rege
     selfCalls: new WeakNodeSet<Expr>(),
     substituted: new WeakNodeSet<Expr>(),
     ofElements: new WeakNodeMap<Expr, TypeNode>(),
+    objectReads: new WeakNodeMap<Expr, { name: "keys" | "values" | "entries"; object: Expr }>(),
     fills: new WeakNodeSet<Expr>(),
     filling: new WeakNodeSet<Expr>(),
     packed: new WeakNodeSet<Expr>(),
@@ -410,4 +419,44 @@ export function newTables({ typing, arenas, upcasts, ids, rewrites, counts, rege
     constants: new Map<InstanceId, Value>(),
     computing: new Set<InstanceId>(),
   };
+}
+
+// How long each stage of a build took, kept only when `--timings` asks. Each stage records its own
+// time: a stage timed inside another is taken out of the outer one, so borrow checking inside the
+// checker, or the comptime interpreter inside macro expansion, is counted once, under its own name.
+// `inner` is the time the stages running inside the current one have taken so far. `objects` names
+// the cached objects built, and counts those reused. `now` is the clock, which a test replaces.
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; now: () => f64 };
+
+export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
+export const NATIVE_STAGES = ["compile", "runtime", "link"];
+
+export function newTimings(now: () => f64 = () => performance.now()): Timings {
+  return { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, now };
+}
+
+// Runs `run`, adding its own time to stage `name` when timing.
+export function timed<T>(timings: Timings | undefined, name: string, run: () => T): T {
+  if (timings === undefined) return run();
+  const outer = timings.inner;
+  timings.inner = 0;
+  const start = timings.now();
+  try {
+    return run();
+  } finally {
+    const spent = timings.now() - start;
+    timings.ms.set(name, (timings.ms.get(name) ?? 0) + spent - timings.inner);
+    timings.inner = outer + spent;
+  }
+}
+
+// One line per stage of `stages`, in that order, a stage that never ran as 0.0, then the total.
+export function formatTimings(timings: Timings, stages: string[], total: f64): string {
+  const line = (name: string, ms: f64, note?: string) => `${name.padEnd(9)}${ms.toFixed(1).padStart(9)} ms${note !== undefined ? ` (${note})` : ""}\n`;
+  return stages.map((s) => line(s, timings.ms.get(s) ?? 0, timings.notes.get(s))).join("") + line("total", total);
+}
+
+// Which cached objects a build made and how many it reused, as the runtime stage's note.
+export function objectsNote({ objects: { built, cached } }: Timings): string {
+  return [...(built.length > 0 ? [`built ${built.join(", ")}`] : []), `${cached} cached`].join("; ");
 }

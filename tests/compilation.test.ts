@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compile } from "../src/main.ts";
+import { newTimings, timed } from "../src/compilation.ts";
 import { cachedSession } from "../src/stdcache.ts";
 
 const session = cachedSession();
@@ -69,4 +70,34 @@ test("two programs compiled alternately in one process each compile the same eve
   expect(ir("a.fsh", A)).toBe(a);
   expect(ir("b.fsh", B)).toBe(b);
   expect(ir("a.fsh", A)).toBe(a);
+});
+
+// A stage timed inside another counts only toward itself, and the outer stage keeps the rest,
+// however deeply nested, repeated, or ended by a throw.
+test("timed gives each stage its own time, nested stages taken out of their parents", () => {
+  let clock = 0;
+  const t = newTimings(() => clock);
+  const spend = (ms: number) => (clock += ms);
+  timed(t, "check", () => {
+    spend(10);
+    timed(t, "moves", () => spend(3));
+    timed(t, "comptime", () => {
+      spend(2);
+      timed(t, "check", () => {
+        spend(4);
+        timed(t, "moves", () => spend(1));
+      });
+    });
+    expect(() =>
+      timed(t, "comptime", () => {
+        spend(5);
+        throw new Error("stop");
+      }),
+    ).toThrow("stop");
+    spend(6);
+  });
+  timed(t, "codegen", () => spend(7));
+  expect(Object.fromEntries(t.ms)).toEqual({ check: 20, moves: 4, comptime: 7, codegen: 7 });
+  expect(t.inner).toBe(38);
+  expect(timed(undefined, "check", () => 5)).toBe(5);
 });

@@ -1,0 +1,228 @@
+import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runtimeUnits } from "../src/main.ts";
+import { HOST_TARGET, instrumented, resolveTarget, sanitizedTarget, staticTarget } from "../src/target.ts";
+
+// `fishc build --sanitize address|thread`: the program, std and the C runtime instrumented by one
+// of clang's sanitizers, its reports naming .fsh lines.
+setDefaultTimeout(120_000);
+
+const MAIN = join(import.meta.dir, "..", "src", "main.ts");
+const root = mkdtempSync(join(tmpdir(), "fish-sanitize-"));
+afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+// Why clang can't build for the host with `kind`, or undefined when it can.
+function unsupported(kind: string): string | undefined {
+  try {
+    sanitizedTarget(HOST_TARGET, [kind]);
+    return undefined;
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+const noAddress = unsupported("address");
+const noThread = unsupported("thread");
+if (noAddress) console.log(`skipping address sanitizer builds: ${noAddress}`);
+if (noThread) console.log(`skipping thread sanitizer builds: ${noThread}`);
+
+// Builds `src` as `main.fsh` in a directory of its own with `args`, then runs it.
+function run(name: string, src: string, args: string[]) {
+  const dir = join(root, name);
+  mkdirSync(dir);
+  writeFileSync(join(dir, "main.fsh"), src);
+  const built = Bun.spawnSync(["bun", MAIN, "build", "main.fsh", "-o", "main", ...args], { cwd: dir });
+  if (built.exitCode !== 0) throw new Error(built.stderr.toString());
+  const done = Bun.spawnSync([join(dir, "main")], { cwd: dir });
+  return { code: done.exitCode, out: done.stdout.toString(), err: done.stderr.toString() };
+}
+
+function fishc(...args: string[]) {
+  const done = Bun.spawnSync(["bun", MAIN, "build", ...args], { cwd: root });
+  return [done.exitCode, done.stderr.toString()];
+}
+
+const has = () => "/bin/lld";
+const anywhere = (_: string) => "/runtime";
+
+test("a sanitizer instruments every compile and keeps frame pointers", () => {
+  // A runtime directory holding no sanitizer library refuses the target.
+  expect(() => sanitizedTarget(HOST_TARGET, ["address"], "aarch64-apple-darwin", () => root)).toThrow("fishc build: clang has no address sanitizer runtime for aarch64-apple-darwin; build for a target it has one for, such as the host's own");
+  const dir = join(root, "runtime");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "libclang_rt.tsan_osx_dynamic.dylib"), "");
+  writeFileSync(join(dir, "libclang_rt.asan-x86_64.a"), "");
+  const mac = sanitizedTarget(HOST_TARGET, ["thread"], "aarch64-apple-darwin", () => dir);
+  expect(mac).toEqual({ ...HOST_TARGET, compile: ["-fsanitize=thread", "-fno-omit-frame-pointer"], sanitize: "thread" });
+  const linux = resolveTarget("x86_64-unknown-linux-gnu", "/s", "aarch64-apple-darwin", has);
+  expect(sanitizedTarget(linux, ["address"], "aarch64-apple-darwin", () => dir).compile).toEqual([...linux.compile, "-fsanitize=address", "-fno-omit-frame-pointer"]);
+  expect(() => sanitizedTarget(linux, ["thread"], "aarch64-apple-darwin", () => dir)).toThrow("clang has no thread sanitizer runtime for x86_64-unknown-linux-gnu");
+});
+
+test("one known sanitizer at a time, for a target clang has its runtime for", () => {
+  expect(() => sanitizedTarget(HOST_TARGET, ["memory"], "aarch64-apple-darwin", anywhere)).toThrow("fishc build: unknown sanitizer 'memory'; use one of address, thread");
+  expect(() => sanitizedTarget(HOST_TARGET, ["address", "thread"], "aarch64-apple-darwin", anywhere)).toThrow("fishc build: --sanitize takes one sanitizer at a time; address and thread can't instrument the same build");
+  const musl = resolveTarget("x86_64-unknown-linux-musl", "/s", "aarch64-apple-darwin", has);
+  expect(() => sanitizedTarget(musl, ["address"], "aarch64-apple-darwin", anywhere)).toThrow("clang has no address sanitizer runtime for x86_64-unknown-linux-musl");
+  expect(() => sanitizedTarget(staticTarget(musl, "aarch64-apple-darwin"), ["thread"], "aarch64-apple-darwin", anywhere)).toThrow("fishc build: --sanitize=thread links clang's sanitizer runtime, which a --static build can't; leave out one of them");
+});
+
+test("each definition in the IR is marked for the sanitizer, and an unsanitized build's left alone", () => {
+  const ir = 'define internal void @"fsh.constants"() {\ndefine internal { i64, ptr } @"fsh.f"(ptr %p) uwtable personality ptr @__gcc_personality_v0 {\ndeclare void @free(ptr)\n  ; define x {';
+  expect(instrumented(ir, { ...HOST_TARGET, sanitize: "thread" })).toBe('define internal void @"fsh.constants"() sanitize_thread noinline {\ndefine internal { i64, ptr } @"fsh.f"(ptr %p) sanitize_thread noinline uwtable personality ptr @__gcc_personality_v0 {\ndeclare void @free(ptr)\n  ; define x {');
+  expect(instrumented(ir, { ...HOST_TARGET, sanitize: "address" })).toContain("sanitize_address noinline uwtable personality");
+  expect(instrumented(ir, HOST_TARGET)).toBe(ir);
+  // A symbol can hold a space, and so the word itself.
+  const named = 'define internal i64 @"fsh.C.static uwtable"() uwtable personality ptr @__gcc_personality_v0 {';
+  expect(instrumented(named, { ...HOST_TARGET, sanitize: "address" })).toBe('define internal i64 @"fsh.C.static uwtable"() sanitize_address noinline uwtable personality ptr @__gcc_personality_v0 {');
+});
+
+test("an instrumented runtime is cached apart from a plain one, a dev build's at -O1", () => {
+  const [plain] = runtimeUnits("", false);
+  const [address] = runtimeUnits("", false, false, { ...HOST_TARGET, compile: ["-fsanitize=address", "-fno-omit-frame-pointer"], sanitize: "address" });
+  expect(address!.args).toEqual(["-x", "c", "-", "-fsanitize=address", "-fno-omit-frame-pointer", ...plain!.args.slice(3).map((a) => (a === "-O0" ? "-O1" : a))]);
+  expect(plain!.args).toContain("-O0");
+});
+
+test("--sanitize refused where it can't apply", () => {
+  writeFileSync(join(root, "lib.fsh"), "export function f(): i64 {\n  return 1;\n}\n");
+  expect(fishc("lib.fsh", "--sanitize", "address", "--lib", "-o", "libf.a")).toEqual([2, "fishc build: '--sanitize' can't build a library; build the program that uses it with '--sanitize' instead\n"]);
+  expect(fishc("lib.fsh", "--sanitize", "address", "--emit-llvm")).toEqual([2, "fishc build: '--emit-llvm' prints the IR before clang instruments it, so '--sanitize' doesn't apply; leave it out\n"]);
+  for (const command of ["run", "check", "watch"]) {
+    const done = Bun.spawnSync(["bun", MAIN, command, "lib.fsh", "--sanitize", "address"], { cwd: root });
+    expect([done.exitCode, done.stderr.toString()]).toEqual([2, `fishc ${command}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes\n`]);
+  }
+  expect(fishc("lib.fsh", "--sanitize=address,thread")).toEqual([1, "fishc build: --sanitize takes one sanitizer at a time; address and thread can't instrument the same build\n"]);
+  expect(fishc("lib.fsh", "--sanitize", "address", "--sanitize", "thread")).toEqual([1, "fishc build: --sanitize takes one sanitizer at a time; address and thread can't instrument the same build\n"]);
+});
+
+test.skipIf(noAddress !== undefined)("the address sanitizer reports a use after free at its .fsh lines", () => {
+  const src = `declare function malloc(size: usize): MutPtr<i64>;
+declare function free(p: MutPtr<i64>): void;
+
+function main() {
+  const p = unsafe { malloc(8) };
+  unsafe {
+    p.write(1);
+    free(p);
+  }
+  console.log(unsafe { p.read() });
+}
+`;
+  const { code, err } = run("use-after-free", src, ["--sanitize", "address"]);
+  expect(code).not.toBe(0);
+  expect(err).toContain("ERROR: AddressSanitizer: heap-use-after-free");
+  expect(err).toMatch(/READ of size 8 [^\n]*\n\s+#0 [^\n]* in fsh\.main [^\n]*main\.fsh:10/);
+  expect(err).toMatch(/freed by thread T0 here:\n[^\n]*\n\s+#1 [^\n]* in fsh\.main [^\n]*main\.fsh:8/);
+});
+
+// Clang's -O0 code for AArch64 misread large aggregates passed to address-sanitized functions,
+// so fetch's init arrived empty and the request went out as a bare GET.
+test.skipIf(noAddress !== undefined)("an address-sanitized fetch sends the method, headers and body it was given", async () => {
+  let seen = "";
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      seen = `${req.method} ${new URL(req.url).pathname} ${req.headers.get("x-tag")} ${await req.text()}`;
+      return new Response("ok");
+    },
+  });
+  try {
+    await fetchUnder(server.port!);
+  } finally {
+    server.stop(true);
+  }
+  expect(seen).toBe("POST /up t1 yyyyyyyyyy");
+});
+
+async function fetchUnder(port: number) {
+  const dir = join(root, "fetch");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "main.fsh"), `async function main(): Promise<void> throws IoError | AbortError {
+  let headers = new Headers();
+  headers.set("x-tag", "t1");
+  const res = await fetch("http://127.0.0.1:${port}/up", { method: "POST", headers, body: "y".repeat(10) });
+  const text = await res.text();
+  console.log(res.status, text);
+}
+`);
+  const built = Bun.spawnSync(["bun", MAIN, "build", "main.fsh", "-o", "main", "--sanitize", "address"], { cwd: dir });
+  expect(built.stderr.toString()).toBe("");
+  const ran = Bun.spawn([join(dir, "main")], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  const [code, out, err] = await Promise.all([ran.exited, new Response(ran.stdout).text(), new Response(ran.stderr).text()]);
+  expect({ code, out, err }).toEqual({ code: 0, out: "200 ok\n", err: "" });
+}
+
+test.skipIf(noThread !== undefined)("the thread sanitizer reports two tasks racing on raw memory", () => {
+  const src = `async function bump(address: usize): Promise<i64> {
+  for (let i = 0; i < 100000; i++) {
+    unsafe {
+      const p = address as MutPtr<i64>;
+      p.write(p.read() + 1);
+    }
+  }
+  return 0;
+}
+
+async function main() {
+  let count = 0;
+  const address = unsafe { mutPtrOf(count) as usize };
+  const a = spawn(bump(address));
+  const b = spawn(bump(address));
+  await a;
+  await b;
+  console.log("done");
+}
+`;
+  const { code, err } = run("race", src, ["--sanitize", "thread"]);
+  expect(code).not.toBe(0);
+  expect(err).toContain("WARNING: ThreadSanitizer: data race");
+  expect(err).toMatch(/#0 fsh\.bump [^\n]*main\.fsh:5/);
+});
+
+test.skipIf(noThread !== undefined)("the runtime's executor, channels, locks and blocking pool run clean under the thread sanitizer", () => {
+  const src = `class Pool {
+  hits: Atomic<i64> = new Atomic(0);
+  log: Lock<string[]> = new Lock<string[]>([]);
+}
+
+type State = { count: i64; pool: Pool };
+
+async function work(state: shared<State>, out: Channel<i64>, n: i64): Promise<i64> {
+  for (let i = 0; i < 50; i++) {
+    state.pool.hits.add(1);
+    state.update((s) => s.count++);
+    if (i % 10 === 0) await yieldNow();
+  }
+  state.pool.log.update((l) => l.push("task" + n));
+  await out.send(n);
+  return n;
+}
+
+async function spin(): Promise<i64> {
+  let n = 0;
+  while (true) n++;
+  return n;
+}
+
+async function main() {
+  const state = shared<State>({ count: 0, pool: new Pool() });
+  const out = new Channel<i64>(4);
+  let handles: JoinHandle<i64>[] = [];
+  for (let n = 0; n < 8; n++) handles.push(spawn(work(state.clone(), out.clone(), n)));
+  let sum = 0;
+  for (let n = 0; n < 8; n++) {
+    const v = await out.receive();
+    sum += v!;
+  }
+  for (let n = 0; n < 8; n++) await handles.pop()!;
+  const blocked = await spawnBlocking(() => 6 * 7);
+  const count = state.update((s) => s.count);
+  console.log(sum, count, state.pool.hits.load(), state.pool.log.update((l) => l.length), blocked);
+  // Main ends while a task is still busy, so the runtime abandons its workers.
+  const _busy = spawn(spin());
+}
+`;
+  expect(run("clean", src, ["--sanitize", "thread"])).toEqual({ code: 0, out: "28 400 400 8 42\n", err: "" });
+});

@@ -343,7 +343,7 @@ export type DynType = TypeId<DynRecord>;
 // `AbortController` and its `AbortSignal`s are handles to one block.
 // A FileJob is a file read or write handed to the runtime's blocking pool.
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
-export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
+export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
 export type BlockType = TypeId<BlockRecord>;
 
 // The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
@@ -351,7 +351,7 @@ export type BlockType = TypeId<BlockRecord>;
 // `send` the value going in. One given an AbortSignal ends with a count on it and whether it is
 // waiting on it, and throws the `AbortError` it is given. `leafOf` names each one's method and
 // what it carries.
-export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "readFile" | "writeFile" | "timerNext" | "jsAwait" | "next";
+export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect" | "accept" | "read" | "write" | "sendTo" | "receiveFrom" | "udpConnect" | "readFile" | "writeFile" | "timerNext" | "jsAwait" | "next";
 
 // A spawned task's `JoinHandle<T>`: what its future gives and may throw, awaited like it. A
 // counted pointer to the task; dropping it detaches the task.
@@ -1150,6 +1150,10 @@ export class Typing {
       case "accept": return [{ name: "block", type: this.blockType("TcpListener") }];
       case "read": return [{ name: "block", type: this.blockType("TcpStream") }, { name: "max", type: "i64" }];
       case "write": return [{ name: "block", type: this.blockType("TcpStream") }, { name: "bytes", type: this.arrayType("u8") }, { name: "written", type: "i64" }];
+      // A UDP socket's waits; a send with no host goes to the connected peer.
+      case "sendTo": return [{ name: "block", type: this.blockType("UdpSocket") }, { name: "bytes", type: this.arrayType("u8") }, { name: "host", type: "string" }, { name: "port", type: "i64" }];
+      case "receiveFrom": return [{ name: "block", type: this.blockType("UdpSocket") }];
+      case "udpConnect": return [{ name: "block", type: this.blockType("UdpSocket") }, { name: "host", type: "string" }, { name: "port", type: "i64" }];
       case "readFile": return [{ name: "path", type: "string" }, { name: "job", type: this.blockType("FileJob") }];
       case "writeFile": return [{ name: "path", type: "string" }, { name: "bytes", type: this.arrayType("u8") }, { name: "job", type: this.blockType("FileJob") }];
       case "timerNext": return [];
@@ -1171,9 +1175,9 @@ export class Typing {
     if (!t) {
       const frame: Field[] = [{ name: "state", type: "i32" }, ...this.leafFrame(method, of)];
       if (signal) frame.push({ name: "signal", type: this.blockType("AbortSignal") }, { name: "waiting", type: "i32" });
-      const gives: Type = method === "acquire" ? this.blockType("Permit") : method === "receive" || method === "timerNext" ? this.unionType([of, "null"]) : method === "bind" ? this.blockType("TcpListener")
-        : method === "connect" || method === "accept" ? this.blockType("TcpStream") : method === "read" || method === "readFile" ? this.arrayType("u8") : method === "jsAwait" ? of
-        : method === "next" ? this.nextResult(this.rec(of as GeneratorType).yields) : "void";
+      const gives: Type = method === "acquire" ? this.blockType("Permit") : method === "receive" || method === "timerNext" ? this.unionType([of, "null"]) : method === "bind" ? (of === "void" ? this.blockType("TcpListener") : of)
+        : method === "connect" || method === "accept" ? (of === "void" ? this.blockType("TcpStream") : of) : method === "read" || method === "readFile" ? this.arrayType("u8") : method === "jsAwait" ? of
+        : method === "next" ? this.nextResult(this.rec(of as GeneratorType).yields) : method === "receiveFrom" ? (of === "void" ? this.datagram() : this.arrayType("u8")) : "void";
       t = this.made<FutureType>({ kind: "future", name: method, gives, throws, fields: [], params: [], frame, concrete: true }, `leaf ${key}`);
       this.leaves.set(key, t);
       this.leafOf.set(t, { method, of, signal });
@@ -1463,6 +1467,11 @@ export class Typing {
   generatorType(this: Mut<this>, name: string, concrete: boolean, async = false): GeneratorType {
     const t = this.made<GeneratorType>({ kind: "generator", name, yields: "never", fields: [], params: [], frame: [], concrete, ...(async ? { async } : {}) }, `generator ${this.declared++}`);
     return t;
+  }
+
+  // What `receiveFrom()` gives: a datagram's bytes and its sender, named as `sendTo` takes them.
+  datagram(this: Mut<this>): ObjectType {
+    return this.objectType([{ name: "bytes", type: this.arrayType("u8") }, { name: "host", type: "string" }, { name: "port", type: "i64" }]);
   }
 
   // What `next()` gives: the next value, or that the generator has finished.

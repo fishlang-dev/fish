@@ -379,9 +379,9 @@ class Headers {
   }
 }
 
-// A cookie's attributes, with Bun's names. maxAge is in seconds and expires in milliseconds since
-// the epoch, as Date.now() gives.
-type CookieInit = { path?: string; domain?: string; maxAge?: i64; expires?: i64; secure?: boolean; httpOnly?: boolean; sameSite?: "strict" | "lax" | "none"; partitioned?: boolean };
+// A cookie's attributes, with Bun's names. maxAge is in seconds and expires a Date or milliseconds
+// since the epoch, as Date.now() gives.
+type CookieInit = { path?: string; domain?: string; maxAge?: i64; expires?: i64 | Date; secure?: boolean; httpOnly?: boolean; sameSite?: "strict" | "lax" | "none"; partitioned?: boolean };
 
 // Cookies by name, as Bun's CookieMap: read from a Cookie header as RFC 6265 reads one, the
 // first of a repeated name kept, and changed by set and delete, each change a Set-Cookie line
@@ -497,9 +497,10 @@ function __cookieLine(name: string, value: string, options: CookieInit | null): 
   if (options !== null) {
     const expires = options.expires;
     if (expires !== null) {
+      const ms = expires instanceof Date ? expires.getTime() : expires;
       // An HTTP date has a four-digit year, so 0000-01-01 to 9999-12-31 can be written.
-      assert(expires >= -62167219200000 && expires <= 253402300799999, "cookie '" + name + "' can't expire at " + String(expires) + "; give milliseconds since the epoch within the years 0000 to 9999");
-      line = line + "; Expires=" + __cookieDate(expires);
+      assert(ms >= -62167219200000 && ms <= 253402300799999, "cookie '" + name + "' can't expire at " + String(ms) + "; give a time within the years 0000 to 9999");
+      line = line + "; Expires=" + new Date(ms).toUTCString();
     }
     const maxAge = options.maxAge;
     if (maxAge !== null) line = line + "; Max-Age=" + String(maxAge);
@@ -519,32 +520,9 @@ function __cookieAttribute(name: string, attribute: string, value: string): stri
   return value;
 }
 
-// Milliseconds since the epoch as an IMF-fixdate, the form HTTP writes dates in.
-function __cookieDate(ms: i64): string {
-  let days = ms / 86400000;
-  let rest = ms % 86400000;
-  if (rest < 0) {
-    days -= 1;
-    rest += 86400000;
-  }
-  // Howard Hinnant's days_from_civil, run backwards: the date of a day count from 1970-01-01.
-  const z = days + 719468;
-  const era = (z >= 0 ? z : z - 146096) / 146097;
-  const doe = z - era * 146097;
-  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-  const mp = (5 * doy + 2) / 153;
-  const day = doy - (153 * mp + 2) / 5 + 1;
-  const month = mp < 10 ? mp + 3 : mp - 9;
-  const year = yoe + era * 400 + (month <= 2 ? 1 : 0);
-  // 1970-01-01 was a Thursday.
-  const weekday = ((days % 7) + 11) % 7;
-  const seconds = rest / 1000;
-  const two = (n: i64) => (n < 10 ? "0" : "") + String(n);
-  return "Sun,Mon,Tue,Wed,Thu,Fri,Sat".split(",")[weekday as usize] + ", " + two(day) + " " + "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec".split(",")[(month - 1) as usize] + " " + String(year).padStart(4, "0") + " " + two(seconds / 3600) + ":" + two(seconds / 60 % 60) + ":" + two(seconds % 60) + " GMT";
-}
-
-type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal };
+// unix is a socket path to send the request over in place of the URL's host and port; tls.ca is
+// PEM certificates an https: server's is verified against in place of the system's, as Bun's is.
+type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal; unix?: string; tls?: { ca?: string } };
 
 // A body given as text or bytes, as the bytes sent.
 function __httpBody(body: string | u8[]): u8[] {
@@ -634,6 +612,8 @@ class Response {
   #stream: Lock<Dyn<AsyncGenerator<string>>[]>;
   // 1 once text() has read a streamed body, which no copy can then have.
   #read: Atomic<i64> = new Atomic(0);
+  // What takes the connection over once a 101 is sent: a WebSocket route's session, at most one.
+  #upgrade: Lock<__wsUpgrade[]>;
   // The URL fetch got it from, or "" for one the program built.
   url: string = "";
   // The cookies it sets and deletes, each sent as a Set-Cookie header of its own.
@@ -668,6 +648,8 @@ class Response {
     this.headers = headers;
     this.body = bytes;
     this.#stream = new Lock(stream);
+    const upgrade: __wsUpgrade[] = [];
+    this.#upgrade = new Lock(upgrade);
   }
 
   // A response whose body is the value as JSON, typed 'application/json' unless the headers
@@ -707,6 +689,16 @@ class Response {
   // The streamed body, taken out for whoever sends or reads it, or null when there is none.
   __stream(): Dyn<AsyncGenerator<string>> | null {
     return this.#stream.update((s) => s.pop());
+  }
+
+  // The session a WebSocket route's 101 hands the connection to, taken out, or null.
+  __upgrade(): __wsUpgrade | null {
+    return this.#upgrade.update((u) => u.pop());
+  }
+
+  __upgradeWith(this: Mut<this>, session: __wsUpgrade) {
+    const one: __wsUpgrade[] = [session];
+    this.#upgrade = new Lock(one);
   }
 
   // The body as UTF-8 text, each malformed sequence as U+FFFD. A streamed one is read to its
@@ -764,10 +756,12 @@ function __sseLine(value: string): string {
 
 type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
-type ServeOptions = { port?: i64; hostname?: string; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
+// unix is a socket path to serve on in place of a port, removed when serve stops. tls has the
+// server speak HTTPS with a PEM certificate chain and its private key, as Bun's does.
+type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
 type ServeHandler = (req: Request) => Promise<Response>;
 // What serve's options settle for each connection, under a name no program can write.
-type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64 };
+type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean };
 // A router's internal names take forms no program can write, so a program's own never hides
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
@@ -778,8 +772,10 @@ type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHan
 // A router's routes and middleware, shared so each middleware's next can hold them.
 type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
-// Serves HTTP/1.1 on hostname and port, each connection on a task of its own.
+// Serves HTTP/1.1 on hostname and port, or a socket path, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
+  const unix = options.unix;
+  if (unix !== null && (options.port !== null || options.hostname !== null)) throw new IoError("serve takes either a 'unix' socket path or a 'port' and 'hostname', not both");
   let hostname = "0.0.0.0";
   const h = options.hostname;
   if (h !== null) hostname = h;
@@ -791,6 +787,7 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     maxBodySize: Http1.option(options.maxBodySize, 134217728, "maxBodySize", "bytes"),
     headerTimeout: Http1.option(options.headerTimeout, 60000, "headerTimeout", "milliseconds, or 0 for no timeout"),
     idleTimeout: Http1.option(options.idleTimeout, 10000, "idleTimeout", "milliseconds, or 0 for no timeout"),
+    secure: options.tls !== null,
   };
   // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
   const given = options.signal;
@@ -798,13 +795,22 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   const live = shared({ count: new Atomic(0) });
   {
     // The listener closes as this block ends, so no one new waits while connections drain.
-    const listener = await TcpListener.bind(hostname, port);
+    let listener: TcpListener;
+    if (unix !== null) listener = await TcpListener.unix(unix);
+    else listener = await TcpListener.bind(hostname, port);
+    // Each connection's handshake runs in its first read, in its own task and within the limits.
+    const tls = options.tls;
+    if (tls !== null) {
+      const why = listener.listenTls(tls.cert, tls.key);
+      if (why.length > 0) throw new IoError("serve can't use its tls option: " + why);
+    }
     const bound = listener.port;
     const listen = options.onListen;
-    if (listen !== null) listen({ hostname: hostname, port: bound });
+    if (listen !== null) listen({ hostname: unix ?? hostname, port: bound });
     const boxed: ServeHandler = handler;
-    // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL.
-    const host = (hostname.includes(":") ? "[" + hostname + "]" : hostname) + ":" + String(bound);
+    // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL,
+    // or localhost, as curl sends over a socket.
+    const host = unix !== null ? "localhost" : (hostname.includes(":") ? "[" + hostname + "]" : hostname) + ":" + String(bound);
     while (true) {
       try {
         const conn = await listener.accept(stop);
@@ -817,6 +823,7 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
       }
     }
   }
+  if (unix !== null) unixUnlink(unix);
   // ponytail: polls until the last connection ends; a wait group would wake at once.
   while (live.count.load() > 0) await sleep(10);
 }
@@ -897,7 +904,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const done = new AbortController();
       const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
       // The body is set after, not passed in init, which would copy it.
-      let req = new Request("http://" + authority + head.target, { method: method, headers: head.headers, signal: signal.clone() });
+      let req = new Request((limits.secure ? "https://" : "http://") + authority + head.target, { method: method, headers: head.headers, signal: signal.clone() });
       req.body = body;
       // The handler runs as a task of its own, so a panic in it ends only that task: its client
       // gets a bare 500 and the connection closes, and the server goes on serving.
@@ -908,6 +915,23 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
         done.abort();
         await watching;
         await Http1.send(conn, new Response("", { status: 500 }), false, true, version);
+        return;
+      }
+      // A WebSocket route's 101 hands the connection to its session, which keeps it to the end.
+      // Bytes the client sent past the request go to the session, though it shouldn't send any
+      // before the 101.
+      const upgrade = res.__upgrade();
+      if (upgrade !== null && res.status === 101 && Http1.fieldsSendable(res)) {
+        done.abort();
+        const early = await watching;
+        // RFC 6455 upgrades HTTP/1.1 and later only.
+        if (version !== "HTTP/1.1") {
+          await Http1.refuse(conn, 400);
+          return;
+        }
+        for (const b of early) buffer.push(b);
+        const sent = await Http1.put(conn, Http1.headText(res, "connection: Upgrade\\r\\n", false, "HTTP/1.1"), stop);
+        if (sent) await upgrade(conn.clone(), buffer, stop.clone());
         return;
       }
       const said = res.headers.get("connection");
@@ -1059,6 +1083,26 @@ class Router {
       t.prefixes.push(true);
       t.groups.push(none);
     });
+  }
+
+  // A WebSocket route at a path, for GET: a request asking to upgrade gets a 101, and the handler
+  // then has the connection's messages and sends on it until it returns, which closes it with
+  // 1000 unless it was closed already. The route runs inside middleware as any route does, so
+  // middleware can refuse a request with an ordinary response before anything is upgraded.
+  ws(this: Mut<this>, path: string, handler: (ws: ServerWebSocket, req: Request) => Promise<void>, options?: WebSocketOptions) {
+    const limits = __wsLimitsOf(options);
+    const route: ServeHandler = async (req: Request) => {
+      let res = __wsHandshake(req);
+      if (res.status !== 101) return res;
+      const run = handler.clone();
+      const kept = limits.clone();
+      const session: __wsUpgrade = async (conn: TcpStream, start: u8[], stop: AbortSignal) => {
+        await __wsSession(conn, start, stop, kept.clone(), run.clone(), req.clone());
+      };
+      res.__upgradeWith(session);
+      return res;
+    };
+    this.add("GET", path, route);
   }
 
   // The response the middleware give around the routes. Each next is built from the one inside
@@ -1244,7 +1288,7 @@ async function __staticResponse(req: Request, skip: usize, root: string): Promis
   const tag = "W/\\"" + __staticHex(size) + "-" + __staticHex(mtime) + "\\"";
   let headers = new Headers();
   headers.set("etag", tag);
-  headers.set("last-modified", __cookieDate(mtime));
+  headers.set("last-modified", new Date(mtime).toUTCString());
   const asked = req.headers.get("if-none-match");
   if (asked !== null && __staticMatches(asked, tag)) return new Response(null, { status: 304, headers: headers });
   headers.set("content-type", __staticType(path));
@@ -1337,6 +1381,493 @@ function __staticType(path: string): string {
   if (ext === "mp3") return "audio/mpeg";
   if (ext === "wav") return "audio/wav";
   return "application/octet-stream";
+}
+
+// WebSockets over HTTP/1.1, as RFC 6455 has a server speak them: text and binary messages, each
+// whole however the client fragmented it, pings answered with pongs, and the close handshake.
+// Extensions such as permessage-deflate and subprotocols are never agreed to.
+
+// A WebSocket route's limits. maxMessageSize is the most bytes one message may take, past which
+// the connection is closed with 1009; maxBuffered the most bytes sends and pongs may queue for a client
+// that reads slowly, past which it is closed with 1013; idleTimeout how long the client may send
+// nothing before it is pinged, and as long again before it is dropped, in milliseconds, 0 for
+// never. The defaults are Bun's: 16 MiB, 16 MiB and two minutes.
+type WebSocketOptions = { maxMessageSize?: i64; maxBuffered?: i64; idleTimeout?: i64 };
+type __wsLimits = { maxMessageSize: i64; maxBuffered: i64; idleTimeout: i64 };
+type __wsWhy = { code: i64; reason: string; heard: boolean };
+type __wsUpgrade = (conn: TcpStream, start: u8[], stop: AbortSignal) => Promise<void>;
+type __wsHandler = (ws: ServerWebSocket, req: Request) => Promise<void>;
+// Frames waiting to be written, whether a close frame has been queued or the connection has
+// broken, after which nothing more is sent, the bell a send aborts to wake the writer, and the
+// code of a close the client sent, or 0.
+type __wsOut = { bytes: u8[]; closing: boolean; bell: AbortController; heard: i64 };
+// What every handle on one connection shares. The stream is held in an array of at most one, so
+// the session can take it out as it ends, and no sender kept elsewhere holds the socket open.
+// The writer and the reader end once ending aborts; returned aborts as the handler returns.
+type __wsState = { conn: Lock<TcpStream[]>; out: Lock<__wsOut>; writing: Semaphore; ending: AbortController; returned: AbortController; maxBuffered: i64 };
+
+function __wsLimitsOf(options: WebSocketOptions | null): __wsLimits {
+  let limits: __wsLimits = { maxMessageSize: 16777216, maxBuffered: 16777216, idleTimeout: 120000 };
+  if (options === null) return limits;
+  const size = options.maxMessageSize;
+  if (size !== null) limits.maxMessageSize = size;
+  const buffered = options.maxBuffered;
+  if (buffered !== null) limits.maxBuffered = buffered;
+  const idle = options.idleTimeout;
+  if (idle !== null) limits.idleTimeout = idle;
+  assert(limits.maxMessageSize >= 0 && limits.maxBuffered >= 0 && limits.idleTimeout >= 0, "a WebSocket route's maxMessageSize, maxBuffered and idleTimeout can't be negative");
+  // A frame's end, its length past a 14-byte head, then stays far from the i64 maximum.
+  if (limits.maxMessageSize > 281474976710656) limits.maxMessageSize = 281474976710656;
+  return limits;
+}
+
+// A connection a WebSocket route's handler has: the messages the client sends, read with
+// 'for await (const m of ws)', each a string for a text message and bytes for a binary one, and
+// sends and a close back. The loop ends once the connection closes, from either side.
+class ServerWebSocket {
+  #socket: WebSocketSender;
+  #incoming: Channel<string | u8[]>;
+
+  constructor(socket: WebSocketSender, incoming: Channel<string | u8[]>) {
+    this.#socket = socket;
+    this.#incoming = incoming;
+  }
+
+  // Queues a message, text for a string and binary for bytes; one sent after the connection
+  // closed is dropped.
+  send(data: string | u8[]) {
+    this.#socket.send(data);
+  }
+
+  // Starts the close handshake with a code, 1000 or one of 3000 to 4999, and a reason of at most
+  // 123 bytes. Messages that arrive before the client answers are still read.
+  close(code?: i64, reason?: string) {
+    this.#socket.close(code, reason);
+  }
+
+  // Waits until everything queued so far is written, so a handler sending a lot can keep pace
+  // with a client that reads slowly.
+  async flush(): Promise<void> {
+    await this.#socket.flush();
+  }
+
+  // A handle other tasks can send on and close with, kept as long as they like; once the
+  // connection closes, what they send is dropped.
+  sender(): WebSocketSender {
+    return this.#socket.clone();
+  }
+
+  // What 'for await' over the socket reads: the messages, until the connection closes.
+  __wsMessages(): Channel<string | u8[]> {
+    return this.#incoming.clone();
+  }
+}
+
+// Sends on a WebSocket from any task. A message sent after the connection closed is dropped.
+class WebSocketSender {
+  #state: shared<__wsState>;
+
+  constructor(state: shared<__wsState>) {
+    this.#state = state;
+  }
+
+  send(data: string | u8[]) {
+    const text = typeof data === "string";
+    __wsQueue(this.#state.clone(), text ? 1 : 2, __httpBody(data));
+  }
+
+  close(code?: i64, reason?: string) {
+    const c = code ?? 1000;
+    const r = reason ?? "";
+    assert(c === 1000 || (c >= 3000 && c <= 4999), "a WebSocket close code is 1000 or one of 3000 to 4999, not " + String(c));
+    assert(new TextEncoder().encode(r).length <= 123, "a WebSocket close reason takes at most 123 bytes of UTF-8");
+    __wsQueue(this.#state.clone(), 8, __wsClosing(c, r));
+  }
+
+  async flush(): Promise<void> {
+    await __wsFlush(this.#state.clone());
+  }
+
+  // A close the client or the server's own rules call for, with a code a program can't send.
+  __wsEnd(code: i64, reason: string) {
+    __wsQueue(this.#state.clone(), 8, __wsClosing(code, reason));
+  }
+
+  // The session's close as the handler returns: the client's own code when it closed first.
+  __wsFinish(code: i64) {
+    this.#state.returned.abort();
+    const heard = this.#state.out.update((o) => o.heard);
+    this.__wsEnd(heard !== 0 ? heard : code, "");
+  }
+
+  __wsHeard(code: i64) {
+    this.#state.out.update((o) => {
+      o.heard = code;
+    });
+  }
+
+  __wsReturned(): AbortSignal {
+    return this.#state.returned.signal;
+  }
+
+  __wsPong(payload: u8[]) {
+    __wsQueue(this.#state.clone(), 10, payload);
+  }
+
+  __wsPing() {
+    __wsQueue(this.#state.clone(), 9, []);
+  }
+
+  // Nothing more is sent, as when the client has gone.
+  __wsStop() {
+    this.#state.out.update((o) => {
+      o.closing = true;
+    });
+  }
+
+  __wsState(): shared<__wsState> {
+    return this.#state.clone();
+  }
+
+  // The stream given up, so senders kept after the connection ends don't hold it open.
+  __wsRelease() {
+    this.#state.conn.update((c) => {
+      c.pop();
+    });
+  }
+}
+
+// The handshake's answer: a 101 accepting the key, a 405 to a HEAD request, which reaches GET
+// routes, a 426 to a request that isn't an upgrade to WebSocket version 13, or a 400 for a key
+// that isn't 16 bytes in base64.
+function __wsHandshake(req: Ref<Request>): Response {
+  if (req.method !== "GET") {
+    let allow = new Headers();
+    allow.set("allow", "GET");
+    return new Response("Method Not Allowed\\n", { status: 405, headers: allow });
+  }
+  const upgrade = req.headers.get("upgrade");
+  const connection = req.headers.get("connection");
+  let headers = new Headers();
+  if (upgrade === null || connection === null || !Http1.hasToken(upgrade, "websocket") || !Http1.hasToken(connection, "upgrade")) {
+    headers.set("upgrade", "websocket");
+    return new Response("Upgrade Required\\n", { status: 426, headers: headers });
+  }
+  if (req.headers.get("sec-websocket-version") !== "13") {
+    headers.set("sec-websocket-version", "13");
+    return new Response("Upgrade Required\\n", { status: 426, headers: headers });
+  }
+  const key = req.headers.get("sec-websocket-key");
+  if (key === null || !__wsKey(key)) return new Response("Bad Request\\n", { status: 400 });
+  const accept = __wsAccept(key);
+  if (accept === null) return new Response("Internal Server Error\\n", { status: 500 });
+  headers.set("upgrade", "websocket");
+  headers.set("sec-websocket-accept", accept);
+  return new Response(null, { status: 101, headers: headers });
+}
+
+// Whether a Sec-WebSocket-Key is 16 bytes in base64: 22 characters of the alphabet and '=='.
+function __wsKey(key: string): boolean {
+  if (key.length !== 24 || !key.endsWith("==")) return false;
+  for (let i = 0; i < 22; i++) {
+    const c = key.charCodeAt(i) as i64;
+    const ok = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 43 || c === 47;
+    if (!ok) return false;
+  }
+  return true;
+}
+
+declare function fsh_rt_crypto_digest(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, rounds: i64, out: MutPtr<u8>): i64;
+
+// Sec-WebSocket-Accept for a key: the SHA-1 of the key and the protocol's GUID, in base64, or
+// null when OpenSSL, which hashes it, wasn't there to link.
+function __wsAccept(key: string): string | null {
+  const data = new TextEncoder().encode(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+  const none: u8[] = [0 as u8];
+  let out: u8[] = new Array(32).fill(0 as u8);
+  const ok = unsafe { fsh_rt_crypto_digest(4, ptrOf(none[0]), 0, ptrOf(data[0]), data.length as i64, 0, mutPtrOf(out[0])) };
+  if (ok !== 1) return null;
+  return __arrayBase64Text(out.slice(0, 20), false, true);
+}
+
+// A frame from the server, which is never masked: final, with the opcode and payload.
+function __wsFrame(opcode: i64, payload: Ref<u8[]>): u8[] {
+  const n = payload.length as i64;
+  let out: u8[] = [];
+  out.reserve(n + 10);
+  out.push((128 | opcode) as u8);
+  if (n < 126) out.push(n as u8);
+  else if (n < 65536) {
+    out.push(126 as u8);
+    out.push((n >> 8) as u8);
+    out.push((n & 255) as u8);
+  } else {
+    out.push(127 as u8);
+    for (let shift = 56; shift >= 0; shift -= 8) out.push(((n >> shift) & 255) as u8);
+  }
+  for (const b of payload) out.push(b);
+  return out;
+}
+
+// A close frame's payload: the code in two bytes, then the reason.
+function __wsClosing(code: i64, reason: string): u8[] {
+  let out: u8[] = [(code >> 8) as u8, (code & 255) as u8];
+  for (const b of new TextEncoder().encode(reason)) out.push(b);
+  return out;
+}
+
+// Queues a frame and wakes the writer. Nothing is queued once a close has been, and any other
+// frame that would take the queue past its limit, pongs to a client that pings and never reads
+// included, closes the connection with 1013 instead.
+function __wsQueue(state: shared<__wsState>, opcode: i64, payload: u8[]) {
+  const frame = __wsFrame(opcode, payload);
+  const limit = state.maxBuffered;
+  state.out.update((o) => {
+    if (o.closing) return;
+    if (opcode !== 8 && (o.bytes.length + frame.length) as i64 > limit) {
+      o.closing = true;
+      for (const b of __wsFrame(8, __wsClosing(1013, "send buffer full"))) o.bytes.push(b);
+    } else {
+      if (opcode === 8) o.closing = true;
+      for (const b of frame) o.bytes.push(b);
+    }
+    o.bell.abort();
+  });
+}
+
+// Writes what sends queue, from when the connection opens until the session ends.
+async function __wsWriter(state: shared<__wsState>): Promise<void> {
+  const ending = state.ending.signal;
+  while (!ending.aborted) {
+    // The bell is replaced under the queue's lock, so a send can't ring the old one unheard.
+    const bell = state.out.update((o): AbortSignal | null => {
+      if (o.bytes.length > 0) return null;
+      o.bell = new AbortController();
+      return o.bell.signal;
+    });
+    if (bell !== null) {
+      const either = AbortSignal.any([bell, ending.clone()]);
+      await Http1.abortOf(either);
+    } else await __wsFlush(state.clone());
+  }
+}
+
+// Writes what is queued, by the writer or a handler's flush, one at a time so frames never
+// interleave. A write that fails or
+// takes over 30 seconds ends the connection.
+async function __wsFlush(state: shared<__wsState>): Promise<void> {
+  const _turn = await state.writing.acquire();
+  while (true) {
+    const conn = state.conn.update((c) => c.length > 0 ? c[0].clone() : null);
+    if (conn === null) return;
+    const bytes = state.out.update((o) => o.bytes.splice(0));
+    if (bytes.length === 0) return;
+    try {
+      await conn.write(bytes, AbortSignal.timeout(30000));
+    } catch (e) {
+      state.out.update((o) => {
+        o.closing = true;
+        o.bytes = [];
+      });
+      state.ending.abort();
+      return;
+    }
+  }
+}
+
+// Runs a WebSocket route's handler on an upgraded connection, while a reader takes the client's
+// frames, and closes the connection once the handler returns: with 1000, 1011 when it panicked,
+// or 1001 when the server stops and it hasn't returned a second later. The client's own close
+// is waited for 5 seconds, then the connection ends.
+async function __wsSession(conn: TcpStream, start: u8[], stop: AbortSignal, limits: __wsLimits, handler: __wsHandler, req: Request): Promise<void> {
+  const incoming = new Channel<string | u8[]>(16);
+  const ending = new AbortController();
+  const streams: TcpStream[] = [conn.clone()];
+  const socket = new WebSocketSender(shared<__wsState>({ conn: new Lock(streams), out: new Lock<__wsOut>({ bytes: [], closing: false, bell: new AbortController(), heard: 0 }), writing: new Semaphore(1), ending: ending.clone(), returned: new AbortController(), maxBuffered: limits.maxBuffered }));
+  spawn(__wsWriter(socket.__wsState()));
+  const reader = spawn(__wsRead(conn, start, socket.clone(), incoming.clone(), stop.clone(), ending.signal, limits));
+  const ws = new ServerWebSocket(socket.clone(), incoming);
+  const code = await Promise.race([__wsRun(handler, ws, req), __wsGraced(stop)]);
+  socket.__wsFinish(code);
+  await socket.flush();
+  await Promise.race([__wsJoined(reader), Http1.late(5000)]);
+  ending.abort();
+  socket.__wsRelease();
+}
+
+// 1000 once the handler returns, or 1011 when it panicked: it runs as a task of its own, so a
+// panic ends only it.
+async function __wsRun(handler: __wsHandler, ws: ServerWebSocket, req: Request): Promise<i64> {
+  try {
+    await spawn(__wsCall(handler, ws, req)).join();
+    return 1000;
+  } catch (e) {
+    return 1011;
+  }
+}
+
+async function __wsCall(handler: __wsHandler, ws: ServerWebSocket, req: Request): Promise<void> {
+  await handler(ws, req);
+}
+
+// 1001, a second after the server stops.
+async function __wsGraced(stop: Ref<AbortSignal>): Promise<i64> {
+  await Http1.graced(stop);
+  return 1001;
+}
+
+async function __wsJoined(reader: JoinHandle<void>): Promise<boolean> {
+  try {
+    await reader.join();
+  } catch (e) {}
+  return true;
+}
+
+// Reads the client's frames until the connection closes: whole messages go to the handler, pings
+// are answered, and a frame breaking the protocol closes the connection with the code RFC 6455
+// gives for it. Ends with the messages closed, so the handler's loop ends too.
+async function __wsRead(conn: TcpStream, start: u8[], socket: WebSocketSender, incoming: Channel<string | u8[]>, stop: AbortSignal, ending: AbortSignal, limits: __wsLimits): Promise<void> {
+  const signal = AbortSignal.any([stop.clone(), ending]);
+  let buffer = start;
+  try {
+    const why = await __wsFrames(conn, buffer, socket, incoming, signal, limits);
+    incoming.close();
+    if (why === null) {
+      if (stop.aborted) socket.__wsEnd(1001, "");
+      else socket.__wsStop();
+    } else if (why.heard) {
+      // The client's close is answered once the handler returns, so its replies to what came
+      // before go out first, or after a second when it doesn't.
+      socket.__wsHeard(why.code);
+      const either = AbortSignal.any([socket.__wsReturned(), AbortSignal.timeout(1000)]);
+      await Http1.abortOf(either);
+      socket.__wsEnd(why.code, "");
+    } else socket.__wsEnd(why.code, why.reason);
+  } catch (e) {
+    incoming.close();
+    socket.__wsStop();
+  }
+}
+
+// The frames' loop: null once the client went, or the code and reason to close with, which the
+// client gave when it was heard closing.
+async function __wsFrames(conn: Ref<TcpStream>, buffer: Mut<u8[]>, socket: Ref<WebSocketSender>, incoming: Ref<Channel<string | u8[]>>, signal: Ref<AbortSignal>, limits: __wsLimits): Promise<__wsWhy | null> throws IoError | AbortError {
+  let message: u8[] = [];
+  // The opcode of the message whose frames are arriving, or 0 between messages.
+  let kind: i64 = 0;
+  while (true) {
+    const started = await __wsFill(conn, buffer, 2, socket, signal, limits.idleTimeout);
+    if (!started) return null;
+    const first = buffer[0] as i64;
+    const second = buffer[1] as i64;
+    const fin = (first & 128) !== 0;
+    const opcode = first & 15;
+    if ((first & 112) !== 0) return { code: 1002, reason: "reserved bits are set", heard: false };
+    if ((second & 128) === 0) return { code: 1002, reason: "a client's frames must be masked", heard: false };
+    if (opcode > 10 || (opcode > 2 && opcode < 8)) return { code: 1002, reason: "unknown opcode", heard: false };
+    let length = second & 127;
+    let head: i64 = 2;
+    if (length >= 126) {
+      head = length === 126 ? 4 : 10;
+      const sized = await __wsFill(conn, buffer, head, socket, signal, limits.idleTimeout);
+      if (!sized) return null;
+      // The 8-byte form's top bit must be clear, so the length fits an i64.
+      if (head === 10 && ((buffer[2] as i64) & 128) !== 0) return { code: 1009, reason: "message too big", heard: false };
+      length = 0;
+      for (let i = 2; i < head; i++) length = (length << 8) | (buffer[i as usize] as i64);
+    }
+    if (opcode >= 8 && (!fin || length > 125)) return { code: 1002, reason: "control frames are whole and at most 125 bytes", heard: false };
+    // Compared without adding, since a client's length can be near the i64 maximum.
+    if (opcode < 8 && length > limits.maxMessageSize - (message.length as i64)) return { code: 1009, reason: "message too big", heard: false };
+    const end = head + 4 + length;
+    const whole = await __wsFill(conn, buffer, end, socket, signal, limits.idleTimeout);
+    if (!whole) return null;
+    let payload: u8[] = [];
+    payload.reserve(length);
+    for (let i = 0; i < length; i++) payload.push(buffer[(head + 4 + i) as usize] ^ buffer[(head + (i & 3)) as usize]);
+    const rest = buffer.splice(end);
+    buffer.splice(0);
+    for (const b of rest) buffer.push(b);
+    if (opcode === 9) socket.__wsPong(payload);
+    else if (opcode === 8) {
+      if (length === 1) return { code: 1002, reason: "a close frame's code takes two bytes", heard: false };
+      if (length === 0) return { code: 1000, reason: "", heard: true };
+      const code = ((payload[0] as i64) << 8) | (payload[1] as i64);
+      const allowed = (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999);
+      if (!allowed) return { code: 1002, reason: "a close code the protocol doesn't allow", heard: false };
+      if (!__wsUtf8(payload.slice(2))) return { code: 1007, reason: "a close reason must be UTF-8", heard: false };
+      return { code: code, reason: "", heard: true };
+    } else if (opcode !== 10) {
+      if (opcode === 0 && kind === 0) return { code: 1002, reason: "a continuation frame with no message to continue", heard: false };
+      if (opcode !== 0 && kind !== 0) return { code: 1002, reason: "a new message began before the last one ended", heard: false };
+      if (opcode !== 0) kind = opcode;
+      for (const b of payload) message.push(b);
+      if (fin) {
+        const done = message.splice(0);
+        const text = kind === 1;
+        kind = 0;
+        if (text && !__wsUtf8(done)) return { code: 1007, reason: "a text message must be UTF-8", heard: false };
+        if (text) await incoming.send(new TextDecoder().decode(done), signal.clone());
+        else await incoming.send(done, signal.clone());
+      }
+    }
+  }
+}
+
+// Whether the buffer holds need bytes, reading more until it does: false once the connection
+// ends, or the client sent nothing for two idle timeouts, a ping going out after the first.
+async function __wsFill(conn: Ref<TcpStream>, buffer: Mut<u8[]>, need: i64, socket: Ref<WebSocketSender>, signal: Ref<AbortSignal>, idle: i64): Promise<boolean> throws IoError {
+  let pinged = false;
+  while ((buffer.length as i64) < need) {
+    const got = await Http1.readBy(conn, signal, Http1.after(idle));
+    if (got === null) {
+      if (pinged) return false;
+      socket.__wsPing();
+      pinged = true;
+      continue;
+    }
+    if (got.length === 0) return false;
+    pinged = false;
+    for (const b of got) buffer.push(b);
+  }
+  return true;
+}
+
+// Whether bytes are well-formed UTF-8: no overlong forms, surrogates, or code points past U+10FFFF.
+function __wsUtf8(bytes: Ref<u8[]>): boolean {
+  let i: usize = 0;
+  while (i < bytes.length) {
+    const c = bytes[i] as i64;
+    if (c < 128) {
+      i++;
+      continue;
+    }
+    let more: usize = 0;
+    let point: i64 = 0;
+    let least: i64 = 0;
+    if (c >= 194 && c <= 223) {
+      more = 1;
+      point = c & 31;
+      least = 128;
+    } else if (c >= 224 && c <= 239) {
+      more = 2;
+      point = c & 15;
+      least = 2048;
+    } else if (c >= 240 && c <= 244) {
+      more = 3;
+      point = c & 7;
+      least = 65536;
+    } else return false;
+    if (i + more >= bytes.length) return false;
+    for (let k: usize = 1; k <= more; k++) {
+      const d = bytes[i + k] as i64;
+      if ((d & 192) !== 128) return false;
+      point = (point << 6) | (d & 63);
+    }
+    if (point < least || point > 1114111 || (point >= 55296 && point <= 57343)) return false;
+    i += more + 1;
+  }
+  return true;
 }
 
 // The wire format of HTTP/1.x.
@@ -1688,7 +2219,12 @@ class Http1 {
   // Whether a response can go out as it stands: a status the Fetch API allows, and a status
   // text and headers that can't break into lines of their own.
   static sendable(res: Ref<Response>): boolean {
-    if (res.status < 200 || res.status > 599 || Http1.hasBreak(res.statusText)) return false;
+    return res.status >= 200 && res.status <= 599 && Http1.fieldsSendable(res);
+  }
+
+  // Whether a response's status text, headers and cookies can't break into lines of their own.
+  static fieldsSendable(res: Ref<Response>): boolean {
+    if (Http1.hasBreak(res.statusText)) return false;
     let fine = true;
     res.headers.forEach((value: string, name: string) => {
       if (!Http1.isToken(name) || Http1.hasBreak(value)) fine = false;
@@ -1809,6 +2345,7 @@ class Http1 {
 
   static reasonPhrase(status: i64): string {
     return match (status) {
+      case 101 => "Switching Protocols",
       case 200 => "OK",
       case 201 => "Created",
       case 202 => "Accepted",
@@ -1823,6 +2360,7 @@ class Http1 {
       case 405 => "Method Not Allowed",
       case 408 => "Request Timeout",
       case 413 => "Content Too Large",
+      case 426 => "Upgrade Required",
       case 431 => "Request Header Fields Too Large",
       case 500 => "Internal Server Error",
       case 501 => "Not Implemented",
@@ -1835,14 +2373,19 @@ class Http1 {
 
 // fetch, whose URLs the URL library's parser reads.
 const FETCH = `
-// Fetches a URL over HTTP/1.1, one connection per request, as the Fetch API does: a 4xx or 5xx
-// is a response, not an error, and a redirect is returned rather than followed.
+// Fetches a URL over HTTP/1.1, or HTTPS, one connection per request, as the Fetch API does: a
+// 4xx or 5xx is a response, not an error, and a redirect is returned rather than followed.
 async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
+  const unix = init !== null ? init.unix : null;
+  const ca = init !== null ? init.tls?.ca ?? "" : "";
   const req = __urlFetchRequest(input, init);
   const signal = req.signal.clone();
   const to = __urlFetchAddress(req.url);
   const sent = Http1.requestBytes(req, to.authority, to.path);
-  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  let conn: TcpStream;
+  if (unix !== null) conn = await TcpStream.unix(unix, signal.clone());
+  else conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  if (to.secure) await __tlsClient(conn, to.host, ca, signal.clone());
   await conn.write(sent, signal.clone());
   let res = await Http1.receive(conn, req.method === "HEAD", signal);
   res.url = to.url;
@@ -1867,26 +2410,27 @@ function __urlFetchRequest(input: string | Request | URL, init?: RequestInit): R
   return req;
 }
 
-// Where an http: URL points: host and port to connect to, the Host header, the path and query
+// Where an http: or https: URL points: host and port to connect to, the Host header, the path and query
 // sent, and the URL without its fragment.
-function __urlFetchAddress(url: string): { host: string; port: i64; authority: string; path: string; url: string } throws IoError {
+function __urlFetchAddress(url: string): { host: string; port: i64; secure: boolean; authority: string; path: string; url: string } throws IoError {
   const parsed = __urlFetchTarget(url);
   if (typeof parsed === "string") throw new IoError("can't fetch '" + url + "': " + parsed);
   const authority = parsed.port >= 0 ? parsed.host + ":" + String(parsed.port) : parsed.host.clone();
   const query = parsed.hasQuery ? "?" + parsed.query : "";
   // An IPv6 host connects without the brackets it has in the URL and the Host header.
   const host = parsed.host.startsWith("[") ? parsed.host.slice(1, (parsed.host.length as i64) - 1) : parsed.host.clone();
-  return { host: host, port: parsed.port >= 0 ? parsed.port : 80, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
+  const secure = parsed.scheme === "https";
+  return { host: host, port: parsed.port >= 0 ? parsed.port : secure ? 443 : 80, secure: secure, authority: authority, path: __urlPathText(parsed) + query, url: __urlHref(parsed, parsed.hasQuery ? parsed.query.clone() : null, false) };
 }
 `;
 
 // A request's path in a program without the URL library, whose requests all come from the server.
 const SERVED = String.raw`
 // A request's path, read with the parser's path rules from its URL as the server writes it:
-// "http://", a Host header the server checked, and a target starting with '/'.
+// "http://" or "https://", a Host header the server checked, and a target starting with '/'.
 function __urlRequestPath(url: string): string {
   const input = __urlInput(url);
-  let p: i64 = 7;
+  let p: i64 = url.startsWith("https:") ? 8 : 7;
   while (p < (input.length as i64) && input[p as usize] !== 47) p++;
   let record = __urlEmpty();
   record.scheme = "http";
@@ -2749,12 +3293,11 @@ function __urlRequestPath(url: string): string {
   return typeof parsed === "string" ? "" : __urlPathText(parsed);
 }
 
-// Where an http: URL points, for fetch: its record, or why it can't be fetched.
+// Where an http: or https: URL points, for fetch: its record, or why it can't be fetched.
 function __urlFetchTarget(url: string): __urlRecord | string {
   const parsed = __urlParse(url, null);
   if (typeof parsed === "string") return parsed.startsWith("Invalid URL: ") ? parsed.slice(13) : "it isn't a valid URL";
-  if (parsed.scheme === "https") return "https: needs TLS, which isn't supported yet";
-  if (parsed.scheme !== "http") return "only http: URLs are supported";
+  if (parsed.scheme !== "http" && parsed.scheme !== "https") return "only http: and https: URLs are supported";
   if (parsed.username.length > 0 || parsed.password.length > 0) return "a URL can't hold a user name or password";
   if (parsed.port === 0) return "the port isn't a number from 1 to 65535";
   return parsed;
@@ -3079,11 +3622,11 @@ const BYTE_METHODS = ["toBase64", "toHex"];
 const BYTE_STATICS = ["fromBase64", "fromHex"];
 const URL_NAMES = ["URL", "URLSearchParams"];
 // std's names a program may declare its own of, which std's own code then reaches under another.
-const HIDDEN_NAMES = [...URL_NAMES, "TypeError"];
+const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE = 2 ** 40;
@@ -3270,6 +3813,80 @@ function btoa(data: string): string throws TypeError {
   return __arrayBase64Text(bytes, false, true);
 }
 `;
+const DATE = String.raw`
+// A point in time as JavaScript's Date holds one, in milliseconds since 1970-01-01T00:00:00Z,
+// read in UTC. A time JavaScript would make an Invalid Date of panics where it is made, as Fish
+// panics where JavaScript throws a RangeError, so every Date can be written out.
+class Date {
+  #time: i64;
+
+  constructor(ms?: i64) {
+    const time = ms ?? Date.now();
+    assert(time >= -8640000000000000 && time <= 8640000000000000, "a Date holds a time within 8640000000000000 milliseconds of 1970-01-01, so " + String(time) + " can't be one");
+    this.#time = time;
+  }
+
+  getTime(): i64 { return this.#time; }
+  valueOf(): i64 { return this.#time; }
+  equals(other: Ref<Date>): boolean { return this.#time === other.getTime(); }
+
+  getUTCFullYear(): i64 { return __dateCivil(this.#time)[0]; }
+  getUTCMonth(): i64 { return __dateCivil(this.#time)[1]; }
+  getUTCDate(): i64 { return __dateCivil(this.#time)[2]; }
+  getUTCDay(): i64 { return __dateCivil(this.#time)[3]; }
+  getUTCHours(): i64 { return __dateCivil(this.#time)[4]; }
+  getUTCMinutes(): i64 { return __dateCivil(this.#time)[5]; }
+  getUTCSeconds(): i64 { return __dateCivil(this.#time)[6]; }
+  getUTCMilliseconds(): i64 { return __dateCivil(this.#time)[7]; }
+
+  // Years outside 0000 to 9999 take a sign and six digits, as ECMAScript's expanded years do.
+  toISOString(): string {
+    const c = __dateCivil(this.#time);
+    const y = c[0];
+    const year = y >= 0 && y <= 9999 ? __datePad(y, 4) : (y < 0 ? "-" : "+") + __datePad(y < 0 ? -y : y, 6);
+    return year + "-" + __datePad(c[1] + 1, 2) + "-" + __datePad(c[2], 2) + "T" + __datePad(c[4], 2) + ":" + __datePad(c[5], 2) + ":" + __datePad(c[6], 2) + "." + __datePad(c[7], 3) + "Z";
+  }
+
+  toJSON(): string { return this.toISOString(); }
+
+  // The IMF-fixdate HTTP writes, with a year past four digits or before zero written as
+  // ECMAScript's toUTCString writes it.
+  toUTCString(): string {
+    const c = __dateCivil(this.#time);
+    const y = c[0];
+    return "Sun,Mon,Tue,Wed,Thu,Fri,Sat".split(",")[c[3] as usize] + ", " + __datePad(c[2], 2) + " " + "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec".split(",")[c[1] as usize] + " " + (y < 0 ? "-" : "") + __datePad(y < 0 ? -y : y, 4) + " " + __datePad(c[4], 2) + ":" + __datePad(c[5], 2) + ":" + __datePad(c[6], 2) + " GMT";
+  }
+}
+
+function __datePad(n: i64, width: usize): string {
+  return String(n).padStart(width, "0");
+}
+
+// A time's year, month from 0, day of the month, weekday from Sunday, hours, minutes, seconds
+// and milliseconds in UTC.
+function __dateCivil(ms: i64): [i64, i64, i64, i64, i64, i64, i64, i64] {
+  let days = ms / 86400000;
+  let rest = ms % 86400000;
+  if (rest < 0) {
+    days -= 1;
+    rest += 86400000;
+  }
+  // Howard Hinnant's days_from_civil, run backwards: the date of a day count from 1970-01-01.
+  const z = days + 719468;
+  const era = (z >= 0 ? z : z - 146096) / 146097;
+  const doe = z - era * 146097;
+  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const mp = (5 * doy + 2) / 153;
+  const day = doy - (153 * mp + 2) / 5 + 1;
+  const month = mp < 10 ? mp + 3 : mp - 9;
+  const year = yoe + era * 400 + (month <= 2 ? 1 : 0);
+  // 1970-01-01 was a Thursday.
+  const weekday = ((days % 7) + 11) % 7;
+  const seconds = rest / 1000;
+  return [year, month - 1, day, weekday, seconds / 3600, seconds / 60 % 60, seconds % 60, rest % 1000];
+}
+`;
 const ATOB = `
 // The HTML spec's forgiving-base64 decode: whitespace is dropped, then up to two '=' that end a
 // whole chunk, and what is left must be a whole number of bytes in the standard alphabet.
@@ -3311,6 +3928,44 @@ function atob(data: string): string throws TypeError {
     }
   }
   return new TextDecoder().decode(out);
+}
+`;
+
+// Standard input, in a program that names readLine or the stdin module: each read runs on the
+// runtime's blocking pool, so other tasks keep running while it waits.
+const STDIN = String.raw`
+declare function fsh_rt_stdin_take(at: MutPtr<u8>, cap: i64, whole: i64): i64;
+
+// The next line's bytes with its newline, or with whole, all that is left; null when nothing is.
+function __stdinTake(whole: boolean): u8[] | null {
+  let out: u8[] = new Array(256).fill(0 as u8);
+  while (true) {
+    const n = unsafe { fsh_rt_stdin_take(mutPtrOf(out[0]), out.length as i64, whole ? 1 : 0) };
+    if (n < 0) return null;
+    if (n <= (out.length as i64)) return out.slice(0, n);
+    out = new Array(n).fill(0 as u8);
+  }
+}
+
+// The next line of standard input without its line ending, or null once input has ended.
+async function readLine(): Promise<string | null> {
+  const line = await spawnBlocking(() => __stdinTake(false));
+  if (line === null) return null;
+  let end = line.length;
+  if (end > 0 && line[end - 1] === 10) end--;
+  if (end > 0 && line[end - 1] === 13) end--;
+  return new TextDecoder().decode(line.slice(0, end as i64));
+}
+`;
+
+// A TLS client on a connected stream, in a program that fetches or names the tls module.
+const TLS = String.raw`
+// Starts TLS as the client on a connected stream and finishes the handshake, so a server whose
+// certificate doesn't verify fails here: an empty write sends nothing past the handshake.
+async function __tlsClient(conn: Ref<TcpStream>, serverName: string, ca: string, signal: AbortSignal): Promise<void> throws IoError | AbortError {
+  const why = conn.startTls(serverName, ca);
+  if (why.length > 0) throw new IoError(why);
+  await conn.write([], signal);
 }
 `;
 
@@ -4023,6 +4678,625 @@ export function spawnSyncText(command: string, args: string[] = [], options: Spa
   return new SpawnSyncReturns<string>(r.pid, r.status, r.signal, text.decode(r.stdout), text.decode(r.stderr), r.error);
 }
 `,
+  // TLS client streams as a global module: tls.connect gives a TcpStream whose bytes are
+  // encrypted, once the handshake has verified the server's certificate.
+  tls: String.raw`
+// serverName is the name the certificate must be for, when it isn't host; ca is PEM certificates
+// trusted in place of the system's.
+export type ConnectOptions = { serverName?: string; ca?: string; signal?: AbortSignal };
+
+export async function connect(host: string, port: i64, options: ConnectOptions = {}): Promise<TcpStream> throws IoError | AbortError {
+  const given = options.signal;
+  const signal = given ?? new AbortController().signal;
+  const conn = await TcpStream.connect(host, port, signal.clone());
+  await __tlsClient(conn, options.serverName ?? host, options.ca ?? "", signal);
+  return conn;
+}
+`,
+  // Postgres over its wire protocol: a pool of connections, statements with parameters sent apart from
+  // their text, and rows read by column name into a type.
+  postgres: String.raw`
+declare function fsh_rt_crypto_digest(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, rounds: i64, out: MutPtr<u8>): i64;
+declare function fsh_rt_crypto_missing(): Ptr<u8>;
+declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
+
+// A value a query's $1, $2 and the rest can take, sent as text: bytes as bytea's hex form, a Date
+// as its ISO string.
+export type SqlValue = null | boolean | i64 | f64 | string | u8[] | Date;
+
+// What the server said went wrong: SQLSTATE's five-character code, its message, and its detail
+// when it gave one.
+export class PostgresError extends Error {
+  code: string;
+  detail: string | null;
+  severity: string;
+  constructor(message: string, code: string, detail: string | null, severity: string) {
+    super(message);
+    this.name = "PostgresError";
+    this.code = code;
+    this.detail = detail;
+    this.severity = severity;
+  }
+}
+
+// A row that can't be read as the type asked for: a column it needs is missing, null where the
+// field can't be, or of another type.
+export class RowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RowError";
+  }
+}
+
+// What a URL asks for; ca is PEM certificates to trust in place of the system's, from sslrootcert.
+type Config = { host: string; port: i64; user: string; password: string; database: string; tls: boolean; ca: string; max: i64 };
+
+// One message from the server: its type byte and its body.
+type Message = { kind: u8; body: u8[] };
+
+// What a statement gave back: its columns' names and type OIDs, each row's values as the server's
+// text, null for SQL's NULL, and the command's tag.
+type Outcome = { names: string[]; types: i64[]; rows: (u8[] | null)[][]; tag: string };
+
+function put32(out: Mut<u8[]>, n: i64) {
+  out.push(((n >> 24) & 255) as u8);
+  out.push(((n >> 16) & 255) as u8);
+  out.push(((n >> 8) & 255) as u8);
+  out.push((n & 255) as u8);
+}
+
+function put16(out: Mut<u8[]>, n: i64) {
+  out.push(((n >> 8) & 255) as u8);
+  out.push((n & 255) as u8);
+}
+
+function putText(out: Mut<u8[]>, s: string) {
+  for (const b of new TextEncoder().encode(s)) out.push(b);
+}
+
+function putCString(out: Mut<u8[]>, s: string) {
+  putText(out, s);
+  out.push(0);
+}
+
+// A message of kind, or the untyped startup ones when kind is 0, with its length in front.
+function framed(kind: u8, body: Ref<u8[]>): u8[] {
+  let out: u8[] = [];
+  if (kind !== 0) out.push(kind);
+  put32(out, (body.length as i64) + 4);
+  for (const b of body) out.push(b);
+  return out;
+}
+
+function get32(bytes: Ref<u8[]>, at: i64): i64 {
+  const i = at as usize;
+  const n = ((bytes[i] as i64) << 24) | ((bytes[i + 1] as i64) << 16) | ((bytes[i + 2] as i64) << 8) | (bytes[i + 3] as i64);
+  return n >= 2147483648 ? n - 4294967296 : n;
+}
+
+function get16(bytes: Ref<u8[]>, at: i64): i64 {
+  const i = at as usize;
+  return ((bytes[i] as i64) << 8) | (bytes[i + 1] as i64);
+}
+
+// The NUL-terminated string starting at an index, and where the next field starts.
+function getCString(bytes: Ref<u8[]>, at: i64): [string, i64] {
+  let end = at;
+  while (end < (bytes.length as i64) && bytes[end as usize] !== 0) end++;
+  return [new TextDecoder().decode(bytes.slice(at, end)), end + 1];
+}
+
+// An ErrorResponse's fields as the error it reports.
+function serverError(body: Ref<u8[]>): PostgresError {
+  let at: i64 = 0;
+  let code = "";
+  let message = "";
+  let severity = "";
+  let detail: string | null = null;
+  while (at < (body.length as i64) && body[at as usize] !== 0) {
+    const field = body[at as usize];
+    const [value, next] = getCString(body, at + 1);
+    if (field === 67) code = value;
+    else if (field === 77) message = value;
+    else if (field === 86) severity = value;
+    else if (field === 68) detail = value;
+    at = next;
+  }
+  return new PostgresError(message, code, detail, severity);
+}
+
+function digest(which: i64, key: Ref<u8[]>, data: Ref<u8[]>, rounds: i64): u8[] throws IoError {
+  // A pointer is taken to an element, so an empty input is passed as one byte of length 0.
+  const k: u8[] = key.length === 0 ? [0 as u8] : key.clone();
+  const d: u8[] = data.length === 0 ? [0 as u8] : data.clone();
+  let out: u8[] = new Array(32).fill(0 as u8);
+  const ok = unsafe { fsh_rt_crypto_digest(which, ptrOf(k[0]), key.length as i64, ptrOf(d[0]), data.length as i64, rounds, mutPtrOf(out[0])) };
+  if (ok !== 1) {
+    const why = unsafe { fromCString(fsh_rt_crypto_missing()) };
+    throw new IoError(why.length > 0 ? "Postgres's password authentication hashes with OpenSSL: " + why : "OpenSSL couldn't hash the password for Postgres's authentication");
+  }
+  return which === 3 ? out.slice(0, 16) : out;
+}
+
+function hmac(key: Ref<u8[]>, data: string): u8[] throws IoError {
+  return digest(1, key, new TextEncoder().encode(data), 0);
+}
+
+// Throws unless what a message's body holds is what its type promises.
+function wellFormed(ok: boolean): void throws IoError {
+  if (!ok) throw new IoError("the Postgres server sent a malformed message");
+}
+
+class Conn {
+  stream: TcpStream;
+  // What has been read and not yet taken, from start on.
+  buffer: u8[] = [];
+  start: i64 = 0;
+  // The transaction status of the last ReadyForQuery: idle, in a transaction, or in a failed one.
+  status: u8 = 73;
+
+  constructor(stream: TcpStream) {
+    this.stream = stream;
+  }
+
+  async send(this: Ref<this>, bytes: u8[]): Promise<void> throws IoError | AbortError {
+    await this.stream.write(bytes);
+  }
+
+  // The next message, past the notices and parameter changes the server sends whenever it likes.
+  async next(this: Mut<this>): Promise<Message> throws IoError | AbortError {
+    while (true) {
+      while (!this.whole()) {
+        if (this.start > 0) {
+          this.buffer.splice(0, this.start);
+          this.start = 0;
+        }
+        const got = await this.stream.read(65536);
+        if (got.length === 0) throw new IoError("the Postgres server closed the connection");
+        for (const b of got) this.buffer.push(b);
+      }
+      const at = this.start;
+      const length = get32(this.buffer, at + 1);
+      const kind = this.buffer[at as usize];
+      this.start = at + 1 + length;
+      if (kind === 78 || kind === 83 || kind === 65) continue;
+      return { kind: kind, body: this.buffer.slice(at + 5, at + 1 + length) };
+    }
+  }
+
+  // Whether the buffer holds a whole message from start.
+  whole(this: Ref<this>): boolean throws IoError {
+    const held = (this.buffer.length as i64) - this.start;
+    if (held < 5) return false;
+    const length = get32(this.buffer, this.start + 1);
+    if (length < 4) throw new IoError("the Postgres server sent a malformed message");
+    // Postgres builds no message past MaxAllocSize, 1 GiB, so a longer one isn't Postgres's.
+    if (length > 1073741824) throw new IoError("the Postgres server sent a message of " + String(length + 1) + " bytes, more than the 1 GiB Postgres itself can send");
+    return held >= 1 + length;
+  }
+
+  static async open(config: Ref<Config>): Promise<Conn> throws PostgresError | IoError | AbortError {
+    const stream = await TcpStream.connect(config.host, config.port);
+    if (config.tls) {
+      let request: u8[] = [];
+      put32(request, 80877103);
+      await stream.write(framed(0, request));
+      const answer = await stream.read(1);
+      if (answer.length === 0 || answer[0] !== 83) throw new IoError("the Postgres server doesn't take TLS connections, which sslmode=require asks for");
+      await __tlsClient(stream, config.host, config.ca, new AbortController().signal);
+    }
+    let conn = new Conn(stream);
+    let start: u8[] = [];
+    put32(start, 196608);
+    putCString(start, "user");
+    putCString(start, config.user);
+    putCString(start, "database");
+    putCString(start, config.database);
+    putCString(start, "client_encoding");
+    putCString(start, "UTF8");
+    start.push(0);
+    await conn.send(framed(0, start));
+    await conn.authenticate(config);
+    while (true) {
+      const m = await conn.next();
+      if (m.kind === 90) {
+        wellFormed(m.body.length === 1);
+        conn.status = m.body[0];
+        return conn;
+      }
+      if (m.kind === 69) throw serverError(m.body);
+    }
+  }
+
+  async authenticate(this: Mut<this>, config: Ref<Config>): Promise<void> throws PostgresError | IoError | AbortError {
+    while (true) {
+      const m = await this.next();
+      if (m.kind === 69) throw serverError(m.body);
+      if (m.kind !== 82) throw new IoError("the Postgres server sent an unexpected message while authenticating");
+      wellFormed(m.body.length >= 4);
+      const code = get32(m.body, 0);
+      if (code === 0) return;
+      if (code === 3) await this.password(config.password);
+      else if (code === 5) {
+        wellFormed(m.body.length >= 8);
+        const none: u8[] = [];
+        const inner = digest(3, none, new TextEncoder().encode(config.password + config.user), 0).toHex();
+        let salted = new TextEncoder().encode(inner);
+        for (const b of m.body.slice(4, 8)) salted.push(b);
+        await this.password("md5" + digest(3, none, salted, 0).toHex());
+      } else if (code === 10) {
+        await this.scram(config.password, m.body);
+        return;
+      } else throw new IoError("the Postgres server asked for an authentication method Fish doesn't support (code " + String(code) + ")");
+    }
+  }
+
+  async password(this: Ref<this>, text: string): Promise<void> throws IoError | AbortError {
+    let body: u8[] = [];
+    putCString(body, text);
+    await this.send(framed(112, body));
+  }
+
+  // SCRAM-SHA-256, RFC 5802 and 7677, without channel binding.
+  async scram(this: Mut<this>, password: string, offer: u8[]): Promise<void> throws PostgresError | IoError | AbortError {
+    let mechanisms: string[] = [];
+    let at: i64 = 4;
+    while (at < (offer.length as i64) && offer[at as usize] !== 0) {
+      const [name, next] = getCString(offer, at);
+      mechanisms.push(name);
+      at = next;
+    }
+    if (!mechanisms.includes("SCRAM-SHA-256")) throw new IoError("the Postgres server offers no SASL mechanism Fish supports, only " + mechanisms.join(", "));
+    let random: u8[] = new Array(18).fill(0 as u8);
+    unsafe { fsh_rt_random_fill(mutPtrOf(random[0]), 18) };
+    const nonce = random.toBase64();
+    const first = "n=,r=" + nonce;
+    let initial: u8[] = [];
+    putCString(initial, "SCRAM-SHA-256");
+    const firstBytes = new TextEncoder().encode("n,," + first);
+    put32(initial, firstBytes.length as i64);
+    for (const b of firstBytes) initial.push(b);
+    await this.send(framed(112, initial));
+
+    const challenge = await this.saslStep(11);
+    let serverNonce = "";
+    let salt = "";
+    let rounds: i64 = 0;
+    for (const part of challenge.split(",")) {
+      if (part.startsWith("r=")) serverNonce = part.slice(2);
+      else if (part.startsWith("s=")) salt = part.slice(2);
+      else if (part.startsWith("i=")) rounds = parseInt(part.slice(2)) ?? 0;
+    }
+    let saltBytes: u8[] = [];
+    try {
+      saltBytes = u8.fromBase64(salt);
+    } catch (e) {
+      saltBytes = [];
+    }
+    if (!serverNonce.startsWith(nonce) || saltBytes.length === 0 || rounds <= 0) throw new IoError("the Postgres server sent a malformed SCRAM challenge");
+    // Postgres's default is 4096. Ten million is far above any server's setting yet still under a
+    // second of hashing; a count near INT_MAX would hold a worker thread for minutes, uncancellably.
+    if (rounds > 10000000) throw new IoError("the Postgres server asks for " + String(rounds) + " SCRAM iterations, more than the 10000000 Fish allows, as hashing that many would hold a thread for minutes");
+    const salted = digest(2, new TextEncoder().encode(password), saltBytes, rounds);
+    const clientKey = hmac(salted, "Client Key");
+    const none: u8[] = [];
+    const storedKey = digest(0, none, clientKey, 0);
+    const final = "c=biws,r=" + serverNonce;
+    const message = first + "," + challenge + "," + final;
+    const signature = hmac(storedKey, message);
+    let proof: u8[] = [];
+    for (let i: usize = 0; i < 32; i++) proof.push(clientKey[i] ^ signature[i]);
+    let response: u8[] = [];
+    putText(response, final + ",p=" + proof.toBase64());
+    await this.send(framed(112, response));
+
+    const verdict = await this.saslStep(12);
+    const expected = "v=" + hmac(hmac(salted, "Server Key"), message).toBase64();
+    if (verdict.split(",")[0] !== expected) throw new IoError("the Postgres server's SCRAM signature doesn't match: it may not know the password");
+    const done = await this.next();
+    if (done.kind === 69) throw serverError(done.body);
+    if (done.kind !== 82 || done.body.length < 4 || get32(done.body, 0) !== 0) throw new IoError("the Postgres server didn't finish SCRAM authentication");
+  }
+
+  // The data of the SASL message of the code expected.
+  async saslStep(this: Mut<this>, code: i64): Promise<string> throws PostgresError | IoError | AbortError {
+    const m = await this.next();
+    if (m.kind === 69) throw serverError(m.body);
+    if (m.kind !== 82 || m.body.length < 4 || get32(m.body, 0) !== code) throw new IoError("the Postgres server sent an unexpected message during SCRAM authentication");
+    return new TextDecoder().decode(m.body.slice(4, m.body.length as i64));
+  }
+
+  // Runs sql with params through Parse, Bind, Describe, Execute and Sync, reading every reply up
+  // to ReadyForQuery, so the connection is ready for the next even when the server refused it.
+  async run(this: Mut<this>, sql: string, params: Ref<SqlValue[]>): Promise<Outcome | PostgresError> throws IoError | AbortError {
+    let out: u8[] = [];
+    let parse: u8[] = [];
+    putCString(parse, "");
+    putCString(parse, sql);
+    put16(parse, 0);
+    for (const b of framed(80, parse)) out.push(b);
+    let bind: u8[] = [];
+    putCString(bind, "");
+    putCString(bind, "");
+    put16(bind, 0);
+    put16(bind, params.length as i64);
+    for (const p of params) {
+      const text = sqlText(p);
+      if (text === null) put32(bind, -1);
+      else {
+        const bytes = new TextEncoder().encode(text);
+        put32(bind, bytes.length as i64);
+        for (const b of bytes) bind.push(b);
+      }
+    }
+    put16(bind, 0);
+    for (const b of framed(66, bind)) out.push(b);
+    let describe: u8[] = [80, 0];
+    for (const b of framed(68, describe)) out.push(b);
+    let execute: u8[] = [0];
+    put32(execute, 0);
+    for (const b of framed(69, execute)) out.push(b);
+    const sync: u8[] = [];
+    for (const b of framed(83, sync)) out.push(b);
+    await this.send(out);
+
+    let outcome: Outcome = { names: [], types: [], rows: [], tag: "" };
+    let failed: PostgresError | null = null;
+    while (true) {
+      const m = await this.next();
+      if (m.kind === 90) {
+        wellFormed(m.body.length === 1);
+        this.status = m.body[0];
+        const refused = failed;
+        if (refused !== null) return refused;
+        return outcome;
+      }
+      if (m.kind === 69) failed = serverError(m.body);
+      else if (m.kind === 84) {
+        const size = m.body.length as i64;
+        wellFormed(size >= 2);
+        const count = get16(m.body, 0);
+        let at: i64 = 2;
+        for (let i: i64 = 0; i < count; i++) {
+          const [name, next] = getCString(m.body, at);
+          wellFormed(next + 18 <= size);
+          outcome.names.push(name);
+          outcome.types.push(get32(m.body, next + 6));
+          at = next + 18;
+        }
+      } else if (m.kind === 68) {
+        const size = m.body.length as i64;
+        wellFormed(size >= 2 && get16(m.body, 0) === (outcome.names.length as i64));
+        let at: i64 = 2;
+        let row: (u8[] | null)[] = [];
+        for (let i: usize = 0; i < outcome.names.length; i++) {
+          wellFormed(at + 4 <= size);
+          const length = get32(m.body, at);
+          at += 4;
+          if (length < 0) row.push(null);
+          else {
+            wellFormed(at + length <= size);
+            row.push(m.body.slice(at, at + length));
+            at += length;
+          }
+        }
+        outcome.rows.push(row);
+      } else if (m.kind === 67) {
+        const [tag, _] = getCString(m.body, 0);
+        outcome.tag = tag;
+      } else if (m.kind === 71) {
+        // COPY FROM STDIN waits for data no query gives, so it is refused, and the server goes on.
+        let body: u8[] = [];
+        putCString(body, "COPY FROM STDIN isn't supported by Fish's postgres module");
+        await this.send(framed(102, body));
+      }
+    }
+  }
+
+  // Ends a transaction left open, or failed, by a statement run on the pool.
+  async rollback(this: Mut<this>): Promise<void> throws IoError | AbortError {
+    let body: u8[] = [];
+    putCString(body, "ROLLBACK");
+    await this.send(framed(81, body));
+    while (true) {
+      const m = await this.next();
+      if (m.kind === 90) {
+        wellFormed(m.body.length === 1);
+        this.status = m.body[0];
+        return;
+      }
+    }
+  }
+}
+
+// A parameter as the text Postgres reads it from, or null for SQL's NULL.
+function sqlText(p: Ref<SqlValue>): string | null {
+  if (p === null) return null;
+  if (typeof p === "boolean") return p ? "true" : "false";
+  if (typeof p === "string") return p;
+  if (typeof p === "number") {
+    // An i64 or an f64, which JSON writes as they are, but for the floats it has no number for.
+    const text = JSON.stringify(p);
+    if (text !== "null") return text;
+    const infinity: f64 = 1e300 * 1e300;
+    return p === infinity ? "Infinity" : p === -infinity ? "-Infinity" : "NaN";
+  }
+  if (p instanceof Date) return p.toISOString();
+  return "\\x" + p.toHex();
+}
+
+// A column's text as the JSON a row is read through, by its type's OID.
+function columnJson(type: i64, value: Ref<u8[] | null>): string {
+  if (value === null) return "null";
+  const text = new TextDecoder().decode(value);
+  if (type === 16) return text === "t" ? "true" : "false";
+  if (type === 20 || type === 21 || type === 23 || type === 26) return text;
+  if (type === 700 || type === 701) return text === "NaN" || text.endsWith("Infinity") ? JSON.stringify(text) : text;
+  if (type === 114 || type === 3802) return text;
+  if (type === 17) {
+    try {
+      return JSON.stringify(u8.fromHex(text.slice(2)));
+    } catch (e) {
+      return JSON.stringify(text);
+    }
+  }
+  return JSON.stringify(text);
+}
+
+function rowsAs<T>(outcome: Ref<Outcome>): T[] throws RowError {
+  let rows: T[] = [];
+  for (const row of outcome.rows) {
+    let json = "{";
+    for (let i: usize = 0; i < outcome.names.length; i++) {
+      if (i > 0) json += ",";
+      json += JSON.stringify(outcome.names[i]) + ":" + columnJson(outcome.types[i], row[i]);
+    }
+    json += "}";
+    try {
+      rows.push(JSON.parse<T>(json));
+    } catch (e) {
+      throw new RowError(rowMessage(e.message, outcome.names, row));
+    }
+  }
+  return rows;
+}
+
+// A JSON reading error put in terms of columns: "missing field 'x' at $" is column x missing,
+// and "... at $.x" is about column x, which may be a null its field can't hold.
+function rowMessage(message: string, names: Ref<string[]>, row: Ref<(u8[] | null)[]>): string {
+  if (message.startsWith("missing field ")) {
+    const end = message.lastIndexOf(" at ");
+    return "the row has no column " + message.slice("missing field ".length as i64, end) + ", which the type reads";
+  }
+  const at = message.indexOf(" at $.");
+  if (at < 0) return "the row can't be read: " + message;
+  const column = message.slice(at + 6);
+  const i = names.indexOf(column);
+  if (i >= 0 && row[i as usize] === null) return "column '" + column + "' is null, which its field can't hold; type it 'T | null'";
+  return "column '" + column + "': " + message.slice(0, at);
+}
+
+// The affected-row count at the end of a command tag, as in "UPDATE 3", or 0.
+function affected(tag: string): i64 {
+  const parts = tag.split(" ");
+  return parseInt(parts[parts.length - 1]) ?? 0;
+}
+
+// A URL's percent-encoded user, password or database name, decoded as a query's values are, but
+// for '+', which stays itself.
+function decoded(text: string): string {
+  return new URLSearchParams("v=" + text.replaceAll("+", "%2B")).get("v") ?? "";
+}
+
+// A postgres:// URL read as what to connect to and how: user, password, host, port and database,
+// then sslmode, sslrootcert and max, the pool's size, from its query.
+function config(url: string): Config throws TypeError | IoError {
+  let u = new URL("postgres://localhost");
+  try {
+    u = new URL(url);
+  } catch (e) {
+    // The URL itself isn't repeated, as it may hold a password.
+    throw new TypeError("the Postgres URL can't be read as a URL: " + e.message);
+  }
+  if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") throw new TypeError("a Postgres URL starts with postgres:// or postgresql://, not " + u.protocol);
+  const port = u.port.length === 0 ? 5432 : parseInt(u.port) ?? 5432;
+  const user = decoded(u.username);
+  const password = decoded(u.password);
+  const database = decoded(u.pathname.startsWith("/") ? u.pathname.slice(1) : u.pathname);
+  const sslmode = u.searchParams.get("sslmode") ?? "disable";
+  if (sslmode !== "disable" && sslmode !== "require" && sslmode !== "verify-full") throw new TypeError("sslmode is 'disable', 'require' or 'verify-full', not '" + sslmode + "'");
+  const root = u.searchParams.get("sslrootcert");
+  const ca = root === null ? "" : new TextDecoder().decode(fileReadSync(root));
+  const maxText = u.searchParams.get("max") ?? "10";
+  const max = parseInt(maxText) ?? 0;
+  if (max < 1) throw new TypeError("max, the pool's size, is a whole number of at least 1, not '" + maxText + "'");
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, (u.hostname.length as i64) - 1) : u.hostname;
+  return { host: host.length === 0 ? "localhost" : host, port: port, user: user, password: password, database: database.length === 0 ? user : database, tls: sslmode !== "disable", ca: ca, max: max };
+}
+
+type Shared = { gate: Semaphore; idle: Lock<Conn[]> };
+
+// Connections to one server, at most max of them, each running one statement at a time. A caller
+// takes an idle one or opens one, and waits in turn when all max are busy; a connection that breaks
+// is dropped, and the next caller opens a new one. Clones share the connections.
+export class Pool {
+  private config: Config;
+  private state: shared<Shared>;
+
+  private constructor(config: Config, state: shared<Shared>) {
+    this.config = config;
+    this.state = state;
+  }
+
+  // A pool for the server url names, with one connection opened now, so a wrong address or
+  // password fails here.
+  static async connect(url: string): Promise<Pool> throws PostgresError | IoError | AbortError | TypeError {
+    const c = config(url);
+    const conn = await Conn.open(c);
+    const idle: Conn[] = [conn];
+    const gate = new Semaphore(c.max);
+    return new Pool(c, shared<Shared>({ gate: gate, idle: new Lock<Conn[]>(idle) }));
+  }
+
+  // The rows sql gives, each read by column name into a T.
+  async query<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T[]> throws PostgresError | RowError | IoError | AbortError {
+    const outcome = await this.run(sql, params);
+    return rowsAs<T>(outcome);
+  }
+
+  // The first row sql gives as a T, or null when it gives none.
+  async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws PostgresError | RowError | IoError | AbortError {
+    let rows = await this.query<T>(sql, params);
+    let first = rows.splice(0, 1);
+    return first.pop();
+  }
+
+  // How many rows sql inserted, updated, deleted or gave.
+  async execute(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<i64> throws PostgresError | IoError | AbortError {
+    const outcome = await this.run(sql, params);
+    return affected(outcome.tag);
+  }
+
+  private async run(this: Ref<this>, sql: string, params: Ref<SqlValue[]>): Promise<Outcome> throws PostgresError | IoError | AbortError {
+    const state = this.state.clone();
+    const _permit = await state.gate.acquire();
+    const idle = state.idle.update((cs) => cs.pop());
+    let conn: Conn;
+    if (idle === null) conn = await Conn.open(this.config);
+    else conn = idle;
+    const result = await conn.run(sql, params);
+    // The server answered, so the connection is whole: it goes back once it is idle again. A
+    // transaction the statement began, or one it failed, is rolled back, since the pool's next
+    // statement may run on another connection.
+    if (conn.status !== 73) await conn.rollback();
+    if (conn.status === 73) state.idle.update((cs) => cs.push(conn));
+    if (result instanceof PostgresError) throw result;
+    return result;
+  }
+}
+`,
+  // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
+  // buffer so readers can be mixed.
+  stdin: String.raw`
+export async function* lines(): AsyncGenerator<string> {
+  while (true) {
+    const line = await readLine();
+    if (line === null) return;
+    yield line;
+  }
+}
+
+export async function bytes(): Promise<u8[]> {
+  const all = await spawnBlocking(() => __stdinTake(true));
+  if (all === null) return [];
+  return all;
+}
+
+export async function text(): Promise<string> {
+  const all = await bytes();
+  return new TextDecoder().decode(all);
+}
+`,
   process: String.raw`
 declare function fsh_rt_argc(): i64;
 declare function fsh_rt_arg(i: i64): Ptr<u8>;
@@ -4091,7 +5365,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB + DATE + STDIN + TLS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -4126,15 +5400,18 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const bytes = next(BYTES);
   const btoa = next(BTOA);
   const atob = next(ATOB);
+  const dates = next(DATE);
+  const reading = next(STDIN);
+  const tls = next(TLS);
   renameValue([...json, ...jsonName]);
   const astNames = ast.flatMap(declaredNames);
-  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]]] as const;
+  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]], [reading, ["readLine"]]] as const;
   const packages = written.some(fromPackage);
   // A program's own URL, URLSearchParams or TypeError keeps its name, and std's takes one no
   // program can write.
   const declared = new Set(written.flatMap(declaredNames));
   const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
-  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url, ...bytes, ...btoa, ...atob], own);
+  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url, ...bytes, ...btoa, ...atob, ...dates], own);
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   const httpUsed = uses(written, http, HTTP_NAMES);
@@ -4144,8 +5421,10 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const linked = parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []));
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa and atob call them too.
-  const encoding = linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
-  return [...prelude, ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : [])];
+  const encoding = httpUsed || linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
+  const dated = httpUsed || uses(written, dates, ["Date"]);
+  const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
+  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(secure ? tls : [])];
 }
 
 // A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.
@@ -4161,7 +5440,7 @@ function hideHelpers(statements: Stmt[]) {
   walk("stmt", statements, ({ node: n }) => {
     const node = n as Record<string, unknown>;
     const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
-    if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url)/.test(node.name)) {
+    if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url|date)/.test(node.name)) {
       node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
     }
   });

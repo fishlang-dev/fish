@@ -43,6 +43,7 @@ export const NATIVE = String.raw`
 #include <poll.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -2865,6 +2866,78 @@ void fsh_rt_random_fill(uint8_t *at, int64_t count) {
 #endif
 }
 
+// Standard input, read on the blocking pool: a pipe, a terminal and a redirected file all read
+// alike, and stdin's flags stay as they are, since a terminal shares them with the shell and
+// O_NONBLOCK on it would break the shell after the program exits. Every reader takes from one
+// buffer, so lines and whole-input reads interleave without losing bytes. The unread bytes are
+// those from start to len.
+static pthread_mutex_t fsh_stdin_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t *fsh_stdin_buf = NULL;
+static size_t fsh_stdin_start = 0, fsh_stdin_len = 0, fsh_stdin_cap = 0;
+static int fsh_stdin_eof = 0;
+
+// Reads one more chunk onto the buffer; 0 once input has ended. An error reading ends it too.
+static int fsh_stdin_fill(void) {
+  if (fsh_stdin_eof) return 0;
+  if (fsh_stdin_start > 0) {
+    memmove(fsh_stdin_buf, fsh_stdin_buf + fsh_stdin_start, fsh_stdin_len - fsh_stdin_start);
+    fsh_stdin_len -= fsh_stdin_start;
+    fsh_stdin_start = 0;
+  }
+  if (fsh_stdin_cap - fsh_stdin_len < 65536) {
+    fsh_stdin_cap = fsh_stdin_cap * 2 + 65536;
+    fsh_stdin_buf = realloc(fsh_stdin_buf, fsh_stdin_cap);
+    if (!fsh_stdin_buf) fsh_rt_panic("out of memory reading standard input\n");
+  }
+  for (;;) {
+    ssize_t got = read(0, fsh_stdin_buf + fsh_stdin_len, fsh_stdin_cap - fsh_stdin_len);
+    if (got < 0 && errno == EINTR) continue;
+    // A stdin some other process left non-blocking: wait for it rather than spin.
+    if (got < 0 && errno == EAGAIN) {
+      struct pollfd p = { .fd = 0, .events = POLLIN };
+      poll(&p, 1, -1);
+      continue;
+    }
+    if (got <= 0) {
+      fsh_stdin_eof = 1;
+      return 0;
+    }
+    fsh_stdin_len += (size_t)got;
+    return 1;
+  }
+}
+
+// The next line's length with its newline, or with whole, everything left; -1 when nothing is.
+// Its bytes are copied to at and taken only when they fit in cap, so a caller whose buffer is
+// too small asks again with one of the length given.
+int64_t fsh_rt_stdin_take(uint8_t *at, int64_t cap, int64_t whole) {
+  pthread_mutex_lock(&fsh_stdin_lock);
+  size_t n = 0, seen = 0;
+  for (;;) {
+    if (!whole) {
+      uint8_t *from = fsh_stdin_buf + fsh_stdin_start;
+      size_t left = fsh_stdin_len - fsh_stdin_start - seen;
+      uint8_t *nl = left > 0 ? memchr(from + seen, '\n', left) : NULL;
+      if (nl) {
+        n = (size_t)(nl - from) + 1;
+        break;
+      }
+      seen = fsh_stdin_len - fsh_stdin_start;
+    }
+    if (!fsh_stdin_fill()) {
+      n = fsh_stdin_len - fsh_stdin_start;
+      break;
+    }
+  }
+  int64_t result = n == 0 ? -1 : (int64_t)n;
+  if (n > 0 && (int64_t)n <= cap) {
+    memcpy(at, fsh_stdin_buf + fsh_stdin_start, n);
+    fsh_stdin_start += n;
+  }
+  pthread_mutex_unlock(&fsh_stdin_lock);
+  return result;
+}
+
 // Math.random(): 53 random bits as a double in [0, 1), from words each thread reads in bulk.
 static _Thread_local uint64_t fsh_random_words[64];
 static _Thread_local int32_t fsh_random_left = 0;
@@ -3030,6 +3103,13 @@ fsh_insp *fsh_rt_insp_f64(double x, int32_t single) {
 
 fsh_insp *fsh_rt_insp_string(fsh_str *s) {
   return fsh_insp_new(FSH_INSP_STRING, s->bytes, s->length);
+}
+
+// Text printed as it is, unquoted, which it takes over.
+fsh_insp *fsh_rt_insp_raw(fsh_str *s) {
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, s->bytes, s->length);
+  fsh_rt_str_release(s);
+  return v;
 }
 
 fsh_insp *fsh_rt_insp_object(const char *name) {
@@ -5293,8 +5373,18 @@ void fsh_rt_file_job_release(struct fsh_file_job *job);
 // A socket's block: its count and its file descriptor, closed with the last count. A connect
 // waiting on a host name's lookup has no descriptor yet, only the lookup's job; once looked up,
 // it keeps the job while connecting to its tried-th address, to fall back to the next, and the
-// time after which that attempt gives way to the next address, or 0.
-typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; } fsh_socket;
+// time after which that attempt gives way to the next address, or 0. A TLS stream, or a listener
+// whose connections are, also has its TLS state and the TLS runtime's calls for it, which only
+// that runtime sets, so a program without TLS links no TLS library.
+struct fsh_tls_ops;
+typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; void *tls; const struct fsh_tls_ops *tls_ops; } fsh_socket;
+typedef struct fsh_tls_ops {
+  int32_t (*read)(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *out, fsh_str **message);
+  int32_t (*write)(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message);
+  // Gives a listener's new connection its TLS state, or 0 when it can't.
+  int (*accepted)(fsh_socket *listener, fsh_socket *conn);
+  void (*release)(fsh_socket *s);
+} fsh_tls_ops;
 
 // Linux marks a new socket close-on-exec as it makes it, so a child spawned on another thread
 // meanwhile can't inherit it; macOS can't, and its spawns close what they don't name instead.
@@ -5320,11 +5410,14 @@ static fsh_socket *fsh_socket_new(int fd) {
   s->tried = 0;
   s->deadline = 0;
   s->lookup = NULL;
+  s->tls = NULL;
+  s->tls_ops = NULL;
   return s;
 }
 
 void fsh_rt_socket_release(fsh_socket *s) {
   if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (s->tls) s->tls_ops->release(s);
   if (s->fd >= 0) {
     if (fsh_poller >= 0) fsh_io_forget(s->fd);
     close(s->fd);
@@ -6143,6 +6236,7 @@ int64_t fsh_rt_tcp_port(fsh_socket *s) {
   struct sockaddr_storage at;
   socklen_t size = sizeof at;
   if (getsockname(s->fd, (struct sockaddr *)&at, &size) < 0) return -1;
+  if (at.ss_family != AF_INET && at.ss_family != AF_INET6) return 0;
   return ntohs(at.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&at)->sin6_port : ((struct sockaddr_in *)&at)->sin_port);
 }
 
@@ -6153,6 +6247,10 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
   while ((fd = FSH_ACCEPT(listener->fd)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
   if (fd >= 0) {
     *out = fsh_socket_new(fd);
+    if (listener->tls && !listener->tls_ops->accepted(listener, *out)) {
+      fsh_rt_socket_release(*out);
+      return fsh_io_parts(message, "can't start TLS on a new connection", "ENOMEM", "accept", NULL);
+    }
     return 1;
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -6188,6 +6286,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
     snprintf(text, sizeof text, "'read' needs room for at least 1 byte, not %lld", (long long)max);
     return fsh_io_parts(message, text, "EINVAL", "read", NULL);
   }
+  if (s->tls) return s->tls_ops->read(s, max, task, out, message);
   // Received onto the stack, so the array holds just what came, however much room was asked for.
   char buffer[65536];
   ssize_t n = recv(s->fd, buffer, (size_t)(max < (int64_t)sizeof buffer ? max : (int64_t)sizeof buffer), 0);
@@ -6210,6 +6309,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
 
 // Polls 'write(bytes)': sends what is left past *written, waiting while the socket is full.
 int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message) {
+  if (s->tls) return s->tls_ops->write(s, bytes, written, task, message);
   while (*written < bytes->length) {
 #ifdef MSG_NOSIGNAL
     ssize_t n = send(s->fd, bytes->data + *written, (size_t)(bytes->length - *written), MSG_NOSIGNAL);
@@ -6299,10 +6399,9 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
       job->task = task;
       s = *socket_at = fsh_rt_alloc(sizeof(fsh_socket));
+      memset(s, 0, sizeof *s);
       s->count = 1;
       s->fd = -1;
-      s->tried = 0;
-      s->deadline = 0;
       s->lookup = job;
       fsh_pool_submit(job);
       return 0;
@@ -6358,6 +6457,195 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
   *out = s;
   *socket_at = NULL;
   return 1;
+}
+
+// A socket call's failure on a path, which the IoError names.
+static int32_t fsh_unix_failed(fsh_str **message, const char *doing, const char *syscall, const char *path) {
+  int32_t failed = fsh_io_failed(message, doing, syscall);
+  message[3] = fsh_rt_str_from_cstring(path);
+  return failed;
+}
+
+// A socket path as an address, or NULL with the reason in message. Abstract names start with a
+// NUL byte, so they are refused with every other path holding one.
+static char *fsh_unix_address(fsh_str *path, struct sockaddr_un *at, const char *syscall, fsh_str **message) {
+  char *text = fsh_rt_str_cstring(path);
+  char reason[160];
+  reason[0] = 0;
+  if (!text) snprintf(reason, sizeof reason, "a socket path can't hold a NUL byte; abstract socket names aren't supported");
+  else if (!text[0]) snprintf(reason, sizeof reason, "the socket path is empty");
+  else if (strlen(text) >= sizeof at->sun_path) snprintf(reason, sizeof reason, "the socket path is %zu bytes, but the system takes at most %zu", strlen(text), sizeof at->sun_path - 1);
+  if (reason[0]) {
+    fsh_io_parts(message, reason, text && text[0] ? "ENAMETOOLONG" : "EINVAL", syscall, text);
+    fsh_rt_free(text);
+    return NULL;
+  }
+  memset(at, 0, sizeof *at);
+  at->sun_family = AF_UNIX;
+  memcpy(at->sun_path, text, strlen(text));
+  return text;
+}
+
+// 'UnixListener.bind(path)': listening at once, or 5 with the reason. A file already at the path
+// is the system's EADDRINUSE: it is never removed to make room.
+int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
+  struct sockaddr_un at;
+  char *text = fsh_unix_address(path, &at, "listen", message);
+  if (!text) return 5;
+  int fd = socket(AF_UNIX, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
+  int32_t failed = 0;
+  if (fd < 0) failed = fsh_unix_failed(message, "can't make a socket", "socket", text);
+  else if (bind(fd, (struct sockaddr *)&at, sizeof at) < 0 || listen(fd, 128) < 0) {
+    failed = fsh_unix_failed(message, "can't listen there", "listen", text);
+    close(fd);
+  }
+  fsh_rt_free(text);
+  if (failed) return failed;
+  *out = fsh_socket_new(fd);
+  return 1;
+}
+
+// Polls 'UnixStream.connect(path)': the frame keeps the socket while it connects. A listener with
+// a full backlog is the system's EAGAIN on Linux, given as is, as Node does.
+int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  fsh_socket *s = *socket_at;
+  struct sockaddr_un at;
+  char *text = fsh_unix_address(path, &at, "connect", message);
+  if (!text) return 5;
+  int32_t failed = 0;
+  if (!s) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
+    if (fd < 0) failed = fsh_unix_failed(message, "can't make a socket", "socket", text);
+    else {
+      s = *socket_at = fsh_socket_new(fd);
+      if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0) {
+        if (errno == EINPROGRESS || errno == EINTR) {
+          fsh_io_wait(fd, 1, task);
+          fsh_rt_free(text);
+          return 0;
+        }
+        failed = fsh_unix_failed(message, "can't connect", "connect", text);
+      }
+    }
+  } else {
+    int error = 0;
+    socklen_t size = sizeof error;
+    getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size);
+    if (error) {
+      errno = error;
+      failed = fsh_unix_failed(message, "can't connect", "connect", text);
+    }
+  }
+  fsh_rt_free(text);
+  if (failed) return failed;
+  *out = s;
+  *socket_at = NULL;
+  return 1;
+}
+
+// serve's socket file, removed once it stops listening.
+void fsh_rt_unix_unlink(fsh_str *path) {
+  char *text = fsh_rt_str_cstring(path);
+  if (text) unlink(text);
+  fsh_rt_free(text);
+}
+
+// A datagram's address, as fsh_address reads it, with the failing call named; an IPv4 address
+// meant for a socket bound to IPv6 is mapped, as "::" takes IPv4 peers too.
+static int fsh_udp_address(fsh_socket *s, fsh_str *host, int64_t port, struct sockaddr_storage *at, const char *syscall, fsh_str **message) {
+  if (!fsh_address(host, port, at, message)) {
+    fsh_rt_str_release(message[2]);
+    message[2] = fsh_rt_str_from_cstring(syscall);
+    return 0;
+  }
+  struct sockaddr_storage own;
+  socklen_t size = sizeof own;
+  if (!s || at->ss_family != AF_INET || getsockname(s->fd, (struct sockaddr *)&own, &size) < 0 || own.ss_family != AF_INET6) return 1;
+  struct sockaddr_in v4 = *(struct sockaddr_in *)at;
+  struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)at;
+  memset(at, 0, sizeof *at);
+  v6->sin6_family = AF_INET6;
+  v6->sin6_port = v4.sin_port;
+  v6->sin6_addr.s6_addr[10] = v6->sin6_addr.s6_addr[11] = 0xff;
+  memcpy(&v6->sin6_addr.s6_addr[12], &v4.sin_addr, 4);
+  return 1;
+}
+
+// 'UdpSocket.bind(host, port)': bound at once, or 5 with the reason.
+int32_t fsh_rt_udp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
+  struct sockaddr_storage at;
+  if (!fsh_udp_address(NULL, host, port, &at, "bind", message)) return 5;
+  int fd = socket(at.ss_family, SOCK_DGRAM | FSH_SOCK_CLOEXEC, 0);
+  if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
+  int off = 0, room = 0, most = 65536;
+  if (at.ss_family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
+  // macOS sends no datagram larger than its send buffer, which starts at 9216 bytes: raised so any
+  // UDP payload goes, as on Linux.
+  socklen_t size = sizeof room;
+  if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &room, &size) == 0 && room < most) setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &most, sizeof most);
+  if (bind(fd, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) < 0) {
+    int32_t failed = fsh_io_failed(message, "can't bind there", "bind");
+    close(fd);
+    return failed;
+  }
+  *out = fsh_socket_new(fd);
+  return 1;
+}
+
+// 'socket.connect(host, port)': only the peer is set, so it never waits.
+int32_t fsh_rt_udp_connect(fsh_socket *s, fsh_str *host, int64_t port, fsh_str **message) {
+  struct sockaddr_storage at;
+  if (!fsh_udp_address(s, host, port, &at, "connect", message)) return 5;
+  if (connect(s->fd, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) < 0) return fsh_io_failed(message, "can't connect", "connect");
+  return 1;
+}
+
+// Polls 'sendTo(bytes, host, port)', or 'send(bytes)' to the connected peer when host is NULL. A
+// datagram goes whole or not at all, so there is no partial send to resume.
+int32_t fsh_rt_udp_send(fsh_socket *s, fsh_array *bytes, fsh_str *host, int64_t port, fsh_task *task, fsh_str **message) {
+  struct sockaddr_storage at;
+  if (host && !fsh_udp_address(s, host, port, &at, "send", message)) return 5;
+  for (;;) {
+    ssize_t n = host ? sendto(s->fd, bytes->data, (size_t)bytes->length, 0, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) : send(s->fd, bytes->data, (size_t)bytes->length, 0);
+    if (n >= 0) return 1;
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      fsh_io_wait(s->fd, 1, task);
+      return 0;
+    }
+    return fsh_io_failed(message, "can't send", "send");
+  }
+}
+
+// Polls 'receiveFrom()' and 'receive()': one datagram's bytes, exactly, and with host not NULL
+// the sender's address, unbracketed.
+int32_t fsh_rt_udp_receive(fsh_socket *s, fsh_task *task, fsh_array *out, fsh_str **host, int64_t *port, fsh_str **message) {
+  // 65536 bytes hold the largest UDP payload, so no datagram is cut short.
+  char buffer[65536];
+  struct sockaddr_storage from;
+  for (;;) {
+    socklen_t size = sizeof from;
+    ssize_t n = recvfrom(s->fd, buffer, sizeof buffer, 0, (struct sockaddr *)&from, &size);
+    if (n >= 0) {
+      char *data = n ? fsh_rt_alloc(n) : NULL;
+      if (n) memcpy(data, buffer, n);
+      *out = (fsh_array){data, n, n};
+      if (host) {
+        char text[INET6_ADDRSTRLEN] = "";
+        int v6 = from.ss_family == AF_INET6;
+        inet_ntop(from.ss_family, v6 ? (void *)&((struct sockaddr_in6 *)&from)->sin6_addr : (void *)&((struct sockaddr_in *)&from)->sin_addr, text, sizeof text);
+        *host = fsh_rt_str_from_cstring(text);
+        *port = ntohs(v6 ? ((struct sockaddr_in6 *)&from)->sin6_port : ((struct sockaddr_in *)&from)->sin_port);
+      }
+      return 1;
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      fsh_io_wait(s->fd, 0, task);
+      return 0;
+    }
+    return fsh_io_failed(message, "can't receive", "recvfrom");
+  }
 }
 
 // Another reference to a JoinHandle's task, where the compiler copies one it then drops.
@@ -6422,6 +6710,11 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_unlock(&fsh_park);
   if (stuck) {
     fsh_abandoned = 1;
+    // Detached, the abandoned threads end with the process rather than as leaks a thread
+    // sanitizer reports.
+    for (int64_t i = 0; i < fsh_workers; i++) pthread_detach(fsh_threads[i]);
+    pthread_detach(fsh_timer_thread);
+    pthread_detach(fsh_io_thread);
     if (fsh_panicked) exit(101);
     memcpy(out, fsh_output(fsh_main_task), output_size);
     return fsh_main_task->outcome;
@@ -7164,3 +7457,379 @@ int fsh_rt_regex_match_all(fsh_array *out, const int32_t *code, fsh_str *s) {
   return out->length > 0;
 }
 `;
+
+// The TLS half of the runtime, over OpenSSL, compiled into a program only when its IR calls
+// `fsh_rt_tls_`, after the rest of the runtime, whose socket calls reach it through a socket's
+// `tls_ops`. A TLS stream is a TcpStream whose reads and writes go through its SSL object.
+export const TLS_NATIVE = String.raw`
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/x509v3.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+
+// A stream's SSL object, or a listener's context its connections are made from. A clone of a
+// stream may read on one thread while another writes, and OpenSSL's calls on one SSL object
+// mustn't overlap, so each call holds the lock; none holds it while waiting.
+typedef struct { SSL_CTX *ctx; SSL *ssl; pthread_mutex_t lock; } fsh_tls;
+
+// OpenSSL writes to the socket itself, without the MSG_NOSIGNAL Linux needs to keep a closed
+// peer from ending the program with SIGPIPE, so the signal is held back on this thread while it
+// works, and one that came is taken. macOS sockets are made with SO_NOSIGPIPE.
+#ifdef __APPLE__
+#define FSH_TLS_QUIET(before) (void)(before)
+#define FSH_TLS_LOUD(before) (void)(before)
+#else
+#define FSH_TLS_QUIET(before) fsh_tls_quiet(&(before))
+#define FSH_TLS_LOUD(before) fsh_tls_loud(&(before))
+static void fsh_tls_quiet(sigset_t *before) {
+  sigset_t pipe_only;
+  sigemptyset(&pipe_only);
+  sigaddset(&pipe_only, SIGPIPE);
+  pthread_sigmask(SIG_BLOCK, &pipe_only, before);
+}
+static void fsh_tls_loud(sigset_t *before) {
+  sigset_t pending, pipe_only;
+  sigemptyset(&pipe_only);
+  sigaddset(&pipe_only, SIGPIPE);
+  sigpending(&pending);
+  if (sigismember(&pending, SIGPIPE) && !sigismember(before, SIGPIPE)) {
+    int taken;
+    sigwait(&pipe_only, &taken);
+  }
+  pthread_sigmask(SIG_SETMASK, before, NULL);
+}
+#endif
+
+// Node's codes for the certificate failures a client meets most.
+static const char *fsh_tls_code(long verify) {
+  switch (verify) {
+    case X509_V_ERR_HOSTNAME_MISMATCH:
+    case X509_V_ERR_IP_ADDRESS_MISMATCH: return "ERR_TLS_CERT_ALTNAME_INVALID";
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY: return "UNABLE_TO_GET_ISSUER_CERT_LOCALLY";
+    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE: return "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
+    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT: return "DEPTH_ZERO_SELF_SIGNED_CERT";
+    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN: return "SELF_SIGNED_CERT_IN_CHAIN";
+    case X509_V_ERR_CERT_HAS_EXPIRED: return "CERT_HAS_EXPIRED";
+    case X509_V_ERR_CERT_NOT_YET_VALID: return "CERT_NOT_YET_VALID";
+    default: return "EPROTO";
+  }
+}
+
+// What a failed SSL call means, with the lock held: 0 to wait, the way to wait in *writing; 1 for
+// the end of the stream, when reading; or 5 with the reason. number is errno from the call.
+static int32_t fsh_tls_failed(fsh_tls *t, int ret, int number, int reading, const char *syscall, int32_t *writing, fsh_str **message) {
+  int error = SSL_get_error(t->ssl, ret);
+  if (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) {
+    *writing = error == SSL_ERROR_WANT_WRITE;
+    return 0;
+  }
+  int handshake = !SSL_is_init_finished(t->ssl);
+  if (error == SSL_ERROR_ZERO_RETURN && reading) return 1;
+  long verify = SSL_get_verify_result(t->ssl);
+  char text[320];
+  int32_t failed;
+  if (verify != X509_V_OK) {
+    snprintf(text, sizeof text, "certificate verify failed: %s", X509_verify_cert_error_string(verify));
+    failed = fsh_io_parts(message, text, fsh_tls_code(verify), syscall, NULL);
+  } else if (error == SSL_ERROR_SYSCALL && number != 0) {
+    errno = number;
+    failed = fsh_io_failed(message, reading ? "can't read" : "can't write", syscall);
+  } else if (error == SSL_ERROR_SYSCALL || error == SSL_ERROR_ZERO_RETURN) {
+    failed = fsh_io_parts(message, handshake ? "the connection closed during the TLS handshake" : "the peer closed the TLS connection", "ECONNRESET", syscall, NULL);
+  } else {
+    const char *why = ERR_reason_error_string(ERR_peek_last_error());
+    snprintf(text, sizeof text, "%s: %s", handshake ? "the TLS handshake failed" : "TLS failed", why ? why : "unknown error");
+    failed = fsh_io_parts(message, text, "EPROTO", syscall, NULL);
+  }
+  ERR_clear_error();
+  return failed;
+}
+
+static int32_t fsh_tls_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *out, fsh_str **message) {
+  fsh_tls *t = s->tls;
+  char buffer[65536];
+  size_t n = 0;
+  int32_t writing = 0, done = 2;
+  sigset_t before;
+  pthread_mutex_lock(&t->lock);
+  FSH_TLS_QUIET(before);
+  ERR_clear_error();
+  errno = 0;
+  int ok = SSL_read_ex(t->ssl, buffer, (size_t)(max < (int64_t)sizeof buffer ? max : (int64_t)sizeof buffer), &n);
+  if (!ok) done = fsh_tls_failed(t, ok, errno, 1, "read", &writing, message);
+  FSH_TLS_LOUD(before);
+  pthread_mutex_unlock(&t->lock);
+  if (done == 2) {
+    char *data = fsh_rt_alloc(n);
+    memcpy(data, buffer, n);
+    *out = (fsh_array){data, (int64_t)n, (int64_t)n};
+    return 1;
+  }
+  if (done == 1) *out = (fsh_array){NULL, 0, 0};
+  if (done == 0) fsh_io_wait(s->fd, writing, task);
+  return done;
+}
+
+// Sends what is left past *written, finishing the handshake first, so writing nothing finishes
+// it alone. A retried SSL_write_ex is given the same bytes, as OpenSSL requires.
+static int32_t fsh_tls_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message) {
+  fsh_tls *t = s->tls;
+  int32_t writing = 0, done = 1;
+  sigset_t before;
+  pthread_mutex_lock(&t->lock);
+  FSH_TLS_QUIET(before);
+  ERR_clear_error();
+  errno = 0;
+  if (!SSL_is_init_finished(t->ssl)) {
+    int ok = SSL_do_handshake(t->ssl);
+    if (ok != 1) done = fsh_tls_failed(t, ok, errno, 0, "write", &writing, message);
+  }
+  while (done == 1 && *written < bytes->length) {
+    size_t n = 0;
+    errno = 0;
+    int ok = SSL_write_ex(t->ssl, bytes->data + *written, (size_t)(bytes->length - *written), &n);
+    if (ok) *written += (int64_t)n;
+    else done = fsh_tls_failed(t, ok, errno, 0, "write", &writing, message);
+  }
+  FSH_TLS_LOUD(before);
+  pthread_mutex_unlock(&t->lock);
+  if (done == 0) fsh_io_wait(s->fd, writing, task);
+  return done;
+}
+
+static fsh_tls *fsh_tls_new(SSL_CTX *ctx, SSL *ssl) {
+  fsh_tls *t = fsh_rt_alloc(sizeof(fsh_tls));
+  t->ctx = ctx;
+  t->ssl = ssl;
+  pthread_mutex_init(&t->lock, NULL);
+  return t;
+}
+
+static const fsh_tls_ops fsh_tls_calls;
+
+// A listener's new connection, which handshakes as the server inside its first read or write.
+static int fsh_tls_accepted(fsh_socket *listener, fsh_socket *conn) {
+  SSL *ssl = SSL_new(((fsh_tls *)listener->tls)->ctx);
+  if (!ssl) return 0;
+  SSL_set_fd(ssl, conn->fd);
+  SSL_set_accept_state(ssl);
+  conn->tls = fsh_tls_new(NULL, ssl);
+  conn->tls_ops = &fsh_tls_calls;
+  return 1;
+}
+
+// Sends close_notify when it can without waiting, so the peer sees a clean end.
+static void fsh_tls_release(fsh_socket *s) {
+  fsh_tls *t = s->tls;
+  if (t->ssl) {
+    sigset_t before;
+    FSH_TLS_QUIET(before);
+    if (SSL_is_init_finished(t->ssl)) SSL_shutdown(t->ssl);
+    SSL_free(t->ssl);
+    ERR_clear_error();
+    FSH_TLS_LOUD(before);
+  }
+  SSL_CTX_free(t->ctx);
+  pthread_mutex_destroy(&t->lock);
+  fsh_rt_free(t);
+  s->tls = NULL;
+}
+
+static const fsh_tls_ops fsh_tls_calls = { fsh_tls_read, fsh_tls_write, fsh_tls_accepted, fsh_tls_release };
+
+static SSL_CTX *fsh_tls_context(int server) {
+  SSL_CTX *ctx = SSL_CTX_new(server ? TLS_server_method() : TLS_client_method());
+  if (!ctx) return NULL;
+  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+  // A peer that closes without close_notify ends the stream, as HTTP servers often do.
+  SSL_CTX_set_options(ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+  if (!server) SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+  return ctx;
+}
+
+// The client context trusting the system's certificates, made once, since loading them takes a
+// while: OpenSSL's default paths, which a Homebrew OpenSSL points at the bundle it keeps.
+static SSL_CTX *fsh_tls_system;
+static pthread_once_t fsh_tls_system_once = PTHREAD_ONCE_INIT;
+static void fsh_tls_system_load(void) {
+  fsh_tls_system = fsh_tls_context(0);
+  if (fsh_tls_system) SSL_CTX_set_default_verify_paths(fsh_tls_system);
+}
+
+// A BIO over a string's bytes.
+static BIO *fsh_tls_bio(fsh_str *pem) {
+  return BIO_new_mem_buf(pem->bytes, (int)pem->length);
+}
+
+static fsh_str *fsh_tls_said(const char *text) {
+  return fsh_rt_str_from_cstring(text);
+}
+
+// Whether a name is a DNS host name: dot-separated labels of 1 to 63 letters, digits, hyphens and
+// underscores, at most 253 bytes. What isn't one is refused here, before OpenSSL sees it.
+// OpenSSL 4 refuses a few more, such as one-character names and labels starting or ending with
+// a hyphen, which OpenSSL 3 checks against the certificate; those fail closed with the same error.
+static int fsh_tls_host_name(const char *host) {
+  size_t length = strlen(host), label = 0;
+  if (length == 0 || length > 253) return 0;
+  for (const char *c = host; *c; c++) {
+    if (*c == '.') {
+      if (label == 0) return 0;
+      label = 0;
+    } else if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '-' || *c == '_') {
+      if (++label > 63) return 0;
+    } else return 0;
+  }
+  return label > 0;
+}
+
+// Starts TLS as the client on a connected stream, verifying the server's certificate for name, a
+// host name or an IP address, against the PEM certificates in ca, or the system's when ca is
+// empty, as Node's ca option does. Gives why it can't, or an empty string.
+fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+  // A second session would replace the first, leaking it and racing a read through a clone.
+  if (s->tls) return fsh_tls_said("the stream already speaks TLS");
+  char *host = fsh_rt_str_cstring(name);
+  if (!host || !host[0]) {
+    fsh_rt_free(host);
+    return fsh_tls_said("the server name to verify is empty or holds a NUL byte");
+  }
+  SSL_CTX *ctx;
+  if (ca->length == 0) {
+    pthread_once(&fsh_tls_system_once, fsh_tls_system_load);
+    ctx = fsh_tls_system;
+    if (ctx) SSL_CTX_up_ref(ctx);
+  } else {
+    ctx = fsh_tls_context(0);
+    int trusted = 0;
+    if (ctx) {
+      BIO *bio = fsh_tls_bio(ca);
+      X509 *cert;
+      while ((cert = PEM_read_bio_X509(bio, NULL, NULL, NULL))) {
+        X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx), cert);
+        X509_free(cert);
+        trusted++;
+      }
+      BIO_free(bio);
+      ERR_clear_error();
+    }
+    if (ctx && !trusted) {
+      SSL_CTX_free(ctx);
+      fsh_rt_free(host);
+      return fsh_tls_said("the 'ca' option holds no PEM certificate");
+    }
+  }
+  SSL *ssl = ctx ? SSL_new(ctx) : NULL;
+  if (!ssl) {
+    SSL_CTX_free(ctx);
+    fsh_rt_free(host);
+    ERR_clear_error();
+    return fsh_tls_said("can't set up TLS");
+  }
+  SSL_set_fd(ssl, s->fd);
+  SSL_set_connect_state(ssl);
+  // An absolute name's trailing dot names the same host, as Node takes it. An address is checked
+  // against the certificate's IP addresses and isn't sent as SNI, which takes only names. Any
+  // name OpenSSL can't check against fails here, since a connection without the check would
+  // take any certificate a trusted CA signed.
+  size_t length = strlen(host);
+  if (length > 1 && host[length - 1] == '.') host[--length] = 0;
+  unsigned char address[16];
+  int checked;
+  if (inet_pton(AF_INET, host, address) == 1 || inet_pton(AF_INET6, host, address) == 1) checked = X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), host);
+  else checked = fsh_tls_host_name(host) && SSL_set_tlsext_host_name(ssl, host) && X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), host, 0);
+  if (!checked) {
+    char text[400];
+    snprintf(text, sizeof text, "'%.200s' isn't a host name or IP address a certificate can be checked against", host);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    fsh_rt_free(host);
+    ERR_clear_error();
+    return fsh_tls_said(text);
+  }
+  fsh_rt_free(host);
+  s->tls = fsh_tls_new(ctx, ssl);
+  s->tls_ops = &fsh_tls_calls;
+  return fsh_tls_said("");
+}
+
+// Has a listener's connections speak TLS as the server, with the PEM certificate chain in cert
+// and its private key in key. Gives why it can't, or an empty string.
+fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
+  SSL_CTX *ctx = fsh_tls_context(1);
+  if (!ctx) return fsh_tls_said("can't set up TLS");
+  const char *why = NULL;
+  BIO *bio = fsh_tls_bio(cert);
+  X509 *leaf = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+  if (!leaf || !SSL_CTX_use_certificate(ctx, leaf)) why = "the TLS 'cert' holds no PEM certificate";
+  X509_free(leaf);
+  X509 *more;
+  while (!why && (more = PEM_read_bio_X509(bio, NULL, NULL, NULL))) {
+    if (!SSL_CTX_add0_chain_cert(ctx, more)) X509_free(more);
+  }
+  BIO_free(bio);
+  if (!why) {
+    bio = fsh_tls_bio(key);
+    EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+    if (!pkey || !SSL_CTX_use_PrivateKey(ctx, pkey)) why = "the TLS 'key' holds no PEM private key";
+    else if (!SSL_CTX_check_private_key(ctx)) why = "the TLS 'key' isn't the private key of the 'cert' certificate";
+    EVP_PKEY_free(pkey);
+  }
+  ERR_clear_error();
+  if (why) {
+    SSL_CTX_free(ctx);
+    return fsh_tls_said(why);
+  }
+  listener->tls = fsh_tls_new(ctx, NULL);
+  listener->tls_ops = &fsh_tls_calls;
+  return fsh_tls_said("");
+}
+
+// Into out, 32 bytes, 16 for MD5 and 20 for SHA-1: SHA-256 of data (0), HMAC-SHA-256 of data keyed by key (1),
+// PBKDF2-HMAC-SHA-256 of the password key salted with data over rounds (2), MD5 of data (3), or
+// SHA-1 of data (4).
+// 1 when OpenSSL did it; each call's own success value is checked, as they differ.
+int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, int64_t rounds, uint8_t *out) {
+  unsigned int n = 0;
+  int ok = 0;
+  switch (which) {
+    case 0: ok = EVP_Digest(data, (size_t)length, out, &n, EVP_sha256(), NULL) == 1 && n == 32; break;
+    case 1: ok = HMAC(EVP_sha256(), key, (int)key_length, data, (size_t)length, out, &n) != NULL && n == 32; break;
+    case 2: ok = rounds > 0 && rounds <= INT_MAX && PKCS5_PBKDF2_HMAC((const char *)key, (int)key_length, data, (int)length, (int)rounds, EVP_sha256(), 32, out) == 1; break;
+    case 3: ok = EVP_Digest(data, (size_t)length, out, &n, EVP_md5(), NULL) == 1 && n == 16; break;
+    case 4: ok = EVP_Digest(data, (size_t)length, out, &n, EVP_sha1(), NULL) == 1 && n == 20; break;
+  }
+  ERR_clear_error();
+  return ok;
+}
+
+// Why the crypto calls can't work: nothing, with OpenSSL linked.
+const char *fsh_rt_crypto_missing(void) {
+  return "";
+}
+`;
+
+// The runtime's TLS calls where OpenSSL wasn't found: each says why and how to get it.
+export function tlsStub(why: string): string {
+  const said = JSON.stringify(why);
+  return String.raw`
+fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+  return fsh_rt_str_from_cstring(${said});
+}
+
+fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
+  return fsh_rt_str_from_cstring(${said});
+}
+
+int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, int64_t rounds, uint8_t *out) {
+  return 0;
+}
+
+const char *fsh_rt_crypto_missing(void) {
+  return ${said};
+}
+`;
+}

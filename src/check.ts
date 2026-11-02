@@ -1,6 +1,6 @@
 import { declareClass, extend, inherited, isLifetime, separatePrivateNames, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
-import { newTables, type Compilation, type Tables } from "./compilation.ts";
+import { newTables, timed, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError, CompileErrors, named } from "./diag.ts";
 import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
@@ -2098,7 +2098,7 @@ class BodyChecker implements Context, Outer, Sight {
     // From here on the body is read as a plain tree, its replacements in place.
     for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam(this.f.params[i]!, this.cx.rewrites);
     rebuiltStmts(this.f.body, this.cx.rewrites);
-    checkMoves(this.f, this.instance, origins);
+    timed(this.instance.tables.timings, "moves", () => checkMoves(this.f, this.instance, origins));
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (this.self && this.cx.registry().classOf(this.self.type).methods.get("clone") === this.f.bodyId && (this.f.params.length > 0 || type !== this.self.type)) {
       throw new CompileError("E0213", `a 'clone' method must take no parameters and return '${this.cx.typing.show(this.self.type)}', since it replaces the compiler's copy`, this.f.start, this.f.end);
@@ -2900,6 +2900,12 @@ class BodyChecker implements Context, Outer, Sight {
         const through = this.exprs().value(s.right);
         const object = this.cx.isRef(through) ? this.cx.typing.rec(through).to : through;
         const o = this.cx.recOf(object);
+        // std's ServerWebSocket gives the messages its client sends.
+        if (s.await && o?.kind === "class" && o.name === "ServerWebSocket" && this.classOf(object as ClassType).node.start >= STD_BASE) {
+          const at = { start: s.right.start, end: s.right.end };
+          const callee: Expr = { id: nextId(this.cx.ids), kind: "member", object: s.right, name: "__wsMessages", optional: false, ...at };
+          return this.statement(this.cx.rewrites.replace(s, { ...s, right: { id: nextId(this.cx.ids), kind: "call", callee, typeArgs: [], args: [], optional: false, ...at } }));
+        }
         if (s.await) {
           this.awaitLoop(s, d.target.name, left.keyword === "let", through, object);
           return;

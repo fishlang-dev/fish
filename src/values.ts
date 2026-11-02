@@ -1,5 +1,5 @@
 import type { Tables } from "./compilation.ts";
-import { fileAt, textAt } from "./modules.ts";
+import { stdModuleAt, textAt } from "./modules.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
 import { abstractIn, copyFor, inherited, shownName, isLifetime, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
 import { openParam } from "./typefns.ts";
@@ -1215,8 +1215,8 @@ export class Expressions implements Union {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && !this.ctx.lookup("AbortSignal") && !this.classes.has("AbortSignal")) {
       return this.signalStatic(e, callee);
     }
-    if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream") && !this.ctx.lookup(callee.object.name) && !this.classes.has(callee.object.name)) {
-      return this.tcpStatic(e, callee, callee.object.name);
+    if (callee.kind === "member" && callee.object.kind === "ident" && (callee.object.name === "TcpListener" || callee.object.name === "TcpStream" || callee.object.name === "UnixListener" || callee.object.name === "UnixStream" || callee.object.name === "UdpSocket") && !this.ctx.lookup(callee.object.name) && !this.classes.has(callee.object.name)) {
+      return this.socketStatic(e, callee, callee.object.name);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && !this.ctx.lookup("FixedArray") && !this.classes.has("FixedArray")) return this.filled(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && !this.ctx.lookup("Array") && !this.classes.has("Array")) return this.arrayStatic(e, callee);
@@ -1230,6 +1230,7 @@ export class Expressions implements Union {
       if (e.args.length < 1 || e.args.length > most) throw new CompileError("E0504", most === 1 ? "'u8.fromHex' takes one string of hex digits" : "'u8.fromBase64' takes a string and an optional options object, as in '{ alphabet: \"base64url\" }'", e.start, e.end);
       return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: helper, start: callee.start, end: callee.end } }));
     }
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Object" && !this.ctx.lookup("Object") && !this.classes.has("Object") && !this.byName.has("Object") && !this.byName.has("const Object") && !this.enums.has("Object")) return this.objectStatic(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "String" && !this.ctx.lookup("String") && !this.classes.has("String") && !this.byName.has("String") && !this.byName.has("const String") && !this.enums.has("String")) return this.stringStatic(e, callee);
     if (callee.kind === "member" && this.isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("E0505", "'Math' is always there, so its functions are called without '?.'", e.start, e.end);
@@ -1441,7 +1442,7 @@ export class Expressions implements Union {
     }
     // `fileRead(path)` and `fileWrite(path, bytes)`: the futures node:fs/promises is written over,
     // each a job on the runtime's blocking pool.
-    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && (inStd || fileAt(this.files, e.start).startsWith("node:"))) {
+    if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && (inStd || stdModuleAt(this.files, e.start) !== undefined)) {
       const reading = callee.name === "fileRead";
       if (e.args.length !== (reading ? 1 : 2)) throw new CompileError("E0504", `'${callee.name}' takes ${reading ? "a path" : "a path and the bytes"}`, e.start, e.end);
       const path = this.value(e.args[0]!);
@@ -1455,7 +1456,7 @@ export class Expressions implements Union {
     }
     // The blocking calls node:fs is written over, as `fileReadSync(path)`, run on the calling
     // thread.
-    const sync = callee.kind === "ident" && (inStd || fileAt(this.files, e.start).startsWith("node:")) ? syncFileSignatures(this.typing)[callee.name] : undefined;
+    const sync = callee.kind === "ident" && (inStd || stdModuleAt(this.files, e.start) !== undefined) ? syncFileSignatures(this.typing)[callee.name] : undefined;
     if (sync) {
       const [params, returns, throws] = sync;
       const name = (callee as Extract<Expr, { kind: "ident" }>).name;
@@ -1486,7 +1487,7 @@ export class Expressions implements Union {
       this.value(e.args[3]!);
       return { type: "i64", what: "'timerSet'" };
     }
-    if (callee.kind === "ident" && callee.name === "jsEvaluate" && fileAt(this.files, e.start) === "fish:engine") {
+    if (callee.kind === "ident" && callee.name === "jsEvaluate" && stdModuleAt(this.files, e.start) === "fish:engine") {
       this.coerce(e.args[0]!, this.value(e.args[0]!), "string", "a module's source is a 'string'");
       this.jsEvaluations.add(e);
       return { type: this.typing.blockType("JsValue"), what: "'jsEvaluate'" };
@@ -1517,10 +1518,15 @@ export class Expressions implements Union {
     }
     // The time as an HTTP Date header gives it, for the std HTTP server alone.
     if (callee.kind === "ident" && callee.name === "httpDate" && e.start >= STD_BASE && e.args.length === 0) return { type: "string", what: "'httpDate'" };
+    // Removes serve's socket file once it stops listening.
+    if (callee.kind === "ident" && callee.name === "unixUnlink" && e.start >= STD_BASE && e.args.length === 1) {
+      this.value(e.args[0]!);
+      return { type: "void", what: "'unixUnlink'" };
+    }
     // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
     if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
     // The signal the first SIGINT or SIGTERM aborts, for node:process's 'shutdown' and the HTTP server.
-    if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || fileAt(this.files, e.start).startsWith("node:")) && e.args.length === 0) return { type: this.typing.blockType("AbortSignal"), what: "'shutdownSignal'" };
+    if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || stdModuleAt(this.files, e.start) !== undefined) && e.args.length === 0) return { type: this.typing.blockType("AbortSignal"), what: "'shutdownSignal'" };
     // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
     if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && this.owner !== undefined && this.typing.rec(this.owner).name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
       this.value(e.args[0]!);
@@ -1557,9 +1563,9 @@ export class Expressions implements Union {
       const callable = kind === "function" || kind === "closure" || this.boundFunction(held) !== undefined;
       throw new CompileError(callable ? "E1005" : "E0503", callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${this.typing.show(this.typing.jsView(held))}' has no call signatures`, e.start, e.end);
     }
-    if (target?.name.replace(/-fsh\d+$/, "") === "ok" && fileAt(this.files, target.start) === "node:assert") return this.assertion(e);
+    if (target?.name.replace(/-fsh\d+$/, "") === "ok" && stdModuleAt(this.files, target.start) === "node:assert") return this.assertion(e);
     // node:util's functions that take any values, as Node's do, given their meaning here.
-    const util = target && callee.kind === "ident" && fileAt(this.files, target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
+    const util = target && callee.kind === "ident" && stdModuleAt(this.files, target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
       if (e.optional) throw new CompileError("E0505", "'format' is always there, so it is called without '?.'", e.start, e.end);
       this.refuseSpread(e.args);
@@ -1591,7 +1597,9 @@ export class Expressions implements Union {
       return { type: this.value(equality), what: "'isDeepStrictEqual'" };
     }
     if (target && (target as { macro?: boolean }).macro) throw new CompileError("E0503", `'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
-    if (!target) {
+    // The prelude holds std's TLS helper, so a program would otherwise reach it; only std calls it.
+    const stdOnly = callee.kind === "ident" && callee.name === "__tlsClient" && e.start < STD_BASE && stdModuleAt(this.files, e.start) === undefined;
+    if (!target || stdOnly) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       throw new CompileError("E0401", `unknown function ${name}${callee.kind === "ident" ? didYouMean(callee.name, this.ctx.names(callee.start)) : ""}`, callee.start, callee.end);
     }
@@ -2542,13 +2550,28 @@ export class Expressions implements Union {
   }
 
   // `Date.now()` and `performance.now()`, unless a name of the program's hides `Date` or
-  // `performance`; their other members aren't there yet.
+  // `performance`; their other members aren't there yet. std's Date class, under its own name or
+  // the one it takes beside a program's own Date, is the clock's owner rather than a hiding name.
   private clockOf(this: Mut<this>, callee: Expr): "Date.now" | "performance.now" | undefined {
     if (callee.kind !== "member" || callee.object.kind !== "ident") return undefined;
-    const owner = callee.object.name;
-    if ((owner !== "Date" && owner !== "performance") || this.ctx.lookup(owner) || this.classes.has(owner) || this.byName.has(owner) || this.byName.has(`const ${owner}`) || this.enums.has(owner)) return undefined;
+    const std = callee.object.name === "std Date" && callee.start >= STD_BASE;
+    const owner = std ? "Date" : callee.object.name;
+    const declared = this.classes.get(owner);
+    const hidden = declared !== undefined && !(owner === "Date" && this.arenas.classOf(declared).node.start >= STD_BASE);
+    if ((owner !== "Date" && owner !== "performance") || (!std && (this.ctx.lookup(owner) || hidden || this.byName.has(owner) || this.byName.has(`const ${owner}`) || this.enums.has(owner)))) return undefined;
+    if (owner === "Date" && callee.name === "parse") throw new CompileError("E0801", "'Date.parse' isn't supported yet, as reading dates from strings isn't; give 'new Date(ms)' milliseconds since the epoch", callee.start, callee.end);
     if (callee.name !== "now") throw new CompileError("E0801", `'${owner}.${callee.name}' isn't supported yet; '${owner}.now()' is`, callee.start, callee.end);
     return `${owner}.now` as "Date.now" | "performance.now";
+  }
+
+  // std's Date is made from milliseconds alone: reading a string and the year, month, day form,
+  // which counts in local time, aren't there yet.
+  private dateNew(this: Mut<this>, e: Expr, list: Expr[], argTypes: Type[]) {
+    if (list.length > 1) throw new CompileError("E0801", "'new Date(year, month, ...)' isn't supported yet, as local time isn't; give 'new Date(ms)' milliseconds since the epoch", e.start, e.end);
+    const t = argTypes[0];
+    if (t !== undefined && (t === "string" || (this.recOf(t)?.kind === "literal" && typeof this.typing.rec(t as LiteralType).value === "string"))) {
+      throw new CompileError("E0801", "'new Date(text)' isn't supported yet, as reading dates from strings isn't; give 'new Date(ms)' milliseconds since the epoch", e.start, e.end);
+    }
   }
 
   // `JSON.stringify` and `JSON.parse`, unless a name of the program's hides `JSON`.
@@ -2691,6 +2714,55 @@ export class Expressions implements Union {
     }
     if (f) made = { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
     return this.call(this.rewrites.replace(e, { ...made, start: e.start, end: e.end }) as Call);
+  }
+
+  // `Object.keys(o)`, `Object.values(o)` and `Object.entries(o)`: o's fields are known while
+  // compiling, so each becomes an array literal reading them, the values cloned.
+  private objectStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    const name = callee.name;
+    if (name !== "keys" && name !== "values" && name !== "entries") throw new CompileError("E0502", `'Object' has no '${name}' yet; it has 'keys', 'values' and 'entries'`, callee.start, callee.end);
+    if (callee.optional || e.optional) throw new CompileError("E0505", `'Object' is always there, so 'Object.${name}' is called without '?.'`, e.start, e.end);
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", `'Object.${name}' takes no type arguments`, e.start, e.end);
+    const o = e.args[0];
+    if (!o || e.args.length > 1 || o.kind === "spread") throw new CompileError("E0504", `'Object.${name}' takes the object to read`, e.start, e.end);
+    const fields = this.objectRead(name, o).fields;
+    const at = { start: e.start, end: e.end };
+    const key = (f: Field): Expr => ({ id: nextId(this.ids), kind: "string", value: f.name, ...at });
+    const fieldValue = (f: Field): Expr => {
+      const member: Expr = { id: nextId(this.ids), kind: "member", object: this.spanned(renumber("expr", structuredClone(o), () => nextId(this.ids)), o), name: f.name, optional: false, ...at };
+      return this.typing.isCopy(f.type) ? member : { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: member, name: "clone", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+    };
+    const elements = fields.map((f): Expr => (name === "keys" ? key(f) : name === "values" ? fieldValue(f) : { id: nextId(this.ids), kind: "array", elements: [key(f), fieldValue(f)], ...at }));
+    const array = this.rewrites.replace(e, { id: 0, kind: "array", elements, ...at });
+    this.ctx.tables.objectReads.set(array, { name, object: o });
+    return { type: this.value(array), what: `'Object.${name}'` };
+  }
+
+  // The fields `Object.keys`, `values` or `entries` reads from o, and the array it gives. An
+  // instance gives its public fields, bases' first, in declaration order; an object type has only
+  // its sorted order, which printing and JSON use too. Values are typed as the union of the fields'.
+  private objectRead(this: Mut<this>, name: "keys" | "values" | "entries", o: Expr): { fields: Field[]; type: ArrayType } {
+    // The object is read once per field, so it has to be a place reading it again gives.
+    const notPlace = () => new CompileError("E0504", `'Object.${name}' reads a variable or a field; store this value in a 'const' first`, o.start, o.end);
+    let root: Expr = o;
+    while (root.kind === "member" && !root.optional) root = root.object;
+    if (root.kind !== "this" && root.kind !== "ident") throw notPlace();
+    const probe = this.spanned(renumber("expr", structuredClone(o), () => nextId(this.ids)), o);
+    const t = this.typing.unfolded(this.read(probe));
+    if (!this.rooted(probe)) throw notPlace();
+    const r = this.recOf(t);
+    if (r?.kind === "map") {
+      const which = r.set ? "Set" : "Map";
+      throw new CompileError("E0504", `'Object.${name}' reads an object's fields, and a ${which} has none; use the ${which}'s own '${name}()'`, o.start, o.end);
+    }
+    // A parameter typed with an object type gives that type's fields, as TypeScript types them.
+    const shape: Type = r?.kind === "param" && r.bound !== undefined && this.recOf(r.bound)?.kind === "object" ? r.bound : t;
+    const sr = this.recOf(shape);
+    if (sr === undefined || !((sr.kind === "object" && !this.typing.isTuple(shape)) || sr.kind === "class")) throw new CompileError("E0504", `'Object.${name}' reads the fields of an object or a class instance, not '${this.typing.show(t)}'`, o.start, o.end);
+    const fields = (sr.kind === "class" ? this.typing.allFields(shape as ClassType) : (sr as { fields: Field[] }).fields).filter((f) => (f.access ?? "public") === "public");
+    if (name !== "keys" && fields.length === 0) throw new CompileError("E0504", `'${this.typing.show(t)}' has no fields, so 'Object.${name}' would give an array of nothing`, o.start, o.end);
+    const held = this.typing.unionType(fields.map((f) => this.typing.widenLet(f.type)));
+    return { fields, type: this.typing.arrayType(name === "keys" ? "string" : name === "values" ? held : this.typing.tupleType(["string", held])) };
   }
 
   // `n` as the `i64` an array's length is made from, checked to be an i64 or a usize, and with
@@ -3086,16 +3158,19 @@ export class Expressions implements Union {
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
   // `close()`. A Permit has no methods: dropping it gives its slot back.
   private blockCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
-    if (this.typing.rec(t).which === "JsValue") return this.jsMethodCall(e, callee, t);
+    const which = this.typing.rec(t).which;
+    if (which === "JsValue") return this.jsMethodCall(e, callee, t);
+    if (which === "UdpSocket") return this.udpCall(e, callee);
     // A wait may also take an AbortSignal, as its last argument.
     const sockets = ["accept", "read", "write"].includes(callee.name);
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
-    const methods: Record<string, usize> = this.typing.rec(t).which === "Semaphore" ? { acquire: 0, available: 0 } : this.typing.rec(t).which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
-      : this.typing.rec(t).which === "AbortController" ? { abort: 0 } : this.typing.rec(t).which === "AbortSignal" ? { throwIfAborted: 0 } : this.typing.rec(t).which === "TcpListener" ? { accept: 0 } : this.typing.rec(t).which === "TcpStream" ? { read: 1, write: 1 } : {};
+    const methods: Record<string, usize> = which === "Semaphore" ? { acquire: 0, available: 0 } : which === "Channel" ? { send: 1, receive: 0, close: 0, ...(e.start >= STD_BASE ? { settle: 1 } : {}) }
+      : which === "AbortController" ? { abort: 0 } : which === "AbortSignal" ? { throwIfAborted: 0 } : which === "TcpListener" || which === "UnixListener" ? { accept: 0, ...(e.start >= STD_BASE ? { listenTls: 2 } : {}) }
+      : which === "TcpStream" || which === "UnixStream" ? { read: 1, write: 1, ...(e.start >= STD_BASE ? { startTls: 2 } : {}) } : {};
     if (!(callee.name in methods)) {
-      const has = this.typing.rec(t).which === "Semaphore" ? "it has 'acquire' and 'available'" : this.typing.rec(t).which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
-        : this.typing.rec(t).which === "AbortController" ? "it has 'abort' and 'signal'" : this.typing.rec(t).which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
-        : this.typing.rec(t).which === "TcpListener" ? "it has 'accept' and 'port'" : this.typing.rec(t).which === "TcpStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
+      const has = which === "Semaphore" ? "it has 'acquire' and 'available'" : which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
+        : which === "AbortController" ? "it has 'abort' and 'signal'" : which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
+        : which === "TcpListener" ? "it has 'accept' and 'port'" : which === "UnixListener" ? "it has 'accept', and dropping it stops listening but leaves its socket file" : which === "TcpStream" || which === "UnixStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
       throw new CompileError("E0502", `'${this.typing.show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
     if (this.linked(callee)) throw unsupported(`optional chains calling '${this.typing.rec(t).which}' methods`, callee);
@@ -3110,7 +3185,17 @@ export class Expressions implements Union {
       this.coerce(e.args[0]!, given, of, `argument of type '${this.typing.show(given)}' is not assignable to parameter of type '${this.typing.show(of)}'`);
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
-    if (callee.name === "accept") return { type: this.typing.leafFuture("accept", "void", this.socketError(signalled), signalled), what: "'accept'" };
+    // std's own TLS setup, `startTls(serverName, ca)` on a stream and `listenTls(cert, key)` on a
+    // listener, giving why it failed, or an empty string.
+    if (callee.name === "startTls" || callee.name === "listenTls") {
+      for (const arg of e.args) {
+        this.expect(arg, "string");
+        const given = this.value(arg);
+        this.coerce(arg, given, "string", `'${callee.name}' takes strings, not '${this.typing.show(given)}'`);
+      }
+      return { type: "string", what: `'${callee.name}'` };
+    }
+    if (callee.name === "accept") return { type: this.typing.leafFuture("accept", this.typing.rec(t).which === "UnixListener" ? this.typing.blockType("UnixStream") : "void", this.socketError(signalled), signalled), what: "'accept'" };
     // `read(max)` gives at most max bytes, and `write(bytes)` takes its bytes to send them all.
     if (callee.name === "read" || callee.name === "write") {
       const want = callee.name === "read" ? "i64" : this.typing.arrayType("u8");
@@ -3126,6 +3211,34 @@ export class Expressions implements Union {
     }
     if (callee.name === "close" || callee.name === "settle") return { type: "void", what: `'${callee.name}'` };
     return { type: this.typing.leafFuture(callee.name as "acquire" | "send" | "receive", this.typing.lower(this.typing.rec(t).of), signalled ? this.abortError() : undefined, signalled), what: `'${callee.name}'` };
+  }
+
+  // A UdpSocket's `sendTo(bytes, host, port)`, `receiveFrom()`, `connect(host, port)`, `send(bytes)`
+  // and `receive()`. Each but connect, which never waits, may take an AbortSignal last.
+  private udpCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
+    const methods: Record<string, usize> = { sendTo: 3, receiveFrom: 0, connect: 2, send: 1, receive: 0 };
+    const what = `'${callee.name}'`;
+    if (!(callee.name in methods)) throw new CompileError("E0502", `'UdpSocket' has no method '${callee.name}'; it has 'sendTo', 'receiveFrom', 'connect', 'send', 'receive', 'clone' and 'port', and dropping it closes it`, callee.start, callee.end);
+    if (this.linked(callee)) throw unsupported("optional chains calling 'UdpSocket' methods", callee);
+    const count = methods[callee.name]!;
+    const signalled = callee.name !== "connect" && e.args.length === count + 1;
+    const usage = { sendTo: "the bytes, a host address and a port, like 'sendTo(bytes, \"127.0.0.1\", 8080)'", connect: "a host address and a port, like 'connect(\"127.0.0.1\", 8080)'", send: "the bytes to send" }[callee.name];
+    if (e.args.length !== count && !signalled) throw new CompileError("E0504", `${what} takes ${usage ?? "no arguments"}${callee.name === "connect" ? "" : ", and may take an AbortSignal"}`, e.start, e.end);
+    if (signalled) this.signalArgument(e.args.at(-1)!, what);
+    const take = (arg: Expr, want: Type, say: (given: Type) => string) => {
+      this.expect(arg, want);
+      const given = this.value(arg);
+      this.coerce(arg, given, want, say(given));
+    };
+    const sends = callee.name === "sendTo" || callee.name === "send";
+    if (sends) take(e.args[0]!, this.typing.arrayType("u8"), (given) => `${what} takes the bytes to send as a 'u8[]', like 'new TextEncoder().encode(text)', not '${this.typing.show(given)}'`);
+    if (callee.name === "sendTo" || callee.name === "connect") {
+      const [host, port] = callee.name === "sendTo" ? [e.args[1]!, e.args[2]!] : [e.args[0]!, e.args[1]!];
+      take(host, "string", (given) => `the host is a 'string' like "127.0.0.1", not '${this.typing.show(given)}'`);
+      take(port, "i64", (given) => `the port is an 'i64', not '${this.typing.show(given)}'`);
+    }
+    const method = sends ? "sendTo" : callee.name === "connect" ? "udpConnect" : "receiveFrom";
+    return { type: this.typing.leafFuture(method, callee.name === "receive" ? this.typing.arrayType("u8") : "void", this.socketError(signalled), signalled), what };
   }
 
   // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds. And
@@ -3160,24 +3273,35 @@ export class Expressions implements Union {
     return { type: signal, what: "'AbortSignal.any'" };
   }
 
-  // `TcpListener.bind(host, port)` and `TcpStream.connect(host, port)`: futures the async
-  // runtime's reactor completes, throwing an `IoError` when the system says no.
-  private tcpStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream"): { type: Type; what: string } {
-    const method = which === "TcpListener" ? "bind" : "connect";
-    if (callee.name !== method) throw new CompileError("E0502", `'${which}' has no static method '${callee.name}'; it has '${method}'`, callee.start, callee.end);
-    if (!this.ctx.runtime && e.start < STD_BASE) throw new CompileError("E0301", `'${which}.${method}' works only when 'main' is an async function, whose runtime waits on sockets`, e.start, e.end);
+  // `TcpListener.bind(host, port)` and `TcpStream.connect(host, port)`, and the Unix ones taking a
+  // socket path: futures the async runtime's reactor completes, throwing an `IoError` when the
+  // system says no. std's own `TcpListener.unix(path)` and `TcpStream.unix(path)` give a socket on a
+  // path typed as TCP's, so serve and fetch share their HTTP code.
+  private socketStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket"): { type: Type; what: string } {
+    const listens = which === "TcpListener" || which === "UnixListener" || which === "UdpSocket";
+    const internal = e.start >= STD_BASE && (which === "TcpListener" || which === "TcpStream") && callee.name === "unix";
+    const unix = internal || which === "UnixListener" || which === "UnixStream";
+    const method = listens ? "bind" : "connect";
+    if (callee.name !== method && !internal) throw new CompileError("E0502", `'${which}' has no static method '${callee.name}'; it has '${method}'`, callee.start, callee.end);
+    const name = `'${which}.${callee.name}'`;
+    if (!this.ctx.runtime && e.start < STD_BASE) throw new CompileError("E0301", `${name} works only when 'main' is an async function, whose runtime waits on sockets`, e.start, e.end);
     // Connecting waits, so it may take an AbortSignal; binding doesn't.
-    const signalled = method === "connect" && e.args.length === 3;
-    if (e.args.length !== 2 && !signalled) throw new CompileError("E0504", `'${which}.${method}' takes a host address and a port, like '${which}.${method}("127.0.0.1", 8080)'${method === "connect" ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
-    if (signalled) this.signalArgument(e.args[2]!, `'${which}.${method}'`);
-    const [host, port] = e.args as [Expr, Expr];
+    const most = unix ? 1 : 2;
+    const signalled = method === "connect" && e.args.length === most + 1;
+    const example = unix ? `like '${which}.${method}("/tmp/app.sock")'` : `like '${which}.${method}("127.0.0.1", 8080)'`;
+    if (e.args.length !== most && !signalled) throw new CompileError("E0504", `${name} takes ${unix ? "a socket path" : "a host address and a port"}, ${example}${method === "connect" ? ", and may take an AbortSignal" : ""}`, e.start, e.end);
+    if (signalled) this.signalArgument(e.args[most]!, name);
+    const host = e.args[0]!;
     this.expect(host, "string");
     const h = this.value(host);
-    this.coerce(host, h, "string", `the host is a 'string' like "127.0.0.1", not '${this.typing.show(h)}'`);
-    this.expect(port, "i64");
-    const p = this.value(port);
-    this.coerce(port, p, "i64", `the port is an 'i64', not '${this.typing.show(p)}'`);
-    return { type: this.typing.leafFuture(method, "void", this.socketError(signalled), signalled), what: `'${which}.${method}'` };
+    this.coerce(host, h, "string", unix ? `the socket path is a 'string' like "/tmp/app.sock", not '${this.typing.show(h)}'` : `the host is a 'string' like "127.0.0.1", not '${this.typing.show(h)}'`);
+    if (!unix) {
+      const port = e.args[1]!;
+      this.expect(port, "i64");
+      const p = this.value(port);
+      this.coerce(port, p, "i64", `the port is an 'i64', not '${this.typing.show(p)}'`);
+    }
+    return { type: this.typing.leafFuture(method, unix || which === "UdpSocket" ? this.typing.blockType(which) : "void", this.socketError(signalled), signalled), what: name };
   }
 
   // The std `IoError` class, which failed socket calls throw.
@@ -3797,7 +3921,7 @@ export class Expressions implements Union {
     if (this.typing.rec(t).which === "JsValue") return this.jsProperty(e, t);
     if (this.typing.rec(t).which === "AbortController" && e.name === "signal") return this.typing.blockType("AbortSignal");
     if (this.typing.rec(t).which === "AbortSignal" && e.name === "aborted") return "boolean";
-    if (this.typing.rec(t).which === "TcpListener" && e.name === "port") return "i64";
+    if ((this.typing.rec(t).which === "TcpListener" || this.typing.rec(t).which === "UdpSocket") && e.name === "port") return "i64";
     throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.typing.show(t)}'`, e.start, e.end);
   }
 
@@ -4800,6 +4924,8 @@ export class Expressions implements Union {
       // declared type has to say what it holds.
       case "array": {
         if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
+        const fromObject = this.ctx.tables.objectReads.get(e);
+        if (fromObject && !this.ctx.exprsState.wanted.has(e)) this.expect(e, this.objectRead(fromObject.name, fromObject.object).type);
         const tuple = this.ctx.exprsState.tuples.get(e);
         if (tuple) return this.tupleLiteral(e, tuple);
         // A pair in `new Map([[k, v]])` is a tuple of what it holds.
@@ -4968,6 +5094,7 @@ export class Expressions implements Union {
             : "'new Array(a, b)' makes an array of its arguments; write 'Array.of(a, b)' or '[a, b]'", e.start, e.end);
         }
         const argTypes = list.map((a) => this.value(a));
+        if (named && this.typing.rec(named.type).name === "Date" && named.node.start >= STD_BASE) this.dateNew(e, list, argTypes);
         const c = e.callee.kind === "ident" ? this.ctx.construct(e.callee.name, e.typeArgs, argTypes, e) : undefined;
         if (!c) throw new CompileError("E0503", `only a class can be constructed with 'new'${e.callee.kind === "ident" && !this.ctx.lookup(e.callee.name) ? didYouMean(e.callee.name, this.ctx.classNames(e.callee.start)) : ""}`, e.callee.start, e.callee.end);
         const rust = rustClassOf(this.typing, c.type);

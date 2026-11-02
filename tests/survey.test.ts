@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { dependencies } from "../src/deps.ts";
 import { formatRanking, rank, readPlan, stepsOf } from "../src/rank.ts";
-import { compare, featuresOf, formatComparison, formatReport, grade, readReport, scanFiles, survey } from "../src/survey.ts";
+import { compare, featureOf, featuresOf, formatComparison, formatReport, grade, readReport, scanFiles, survey } from "../src/survey.ts";
 
 const sample = join(import.meta.dir, "survey", "sample");
 const fishc = (...args: string[]) => Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), ...args]);
@@ -87,6 +87,8 @@ test("forms that look alike are told apart", () => {
   expect(counts("import os from \"node:os\";\nimport { hostname } from \"os\";\nimport { cpus } from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
   expect(counts("export { hostname } from \"node:os\";\nexport * from \"os\";\n")).toEqual({});
   expect(counts("export * as system from \"os\";\n")).toEqual({ nodeBuiltins: 1 });
+  expect(counts("import { connect } from \"node:tls\";\nimport * as tls from \"tls\";\nexport const s = tls.connect(443, \"x\");\nimport https from \"node:https\";\n")).toEqual({ nodeBuiltins: 3 });
+  expect([featureOf("nodeBuiltins", "tls"), featureOf("nodeBuiltins", "https")]).toEqual(["node:tls", "node:http server shim"]);
   expect(counts("import path from \"path\";\nimport { sep } from \"path\";\nexport function f(x: string) {\n  return path.join(x, sep) + path.parse(x).base;\n}\n")).toEqual({ nodeBuiltins: 1 });
   expect(counts("function f() {\n  console.error(1);\n  console.warn(2);\n  console.info(3);\n  const t = Date.now() + performance.now();\n}\n")).toEqual({ console: 1 });
   expect(counts("function f() {\n  const a = process.argv[2];\n  const h = process.env.HOME;\n  process.exit(1);\n}\n")).toEqual({});
@@ -279,8 +281,8 @@ test("unread files are left out of the steps but not the shares, and the self cu
 });
 
 test("imports wait on other files or Node built-ins by how they are written, and npm packages run", () => {
-  project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import dgram from \"node:dgram\";\nimport crypto = require(\"crypto\");\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Hashing", "UDP sockets"]]);
+  project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import tty from \"node:tty\";\nimport crypto = require(\"crypto\");\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Hashing", "Terminal detection and styled text"]]);
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Bun's own modules"], ["Path aliases"], ["Namespace imports"]]);
@@ -473,30 +475,52 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
   });
 });
 
+test("pg and postgres are replaced by std's postgres module", () => {
+  project({ "package.json": JSON.stringify({ dependencies: { pg: "8", postgres: "3" } }), "a.ts": "const x = 1;\n" }, (dir) => {
+    const d = dependencies(dir)!;
+    expect(d.counts).toEqual({ std: 2, planned: 0, native: 0, pure: 0, unknown: 0 });
+    expect(d.list.map((x) => x.equivalent)).toEqual([{ name: "the postgres module's Pool", planned: false }, { name: "the postgres module's Pool", planned: false }]);
+  });
+});
+
+test("ws and the frameworks' WebSocket helpers are replaced by Router.ws", () => {
+  project({ "package.json": JSON.stringify({ dependencies: { ws: "8", "express-ws": "5", "@hono/node-ws": "1" } }), "a.ts": "const x = 1;\n" }, (dir) => {
+    const d = dependencies(dir)!;
+    expect(d.counts).toEqual({ std: 3, planned: 0, native: 0, pure: 0, unknown: 0 });
+    expect(d.list.every((x) => x.equivalent?.name === "Router.ws, for a server")).toBe(true);
+  });
+});
+
+test("node:readline waits on nothing, as readLine and the stdin module replace it", () => {
+  project({ "a.ts": "import { createInterface } from \"node:readline\";\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[]]);
+  });
+});
+
 test("each Node built-in waits on the feature that replaces it, and the ranking names those features", () => {
   project({
-    "a.ts": "import { createSocket } from \"node:dgram\";\nimport { createHash } from \"crypto\";\n",
+    "a.ts": "import { isatty } from \"node:tty\";\nimport { createHash } from \"crypto\";\n",
     "b.ts": "import { setTimeout } from \"node:timers/promises\";\n",
-    "c.ts": "import vm from \"vm\";\nimport d = require(\"dgram\");\n",
-    "plan.md": "- [ ] 1. **UDP sockets**\n- [ ] 2. **Hashing**\n",
+    "c.ts": "import vm from \"vm\";\nimport d = require(\"tty\");\n",
+    "plan.md": "- [ ] 1. **Terminal detection and styled text**\n- [ ] 2. **Hashing**\n",
   }, (dir) => {
     // `timers/promises` is std's sleep, so b.ts waits on nothing.
-    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Hashing", "UDP sockets"], [], ["Node built-ins", "UDP sockets"]]);
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Hashing", "Terminal detection and styled text"], [], ["Node built-ins", "Terminal detection and styled text"]]);
     const steps = rank([dir], undefined, readPlan(join(dir, "plan.md"))).curve.steps;
     expect(steps.map((s) => [s.feature, s.rules, s.plan])).toEqual([
-      ["UDP sockets", ["nodeBuiltins"], { item: "1", done: false }],
+      ["Terminal detection and styled text", ["nodeBuiltins"], { item: "1", done: false }],
       // Each frees one 2-line file, so the tie goes by name.
       ["Hashing", ["nodeBuiltins"], { item: "2", done: false }],
       ["Node built-ins", ["nodeBuiltins"], null],
     ]);
-    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["dgram", "crypto", "timers/promises"]);
+    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["tty", "crypto", "timers/promises"]);
   });
   project({
-    "a.ts": "export * from \"zlib\";\nexport { createSocket } from \"node:dgram\";\n",
+    "a.ts": "export * from \"zlib\";\nexport { isatty } from \"node:tty\";\n",
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Response compression", "UDP sockets"], ["Jest-style test API", "The rest of console", "node:http server shim"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Response compression", "Terminal detection and styled text"], ["Jest-style test API", "The rest of console", "node:http server shim"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
   });
   // The global URL and URLSearchParams are std's, but Fish refuses importing them from url, and
@@ -525,24 +549,26 @@ test("child_process's sync calls are std's, and spawn still waits", () => {
 
 test("the report lists each Node built-in with its files and what replaces it", () => {
   project({
-    "a.ts": "import { createSocket } from \"node:dgram\";\nimport { createHash } from \"crypto\";\n",
-    "b.ts": "import dgram from \"node:dgram\";\nimport http from \"node:http\";\n",
-    "c.ts": "import vm from \"vm\";\nimport net from \"node:net\";\n",
+    "a.ts": "import { isatty } from \"node:tty\";\nimport { createHash } from \"crypto\";\n",
+    "b.ts": "import tty from \"node:tty\";\nimport http from \"node:http\";\n",
+    "c.ts": "import vm from \"vm\";\nimport net from \"node:net\";\nimport { createSocket } from \"node:dgram\";\n",
   }, (dir) => {
     const r = survey(dir);
     expect(r.builtins).toEqual([
-      { module: "dgram", files: 2, equivalent: { name: "UDP sockets", planned: true } },
+      { module: "tty", files: 2, equivalent: { name: "Terminal detection and styled text", planned: true } },
       { module: "crypto", files: 1, equivalent: { name: "Hashing", planned: true } },
+      { module: "dgram", files: 1, equivalent: { name: "UdpSocket", planned: false } },
       { module: "http", files: 1, equivalent: { name: "node:http server shim", planned: true } },
-      { module: "net", files: 1, equivalent: { name: "TcpListener and TcpStream", planned: false } },
+      { module: "net", files: 1, equivalent: { name: "TcpListener, TcpStream, UnixListener and UnixStream", planned: false } },
       { module: "vm", files: 1 },
     ]);
     const text = formatReport(r);
-    expect(text).toContain("  dgram               2 files  planned: UDP sockets");
+    expect(text).toContain("  tty                 2 files  planned: Terminal detection and styled text");
+    expect(text).toContain("  dgram               1 file   in std: UdpSocket");
     expect(text).toContain("  http                1 file   planned: node:http server shim");
     expect(text).toContain("  vm                  1 file   nothing planned");
-    expect(text).toContain("  net                 1 file   in std: TcpListener and TcpStream");
-    expect(JSON.parse(fishc("survey", dir, "--json").stdout.toString()).builtins).toHaveLength(5);
+    expect(text).toContain("  net                 1 file   in std: TcpListener, TcpStream, UnixListener and UnixStream");
+    expect(JSON.parse(fishc("survey", dir, "--json").stdout.toString()).builtins).toHaveLength(6);
   });
   project({ "a.ts": "import x from \"./x\";\n" }, (dir) => {
     expect(survey(dir)).not.toHaveProperty("builtins");

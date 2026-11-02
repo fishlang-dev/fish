@@ -180,21 +180,22 @@ export function featureOf(id: string, module?: string): string | undefined {
 const STD = (name: string) => ({ name, planned: false });
 const PLANNED = (title: string) => ({ name: title, planned: true });
 const BUILTINS = new Map<string, { name: string; planned: boolean }>([
-  // `net` is TCP here; a socket path (Unix domain sockets) isn't told apart from an address.
-  ["net", STD("TcpListener and TcpStream")], ["worker_threads", STD("spawn and spawnBlocking")], ["string_decoder", STD("TextDecoder")],
+  ["net", STD("TcpListener, TcpStream, UnixListener and UnixStream")], ["worker_threads", STD("spawn and spawnBlocking")], ["string_decoder", STD("TextDecoder")],
   ["timers/promises", STD("sleep")],
   // `fetch` and `serve` are the client and the server, but importing `http` itself needs its shim.
   ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
   ["fs/promises", STD("fs/promises, for readFile and writeFile")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative and normalize")], ["crypto", PLANNED("Hashing")],
-  ["https", PLANNED("TLS")], ["tls", PLANNED("TLS")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
+  // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
+  // Node's own connect and its sockets with events.
+  ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("import.meta.url and file URLs")], ["querystring", PLANNED("node:querystring")],
   ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Typed arrays and DataView")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
   // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
   // `buffer` is more than the base64 and hex std has: `Buffer` is a typed array with endian reads.
   // `crypto` is more than the random functions std has: an import of only those is portable.
-  ["readline", PLANNED("Reading standard input")], ["dgram", PLANNED("UDP sockets")],
+  ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
   ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
 ]);
@@ -516,7 +517,9 @@ function stdHas(n: Node, specifier: string): boolean {
 // equivalent, by the built-in each is filed under. Node's randomBytes gives a Buffer and std's a
 // u8[], so code calling Buffer methods on it, as 'randomBytes(16).toString("hex")', waits on typed
 // arrays. randomInt has no plan item, so it is filed under its own name, which nothing replaces.
-const NAME_MODULES: Record<string, Record<string, string>> = { crypto: { randomBytes: "buffer", randomInt: "crypto.randomInt" } };
+// Node's tls.connect takes options and gives a socket with events, where std's is awaited and
+// gives a TcpStream, so it waits on Node's tls.
+const NAME_MODULES: Record<string, Record<string, string>> = { crypto: { randomBytes: "buffer", randomInt: "crypto.randomInt" }, tls: { connect: "tls" } };
 
 // What a std module exports that ports as written: its functions and its consts, less those.
 function stdExports(name: string): Set<string> {
