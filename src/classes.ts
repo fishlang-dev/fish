@@ -453,7 +453,7 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
   // such name is renamed apart into this constructor's own scope, standing for what it means there.
   const outer = baseConstructor.scope ?? new Map<string, Type>();
   const names = new Map([...new Set(baseConstructor.params.flatMap((p) => refNames(p.type)))]
-    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, `${n} of ${typing.rec(base.type).name}`]));
+    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, apartName(n, typing.rec(base.type).name)]));
   if (names.size > 0) constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
   // Copies, so each constructor has its own parameters, and none of them is a property here.
   const params = baseConstructor.params.map((p) => {
@@ -483,6 +483,13 @@ function refNames(t: TypeNode | Param | Stmt[] | undefined): string[] {
   else walk("typeNode", t, each);
   return found;
 }
+
+// A name a base's member is renamed to in a derived class, apart from that class's own type
+// parameters. It stands for a type the base names, an interface included, rather than for a type
+// argument, so it never makes an instance a definition check.
+const APART = " of ";
+const apartName = (name: string, base: string) => `${name}${APART}${base}`;
+export const isApart = (name: string) => name.includes(APART);
 
 // A copy of a type with the type parameters `names` maps renamed.
 function renamed<T>(t: T, names: Map<string, string>): T {
@@ -611,7 +618,7 @@ export function copyFor({ arenas, ids, typing, defaulted, prologues }: Tables, c
   if (made !== undefined) return arenas.bodyOf(made);
   const outer = f.scope ?? new Map<string, Type>();
   const used = new Set([...refNames(f.returnType), ...f.params.flatMap((p) => refNames(p)), ...refNames(f.body)]);
-  const names = new Map([...used].filter((n) => c.scope.has(n) && (outer.has(n) || c.globals?.has(n))).map((n) => [n, `${n} of ${typing.rec(f.owner!).name}`]));
+  const names = new Map([...used].filter((n) => c.scope.has(n) && (outer.has(n) || c.globals?.has(n))).map((n) => [n, apartName(n, typing.rec(f.owner!).name)]));
   const scope = new Map([...outer].filter(([n]) => !c.scope.has(n)));
   for (const [n, to] of names) scope.set(to, outer.get(n) ?? c.globals!.get(n)!);
   const apart = names.size > 0 ? renumber("stmt", renamed(f.body, names), () => nextId(ids)) : f.body;

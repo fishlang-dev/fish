@@ -1,6 +1,6 @@
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId } from "./arenas.ts";
 import { holdsNode, type Instance } from "./check.ts";
-import { declareClass, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { declareClass, isApart, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { Tables } from "./compilation.ts";
 import { unsupported } from "./unsupported.ts";
@@ -489,7 +489,7 @@ export class Instancing {
     if (known) return this.host.tables.arenas.instanceOf(known);
     // Every type parameter, implicit ones included, needs a concrete binding to compile.
     const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...this.implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
-    const isConcrete = complete && [...bindings.values()].every((t) => this.host.instancingState.concreteness.concrete(t));
+    const isConcrete = complete && [...bindings].every(([name, t]) => isApart(name) || this.host.instancingState.concreteness.concrete(t));
     const generic = bindings.size > 0;
     const found = this.host.tables.arenas.addInstance({
       tables: this.host.tables, body: this.host.tables.arenas.addBody(f).bodyId, symbol: generic && isConcrete ? this.instanceSymbol(f.name, bindings, byKey) : f.name, bindings, concrete: isConcrete,

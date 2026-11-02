@@ -434,3 +434,44 @@ function main() {
   const b = new B<string>();
   b.show("hi");
 }
+
+// case: subclass_param_hides_interface
+// expect: 10
+// expect: 9
+// An inherited member taking a hidden interface still gets an instance per argument type.
+interface Bar {
+  v(): i64;
+}
+
+class Q implements Bar {
+  v(): i64 { return 9; }
+}
+
+abstract class A {
+  abstract k(): i64;
+  show(b: Bar): i64 {
+    return b.v() + this.k();
+  }
+}
+
+class B<Bar> extends A {
+  k(): i64 { return 1; }
+}
+
+class C {
+  n: i64 = 0;
+  show(this: Mut<this>, b: Bar): Mut<this> {
+    this.n = b.v();
+    return this;
+  }
+}
+
+class D<Bar> extends C {}
+
+function main() {
+  const b = new B<string>();
+  console.log(b.show(new Q()));
+  let d = new D<string>();
+  d.show(new Q());
+  console.log(d.n);
+}
