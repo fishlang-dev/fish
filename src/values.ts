@@ -594,6 +594,9 @@ export class Expressions implements Union {
   // A float literal only becomes a float type.
   adapt(this: Mut<this>, e: Expr, to: Type): boolean {
     e = this.rewrites.current(e);
+    // A loose brand takes its base's literals, which fit it.
+    const brand = this.recOf(to);
+    if (brand?.kind === "brand" && brand.loose) to = brand.base;
     if (!isNumeric(to)) return false;
     if (e.kind === "unsafe" || e.kind === "comptime") {
       if (!this.adapt(e.expr, to)) return false;
@@ -2737,7 +2740,7 @@ export class Expressions implements Union {
     if (arity !== undefined) {
       if (e.args.length !== arity) throw new CompileError("E0504", `${what} takes ${arity === 1 ? "one number" : "two numbers"}`, e.start, e.end);
       for (const a of e.args) {
-        const t = this.read(a);
+        const t = this.brandBase(this.read(a));
         if (t === "f64" || this.adapt(a, "f64")) continue;
         throw new CompileError("E0111", isNumeric(t) ? `${what} takes a '${this.typing.show("f64")}', an f64, not '${this.typing.show(t)}'; convert it with 'as', as in 'n as f64'` : `${what} takes a number, not '${this.typing.show(t)}'`, a.start, a.end);
       }
@@ -2747,7 +2750,7 @@ export class Expressions implements Union {
     if (!["abs", "sign", "min", "max"].includes(name)) throw new CompileError("E0801", `'Math' has no '${name}' in Fish yet`, e.start, e.end);
     const many = name === "min" || name === "max";
     if (many ? e.args.length === 0 : e.args.length !== 1) throw new CompileError("E0504", many ? `${what} takes one or more numbers` : `${what} takes one number`, e.start, e.end);
-    const given = e.args.map((a) => this.read(a));
+    const given = e.args.map((a) => this.brandBase(this.read(a)));
     given.forEach((t, i) => {
       if (!isNumeric(t)) throw new CompileError("E0504", `${what} takes numbers, not '${this.typing.show(t)}'`, e.args[i]!.start, e.args[i]!.end);
     });
@@ -2916,7 +2919,7 @@ export class Expressions implements Union {
       x = this.rewrites.replace(x, { ...x, value: from });
     }
     const array = from ? this.value(from) : t;
-    const lowered = this.typing.lower(this.isRefType(array) ? this.typing.rec(array).to : array) as ArrayType;
+    const lowered = this.typing.lowerKeepingBrands(this.isRefType(array) ? this.typing.rec(array).to : array) as ArrayType;
     if (this.isRefType(array)) this.coercions.set(x.value, lowered);
     this.clonable(this.typing.rec(lowered).element, x, "a spread");
     // Codegen converts each element from this type.
@@ -3081,7 +3084,7 @@ export class Expressions implements Union {
     if (!(callee.name in takes)) throw new CompileError("E0502", `'Atomic' has no method '${callee.name}'; it has 'load', 'store', 'add', 'sub', 'exchange' and 'compareExchange'`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling 'Atomic' methods", callee);
     if (e.args.length !== takes[callee.name]) throw new CompileError("E0504", `'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : `${takes[callee.name]} arguments`}`, e.start, e.end);
-    const of = this.typing.lower(this.typing.rec(t).of);
+    const of = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
     if ((callee.name === "add" || callee.name === "sub") && !isInteger(of)) throw new CompileError("E0504", `'${callee.name}' needs an integer 'Atomic', not '${this.typing.show(t)}'`, callee.start, callee.end);
     for (const a of e.args) {
       this.expect(a, of);
@@ -3120,7 +3123,7 @@ export class Expressions implements Union {
     if (!(callee.name in takes)) throw new CompileError("E0502", `'Cell' has no method '${callee.name}'; it has 'get', 'set' and 'replace'`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling 'Cell' methods", callee);
     if (e.args.length !== takes[callee.name]) throw new CompileError("E0504", `'${callee.name}' takes ${takes[callee.name] === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
-    const of = this.typing.lower(this.typing.rec(t).of);
+    const of = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
     if (callee.name === "get" && !this.typing.isCopy(of)) throw new CompileError("E0504", `'get' copies what a Cell holds, which a '${this.typing.show(of)}' can't be; use 'replace' to take it out and put another in`, callee.start, callee.end);
     for (const a of e.args) {
       this.expect(a, of);
@@ -3304,7 +3307,7 @@ export class Expressions implements Union {
     if (signalled) this.signalArgument(e.args.at(-1)!, `'${callee.name}'`);
     // The std's own non-waiting send, which a promise's resolve and reject make.
     if (callee.name === "send" || callee.name === "settle") {
-      const of = this.typing.lower(this.typing.rec(t).of);
+      const of = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
       this.expect(e.args[0]!, of);
       const given = this.value(e.args[0]!);
       this.coerce(e.args[0]!, given, of, `argument of type '${this.typing.show(given)}' is not assignable to parameter of type '${this.typing.show(of)}'`);
@@ -3335,7 +3338,7 @@ export class Expressions implements Union {
       return { type: "void", what: "'throwIfAborted'" };
     }
     if (callee.name === "close" || callee.name === "settle") return { type: "void", what: `'${callee.name}'` };
-    return { type: this.typing.leafFuture(callee.name as "acquire" | "send" | "receive", this.typing.lower(this.typing.rec(t).of), signalled ? this.abortError() : undefined, signalled), what: `'${callee.name}'` };
+    return { type: this.typing.leafFuture(callee.name as "acquire" | "send" | "receive", this.typing.lowerKeepingBrands(this.typing.rec(t).of), signalled ? this.abortError() : undefined, signalled), what: `'${callee.name}'` };
   }
 
   // A UdpSocket's `sendTo(bytes, host, port)`, `receiveFrom()`, `connect(host, port)`, `send(bytes)`
@@ -4072,7 +4075,7 @@ export class Expressions implements Union {
       if (e.args.length > 0) throw new CompileError("E0504", "'downgrade' takes no arguments", e.start, e.end);
       return { type: this.typing.sharedType(this.typing.rec(t).of, "Weak"), what: "'downgrade'" };
     }
-    const inner = this.typing.lower(this.typing.rec(t).of);
+    const inner = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
     const stored = typeof inner !== "string" && (this.typing.rec(inner).kind === "object" || this.typing.rec(inner).kind === "class") ? this.typing.field(inner, callee.name) : undefined;
     if (stored && this.isCallable(this.typing.lower(stored.type))) return this.callableCall(e, callee, this.typing.lower(stored.type) as DynType);
     if (which === "Rc" && callee.name === "read") return this.lockCall(e, callee, this.typing.interiorType("RwLock", this.typing.rec(t).of), true, true);
@@ -4128,7 +4131,7 @@ export class Expressions implements Union {
   private sharedField(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, t: SharedType): Type {
     if (this.linked(e)) throw unsupported("optional chains through shared values", e);
     if (this.typing.rec(t).which === "Weak") throw new CompileError("E0502", `a 'Weak' reaches its value only through 'upgrade()', which gives an 'Rc' while one is left, as in 'const p = ${this.placeText(this.bare(e.object))}.upgrade()'`, e.start, e.end);
-    const inner = this.typing.lower(this.typing.rec(t).of);
+    const inner = this.typing.lowerKeepingBrands(this.typing.rec(t).of);
     const ir = this.recOf(inner);
     if (ir?.kind === "class") this.ctx.classOf(inner as ClassType);
     const found = ir === undefined || ir.kind === "closure" ? undefined : this.typing.field(inner as Exclude<Type, string>, e.name);
@@ -4158,7 +4161,7 @@ export class Expressions implements Union {
     if (e.args.length !== 1) throw new CompileError("E0506", `'${method}' takes 1 argument, a callback like 'v => ...'`, e.start, e.end);
     const callback = e.args[0]!;
     if (callback.kind !== "arrow") throw unsupported(`callbacks passed to '${method}' by name; write the arrow function in place`, callback);
-    const held = this.typing.refType(this.typing.lower(this.typing.rec(t).of), method === "update");
+    const held = this.typing.refType(this.typing.lowerKeepingBrands(this.typing.rec(t).of), method === "update");
     const signature = this.typing.functionType(["value"], [held], "void");
     this.typing.lockCallbacks.set(signature, method);
     if (sharing) this.typing.sharedCallbacks.add(signature);
@@ -5316,6 +5319,17 @@ export class Expressions implements Union {
           }
           return to;
         }
+        // A brand is made and taken apart with 'as', between its base and what converts to it.
+        const [fb, tb] = [this.typing.unbranded(from), this.typing.unbranded(to)];
+        if (fb !== from || tb !== to) {
+          if (tb !== to && this.adapt(e.expr, tb)) return to;
+          if (isNumeric(fb) && isNumeric(tb)) return to;
+          if (fb === tb || this.typing.fits(fb, tb)) {
+            if (from !== tb) this.coerce(e.expr, from, tb, "");
+            return to;
+          }
+          throw new CompileError("E0111", `'${this.typing.show(from)}' can't be converted to '${this.typing.show(to)}' with 'as'`, e.start, e.end);
+        }
         // A bigint becomes a number with 'as', truncated to an integer type's bits as
         // 'BigInt.asIntN' does; a number becomes a bigint only through 'BigInt(x)'.
         if (to === "bigint" && from !== "bigint") throw new CompileError("E0111", `'${this.typing.show(from)}' converts to a bigint with 'BigInt(x)', not 'as'`, e.start, e.end);
@@ -5435,7 +5449,9 @@ export class Expressions implements Union {
           return this.typeOf(this.become(e, { id: nextId(this.ids), kind: "binary", op: "||", left: removed, right: { id: nextId(this.ids), kind: "bool", value: true, ...at }, ...at }));
         }
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
-        const type = this.operand(e.operand);
+        const operand = this.operand(e.operand);
+        // A brand's operators work on its base; a unit negated keeps its unit.
+        const type = this.typing.unbranded(operand);
         // The smallest i64 is written as the negation of a literal one past the largest.
         if (e.op === "-" && e.operand.kind === "int" && e.operand.value === I64_MAX + 1n) this.ctx.exprsState.fitted.add(e.operand);
         if (e.op === "!" ? type !== "boolean" : type !== "bigint" && (e.op === "~" ? !isInteger(type) : !isNumeric(type))) {
@@ -5444,7 +5460,8 @@ export class Expressions implements Union {
         if (e.op === "-" && isInteger(type) && !INTEGERS[type].signed) {
           throw new CompileError("E0110", `'${this.typing.show(type)}' is unsigned, so it can't be negated; convert it to a signed type with 'as' first`, e.start, e.end);
         }
-        return type;
+        const brand = this.recOf(operand);
+        return e.op === "-" && brand?.kind === "brand" && brand.unit ? operand : type;
       }
       case "assign": {
         if (this.staticWrite(e)) throw new CompileError("E0705", "a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
@@ -5463,7 +5480,7 @@ export class Expressions implements Union {
         // A variable whose type is still open takes the integer type assigned to it.
         if (op === "=" && isInteger(assigned) && assigned !== target && this.ctx.infer(place, assigned)) return assigned;
         const type = op === "=" ? assigned
-          : op === "+" && target === "string" ? this.join(place, target, e.value, this.widen(e.value, assigned))
+          : op === "+" && this.typing.unbranded(target) === "string" ? this.join(place, target, e.value, this.widen(e.value, assigned))
           : op === "**" ? this.power(place, target, e.value, this.widen(e.value, assigned), e)
           : binaryType(this.typing, op, ...this.sameNumbers(place, target, e.value, this.widen(e.value, assigned)), e);
         // A parameter typed by an object type or interface takes any value with its members, so
@@ -5490,6 +5507,12 @@ export class Expressions implements Union {
         const entry = this.dictEntry(e.operand);
         if (entry) throw this.dictWrite(entry.place);
         const target = this.assignable(e.operand, true);
+        // A loose brand takes back the base `++` gives; a strict one or a unit only through `as`.
+        const brand = this.recOf(target);
+        if (brand?.kind === "brand" && isNumeric(brand.base)) {
+          if (brand.loose) return target;
+          throw new CompileError("E0103", `operator '${e.op}' gives a '${this.typing.show(brand.base)}', which a '${this.typing.show(target)}' is made from only with 'as'; write it as an assignment, like 'x = (x ${e.op[0]} 1) as ${this.typing.show(target)}'`, e.start, e.end);
+        }
         if (!isNumeric(target) && target !== "bigint") throw new CompileError("E0103", `operator '${e.op}' cannot be applied to type '${this.typing.show(target)}'`, e.start, e.end);
         return target;
       }
@@ -5706,6 +5729,13 @@ export class Expressions implements Union {
     return to;
   }
 
+  // A brand's base, which `Math` works on as it would on any of its values; a unit stays, since
+  // what `Math` gives would lose it.
+  private brandBase(t: Type): Type {
+    const r = this.recOf(t);
+    return r?.kind === "brand" && !r.unit ? r.base : t;
+  }
+
   // Whether an expression of only literals could take this number type.
   private adaptable(e: Expr, to: Type): boolean {
     e = this.rewrites.current(e);
@@ -5849,8 +5879,9 @@ export class Expressions implements Union {
   }
 
   // A value written into a string: text, or a number or boolean written as JavaScript would.
-  private joined(this: Mut<this>, e: Expr, type: Type, into: string) {
+  private joined(this: Mut<this>, e: Expr, type: Type, into: string): void {
     e = this.rewrites.current(e);
+    if (this.typing.unbranded(type) !== type) return this.joined(e, this.typing.unbranded(type), into);
     if (stringLike(this.typing, type) || enumText(this.typing, type)) {
       if (type !== "string") this.coerce(e, type, "string", "");
       return;
@@ -5868,8 +5899,10 @@ export class Expressions implements Union {
       return ["string", "string"];
     }
     if (left === right) return [left, right];
-    if (this.adapt(b, left)) return [left, left];
-    if (this.adapt(a, right)) return [right, right];
+    // A literal meeting a brand takes its base, which is what operators on a brand work in.
+    const [lb, rb] = [this.typing.unbranded(left), this.typing.unbranded(right)];
+    if (this.adapt(b, lb)) return [left, lb];
+    if (this.adapt(a, rb)) return [rb, right];
     return [left, right];
   }
 
@@ -5959,6 +5992,8 @@ export class Expressions implements Union {
       return;
     }
     if (isNumeric(type) && isNumeric(to)) throw new CompileError("E0101", `${message}; convert it with 'as ${this.typing.show(to)}'`, e.start, e.end);
+    // A brand is made from its base only by saying so.
+    if (tr?.kind === "brand" && !tr.loose && message !== "" && (type === tr.base || (isNumeric(type) && isNumeric(tr.base)))) throw new CompileError("E0101", `${message}; make one with 'as ${this.typing.show(to)}'`, e.start, e.end);
     if (tr?.kind === "ref" && (typeof type === "string" || this.typing.rec(type).kind !== "ref")) {
       this.borrow(e, type, to as RefType, message);
       return;
@@ -6270,7 +6305,7 @@ export class Expressions implements Union {
         continue;
       }
       const t = this.value(p.value);
-      const low = this.typing.lower(this.isRefType(t) ? this.typing.rec(t).to : t);
+      const low = this.typing.lowerKeepingBrands(this.isRefType(t) ? this.typing.rec(t).to : t);
       // An object-typed parameter stands for any type with its fields, which its bound names.
       const lr = this.recOf(low);
       const br = lr?.kind === "param" ? this.recOf(lr.bound) : undefined;
@@ -6523,9 +6558,10 @@ export class Expressions implements Union {
       throw new CompileError("E0109", `can't assign to '${target.name}' through '${this.typing.show(object)}'; narrow it to one member first`, target.start, target.end);
     }
     const found = typeof object !== "string" && this.typing.field(object, target.name)?.type;
-    // A pattern the field was declared with is what a write must match, though lowering made it a string.
+    // A pattern or brand the field was declared with is what a write must match, though lowering
+    // made it a string or the brand's base.
     const declared = this.types.get(target)!;
-    if (found && this.typing.holdsPattern(declared) && this.typing.lower(declared) === this.typing.lower(found)) return declared;
+    if (found && (this.typing.holdsPattern(declared) || this.typing.holdsBrand(declared)) && this.typing.lower(declared) === this.typing.lower(found)) return declared;
     return found || declared;
   }
 
@@ -6967,7 +7003,7 @@ export class Expressions implements Union {
   condition(this: Mut<this>, e: Expr) {
     const type = this.operand(e);
     if (this.typing.isOption(type)) throw new CompileError("E0102", `condition must be a boolean, not the Option '${this.typing.show(type)}'; check it with '!== null'`, e.start, e.end);
-    if (type !== "boolean") {
+    if (this.typing.unbranded(type) !== "boolean") {
       throw new CompileError("E0102", `condition must be a boolean, not '${this.typing.show(type)}'; compare explicitly, e.g. 'n !== 0'`, e.start, e.end);
     }
   }
@@ -6977,7 +7013,7 @@ export class Expressions implements Union {
 const isText = (typing: Typing, t: Type) => {
   if (typeof t === "string") return t === "string";
   const r = typing.rec(t);
-  return r.kind === "pattern" || (r.kind === "literal" && typeof r.value === "string" && !r.owner);
+  return r.kind === "pattern" || (r.kind === "literal" && typeof r.value === "string" && !r.owner) || (r.kind === "brand" && r.base === "string");
 };
 
 // A string enum's member, or a union of them, which joins into a string as its value.

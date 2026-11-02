@@ -20,6 +20,7 @@ export function layoutOf(typing: Typing): (t: Type) => string {
   return function llvm(t: Type): string {
     if (typeof t === "string") return PRIMITIVES[t];
     const r = typing.rec(t);
+    if (r.kind === "brand") return llvm(r.base);
     // A Rust type's handle is the pointer to its boxed value, the one field its class has.
     if (r.kind === "ref" || r.kind === "pointer" || r.kind === "handle" || r.kind === "shared" || r.kind === "block" || r.kind === "map" || r.kind === "regex" || r.kind === "recursive" || rustClassOf(typing, t)) return "ptr";
     if (r.kind === "array") return ARRAY;
@@ -49,6 +50,7 @@ export const byteSize = (typing: Typing, t: Type): usize => size(typing, t)[0];
 
 function size(typing: Typing, t: Type): [usize, usize] {
   const r = typeof t === "string" ? undefined : typing.rec(t);
+  if (r?.kind === "brand") return size(typing, r.base);
   if (r?.kind === "array") return [24, 8];
   if (r?.kind === "fixed") {
     const [bytes, align] = size(typing, r.element);

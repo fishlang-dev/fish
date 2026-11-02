@@ -124,7 +124,7 @@ function main() {
 }
 // expect: 1536 1536 7 17
 // case: intersection_primitive
-type Id = i64 & { __brand: "Id" }
+type Id = i64 & { a: i64 }
 
 function main() {}
 // error: intersections with primitive types are not supported yet

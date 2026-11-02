@@ -70,6 +70,9 @@ export type Instance = {
   depth: usize;
   // Its return type, written or inferred.
   returns: Type;
+  // Its parameters' and return types with their brands kept, which lowering forgets, for the
+  // type of a closure made from it.
+  branded?: { params: Map<LocalId, Type>; returns: Type };
   // Every value expression's type.
   types: NodeMap<Expr, Type>;
   // Each `JSON.stringify` argument's type before lowering, which keeps how fields were spelled.
@@ -991,6 +994,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     };
     const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
     const compiledIds = compiledInstances.map((i) => i.id);
+    this.typing.layOutForCodegen();
     return { instances: compiledIds, tables: this.tables, compilation: this.compilation, warnings: warnings(this.tables, compiledIds, required) };
   }
 
@@ -1275,6 +1279,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     instance.caught.forEach((t, s) => instance.caught.set(s, this.typing.lower(t)));
     instance.predicates?.forEach((p, e) => instance.predicates!.set(e, { ...p, type: this.typing.lower(p.type) }));
     if (instance.throws) instance.throws = this.typing.lower(instance.throws);
+    const kept = (t: Type) => this.typing.lowerKeepingBrands(t);
+    const params = new Map([...new Set(instance.locals.values())].filter((l) => this.arenas.localOf(l).param).map((l): [LocalId, Type] => [l, kept(this.arenas.localOf(l).type)]));
+    instance.branded = { params, returns: kept(instance.returns) };
     for (const local of new Set(instance.locals.values())) this.arenas.localOf(local).type = lowered(this.arenas.localOf(local).type);
     for (const table of [instance.calls, instance.setters]) table.forEach((target, e) => table.set(e, this.counterpart(this.arenas.instanceOf(target)).id));
     instance.returns = this.typing.lower(instance.returns);
@@ -1533,7 +1540,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       throw new CompileError("E0104", `'${f.name}' needs a return type annotation because it calls itself`, at.start, at.end);
     }
     this.checkBody(instance);
-    return instance.returns;
+    // What it was inferred to give, with the brands lowering left out of the compiled type.
+    return instance.branded?.returns ?? instance.returns;
   }
 
   // The check of a generic body as written, before an instance's: a generic function's
@@ -1807,7 +1815,7 @@ class BodyChecker implements Context, Outer, Sight {
     this.yielded = this.generatorType && this.declared ? this.cx.typing.generatorElement(this.declared, this.f.async === true) : undefined;
     // What `next(x)` sends, which a `yield` whose value is used gives.
     this.sends = this.generatorType && this.declared ? this.cx.typing.generatorSends(this.declared) : undefined;
-    if (this.generatorType && this.sends !== undefined) this.cx.typing.rec(this.generatorType).sends = this.instance.concrete ? this.cx.typing.lower(this.sends) : this.sends;
+    if (this.generatorType && this.sends !== undefined) this.cx.typing.rec(this.generatorType).sends = this.instance.concrete ? this.cx.typing.lowerKeepingBrands(this.sends) : this.sends;
     if (this.generatorType && this.declared && !this.yielded) throw new CompileError("E0606", `${this.f.async ? "an async" : "a"} generator function's return type is '${this.generatorName}<T>', the type of what it yields`, this.f.returnType!.start, this.f.returnType!.end);
     if (this.generatorType) this.declared = undefined;
     if (this.yielded && this.cx.typing.holdsRef(this.yielded)) throw unsupported("generators yielding references", this.f.returnType!);
@@ -2097,7 +2105,7 @@ class BodyChecker implements Context, Outer, Sight {
     if (this.generatorType) {
       if (!this.yielded) throw new CompileError("E0606", `this generator never yields, so what it gives can't be told; declare it as '${this.generatorName}<T>'`, (this.f.returnType ?? this.f).start, (this.f.returnType ?? this.f).end);
       const laid = (t: Type) => (this.instance.concrete ? this.cx.typing.lower(t) : t);
-      this.cx.typing.rec(this.generatorType).yields = laid(this.yielded);
+      this.cx.typing.rec(this.generatorType).yields = this.instance.concrete ? this.cx.typing.lowerKeepingBrands(this.yielded) : this.yielded;
       this.cx.typing.rec(this.generatorType).params = this.f.params.map((p, i) => ({ name: paramName(p), type: laid(this.params[i]!) }));
       // A generator method's frame holds its object, as an async method's future does.
       if (this.f.self && !this.f.self.constructor) this.cx.typing.rec(this.generatorType).params.unshift(receiverField(this.cx.typing, this.f.self, laid));
@@ -2111,7 +2119,8 @@ class BodyChecker implements Context, Outer, Sight {
       if (this.cx.typing.holdsRef(gives)) throw unsupported("async functions giving references", this.f.returnType ?? this.f);
       const laid = (t: Type) => (this.instance.concrete ? this.cx.typing.lower(t) : t);
       // An inferred result widens as a `let` does: an async `return "x"` gives a string.
-      this.cx.typing.rec(this.future).gives = laid(this.f.returnType ? gives : this.cx.typing.widenLet(gives));
+      const given = this.f.returnType ? gives : this.cx.typing.widenLet(gives);
+      this.cx.typing.rec(this.future).gives = this.instance.concrete ? this.cx.typing.lowerKeepingBrands(given) : given;
       this.cx.typing.rec(this.future).throws = this.errorType && laid(this.errorType);
       this.cx.typing.rec(this.future).params = this.f.params.map((p, i) => ({ name: paramName(p), type: laid(this.params[i]!) }));
       // An async method's future holds its object: borrowed, or owned under `Own<this>`.
@@ -2708,7 +2717,7 @@ class BodyChecker implements Context, Outer, Sight {
     // Calling an async arrow gives its future, whose frame holds a copy of what it captured.
     // An async arrow's call only makes its future, which carries what it throws.
     const throws = inner.future ? undefined : inner.throws && laid(inner.throws);
-    const type = madeBy(this.cx.typing.closureType(e.params.map((p) => writtenName(this.cx.tables, p)), e.params.map((p) => this.cx.localOf(inner.locals.get(p)!).type), inner.future ?? inner.returns, fields, moved[0]?.name, inner.concrete, throws), inner);
+    const type = madeBy(this.cx.typing.closureType(e.params.map((p) => writtenName(this.cx.tables, p)), e.params.map((p) => inner.branded?.params.get(inner.locals.get(p)!) ?? this.cx.localOf(inner.locals.get(p)!).type), inner.future ?? inner.branded?.returns ?? inner.returns, fields, moved[0]?.name, inner.concrete, throws), inner);
     // One throwing what the function type it is given as doesn't take can't be given as it.
     const given = expected && this.cx.typing.rec(expected);
     if (expected && given && throws && e.throws && !this.cx.typing.openThrows.has(expected) && !(given.throws && this.cx.typing.fits(throws, given.throws))) {
@@ -3043,7 +3052,7 @@ class BodyChecker implements Context, Outer, Sight {
         const type = this.exprs().read(s.discriminant);
         const r = this.cx.recOf(type);
         const union = r?.kind === "union" ? (type as UnionType) : undefined;
-        if (r && !union && r.kind !== "literal") throw unsupported("comparisons of objects", s.discriminant);
+        if (r && !union && r.kind !== "literal" && r.kind !== "brand") throw unsupported("comparisons of objects", s.discriminant);
         const defaults = s.cases.filter((c) => !c.test);
         if (defaults.length > 1) throw new CompileError("E0608", "a 'switch' can have only one 'default'", defaults[1]!.start, defaults[1]!.end);
         // The case bodies share one scope, as in JavaScript, but any case may be entered
@@ -3059,7 +3068,8 @@ class BodyChecker implements Context, Outer, Sight {
             const before = new Set(shared.values());
             let test = c.test && this.exprs().value(c.test);
             // A literal case takes the discriminant's type, or its union's one number type.
-            const numbers = union ? numberMembers(this.cx.tables.typing, union) : [type];
+            // A brand's cases are its base's values, as `===` compares them.
+            const numbers = union ? numberMembers(this.cx.tables.typing, union) : [this.cx.typing.unbranded(type)];
             if (test && test !== type && numbers.length === 1 && this.exprs().adapt(c.test!, numbers[0]!)) test = numbers[0]!;
             // A discriminant whose type is still open takes an integer case's.
             if (test && test !== type && isInteger(test) && !this.exprs().literalOnly(s.discriminant, false) && this.exprs().adapt(s.discriminant, test)) test = type;
@@ -3191,7 +3201,7 @@ class BodyChecker implements Context, Outer, Sight {
   awaitLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, name: string, mutable: boolean, through: Type, object: Type) {
     const yields = this.cx.typing.yieldsOf(object, true);
     const o = this.cx.recOf(object);
-    const channel = o?.kind === "block" && o.which === "Channel" ? this.cx.typing.lower(o.of) : undefined;
+    const channel = o?.kind === "block" && o.which === "Channel" ? this.cx.typing.lowerKeepingBrands(o.of) : undefined;
     if (yields === undefined && channel === undefined) {
       throw new CompileError("E0119", `'for await' loops over an async generator or a Channel, not '${this.cx.typing.show(through)}'`, s.right.start, s.right.end);
     }

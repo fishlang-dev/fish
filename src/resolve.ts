@@ -6,7 +6,7 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap, walk } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { unitPowers, isNumeric, type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./layout.ts";
@@ -538,6 +538,19 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // A package's interface or class is a JS handle of its shape.
     if (trait?.js) return this.typing.blockType("JsValue", this.interfaceOf(trait, args, t));
     if (trait) return this.interfaceOf(trait, args.map((t) => this.typing.heldArgument(t)), t);
+    // Brands and units, unless the program declares its own of the name.
+    if (t.name === "Unit") {
+      const [of, text] = t.args;
+      const base = of && args[0];
+      const powers = text?.kind === "literal" && text.value.kind === "string" ? unitPowers(text.value.value) : undefined;
+      if (t.args.length !== 2 || !isNumeric(base!) || !powers) throw new CompileError("E0116", "'Unit' takes a number type and its unit, like 'Unit<f64, \"m/s\">', the unit names with powers over at most one '/'", t.start, t.end);
+      if (Object.values(powers).every((p) => p === 0)) throw new CompileError("E0116", `the unit '${(text as { value: { value: string } }).value.value}' cancels to none, so this is a plain '${this.typing.show(base!)}'; write that instead`, t.start, t.end);
+      return this.typing.unitType(base!, powers);
+    }
+    if (t.name === "Brand") {
+      if (t.args.length !== 2) throw new CompileError("E0116", "'Brand' takes the type it brands and a tag naming it, like 'Brand<usize, \"UserId\">'", t.start, t.end);
+      return this.brand(args[0]!, args[1]!, t.args[0]!, t.args[1]!);
+    }
     // TypeScript's utility types, unless the program declares its own of the name.
     const utility = UTILITIES.get(t.name);
     if (utility) {
@@ -560,7 +573,33 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       return t.name === "Iterable" ? this.typing.iterableInterface(args[0]!) : this.typing.generatorInterface(args[0]!);
     }
     if (t.name === "this") throw new CompileError("E0105", "'this' as a type is supported only in a class's instance methods: in the return type, where it is the receiver's own class, and in parameter types, where it is the class that declares the method", t.start, t.end);
-    throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...ITERATORS, ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
+    throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "Brand", "Unit", "never", ...ITERATORS, ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
+  }
+
+  // TypeScript's brand idiom, `usize & { readonly __brand: "X" }`: a primitive and an object of
+  // one property, whose type names the brand. An optional property makes a loose brand, which
+  // the base fits too, as it does in TypeScript.
+  private brandIdiom(this: Mut<this>, nodes: TypeNode[], sides: Type[]): Type | undefined {
+    if (sides.length !== 2) return undefined;
+    const at = typeof sides[0] === "string" ? 0 : 1;
+    const [base, other] = [sides[at]!, sides[1 - at]!];
+    const r = this.recOf(other);
+    if (typeof base !== "string" || r?.kind !== "object" || r.tuple || r.fields.length !== 1) return undefined;
+    const field = r.fields[0]!;
+    const tag = field.optional === "added" ? this.typing.withoutNull(field.type) : field.type;
+    // A property of a plain type, as in `i64 & { a: i64 }`, describes a value rather than naming one.
+    if (typeof tag === "string") return undefined;
+    return this.brand(base, tag, nodes[at]!, nodes[1 - at]!, { field: field.name, ...(field.optional && { loose: true as const }) });
+  }
+
+  // A brand's base is a primitive, and its tag is known where it is written, since nothing infers
+  // a tag from a value.
+  private brand(this: Mut<this>, base: Type, tag: Type, baseNode: Span, tagNode: Span, how: Parameters<Typing["brandType"]>[2] = {}): Type {
+    if (typeof base !== "string" || base === "void" || base === "null" || base === "never") {
+      throw new CompileError("E0116", `a brand's base is a number, boolean, string or bigint type, not '${this.typing.show(base)}'`, baseNode.start, baseNode.end);
+    }
+    if (this.typing.holdsPart(tag, (u) => this.recOf(u)?.kind === "param")) throw unsupported("brand tags holding type parameters", tagNode);
+    return this.typing.brandType(base, tag, how);
   }
 
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
@@ -614,8 +653,15 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // is a combined bound: an interface with every side's fields and methods. A union of object
   // types as a side distributes, as in TypeScript: `A & (B | C)` is `(A & B) | (A & C)`.
   private intersection(this: Mut<this>, nodes: TypeNode[]): Type {
-    const sides = nodes.map((node): ObjectType | InterfaceType | UnionType => {
-      const s = this.resolveType(node);
+    const resolved = nodes.map((node) => this.resolveType(node));
+    // A generic alias checked before any use, as `type Brand<K, T> = K & { __brand: T }`, is
+    // known only per use.
+    const open = this.host.resolverState.deferring > 0 ? resolved.map((t) => openParam(this.typing, t, true)).find((t) => t) : undefined;
+    if (open) return open;
+    const branded = this.brandIdiom(nodes, resolved);
+    if (branded !== undefined) return branded;
+    const sides = nodes.map((node, i): ObjectType | InterfaceType | UnionType => {
+      const s = resolved[i]!;
       const t = this.recOf(s);
       if (t?.kind === "object" || t?.kind === "interface") return s as ObjectType | InterfaceType;
       if (t?.kind === "union" && t.members.every((m) => this.recOf(m)?.kind === "object")) return s as UnionType;
@@ -1061,7 +1107,7 @@ function merged(typing: Typing, a: ObjectType, b: ObjectType, from: Span, to: Sp
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { pattern: "template literal types", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", map: "maps and sets", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values", regex: "regexes", recursive: "types that hold themselves" };
+const SIDE_FORMS = { pattern: "template literal types", brand: "brands", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", map: "maps and sets", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values", regex: "regexes", recursive: "types that hold themselves" };
 
 const I64_MAX = (1n << 63n) - 1n;
 

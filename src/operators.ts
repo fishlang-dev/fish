@@ -21,6 +21,8 @@ export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
 
 // The result of a binary operator, or an error when its operands don't suit it.
 export function binaryType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type {
+  const branded = brandedType(typing, op, left, right, at);
+  if (branded !== undefined) return branded;
   // Value equality comes through Eq, which objects don't have yet. A literal's value is known.
   const comparable = (t: Type) => typeof t === "string" || ["literal", "pattern", "pointer"].includes(typing.rec(t).kind);
   if ((op === "===" || op === "!==") && (!comparable(left) || !comparable(right))) {
@@ -72,3 +74,34 @@ export function binaryType(typing: Typing, op: BinaryOp, left: Type, right: Type
 
 // The operators only integers have.
 const BITWISE = new Set<BinaryOp>(["&", "|", "^", "<<", ">>", ">>>"]);
+
+// A brand compares with itself and with its base, and arithmetic on it gives its base, as
+// TypeScript's does; two different brands don't mix.
+function brandedType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type | undefined {
+  const [l, r] = [typing.recOf(left), typing.recOf(right)];
+  if (l?.kind !== "brand" && r?.kind !== "brand") return undefined;
+  if ((l?.kind === "brand" && l.unit) || (r?.kind === "brand" && r.unit)) return unitResult(typing, op, left, right, at);
+  if (l?.kind === "brand" && r?.kind === "brand" && left !== right) {
+    throw new CompileError("E0111", `operator '${op}' can't mix '${typing.show(left)}' and '${typing.show(right)}'; convert one side with 'as'`, at.start, at.end);
+  }
+  return binaryType(typing, op, typing.unbranded(left), typing.unbranded(right), at);
+}
+
+// Units add, subtract and compare only with the same unit; multiplying and dividing combine
+// them, a plain number scaling one.
+function unitResult(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type {
+  const [l, r] = [typing.recOf(left), typing.recOf(right)];
+  const unitOf = (t: Type, b: typeof l) => (b?.kind === "brand" ? b.unit : isNumeric(t) ? {} : undefined);
+  const [lu, ru] = [unitOf(left, l), unitOf(right, r)];
+  const mix = () => new CompileError("E0111", `operator '${op}' can't mix '${typing.show(left)}' and '${typing.show(right)}'; a unit meets only the same unit, except that '*' and '/' combine them`, at.start, at.end);
+  if (!lu || !ru) throw mix();
+  const base = binaryType(typing, op, typing.unbranded(left), typing.unbranded(right), at);
+  if (op === "*" || op === "/") {
+    const powers = { ...lu };
+    for (const [n, p] of Object.entries(ru)) powers[n] = (powers[n] ?? 0) + (op === "*" ? p : -p);
+    return typing.unitType(base, powers);
+  }
+  if (BITWISE.has(op)) throw new CompileError("E0103", `operator '${op}' can't be applied to '${typing.show(l?.kind === "brand" ? left : right)}', a unit`, at.start, at.end);
+  if (left !== right) throw mix();
+  return base === "boolean" ? base : left;
+}
