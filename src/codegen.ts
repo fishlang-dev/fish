@@ -6976,6 +6976,16 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         emit(`${status} = call i32 @fsh_rt_fs_rm(ptr ${path}, i32 ${recursive}, i32 ${force}, ptr ${parts})`);
         break;
       }
+      case "pathRename":
+      case "fileCopy": {
+        const to = operand(e.args[1]!, e.args.slice(2));
+        const flags = name === "fileCopy" ? `i64 ${value(e.args[2]!)}, ` : "";
+        emit(`${status} = call i32 @fsh_rt_fs_${name === "fileCopy" ? "copyfile" : "rename"}(ptr ${path}, ptr ${to}, ${flags}ptr ${parts})`);
+        break;
+      }
+      case "pathUnlink":
+        emit(`${status} = call i32 @fsh_rt_fs_unlink(ptr ${path}, ptr ${parts})`);
+        break;
       case "dirMake": {
         const [recursive, out] = [temp(), alloca("ptr")];
         emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);

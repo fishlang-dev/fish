@@ -114,3 +114,42 @@ test("mkdirSync makes a directory, or with recursive its missing parents, as nod
     try { mkdirSync(p, { recursive }); } catch (e) { console.log(e.message, e.code, e.syscall, e.path === p); }
   }`, (dir) => writeFileSync(join(dir, "f"), "hi"));
 });
+
+test("renameSync, copyFileSync and unlinkSync give what node's give", () => {
+  const imports = `import { readFileSync, writeFileSync, statSync, lstatSync, existsSync, readdirSync, renameSync, copyFileSync, unlinkSync, constants } from "node:fs";\nimport * as fs from "fs";`;
+  compare("move", imports, `
+  renameSync("f", "a/g");
+  renameSync("a/g", "f");
+  copyFileSync("f", "c");
+  writeFileSync("c2", "long text here");
+  fs.copyFileSync("f", "c2");
+  copyFileSync("f", "c3", constants.COPYFILE_EXCL);
+  copyFileSync("f", "c4", fs.constants.COPYFILE_FICLONE);
+  copyFileSync("f", "f");
+  copyFileSync("lf", "cl");
+  console.log(readFileSync("c", "utf8"), readFileSync("c2", "utf8"), readFileSync("c3", "utf8"), readFileSync("f", "utf8"));
+  console.log(statSync("c").mode === statSync("f").mode, lstatSync("cl").isSymbolicLink());
+  unlinkSync("c");
+  unlinkSync("ln");
+  console.log(existsSync("c"), readdirSync("."));
+  const pairs: [string, string][] = [["nope", "a/h"], ["a/missing", "zz/g"], ["md", "x"]];
+  for (const [from, to] of pairs) {
+    try { renameSync(from, to); } catch (e) { console.log(e.message, e.code, e.syscall, e.path ?? "none"); }
+  }
+  const copies: [string, string, i64][] = [["f", "c3", 1], ["nope", "c5", 0], ["a", "c6", 0], ["f", "a", 0], ["f", "zz/c", 0], ["f", "c7", 8], ["f", "c8", 4]];
+  for (const [from, to, mode] of copies) {
+    // A mode out of range is node's RangeError, with no system call; Fish's IoError gives "".
+    try { copyFileSync(from, to, mode); } catch (e) { console.log(e.message, e.code, e.code === "ERR_OUT_OF_RANGE" ? "-" : e.syscall, e.path ?? "none"); }
+  }
+  for (const p of ["c", "a", "f/x"]) {
+    try { unlinkSync(p); } catch (e) { console.log(e.message, e.code, e.syscall, e.path ?? "none"); }
+  }
+  console.log(readdirSync("."));`, (dir) => {
+    writeFileSync(join(dir, "f"), "hi");
+    mkdirSync(join(dir, "a"));
+    mkdirSync(join(dir, "md"));
+    mkdirSync(join(dir, "x", "y"), { recursive: true });
+    symlinkSync("f", join(dir, "lf"));
+    symlinkSync("nowhere", join(dir, "ln"));
+  });
+});

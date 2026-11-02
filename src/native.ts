@@ -51,7 +51,9 @@ export const NATIVE = String.raw`
 #ifdef __APPLE__
 #include <sys/event.h>
 #include <mach-o/dyld.h>
+#include <copyfile.h>
 #else
+#include <sys/ioctl.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #endif
@@ -5691,6 +5693,7 @@ static const struct { int number; const char *code, *text; } fsh_errnos[] = {
   {EINVAL, "EINVAL", "invalid argument"}, {EIO, "EIO", "i/o error"}, {EBUSY, "EBUSY", "resource busy or locked"},
   {EAGAIN, "EAGAIN", "resource temporarily unavailable"}, {ENOTEMPTY, "ENOTEMPTY", "directory not empty"},
   {EXDEV, "EXDEV", "cross-device link not permitted"}, {EFBIG, "EFBIG", "file too large"},
+  {ENOSYS, "ENOSYS", "function not implemented"}, {ENOTSUP, "ENOTSUP", "operation not supported on socket"},
   {EBADF, "EBADF", "bad file descriptor"}, {ECHILD, "ECHILD", "no child processes"}, {ECONNREFUSED, "ECONNREFUSED", "connection refused"},
   {ECONNRESET, "ECONNRESET", "connection reset by peer"}, {EPIPE, "EPIPE", "broken pipe"},
   {ETIMEDOUT, "ETIMEDOUT", "connection timed out"}, {EADDRINUSE, "EADDRINUSE", "address already in use"},
@@ -6116,6 +6119,114 @@ int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str 
   }
   fsh_rt_free(at);
   fsh_rt_free(pending);
+  fsh_rt_free(c);
+  return result;
+}
+
+// A two-path call's failure, in Node's words: "ENOENT: no such file or directory, rename 'a' -> 'b'",
+// its path the first.
+static int32_t fsh_fs_failed_two(fsh_str **error, int number, const char *syscall, const char *from, const char *to) {
+  char code[32], text[200];
+  fsh_errno_words(number, code, sizeof code, text, sizeof text);
+  size_t size = strlen(code) + strlen(text) + strlen(syscall) + strlen(from) + strlen(to) + 24;
+  char *message = fsh_rt_alloc(size);
+  snprintf(message, size, "%s: %s, %s '%s' -> '%s'", code, text, syscall, from, to);
+  int32_t failed = fsh_io_parts(error, message, code, syscall, from);
+  fsh_rt_free(message);
+  return failed;
+}
+
+// renameSync.
+int32_t fsh_rt_fs_rename(fsh_str *from, fsh_str *to, fsh_str **error) {
+  char *a = fsh_rt_str_cstring(from), *b = fsh_rt_str_cstring(to);
+  int32_t result = !a || !b ? fsh_fs_failed_two(error, EINVAL, "rename", a ? a : "", b ? b : "")
+    : rename(a, b) != 0 ? fsh_fs_failed_two(error, errno, "rename", a, b) : 1;
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return result;
+}
+
+// The copy itself, as libuv makes it: 0 or an errno. On macOS copyfile(3) with every attribute;
+// elsewhere the bytes and the mode, a copy onto the same file left alone, and a failed copy's
+// destination removed.
+static int fsh_copy_file(const char *from, const char *to, int64_t mode) {
+#ifdef __APPLE__
+  if (faccessat(AT_FDCWD, to, R_OK | W_OK, AT_EACCESS) != 0 && errno != ENOENT) return errno;
+  if (mode & 4) return ENOSYS;
+  // copyfile(3) would copy a directory's attributes; Node's copy refuses one.
+  struct stat src;
+  if (stat(from, &src) == 0 && S_ISDIR(src.st_mode)) return ENOTSUP;
+  copyfile_flags_t flags = COPYFILE_ALL | (mode & 1 ? COPYFILE_EXCL : 0) | (mode & 2 ? COPYFILE_CLONE : 0);
+  return copyfile(from, to, NULL, flags) == 0 ? 0 : errno;
+#else
+  int in = open(from, O_RDONLY | O_CLOEXEC);
+  if (in < 0) return errno;
+  struct stat src, dst;
+  if (fstat(in, &src) != 0) {
+    int failure = errno;
+    close(in);
+    return failure;
+  }
+  int out = open(to, O_WRONLY | O_CREAT | O_CLOEXEC | (mode & 1 ? O_EXCL : 0), src.st_mode);
+  if (out < 0) {
+    int failure = errno;
+    close(in);
+    return failure;
+  }
+  int failure = 0;
+  if (!(mode & 1)) {
+    if (fstat(out, &dst) != 0) failure = errno;
+    else if (src.st_dev == dst.st_dev && src.st_ino == dst.st_ino) {
+      close(in);
+      close(out);
+      return 0;
+    } else if (ftruncate(out, 0) != 0) failure = errno;
+  }
+  if (!failure && fchmod(out, src.st_mode) != 0 && errno != EPERM) failure = errno;
+  int cloned = 0;
+  if (!failure && (mode & 6)) {
+    // FICLONE, written out as linux/fs.h defines it.
+    cloned = ioctl(out, 0x40049409, in) == 0;
+    if (!cloned && (mode & 4)) failure = errno;
+  }
+  char buffer[65536];
+  while (!failure && !cloned) {
+    ssize_t got = read(in, buffer, sizeof buffer);
+    if (got < 0 && errno == EINTR) continue;
+    if (got <= 0) {
+      if (got < 0) failure = errno;
+      break;
+    }
+    for (ssize_t put = 0; put < got && !failure;) {
+      ssize_t n = write(out, buffer + put, got - put);
+      if (n >= 0) put += n;
+      else if (errno != EINTR) failure = errno;
+    }
+  }
+  close(in);
+  if (close(out) != 0 && !failure) failure = errno;
+  if (failure) unlink(to);
+  return failure;
+#endif
+}
+
+// copyFileSync, its mode the bits of COPYFILE_EXCL (1), COPYFILE_FICLONE (2) and
+// COPYFILE_FICLONE_FORCE (4), checked first as Node checks it.
+int32_t fsh_rt_fs_copyfile(fsh_str *from, fsh_str *to, int64_t mode, fsh_str **error) {
+  if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
+  char *a = fsh_rt_str_cstring(from), *b = fsh_rt_str_cstring(to);
+  int failure = !a || !b ? EINVAL : fsh_copy_file(a, b, mode);
+  int32_t result = failure ? fsh_fs_failed_two(error, failure, "copyfile", a ? a : "", b ? b : "") : 1;
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return result;
+}
+
+// unlinkSync.
+int32_t fsh_rt_fs_unlink(fsh_str *path, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "unlink", "");
+  int32_t result = unlink(c) == 0 ? 1 : fsh_fs_failed(error, errno, "unlink", c);
   fsh_rt_free(c);
   return result;
 }

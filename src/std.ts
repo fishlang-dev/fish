@@ -4721,6 +4721,20 @@ export function mkdirSync(path: string, options: MakeDirectoryOptions | i64 = {}
   if (typeof options === "number") return dirMake(path, false, options);
   return dirMake(path, options.recursive ?? false, options.mode ?? 0o777);
 }
+
+export function renameSync(oldPath: string, newPath: string): void throws IoError {
+  pathRename(oldPath, newPath);
+}
+
+export const constants = { COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+
+export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
+  fileCopy(src, dest, mode);
+}
+
+export function unlinkSync(path: string): void throws IoError {
+  pathUnlink(path);
+}
 `,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
