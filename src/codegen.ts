@@ -559,7 +559,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   // Comptime gives what can be built into the program: numbers, booleans, strings, and arrays,
-  // objects, instances, unions and enums of them; a top-level const may also hold an Atomic or
+  // Maps, Sets, objects, instances, unions and enums of them; a top-level const may also hold an Atomic or
   // a Lock.
   function bakeable(type: Type, at: Span, constant = false) {
     // The first part of a type comptime can't make, or undefined.
@@ -570,7 +570,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       // A type holding itself isn't built into the program.
       if (typing.tiedBy(t)) return t;
       const parts = r.kind === "union" ? r.members : r.kind === "array" ? [r.element] : r.kind === "object" || r.kind === "variant" ? r.fields.map((f) => f.type)
-        : r.kind === "class" ? [...(r.base ? [r.base] : []), ...r.fields.map((f) => f.type)] : r.kind === "interior" && constant && r.which !== "Cell" ? [r.of] : undefined;
+        : r.kind === "class" ? [...(r.base ? [r.base] : []), ...r.fields.map((f) => f.type)] : r.kind === "map" ? (r.set ? [r.key] : [r.key, r.value]) : r.kind === "interior" && constant && r.which !== "Cell" ? [r.of] : undefined;
       if (!parts) return t;
       for (const p of parts) {
         const found = fault(p);
@@ -581,7 +581,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const part = fault(type);
     if (!part) return;
     const inside = part === type ? "" : ` (in '${typing.show(type)}')`;
-    const what = isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `'${typing.show(part)}'${inside} can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, objects, instances, unions and enums of them`;
+    const what = isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `'${typing.show(part)}'${inside} can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, Maps, Sets, objects, instances, unions and enums of them`;
     throw new CompileError("E1102", what, at.start, at.end);
   }
 
@@ -1154,13 +1154,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // `new Map<K, V>()` and `new Set<T>()`: an empty table, told how to drop its keys and values.
   // With `from`, the array whose pairs or members it takes over, a later key replacing an earlier.
   function mapNew(t: MapType, from: Expr | undefined): string {
-    const entry = entryType(t);
     // The array runs first, so a panic in it has no table to leave behind.
     const whole = from && owned(from);
-    const [size, keyAt, valueAt] = [offsetOf(entry), offsetOf(entry, 3), offsetOf(entry, 4)];
-    const drop = (part: Type) => (needsDrop(part) ? elementDrop(part) : "null");
-    const made = temp();
-    emit(`${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${typing.lower(typing.rec(t).key) === "string" ? 1 : 0}, ptr ${drop(typing.rec(t).key)}, ptr ${typing.rec(t).set ? "null" : drop(typing.rec(t).value)})`);
+    const made = emptyMap(t);
     if (!from || !whole) return made;
     const array = typing.rec((coercions.get(from) ?? types.get(from)) as ArrayType);
     const et = llvm(array.element);
@@ -1177,6 +1173,15 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       inserted(t, made, key, v);
     });
     emit(`call void @fsh_rt_free(ptr ${data})`);
+    return made;
+  }
+
+  function emptyMap(t: MapType): string {
+    const entry = entryType(t);
+    const [size, keyAt, valueAt] = [offsetOf(entry), offsetOf(entry, 3), offsetOf(entry, 4)];
+    const drop = (part: Type) => (needsDrop(part) ? elementDrop(part) : "null");
+    const made = temp();
+    emit(`${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${typing.lower(typing.rec(t).key) === "string" ? 1 : 0}, ptr ${drop(typing.rec(t).key)}, ptr ${typing.rec(t).set ? "null" : drop(typing.rec(t).value)})`);
     return made;
   }
 
@@ -10084,6 +10089,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         return made;
       }
       return llvm(type) === "i8" ? (v.value ? "1" : "0") : bake(v.value, r.of);
+    }
+    // A table is built at start-up, each entry inserted in the order comptime made it.
+    if (v && v.kind === "map" && r?.kind === "map") {
+      const made = emptyMap(type as MapType);
+      for (const [k, x] of v.entries.values()) inserted(type as MapType, made, bake(k, r.key), r.set ? undefined : bake(x, r.value));
+      return made;
     }
     if (v && v.kind === "array" && r?.kind === "array") {
       const n = String(v.items.length);
