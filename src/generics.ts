@@ -175,6 +175,8 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
   // `Generator<T>` against a generator matches what it yields.
   // A parameter of a generator interface, or one standing for a generator, yields too.
   if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && typing.yieldsOf(arg) !== undefined) return infer(tables, node.args[0]!, typing.yieldsOf(arg)!, names, bindings, at);
+  // `Iterable<T>` against anything a loop reads matches what it reads.
+  if (node.kind === "ref" && node.name === "Iterable" && node.args.length === 1 && !names.has(node.name) && typing.iteratedBy(arg) !== undefined) return infer(tables, node.args[0]!, typing.iteratedBy(arg)!, names, bindings, at);
   if (node.kind === "ref" && node.name === "AsyncGenerator" && node.args.length >= 1 && typing.yieldsOf(arg, true) !== undefined) return infer(tables, node.args[0]!, typing.yieldsOf(arg, true)!, names, bindings, at);
   // `FixedArray<T, N>` against a fixed array matches its element type.
   if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && a?.kind === "fixed") return infer(tables, node.args[0]!, a.element, names, bindings, at);
@@ -641,6 +643,8 @@ export class Instancing {
     if (decided.size === 0) return bound;
     const [element, asyncElement, promised] = [this.typing.generatorElement(bound), this.typing.generatorElement(bound, true), this.typing.promiseElement(bound)];
     if (element !== undefined) return this.typing.generatorInterface(this.typing.replaced(element, decided));
+    const iterable = this.typing.iterableElement(bound);
+    if (iterable !== undefined) return this.typing.iterableInterface(this.typing.replaced(iterable, decided));
     if (asyncElement !== undefined) return this.typing.asyncGeneratorInterface(this.typing.replaced(asyncElement, decided));
     if (promised !== undefined) return this.typing.promiseInterface(this.typing.replaced(promised, decided));
     const b = this.typing.rec(bound);

@@ -119,6 +119,11 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
   };
   const missing = (what: string, name: string) => `${what} '${name}' is missing in type '${typing.show(type)}' but required in type '${typing.rec(trait).name}'`;
   if (type === trait) return undefined;
+  // An array, a Map, a Set, a string or a generator is an `Iterable<T>` for exactly what a loop
+  // over it reads; a class is one through its `[Symbol.iterator]` method, checked as any method.
+  const iterable = typing.iterableElement(trait);
+  const gives = iterable === undefined ? undefined : typing.iteratedBy(type);
+  if (gives !== undefined) return typing.lower(gives) === typing.lower(iterable!) ? undefined : `it gives '${typing.show(gives)}', not '${typing.show(iterable!)}'`;
   const t = typeof type === "string" ? undefined : typing.rec(type);
   // A type parameter has what its bound has.
   if (t?.kind === "param") {

@@ -12,11 +12,11 @@ import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMembe
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
-import { TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
+import { ITERATOR, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
 import type { EnumInfo, EnumInstance } from "./enums.ts";
 import { EXPRESSION_FORMS, unsupported } from "./unsupported.ts";
-import { ITERATOR, isIteratorKey, knownKey, unknownKey } from "./keys.ts";
+import { isIteratorKey, knownKey, unknownKey } from "./keys.ts";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.ts";
 import { JSON_VALUE_NAME, STD_BASE } from "./std.ts";
 import { parseArgsArgs } from "./parseargs.ts";
@@ -2789,6 +2789,7 @@ export class Expressions implements Union {
     } else {
       const t = this.value(source);
       const held = this.isRefType(t) ? this.typing.rec(t).to : t;
+      if (this.typing.iterableElement(held) !== undefined) throw unsupported("'Array.from' over an 'Iterable' parameter", source);
       if (this.isArray(held)) made = f ? source : { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
       else if (stringLike(this.typing, held)) made = prelude("array chars", [source]);
       else if (this.typing.yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
@@ -2902,6 +2903,7 @@ export class Expressions implements Union {
     const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: nextId(this.ids), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
     let from: Expr | undefined;
     if (this.dictOf(held)) throw this.notIterable(source);
+    if (this.typing.iterableElement(held) !== undefined) throw unsupported("spreads of an 'Iterable' parameter", source);
     if (stringLike(this.typing, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array chars", ...at }, [source]);
     else if (this.typing.yieldsOf(held) !== undefined) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [source]);
     else if (this.iteratorCall(source, held)) from = made({ id: nextId(this.ids), kind: "ident", name: "array collect", ...at }, [this.iteratorCall(source, held)!]);
@@ -4702,7 +4704,11 @@ export class Expressions implements Union {
   // `source[Symbol.iterator]()`, when `held` is a class with that method: what iterating it runs.
   iteratorCall(this: Mut<this>, source: Expr, held: Type): Expr | undefined {
     const t = this.typing.lower(held);
-    if (this.recOf(t)?.kind !== "class" || !inherited(this.arenas, this.ctx.classOf(t as ClassType), "methods", ITERATOR)) return undefined;
+    const r = this.recOf(t);
+    // A parameter of an interface declaring the method has it in every instance.
+    const bound = r?.kind === "param" && this.typing.iterableElement(t) === undefined ? this.recOf(r.bound) : undefined;
+    const has = r?.kind === "class" ? inherited(this.arenas, this.ctx.classOf(t as ClassType), "methods", ITERATOR) !== undefined : bound?.kind === "interface" && bound.methods.some((m) => m.name === ITERATOR);
+    if (!has) return undefined;
     const at = { start: source.start, end: source.end };
     return { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: source, name: ITERATOR, optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
   }

@@ -212,6 +212,9 @@ export type TypeRecord = ObjectRecord | ClassRecord | InterfaceRecord | ParamRec
 // The record a type of `T` has.
 export type RecordOf<T> = T extends { readonly __record?: infer R } ? Exclude<R, undefined> : never;
 
+// The name a `[Symbol.iterator]` method takes, which no identifier or member read can spell.
+export const ITERATOR = "[Symbol.iterator]";
+
 // The ids the primitives key tables by, below every type record's.
 const PRIMITIVES: Extract<Type, string>[] = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "boolean", "void", "null", "never", "string", "bigint"];
 const PRIMITIVE_IDS = new Map(PRIMITIVES.map((p, i): [string, usize] => [p, i + 1]));
@@ -1542,6 +1545,41 @@ export class Typing {
     const r = this.rec(t);
     if (r.kind === "generator") return r.throws;
     return r.kind === "param" && r.concrete ? this.generatorThrows(r.concrete) : undefined;
+  }
+
+  private iterables = new TypeMap<InterfaceType, Type>();
+
+  // `Iterable<T>`: anything `for...of` reads `T`s from. Its one method is a class's way to be one;
+  // an array, a Map, a Set, a string and a generator are ones too.
+  iterableInterface(this: Mut<this>, t: Type): InterfaceType {
+    let found = this.generators.get(`iterable ${this.keyOf(t)}`);
+    if (!found) {
+      found = this.interfaceType(`Iterable<${this.show(t)}>`);
+      this.rec(found).methods.push({ name: ITERATOR, params: [], returns: this.generatorInterface(t) });
+      this.generators.set(`iterable ${this.keyOf(t)}`, found);
+      this.iterables.set(found, t);
+    }
+    return found;
+  }
+
+  // What an `Iterable<T>`, or a type parameter bounded by one, gives.
+  iterableElement(t: Type): Type | undefined {
+    const r = this.recOf(t);
+    if (r?.kind === "param") return r.bound && this.iterableElement(r.bound);
+    return r?.kind === "interface" ? this.iterables.get(t as InterfaceType) : undefined;
+  }
+
+  // What `t` gives as an `Iterable<T>` without a method of its own: a generator's values, an array's
+  // or a Set's members, a Map's `[key, value]` pairs, or a string's one-character strings.
+  iteratedBy(this: Mut<this>, t: Type): Type | undefined {
+    const held = this.lower(t);
+    if (held === "string") return "string";
+    const r = this.recOf(held);
+    if (r?.kind === "pattern" || (r?.kind === "literal" && typeof r.value === "string" && !r.owner)) return "string";
+    if (r?.kind === "generator") return r.async || r.throws ? undefined : r.yields;
+    if (r?.kind === "array" || r?.kind === "fixed") return r.element;
+    if (r?.kind === "map" && !r.dict) return r.set ? r.key : this.tupleType([r.key, r.value]);
+    return this.yieldsOf(held) ?? this.iterableElement(held);
   }
 
   // What a `Generator<T>`, or with `async` an `AsyncGenerator<T>`, yields, when the interface is one.

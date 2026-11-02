@@ -2,6 +2,7 @@ import { CompileError } from "./diag.ts";
 import type { ClassMember, Expr, Stmt, TypeMember } from "./parser.ts";
 import { forEachChild, Rewrites, walk, type AnyNode } from "./nodes.ts";
 import { rebuiltStmts } from "./rebuild.ts";
+import { ITERATOR } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 
 // Computed property names, `[key]`, whose key is known while compiling: an object or class has a
@@ -39,9 +40,6 @@ export function numberKey(e: Expr): string | undefined {
   const n = x.kind === "unary" && x.op === "-" ? x.operand : x;
   return n.kind === "int" || n.kind === "float" ? knownKey(x, () => "") : undefined;
 }
-
-// The name a `[Symbol.iterator]` method takes, which no identifier or member read can spell.
-export const ITERATOR = "[Symbol.iterator]";
 
 // Whether `key` is `Symbol.iterator`.
 export const isIteratorKey = (key: Expr): boolean => key.kind === "member" && key.name === "iterator" && key.object.kind === "ident" && key.object.name === "Symbol";

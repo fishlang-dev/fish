@@ -140,3 +140,108 @@ function main() {
 // expect: 4
 // expect: 5
 // expect: [ 4, 5 ]
+// case: iterable_parameter
+class Bag {
+  items: string[] = ["p", "q"];
+  *[Symbol.iterator](): Generator<string> { for (const s of this.items) yield s; }
+}
+function* gen(): Generator<string> { yield "g1"; yield "g2"; }
+function count(xs: Iterable<string>): i64 {
+  let n = 0;
+  for (const x of xs) { console.log(x); n++; }
+  return n;
+}
+function main() {
+  const arr = ["a", "b"];
+  console.log(count(arr));
+  const set = new Set<string>(["s"]);
+  console.log(count(set));
+  console.log(count(gen()));
+  const b = new Bag();
+  console.log(count(b));
+  console.log(count("hé"));
+}
+// expect: a
+// expect: b
+// expect: 2
+// expect: s
+// expect: 1
+// expect: g1
+// expect: g2
+// expect: 2
+// expect: p
+// expect: q
+// expect: 2
+// expect: h
+// expect: é
+// expect: 2
+// case: iterable_interface_and_iterator_types
+interface Numbers {
+  [Symbol.iterator](): Iterator<i64>;
+}
+class Evens implements Numbers {
+  n: i64 = 3;
+  *[Symbol.iterator](): IterableIterator<i64> { for (let i = 0; i < this.n; i++) yield i * 2; }
+}
+class Table {
+  names: string[] = ["x", "y"];
+  *keys(): IterableIterator<string> { for (const n of this.names) yield n; }
+  [Symbol.iterator](): IterableIterator<string> { return this.keys(); }
+}
+function total(ns: Ref<Numbers>): i64 {
+  let t = 0;
+  for (const n of ns) t += n;
+  return t;
+}
+function size<T>(xs: Ref<Iterable<T>>): i64 {
+  let n = 0;
+  for (const _x of xs) n++;
+  return n;
+}
+function main() {
+  const e = new Evens();
+  console.log(total(e));
+  const t = new Table();
+  for (const k of t) console.log(k);
+  console.log(size<string>(t), size([1, 2, 3]), size(new Map<string, i64>([["a", 1]])), size<i64>(e));
+}
+// expect: 6
+// expect: x
+// expect: y
+// expect: 2 3 1 3
+// case: iterable_parameter_not_iterable
+function count(xs: Iterable<string>): i64 {
+  let n = 0;
+  for (const _x of xs) n++;
+  return n;
+}
+function main() {
+  console.log(count(5));
+}
+// error: 7:21: error[E0101]: argument of type 'i64' is not assignable to parameter of type 'Iterable<string>'
+// case: iterable_parameter_wrong_element
+function count(xs: Iterable<string>): i64 {
+  let n = 0;
+  for (const _x of xs) n++;
+  return n;
+}
+function main() {
+  console.log(count([1, 2]));
+}
+// error: it gives 'i64', not 'string'
+// case: iterable_parameter_spread
+function all(xs: Iterable<string>): string[] {
+  return [...xs];
+}
+function main() {
+  console.log(all(["a"]));
+}
+// error: spreads of an 'Iterable' parameter are not supported yet
+// case: iterable_return_type
+function* letters(): Generator<string> { yield "a"; yield "b"; }
+function source(): Iterable<string> { return letters(); }
+function main() {
+  for (const s of source()) console.log(s);
+}
+// expect: a
+// expect: b

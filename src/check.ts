@@ -133,6 +133,10 @@ export type Instance = {
   // `for...of` loop's state lives in its frame.
   generator?: GeneratorType;
   frame?: { locals: Map<LocalId, usize>; loops: NodeMap<Stmt, usize>; awaits: NodeMap<Expr, usize> };
+  // Each `for...of` over an `Iterable<T>` parameter standing for a class here, and the
+  // `[Symbol.iterator]()` call it loops over instead. It isn't written into the body, which every
+  // instance shares.
+  iterators?: NodeMap<Stmt, Expr>;
 };
 
 // What a closure's body sees of the body it is written in, as it is where the closure is made.
@@ -287,7 +291,7 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
     const s = node as Stmt;
     if (of === "stmt" && s.kind === "forOf") {
       loops.set(s, fields.length);
-      const kept = iterated(instance, s.right);
+      const kept = iterated(instance, instance.iterators?.get(s) ?? s.right);
       const ref = typeof kept === "string" ? undefined : typing.rec(kept);
       const held = ref?.kind === "ref" ? ref.to : kept;
       const h = typeof held === "string" ? undefined : typing.rec(held);
@@ -2912,7 +2916,25 @@ class BodyChecker implements Context, Outer, Sight {
         if (left.declarations.length > 1 || d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
         if (d.type) throw new CompileError("E0004", "a 'for...of' variable can't have a type annotation; its type comes from what it loops over", d.type.start, d.type.end);
         const through = this.exprs().value(s.right);
-        const object = this.cx.isRef(through) ? this.cx.typing.rec(through).to : through;
+        const referred = this.cx.isRef(through) ? this.cx.typing.rec(through).to : through;
+        // An `Iterable<T>` parameter is looped over as what it stands for in an instance; at its
+        // definition, it gives its `T`s.
+        const element = this.cx.typing.iterableElement(referred);
+        const object = element === undefined ? referred : this.cx.typing.lower(referred);
+        const call = element === undefined ? undefined : this.exprs().iteratorCall(s.right, object);
+        if (call) {
+          (this.instance.iterators ??= new NodeMap()).set(s, call);
+          const made = this.exprs().value(call);
+          const error = this.cx.typing.generatorThrows(made);
+          if (error) this.raise(call, error, "this generator");
+        }
+        if (element !== undefined && (object === referred || call)) {
+          this.scopes.push(new Map());
+          this.declare(d.target.name, call ? this.cx.typing.yieldsOf(this.types.get(call)!)! : element, left.keyword === "let", false, left);
+          this.within({ stmt: s, kind: "loop" }, () => this.scoped(s.body));
+          this.scopes.pop();
+          return;
+        }
         const o = this.cx.recOf(object);
         // std's ServerWebSocket gives the messages its client sends.
         if (s.await && o?.kind === "class" && o.name === "ServerWebSocket" && this.classOf(object as ClassType).node.start >= STD_BASE) {
