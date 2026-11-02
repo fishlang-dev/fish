@@ -430,7 +430,7 @@ function newExpression(c: Mut<Cursor>): Expr {
 export function templateParts<T>(c: Mut<Cursor>, part: Parse<T>, rawOnly = false): { quasis: string[]; raw: string[]; parts: T[]; start: usize; end: usize } {
   const first = c.next();
   const start = first.start;
-  if (first.invalid && !rawOnly) throw first.invalid;
+  if (first.invalid !== undefined && !rawOnly) throw first.invalid;
   let quasis = [first.text];
   let raw = [first.raw ?? ""];
   let parts: T[] = [];
@@ -440,7 +440,7 @@ export function templateParts<T>(c: Mut<Cursor>, part: Parse<T>, rawOnly = false
     piece = c.token();
     if (piece.kind !== "templateMiddle" && piece.kind !== "templateTail") throw c.error("expected '}'");
     const next = c.next();
-    if (next.invalid && !rawOnly) throw next.invalid;
+    if (next.invalid !== undefined && !rawOnly) throw next.invalid;
     quasis.push(next.text);
     raw.push(next.raw ?? "");
   }
