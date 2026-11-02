@@ -282,7 +282,7 @@ test("the handshake's accept key is RFC 6455's, and no extension or subprotocol 
   }
 });
 
-test("fragments make one message, pings get pongs between them, and a close is echoed", async () => {
+test("fragments make one message, even splitting a character, pings get pongs between them, the 8-byte length form reads, and a close is echoed", async () => {
   const server = await start();
   try {
     const c = await rawClient(server.port, "/echo");
@@ -292,8 +292,11 @@ test("fragments make one message, pings get pongs between them, and a close is e
     c.send(0, "ted", { fin: true });
     c.send(2, Buffer.from([7, 8]), { fin: false });
     c.send(0, Buffer.from([9]));
+    c.send(2, Buffer.from([5, 6]), { claim: 2n });
+    c.send(1, Buffer.from([0xc3]), { fin: false });
+    c.send(0, Buffer.from([0xa9]));
     c.send(8, Buffer.concat([Buffer.from([11, 184]), Buffer.from("later")]));
-    expect(await c.rest()).toEqual([[10, "are you there"], [1, "fragmented"], [2, "\x07\x08\t"], [8, "3000 "]]);
+    expect(await c.rest()).toEqual([[10, "are you there"], [1, "fragmented"], [2, "\x07\x08\t"], [2, "\x05\x06"], [1, "é"], [8, "3000 "]]);
   } finally {
     await server.stop();
   }
@@ -314,6 +317,13 @@ test("protocol errors close the connection with RFC 6455's codes", async () => {
       ["/small", (c) => c.send(2, Buffer.alloc(11)), "1009 message too big"],
       ["/small", (c) => (c.send(1, "123456", { fin: false }), c.send(0, "78901")), "1009 message too big"],
       ["/small", (c) => c.send(1, "flood"), "1013 send buffer full"],
+      ["/echo", (c) => c.send(1, Buffer.from([0xc0, 0x80])), "1007 a text message must be UTF-8"],
+      ["/echo", (c) => c.send(1, Buffer.from([0xe0, 0x80, 0x80])), "1007 a text message must be UTF-8"],
+      ["/echo", (c) => c.send(1, Buffer.from([0xf4, 0x90, 0x80, 0x80])), "1007 a text message must be UTF-8"],
+      ["/echo", (c) => c.send(1, Buffer.from([0x61, 0xe2, 0x82])), "1007 a text message must be UTF-8"],
+      ["/echo", (c) => c.send(8, Buffer.from([3, 232, 0xc0, 0x80])), "1007 a close reason must be UTF-8"],
+      ["/small", (c) => c.send(2, Buffer.alloc(11), { claim: 11n }), "1009 message too big"],
+      ["/echo", (c) => c.send(2, "", { claim: 0x8000000000000000n }), "1009 message too big"],
       // A continuation claiming the largest length a frame can, after a fragment.
       ["/echo", (c) => (c.send(1, "a", { fin: false }), c.send(0, "", { claim: 0x7fffffffffffffffn })), "1009 message too big"],
     ];
