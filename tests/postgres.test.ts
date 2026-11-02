@@ -546,7 +546,13 @@ const lengthOnly = (kind: string, length: number) => {
   return head;
 };
 const HOSTILE: [string, Partial<Script>, string][] = [
+  ["a SCRAM nonce that doesn't extend the client's", { auth: "scram", challenge: () => "r=attacker,s=c2FsdA==,i=4096" }, "IoError the Postgres server sent a malformed SCRAM challenge"],
+  ["no SCRAM iterations", { auth: "scram", challenge: (nonce) => `r=${nonce}x,s=c2FsdA==,i=0` }, "IoError the Postgres server sent a malformed SCRAM challenge"],
   ["too many SCRAM iterations", { auth: "scram", challenge: (nonce) => `r=${nonce}x,s=c2FsdA==,i=2147483647` }, "IoError the Postgres server asks for 2147483647 SCRAM iterations, more than the 10000000 Fish allows, as hashing that many would hold a thread for minutes"],
+  ["a RowDescription shorter than its columns", { answer: () => ({ raw: Buffer.concat([message("1"), message("2"), message("T", int16(1), cstring("who")), ready()]) }) }, "IoError the Postgres server sent a malformed message"],
+  ["a DataRow value longer than its body", { answer: () => ({ raw: Buffer.concat([message("1"), message("2"), PRESENT, message("D", int16(1), int32(1000)), ready()]) }) }, "IoError the Postgres server sent a malformed message"],
+  ["a DataRow whose count isn't its columns'", { answer: () => ({ raw: Buffer.concat([message("1"), message("2"), PRESENT, message("D", int16(0), int32(3), Buffer.from("abc")), ready()]) }) }, "IoError the Postgres server sent a malformed message"],
+  ["a length under 4", { answer: () => ({ raw: Buffer.concat([message("1"), lengthOnly("N", -5), Buffer.alloc(64)]) }) }, "IoError the Postgres server sent a malformed message"],
   ["a message over 1 GiB", { answer: () => ({ raw: Buffer.concat([message("1"), lengthOnly("D", 1073741829)]) }) }, "IoError the Postgres server sent a message of 1073741830 bytes, more than the 1 GiB Postgres itself can send"],
 ];
 for (const [what, script, said] of HOSTILE) {
@@ -563,3 +569,15 @@ for (const [what, script, said] of HOSTILE) {
   }, 15_000);
 }
 
+test("COPY FROM STDIN is answered with CopyFail, and the connection goes on", async () => {
+  const fake = fakeServer({
+    auth: "trust",
+    answer: (sql) => (sql === "copy" ? { raw: Buffer.concat([message("1"), message("2"), message("n"), message("G", Buffer.from([0]), int16(0))]) } : { tag: "SELECT 0" }),
+  });
+  try {
+    expect(await run(binaries.copy, [fake.url()])).toBe("PostgresError 57014 COPY from stdin failed\nafter 0\n");
+    expect(fake.seen.map((x) => ("simple" in x ? x.simple : x.sql))).toEqual(["copy", "CopyFail: COPY FROM STDIN isn't supported by Fish's postgres module", "after"]);
+  } finally {
+    fake.server.stop(true);
+  }
+});
