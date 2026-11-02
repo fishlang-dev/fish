@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { newSession, type Session } from "./compilation.ts";
+import type { Session } from "./compilation.ts";
 
 // The runtime's `Math` functions: src/runtime/math.cpp over LLVM libc's correctly rounded ones,
 // and CORE-MATH's hyperbolic ones, both vendored. Compiling them takes seconds, so each clang
@@ -52,9 +52,11 @@ export type Unit = { name: string; args: string[]; stdin?: string; inputs: strin
 // `mathUnits`: the Math runtime's objects to compile.
 export type BuildSession = Session & { clang?: string; digests: Map<string, string>; compiling: Map<string, Promise<string>>; mathUnits?: Unit[] };
 
-// `session` given the caches building needs.
-export function buildSession(session: Session = newSession()): BuildSession {
-  return Object.assign(session, { digests: new Map<string, string>(), compiling: new Map<string, Promise<string>>() });
+// `session` given the caches building needs, keeping any it already has.
+export function buildSession(session: Session & Partial<BuildSession>): BuildSession {
+  session.digests ??= new Map();
+  session.compiling ??= new Map();
+  return session as BuildSession;
 }
 
 // `clang --version`, which names the target as well as the compiler, run once a session.
