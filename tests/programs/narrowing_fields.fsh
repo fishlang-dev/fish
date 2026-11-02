@@ -669,3 +669,96 @@ async function main() {
   print(v)
 }
 // expect: 7
+// case: narrowing_fields_setter
+type Leaf = { kind: "leaf"; v: i64 }
+class A {
+  item: Leaf | string | null
+  n: i64
+  constructor() { this.item = { kind: "leaf", v: 7 }; this.n = 0 }
+  set x(v: i64) { this.n = v; this.item = "gone" + "!" }
+}
+function main() {
+  let a = new A()
+  if (a.item !== null && typeof a.item !== "string") { a.x = 3; print(a.item.v) }
+}
+// error: 10:71: error[E0502]: property 'v' does not exist on type 'null | string | { kind: "leaf"; v: i64 }'
+// case: narrowing_fields_setter_on_this
+type Leaf = { kind: "leaf"; v: i64 }
+class A {
+  item: Leaf | string | null
+  n: i64
+  constructor() { this.item = { kind: "leaf", v: 7 }; this.n = 0 }
+  set x(v: i64) { this.n = v; this.item = "gone" + "!" }
+  go(this: Mut<this>): i64 {
+    if (this.item !== null && typeof this.item !== "string") { this.x = 3; return this.item.v }
+    return 0
+  }
+}
+function main() { let a = new A(); print(a.go()) }
+// error: 8:83: error[E0502]: property 'v' does not exist on type 'null | string | { kind: "leaf"; v: i64 }'
+// case: narrowing_fields_setter_on_field_of_this
+type Leaf = { kind: "leaf"; v: i64 }
+class In {
+  item: Leaf | string | null
+  constructor() { this.item = { kind: "leaf", v: 7 } }
+  set x(v: i64) { this.item = "gone" + "!" }
+}
+class A {
+  inner: In
+  constructor() { this.inner = new In() }
+  go(this: Mut<this>): i64 {
+    if (this.inner.item !== null && typeof this.inner.item !== "string") { this.inner.x = 3; return this.inner.item.v }
+    return 0
+  }
+}
+function main() { let a = new A(); print(a.go()) }
+// error: 11:101: error[E0502]: property 'v' does not exist on type 'null | string | { kind: "leaf"; v: i64 }'
+// case: narrowing_fields_setter_updated
+type Leaf = { kind: "leaf"; v: i64 }
+class A {
+  item: Leaf | string | null
+  n: i64
+  constructor() { this.item = { kind: "leaf", v: 7 }; this.n = 0 }
+  get x(): i64 { return this.n }
+  set x(v: i64) { this.n = v; this.item = "gone" + "!" }
+}
+function main() {
+  let a = new A()
+  if (a.item !== null && typeof a.item !== "string") { a.x += 1; print(a.item.v) }
+  let b = new A()
+  if (b.item !== null && typeof b.item !== "string") { b.x++; print(b.item.v) }
+}
+// error: 11:72: error[E0502]: property 'v' does not exist on type 'null | string | { kind: "leaf"; v: i64 }'
+// case: narrowing_fields_setter_updated_by_increment
+type Leaf = { kind: "leaf"; v: i64 }
+class A {
+  item: Leaf | string | null
+  n: i64
+  constructor() { this.item = { kind: "leaf", v: 7 }; this.n = 0 }
+  get x(): i64 { return this.n }
+  set x(v: i64) { this.n = v; this.item = "gone" + "!" }
+}
+function main() {
+  let a = new A()
+  if (a.item !== null && typeof a.item !== "string") { a.x += 1 }
+  let b = new A()
+  if (b.item !== null && typeof b.item !== "string") { b.x++; print(b.item.v) }
+}
+// error: 13:69: error[E0502]: property 'v' does not exist on type 'null | string | { kind: "leaf"; v: i64 }'
+// case: narrowing_fields_setter_in_closure
+type Leaf = { kind: "leaf"; v: i64 }
+class A {
+  item: Leaf | string | null
+  n: i64
+  constructor() { this.item = { kind: "leaf", v: 7 }; this.n = 0 }
+  set x(v: i64) { this.n = v; this.item = "gone" + "!" }
+}
+function main() {
+  let a = new A()
+  if (a.item !== null && typeof a.item !== "string") {
+    const f = () => { a.x = 3 }
+    f()
+    print(a.item.v)
+  }
+}
+// error: 13:11: error[E0502]: property 'v' does not exist on type 'null | string | { kind: "leaf"; v: i64 }'

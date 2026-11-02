@@ -2097,14 +2097,17 @@ class BodyChecker implements Context, Outer, Sight {
     return true;
   }
 
-  // A closure's change to what it captures, which a call of it could make at any time.
+  // A closure's change to what it captures, which a call of it could make at any time, so all
+  // that was known of the root's fields is forgotten.
   changesLocal(this: Mut<this>, l: Local, path: string, action: string, target: Expr, throughMut: boolean) {
     this.closureChanged.add(String(l.localId));
+    this.changesPath(l, "", action, target);
     this.exprs().changesLocal(l, path, action, target, throughMut);
   }
 
   changesThis(this: Mut<this>, path: string, action: string, target: Expr) {
     this.closureChanged.add("this");
+    this.changesPath("this", "", action, target);
     this.exprs().changesThis(path, action, target);
   }
 

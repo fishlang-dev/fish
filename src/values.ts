@@ -6630,7 +6630,7 @@ export class Expressions implements Union {
     if (reads && this.value(target) !== type) {
       throw new CompileError("E0705", `the getter and setter of '${target.name}' must have the same type`, target.start, target.end);
     }
-    this.changeable(target, "assign to");
+    this.changeable(target, "assign to", true);
     this.setters.set(target, this.ctx.instanceOf(setter).id);
     this.types.set(target, type);
     return type;
@@ -6689,12 +6689,15 @@ export class Expressions implements Union {
   // Checks that a place, already typed, may change. `const` is deeply immutable, so no field
   // of a constant can change, and `this` changes only in a constructor or a method declared
   // `this: Mut<this>`.
-  private changeable(this: Mut<this>, target: Expr, action: string) {
+  // A setter changes its whole object, whatever field it is named for: `setter` says one runs.
+  private changeable(this: Mut<this>, target: Expr, action: string, setter = false) {
     target = this.rewrites.current(target);
     // Below a read through a Dyn, the place is part of a copy.
     if (this.readCopy(target) && !this.computed.has(target)) throw new CompileError("E0211", `cannot ${action} this: it is part of a value read through a Dyn, which gives a copy, so the change would be lost; change it through a method`, target.start, target.end);
     let root = this.bare(target);
     let path = "";
+    // The part of the path naming the field the setter is for.
+    let named: string | undefined;
     // Through a mutable reference anything below it may change, whatever variable holds the
     // reference, as long as nothing above it is shared.
     let throughMut = false;
@@ -6717,6 +6720,8 @@ export class Expressions implements Union {
       // A rest tuple's element is named by its place in the tuple, its array left unsaid.
       if (root.kind === "index" && root.index.kind === "int" && this.restStarts.has(root.object)) path = `[${BigInt(this.restStarts.get(root.object)!) + root.index.value}]${path}`;
       else if (!(root.kind === "member" && this.restStarts.has(root))) path = `${root.kind === "member" ? (/^\d+$/.test(root.name) ? `[${root.name}]` : `.${shownName(root.name)}`) : "[...]"}${path}`;
+      // The last part, the field the setter is named for.
+      named ??= path;
       root = this.bare(root.object);
     }
     if (this.ctx.sharing && path === "" && this.isParamPath(root)) {
@@ -6727,6 +6732,8 @@ export class Expressions implements Union {
         throw new CompileError("E0304", `cannot ${action} '${this.placeText(target)}' as a whole inside 'update': ${why}; change its other fields one by one`, target.start, target.end);
       }
     }
+    // A setter may change any field of its object, as a method taking `Mut<this>` may.
+    if (setter && target.kind === "member") this.ctx.changesPath(root.kind === "ident" ? this.localAt(root)! : "this", path.slice(0, path.length - named!.length), `call the setter of '${target.name}' on`, target.object);
     if (root.kind === "this" || root.kind === "super") return this.changesThis(path, action, target);
     this.changesLocal(this.localAt(root)!, path, action, target, throughMut);
   }
