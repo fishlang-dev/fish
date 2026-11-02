@@ -100,3 +100,20 @@ function patternNames(p: unknown, names: string[] = []): string[] {
   else if (q.kind === "object") [...(q.props ?? []).map((x) => x.value), q.rest].forEach((x) => patternNames(x, names));
   return names;
 }
+
+// The roots of the fields and elements any assignment, `++`, `--` or destructuring in these
+// statements writes, `this` among them: a loop writing one may reach a field narrowed before it.
+export function fieldRoots(body: Stmt[]): Set<string> {
+  const roots = new Set<string>();
+  const add = (target: Expr | undefined) => {
+    if (target?.kind !== "member" && target?.kind !== "index") return;
+    let e: Expr = target;
+    while (e.kind === "member" || e.kind === "index" || e.kind === "nonNull") e = e.kind === "nonNull" ? e.expr : e.object;
+    roots.add(e.kind === "ident" ? e.name : e.kind === "this" ? "this" : "");
+  };
+  walk("stmt", body, ({ of, node: n }) => {
+    if (of === "expr") add(n.kind === "assign" ? n.target : n.kind === "update" ? n.operand : undefined);
+    if (of === "pattern" && n.kind === "expr") add(n.expr);
+  });
+  return roots;
+}

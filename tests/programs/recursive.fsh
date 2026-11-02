@@ -616,3 +616,20 @@ function f(e: Expr): i64 {
   };
 }
 function main() { console.log(f({ kind: "lit", v: 1 })); }
+// case: recursive_named_member_field_path_narrowing
+// A field path narrows through a member holding the union again, for reads and writes.
+// expect: 14 52
+// expect: 3 3
+type Lit = { kind: "lit"; v: i64 };
+type Add = { kind: "add"; l: Expr; v: i64 };
+type Expr = Lit | Add;
+function main1() {
+  let e: Expr = { kind: "add", l: { kind: "add", l: { kind: "lit", v: 1 }, v: 2 }, v: 3 };
+  if (e.kind === "add") { if (e.l.kind === "add") { e.l.v = 50; e.l.v += 1; e.l.v++; } }
+  if (e.kind === "add") { e.v++; e.v += 10; }
+  if (e.kind === "add") { const a = e.l; console.log(e.v, a.v); }
+}
+function rd(e: Ref<Expr>): i64 { if (e.kind === "add") { if (e.l.kind === "add") return e.l.v + e.l.l.v; return e.l.v; } return e.v; }
+function ow(e: Expr): i64 { if (e.kind === "add") { if (e.l.kind === "add") return e.l.v + e.l.l.v; return e.l.v; } return e.v; }
+function main2() { const e: Expr = { kind: "add", l: { kind: "add", l: { kind: "lit", v: 1 }, v: 2 }, v: 3 }; console.log(rd(e), ow(e)); }
+function main() { main1(); main2(); }

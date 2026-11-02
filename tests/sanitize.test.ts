@@ -117,6 +117,59 @@ function main() {
   expect(err).toMatch(/freed by thread T0 here:\n[^\n]*\n\s+#1 [^\n]* in fsh\.main [^\n]*main\.fsh:8/);
 });
 
+// A field a check narrowed is read, written and lent inside its union's payload, through a class's
+// boxed field and a parameter whose argument stores the field as a narrower type.
+test.skipIf(noAddress !== undefined)("narrowed fields run clean under the address sanitizer", () => {
+  const src = `class Node {
+  value: i64
+  next: Node | null
+  constructor(value: i64, next: Node | null) {
+    this.value = value
+    this.next = next
+  }
+  bump(this: Mut<this>) {
+    this.value = this.value + 10
+  }
+}
+type Box = { label: string | null }
+function shout(s: Mut<string>) {
+  s = s + "!"
+}
+function clear(o: Mut<string | null>) {
+  o = null
+}
+function len(b: Box): usize {
+  return b.label !== null ? b.label.length : 0
+}
+function reset(n: Mut<Node>) {
+  n.next = null
+}
+function main() {
+  let n = new Node(1, new Node(2, null))
+  for (let i = 0; i < 2; i++) {
+    if (n.next !== null) {
+      n.next.value = n.next.value + 3
+      n.next.bump()
+      console.log(n.next.value)
+      reset(n)
+    }
+  }
+  let b: Box = { label: "hi" }
+  if (b.label !== null) {
+    shout(b.label)
+    console.log(b.label)
+    clear(b.label)
+  }
+  const wide = { label: "abc", extra: 1 }
+  const empty = { label: null, extra: 2 }
+  console.log(len(b), len(wide), len(empty))
+}
+`;
+  const { code, out, err } = run("narrowed-fields", src, ["--sanitize", "address"]);
+  expect(err).toBe("");
+  expect([code, out]).toEqual([0, "15\nhi!\n0 3 0\n"]);
+});
+
 // Clang's -O0 code for AArch64 misread large aggregates passed to address-sanitized functions,
 // so fetch's init arrived empty and the request went out as a bare GET.
 test.skipIf(noAddress !== undefined)("an address-sanitized fetch sends the method, headers and body it was given", async () => {
