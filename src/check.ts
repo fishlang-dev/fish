@@ -2226,7 +2226,7 @@ class BodyChecker implements Context, Outer, Sight {
     const from = this.facts.findIndex((f) => f.has(l.localId));
     const loop = from < 0 ? undefined : this.loops.find((x) => x.facts > from);
     if (loop && this.narrowReads.slice(loop.reads).some((r) => r.local === l.localId && r.at !== at)) {
-      throw new CompileError("E0109", `can't lend '${l.name}' mutably here: it was read as narrowed earlier in this loop, by a check before the loop, and the next time round it may hold another member; check it inside the loop`, at.start, at.end);
+      throw new CompileError("E0109", `can't lend '${l.name}' mutably here: earlier in this loop it was read as narrowed by what was known before the loop, and the next time round it may hold another member; check or assign it inside the loop`, at.start, at.end);
     }
     this.forget(l, at);
   }
@@ -2251,9 +2251,24 @@ class BodyChecker implements Context, Outer, Sight {
   proves(e: Expr) {
     const proven = guard(this.cx.tables, e, this.types, this.locals as NodeMap<Expr, LocalId>, (l) => this.narrowable(l), (call) => this.predicate(call));
     const inside = this.written.filter((w) => w.at >= e.start && w.at < e.end);
-    if (inside.length === 0) return proven;
-    const keep = (f: Facts) => new Map([...f].filter(([l]) => !inside.some((w) => w.local === l)));
+    // A variable compared as declared, in a check it was already narrowed past, stays as narrow.
+    const declared = new Set<LocalId>();
+    walk("expr", e, ({ of, node }) => {
+      if (of === "expr" && node.kind === "ident" && this.exprsState.asDeclared.has(node)) declared.add(this.locals.get(node)!);
+    });
+    if (inside.length === 0 && declared.size === 0) return proven;
+    const keep = (f: Facts) => new Map([...f].filter(([l]) => !inside.some((w) => w.local === l)).map(([l, t]) => [l, declared.has(l) ? this.narrowedPast(l, t) : t] as const));
     return { yes: keep(proven.yes), no: keep(proven.no) };
+  }
+  // What a check on a variable read as declared leaves of what it was narrowed to.
+  narrowedPast(this: Mut<this>, id: LocalId, t: Type): Type {
+    const now = this.narrowed(this.cx.localOf(id));
+    const members = (x: Type): Type[] => {
+      const r = this.cx.recOf(x);
+      return r?.kind === "union" ? r.members : [x];
+    };
+    const kept = now === undefined ? [] : members(t).filter((m) => members(now).some((k) => this.cx.typing.fits(m, k)));
+    return kept.length === 0 ? t : this.cx.typing.unionType(kept);
   }
 
   // Nested functions go right after the declarations of the variables they use, as early as

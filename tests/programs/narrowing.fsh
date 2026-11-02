@@ -248,7 +248,7 @@ function main() {
     } while (n < 3 && bump(x))
   }
 }
-// error: 9:28: error[E0109]: can't lend 'x' mutably here: it was read as narrowed earlier in this loop, by a check before the loop, and the next time round it may hold another member; check it inside the loop
+// error: 9:28: error[E0109]: can't lend 'x' mutably here: earlier in this loop it was read as narrowed by what was known before the loop, and the next time round it may hold another member; check or assign it inside the loop
 // case: narrowing_lent_in_while_condition
 function bump(x: Mut<string | i64>): boolean { x = 5; return true }
 function main() {
@@ -260,7 +260,7 @@ function main() {
     }
   }
 }
-// error: 6:42: error[E0109]: can't lend 'x' mutably here: it was read as narrowed earlier in this loop
+// error: 6:42: error[E0109]: can't lend 'x' mutably here: earlier in this loop it was read as narrowed by what was known before the loop
 // case: narrowing_lent_by_closure
 // A closure lending a variable mutably forgets what was known of it where the closure is made.
 function bump(x: Mut<string | i64>) { x = 5 }
@@ -298,6 +298,63 @@ function main() {
   console.log(c, s, k)
 }
 // expect: 7 4 b
+// case: narrowing_lent_as_member
+// Lending a narrowed variable mutably as the member it was narrowed to keeps that member.
+function app(s: Mut<string>) { s = s + "!" }
+function addTo(xs: Mut<i64[]>, v: i64) { xs.push(v) }
+class C { n: i64 = 0 }
+function bumpC(c: Mut<C>) { c.n += 10 }
+function main() {
+  let x: string | i64 = "abc"
+  if (typeof x === "string") {
+    for (let i = 0; i < 3; i++) {
+      console.log(x.length)
+      app(x)
+    }
+    console.log(x)
+  }
+  let xs: i64[] | null = []
+  if (xs !== null) {
+    let i = 0
+    while (xs.length < 3) {
+      addTo(xs, i)
+      i++
+    }
+    console.log(xs.length)
+  }
+  let c: C | null = new C()
+  if (c !== null) {
+    bumpC(c)
+    console.log(c.n)
+  }
+  const k = () => {
+    if (c !== null) {
+      bumpC(c)
+      console.log(c.n)
+    }
+  }
+  k()
+}
+// expect: 3
+// expect: 4
+// expect: 5
+// expect: abc!!!
+// expect: 3
+// expect: 10
+// expect: 20
+// case: narrowing_redundant_literal_check
+// A literal check a narrowed variable can't match keeps what it was narrowed to.
+function main() {
+  let x: string | i64 = "abc"
+  if (typeof x === "string") {
+    if (x !== 5) console.log(x.length)
+    while (x === 5) {
+      console.log(x + 1)
+      break
+    }
+  }
+}
+// expect: 3
 // case: narrowing_reassigned_comptime
 function len(i: i64): i64 {
   let x: string | i64 = i

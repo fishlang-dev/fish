@@ -6114,12 +6114,11 @@ export class Expressions implements Union {
     }
     // A narrowed variable lent mutably is lent whole, as declared.
     const lent = e.kind === "ident" && this.typing.rec(to).mutable ? this.localAt(e) : undefined;
-    if (lent && !this.typing.holdsRef(lent.type)) {
+    // Lent as the member a check narrowed it to, it keeps that member, and the check holds.
+    if (lent && !this.typing.holdsRef(lent.type) && this.typing.sameLowered(lent.type, this.typing.rec(to).to)) {
       this.ctx.lendsWhole(lent, e);
-      if (type !== lent.type && this.typing.sameLowered(lent.type, this.typing.rec(to).to)) {
-        this.types.set(e, lent.type);
-        type = lent.type;
-      }
+      this.types.set(e, lent.type);
+      type = lent.type;
     }
     const exact = this.typing.sameLowered(type, this.typing.rec(to).to);
     // A type that holds itself may lend a part of a parameter's value as the parameter's type,
