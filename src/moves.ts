@@ -1449,8 +1449,9 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return e.kind === "binary" && e.op === "??" && typing.holdsRef(types.get(e)!);
   }
 
+  // `x!` reads from the place `x` is, as `key` names it, whatever the Option holds.
   function rootOf(e: Named): Named {
-    if ((e.kind === "nonNull" && (typing.optionRef(types.get(e.expr)) || redundantBang(e))) || transparent(e)) return rootOf((e as { expr: Expr }).expr);
+    if (e.kind === "nonNull" || transparent(e)) return rootOf((e as { expr: Expr }).expr);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
