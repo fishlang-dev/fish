@@ -7446,7 +7446,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     }
     const union = recOf(whole);
     if (union?.kind !== "union") return;
-    const [held, wrong, bad] = [holdsWhere(v, whole as UnionType, (m) => typing.fits(m, type)), temp(), temp()];
+    // An `unknown` holding any number holds JavaScript's `number`, read as an f64.
+    const gives = (m: Type) => (union.unknown ? typing.unknownGives(m, type) : typing.fits(m, type));
+    const [held, wrong, bad] = [holdsWhere(v, whole as UnionType, gives), temp(), temp()];
     emit(`${wrong} = xor i1 ${answer}, ${held}`);
     emit(`${bad} = select i1 ${answer}, i1 ${yes ? wrong : "false"}, i1 ${no ? wrong : "false"}`);
     const [fail, ok] = [label(), label()];

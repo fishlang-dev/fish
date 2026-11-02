@@ -3,7 +3,7 @@ import type { Value } from "./comptime.ts";
 import type { Names } from "./diag.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 import { Rewrites, WeakNodeMap, WeakNodeSet, type Id, type Ids } from "./nodes.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
 import type { RustTables } from "./rust.ts";
@@ -230,6 +230,8 @@ export type Tables = {
   promiseVariants: WeakNodeMap<Expr, { name: string; typeArgs: TypeNode[] }>;
   // The reads of a package's consts that can't be converted, refused once the program is checked.
   jsUses: Expr[];
+  // The values given to `JSON.stringify` holding an `unknown`, checked once its members are known.
+  unknownJson: Span[];
   // The calls into a package, whose arguments cross by copy, so nothing moves into them.
   jsCrossings: WeakNodeSet<Expr>;
   // The function each of a package's signatures is checked as, by its declaration.
@@ -392,6 +394,7 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     boxedMembers: new WeakNodeMap<Expr, DynType>(),
     promiseVariants: new WeakNodeMap<Expr, { name: string; typeArgs: TypeNode[] }>(),
     jsUses: [],
+    unknownJson: [],
     jsCrossings: new WeakNodeSet<Expr>(),
     jsBodies: new WeakNodeMap<Stmt, BodyId>(),
     jsClasses: new Map<string, Interface>(),

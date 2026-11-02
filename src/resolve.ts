@@ -457,6 +457,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return this.reference(t);
     if (t.name === "never" && t.args.length === 0) return "never";
+    if (t.name === "unknown" && t.args.length === 0) return this.typing.unknownType();
     if (t.name === "null" || t.name === "undefined") {
       if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
       return "null";
@@ -971,7 +972,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     const found = new Map<string, Type>();
     if (!this.matches(t.extends, check, found)) return this.resolveType(t.else);
     for (const name of names) {
-      if (!found.has(name)) throw new CompileError("E0114", `'infer ${name}' matched nothing in '${this.typing.show(check)}', since the optional field holding it is missing; TypeScript would give 'unknown', which Fish doesn't have`, t.extends.start, t.extends.end);
+      if (!found.has(name)) throw new CompileError("E0114", `'infer ${name}' matched nothing in '${this.typing.show(check)}', since the optional field holding it is missing; TypeScript would give 'unknown' for it`, t.extends.start, t.extends.end);
     }
     return this.withScope(new Map([...this.host.resolverState.scope, ...found]), () => this.resolveType(t.then));
   }
@@ -1156,7 +1157,7 @@ function merged(typing: Typing, a: ObjectType, b: ObjectType, from: Span, to: Sp
 }
 
 // What each other kind of type is called when it can't be a side of `&`.
-const SIDE_FORMS = { pattern: "template literal types", brand: "brands", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", map: "maps and sets", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values", regex: "regexes", recursive: "types that hold themselves" };
+const SIDE_FORMS = { pattern: "template literal types", brand: "brands", class: "classes", param: "type parameters", union: "unions", ref: "references", closure: "functions", function: "function types", array: "arrays", fixed: "fixed arrays", map: "maps and sets", variant: "enum members", generator: "generators", pointer: "raw pointers", future: "promises", handle: "join handles", interior: "atomics, locks and cells", shared: "shared values", block: "semaphores and channels", dyn: "Dyn values", regex: "regexes", recursive: "types that hold themselves", unknown: "unknown" };
 
 const I64_MAX = (1n << 63n) - 1n;
 
@@ -1301,7 +1302,7 @@ export function collection(typing: Typing, key: Type, value: Type, set: boolean,
 
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined", "unknown"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

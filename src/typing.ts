@@ -72,8 +72,15 @@ export type LiteralType = TypeId<LiteralRecord>;
 
 // A union holds a value of one of its members: a tag naming which, then that member's value.
 // It has no fields; reaching into one takes narrowing to a member first.
-export type UnionRecord = { kind: "union"; members: Type[]; fields: Field[]; name?: string };
+export type UnionRecord = { kind: "union"; members: Type[]; fields: Field[]; name?: string; unknown?: true };
 export type UnionType = TypeId<UnionRecord>;
+
+// `unknown`: a value of any type the program stores in one. While checking, nothing can be done
+// with it but narrow it; once every body is checked, `closeUnknown` makes it a union over every
+// type that went in, marked `unknown`, so narrowing it is a check of its tag. It moves, whatever
+// it holds, since what it holds isn't known where it is checked.
+export type UnknownRecord = { kind: "unknown"; name: string; fields: Field[] };
+export type UnknownType = TypeId<UnknownRecord>;
 
 // A borrow of a value that lives elsewhere: `Ref<T>` shared, `Mut<T>` mutable. It is a pointer
 // to the value, reads through to it, and copies like a pointer. A written lifetime names the
@@ -238,14 +245,14 @@ export function range(t: Integer): [bigint, bigint] {
 // it, which flattening keeps from nesting.
 // `never` is the type of an expression that never finishes, like a throw expression; it fits
 // anywhere, and a union drops it.
-export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | BrandType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType;
+export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | BrandType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType | UnknownType;
 
 // A type that isn't a primitive: its record's index in its program's arena, from 21 up, since
 // 1 to 20 are the primitives' ids. `R` is the record's kind, for tsc only.
 export type TypeId<R> = usize & { readonly __record?: R };
 
 // What a type's record holds.
-export type TypeRecord = ObjectRecord | ClassRecord | InterfaceRecord | ParamRecord | LiteralRecord | PatternRecord | BrandRecord | UnionRecord | RefRecord | ClosureRecord | FunctionRecord | ArrayRecord | FixedRecord | MapRecord | VariantRecord | GeneratorRecord | PointerRecord | FutureRecord | HandleRecord | InteriorRecord | SharedRecord | BlockRecord | DynRecord | RegexRecord | RecursiveRecord;
+export type TypeRecord = ObjectRecord | ClassRecord | InterfaceRecord | ParamRecord | LiteralRecord | PatternRecord | BrandRecord | UnionRecord | RefRecord | ClosureRecord | FunctionRecord | ArrayRecord | FixedRecord | MapRecord | VariantRecord | GeneratorRecord | PointerRecord | FutureRecord | HandleRecord | InteriorRecord | SharedRecord | BlockRecord | DynRecord | RegexRecord | RecursiveRecord | UnknownRecord;
 
 // The record a type of `T` has.
 export type RecordOf<T> = T extends { readonly __record?: infer R } ? Exclude<R, undefined> : never;
@@ -590,6 +597,9 @@ export class Typing {
         return r.concrete ? part(r.concrete) : undefined;
       case "union":
         return r.members.map(part).find((p) => p !== undefined);
+      // An unknown is compared only with primitives, which the comparison itself checks.
+      case "unknown":
+        return undefined;
       case "array":
       case "fixed":
         return part(r.element);
@@ -633,6 +643,9 @@ export class Typing {
         return r.concrete ? part(r.concrete) : undefined;
       case "union":
         return first(r.members);
+      // What an unknown holds prints, as nothing that doesn't goes in.
+      case "unknown":
+        return undefined;
       case "array":
       case "fixed":
         return part(r.element);
@@ -713,7 +726,7 @@ export class Typing {
     // A tuple copies when everything in it does, as a union does.
     // A copy of a mutable reference would be a second one, so a tuple holding one moves.
     if (r.kind === "object" && r.tuple === true) return r.fields.every((f) => this.isCopy(f.type) && !this.holdsMut(f.type));
-    return r.kind === "union" && r.members.every((t) => this.isCopy(t));
+    return r.kind === "union" && !r.unknown && r.members.every((t) => this.isCopy(t));
   }
 
   // Whether a value of `t` holds a mutable reference anywhere, which a copy would alias.
@@ -827,7 +840,8 @@ export class Typing {
       case "recursive": return [...r.args, r.of];
       case "brand": return [r.base, r.tag];
       case "pattern":
-      case "regex": return [];
+      case "regex":
+      case "unknown": return [];
     }
   }
 
@@ -1518,6 +1532,8 @@ export class Typing {
         return r.concrete ? part(r.concrete) : undefined;
       case "union":
         return first(r.members);
+      case "unknown":
+        return undefined;
       case "array":
       case "fixed":
         return part(r.element);
@@ -1755,6 +1771,9 @@ export class Typing {
   // and a literal whose base type is also a member adds nothing. A single member is itself.
   // An enum's union carries the enum's name, for messages.
   unionType(this: Mut<this>, parts: Type[], name?: string): Type {
+    // An `unknown` holds every other member already.
+    const unknown = parts.find((p) => this.isUnknown(p));
+    if (unknown !== undefined) return unknown;
     let flat = parts.flatMap((p) => { const r = this.recOf(p); return r?.kind === "union" ? r.members : [p]; }).filter((p, _, all) => p !== "never" || all.every((q) => q === "never"));
     // Regexes of different patterns are one \`RegExp\`, as every regex is a pointer to a program.
     const isRegex = (p: Type) => this.recOf(p)?.kind === "regex";
@@ -1793,6 +1812,63 @@ export class Typing {
     const js = (t: Type) => { const r = this.recOf(t); return r?.kind === "block" && r.which === "JsValue"; };
     return fitting.length > 0 || !js(type) ? fitting : members.filter(js);
   }
+
+  // The one `unknown` type of this program.
+  unknownType(this: Mut<this>): UnknownType {
+    this.unknownId ??= this.made<UnknownType>({ kind: "unknown", name: "unknown", fields: [] }, "unknown");
+    return this.unknownId;
+  }
+
+  isUnknown(t: Type | undefined): boolean {
+    const r = this.recOf(t);
+    return r?.kind === "unknown" || (r?.kind === "union" && r.unknown === true);
+  }
+
+  // Whether a value of `from` can be held by an `unknown`, noting the type it is held as. A type
+  // parameter of a definition stands for nothing yet, and each instance checks its own argument.
+  // A borrow, a function, a generator or a future can't be held, nor a value `console.log` can't
+  // print, so that every unknown prints, nor a value holding an `unknown` in place, which would
+  // make its layout hold itself.
+  private storesUnknown(this: Mut<this>, from: Type): boolean {
+    const r = this.recOf(from);
+    if (r?.kind === "param") return r.concrete === undefined || r.within === true || this.storesUnknown(r.concrete);
+    if (r?.kind === "union") return r.members.every((m) => this.storesUnknown(m));
+    if (from === "void" || r?.kind === "interface" || r?.kind === "function" || r?.kind === "closure" || r?.kind === "generator" || r?.kind === "future" || r?.kind === "handle") return false;
+    if (this.holdsRef(from) || this.holdsUnknownInPlace(from) || this.uninspectable(from) !== undefined) return false;
+    const held = this.lower(r?.kind === "literal" ? (r.owner?.of ?? this.baseOf(from as LiteralType)) : r?.kind === "variant" && r.of ? r.of : from);
+    for (const m of this.isUnknown(held) ? [] : (this.recOf(held)?.kind === "union" ? this.rec(held as UnionType).members : [held])) this.intoUnknown.add(m);
+    return true;
+  }
+
+  private holdsUnknownInPlace(t: Type): boolean {
+    if (this.isUnknown(t)) return true;
+    const r = this.recOf(t);
+    if (r === undefined) return false;
+    if (r.kind === "union") return r.members.some((m) => this.holdsUnknownInPlace(m));
+    if (r.kind === "fixed") return this.holdsUnknownInPlace(r.element);
+    if (r.kind === "class" && r.base !== undefined && this.holdsUnknownInPlace(r.base)) return true;
+    return (r.kind === "object" || r.kind === "class" || r.kind === "variant") && r.fields.some((f) => this.holdsUnknownInPlace(f.type));
+  }
+
+  // Once every body is checked, `unknown` becomes the union of every type the program stores in
+  // one, and of `null`, which an optional or defaulted `unknown` parameter is given when left out.
+  closeUnknown(this: Mut<this>): void {
+    if (this.unknownId === undefined) return;
+    const all = this.unionType([...this.intoUnknown, "null"]);
+    const members = this.recOf(all)?.kind === "union" ? this.rec(all as UnionType).members : [all];
+    this.arena[this.unknownId - 21] = { kind: "union", members, fields: [], name: "unknown", unknown: true };
+  }
+
+  // Whether an `unknown` holding a `member` gives it where a `to` is read, after narrowing: as
+  // itself, as a class it extends, or, for a number, as JavaScript's `number`, an f64.
+  unknownGives(this: Mut<this>, member: Type, to: Type): boolean {
+    if (member === to || this.isSubclass(member, to) || (to === "f64" && isNumeric(member))) return true;
+    const r = this.recOf(to);
+    return r?.kind === "union" && r.members.some((m) => this.unknownGives(member, m));
+  }
+
+  private unknownId?: UnknownType;
+  private intoUnknown = new TypeSet<Type>();
 
   typeParameter(this: Mut<this>, name: string, bound: Bound | undefined, within?: Type): ParamType {
     const t = this.made<ParamType>({ kind: "param", name, bound, fields: [], ...(within === undefined ? {} : { concrete: within, within: true as const }) }, `param ${this.declared++}`);
@@ -1963,7 +2039,7 @@ export class Typing {
     if (r.kind === "interface" && r.generic?.args.some((a) => this.lower(a) !== a)) return this.instanceInterface(t as InterfaceType, r.generic.args.map((t) => this.lower(t)));
     if (r.kind === "dyn" && this.rec(r.of).generic?.args.some((a) => this.lower(a) !== a)) return this.dynType(this.lower(r.of) as InterfaceType);
     if (r.kind === "dyn" && r.shown !== undefined) return this.dynType(r.of);
-    if (r.kind === "literal" || r.kind === "interface" || r.kind === "closure" || r.kind === "function" || r.kind === "generator" || r.kind === "future" || r.kind === "dyn" || r.kind === "regex") return t;
+    if (r.kind === "unknown" || (r.kind === "union" && r.unknown) || r.kind === "literal" || r.kind === "interface" || r.kind === "closure" || r.kind === "function" || r.kind === "generator" || r.kind === "future" || r.kind === "dyn" || r.kind === "regex") return t;
     if (r.kind === "param") return r.concrete && !r.within ? this.lower(r.concrete) : t;
     if (r.kind === "pattern") return "string";
     if (r.kind === "brand") return r.base;
@@ -2258,6 +2334,7 @@ export class Typing {
     }
     // In an instance, a type parameter and the concrete type it stands for are one value.
     if (from === to || this.sameLowered(from, to) || from === "never" || this.sameCallable(from, to)) return true;
+    if (this.isUnknown(target)) return this.storesUnknown(from);
     // So does a value of a type parameter fit as what it stands for, a literal as its base type.
     if (fr?.kind === "param" && fr.concrete !== undefined && this.fits(fr.concrete, to)) return true;
     // A future fits the `Promise<T>` describing it, as an async function's result.
