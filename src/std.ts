@@ -4789,6 +4789,22 @@ export async function lutimes(path: string, atime: f64 | Date, mtime: f64 | Date
 export async function chmod(path: string, mode: i64 | string): Promise<void> throws IoError {
   await spawnBlocking(() => chmodSync(path, mode));
 }
+
+export async function symlink(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): Promise<void> throws IoError {
+  await spawnBlocking(() => pathLink(target, path, true));
+}
+
+export async function link(existingPath: string, newPath: string): Promise<void> throws IoError {
+  await spawnBlocking(() => pathLink(existingPath, newPath, false));
+}
+
+export async function readlink(path: string): Promise<string> throws IoError {
+  return await spawnBlocking(() => pathReadLink(path));
+}
+
+export async function realpath(path: string): Promise<string> throws IoError {
+  return await spawnBlocking(() => pathRealNative(path));
+}
 `,
   fs: String.raw`
 export function readFileSync(path: string): u8[] throws IoError {
@@ -4942,6 +4958,19 @@ function fileMode(mode: i64 | string): i64 throws IoError {
 
 export function chmodSync(path: string, mode: i64 | string): void throws IoError {
   pathChmod(path, fileMode(mode));
+}
+
+// The link type matters only on Windows, so it is checked and then unused.
+export function symlinkSync(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): void throws IoError {
+  pathLink(target, path, true);
+}
+
+export function linkSync(existingPath: string, newPath: string): void throws IoError {
+  pathLink(existingPath, newPath, false);
+}
+
+export function readlinkSync(path: string): string throws IoError {
+  return pathReadLink(path);
 }
 `,
   child_process: String.raw`

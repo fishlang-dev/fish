@@ -7638,6 +7638,9 @@ const syncFileSignatures = (typing: Typing): Record<string, [Type[], Type, boole
   pathStat: [["string", "boolean"], typing.tupleType(["i64", "i64", "f64", "i64"]), true],
   dirRead: [["string"], typing.arrayType("string"), true],
   pathReal: [["string"], "string", true],
+  // realpath(3) itself, as fs/promises realpath calls it.
+  pathRealNative: [["string"], "string", true],
+  pathReadLink: [["string"], "string", true],
   dirTemp: [["string"], "string", true],
   pathRemove: [["string", "boolean", "boolean"], "void", true],
   // A path, recursive and mode, giving the first directory made, or null.
@@ -7650,6 +7653,8 @@ const syncFileSignatures = (typing: Typing): Record<string, [Type[], Type, boole
   pathAccess: [["string", "i64"], "void", true],
   // A path and a mode std has checked.
   pathChmod: [["string", "i64"], "void", true],
+  // A target, the link made to it, and whether the link is symbolic.
+  pathLink: [["string", "string", "boolean"], "void", true],
   // A path, atime and mtime in seconds, and whether a link is followed.
   pathUtimes: [["string", "f64", "f64", "boolean"], "void", true],
   // A command, its arguments, the working directory ("" for this one's) and stdin, giving the

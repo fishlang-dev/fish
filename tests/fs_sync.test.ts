@@ -256,3 +256,45 @@ test("chmodSync and chmod give what node's give", () => {
   const modes = (dir: string) => ["f", "g", "h", "i", "j", "d"].map((p) => [p, lstatSync(join(dir, p)).mode]);
   expect(modes(fishDir)).toEqual(modes(nodeDir));
 });
+
+test("symlinkSync, linkSync, readlinkSync and their promise forms, with realpath, give what node's give", () => {
+  const imports = `import { symlinkSync, linkSync, readlinkSync, lstatSync, statSync, readFileSync } from "node:fs";\nimport * as fsp from "node:fs/promises";\nimport { symlink, readlink, realpath } from "fs/promises";`;
+  compare("links", imports, `
+  symlinkSync("f", "s1");
+  symlinkSync("d", "s2", "dir");
+  symlinkSync("nowhere", "s3", "file");
+  symlinkSync("", "s4", null);
+  await symlink("f", "s5");
+  await fsp.symlink("s5", "s6", "junction");
+  linkSync("f", "h1");
+  await fsp.link("s1", "h2");
+  const r6 = await readlink("s6");
+  const rl = await fsp.readlink("dl");
+  console.log(readlinkSync("s1"), readlinkSync("s2"), readlinkSync("s3"), readlinkSync("s4").length, r6, rl);
+  console.log(lstatSync("s5").isSymbolicLink(), lstatSync("h1").isSymbolicLink(), statSync("f").size, readFileSync("h2", "utf8"), readFileSync("s6", "utf8"));
+  const p6 = await realpath("s6");
+  const p2 = await fsp.realpath("d/../s2");
+  const here = await realpath(".");
+  console.log(p6, p2, here);
+  const pairs: [string, string][] = [["f", "s1"], ["x", "no/such/s"], ["f", "f/x"], ["f", ""]];
+  for (const [target, path] of pairs) {
+    try { symlinkSync(target, path); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+    try { await symlink(target, path); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+  }
+  const links: [string, string][] = [["f", "h1"], ["missing", "h3"], ["dl", "h4"], ["d", "h5"], ["", "h6"]];
+  for (const [from, to] of links) {
+    try { linkSync(from, to); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+    try { await fsp.link(from, to); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+  }
+  for (const p of ["f", "missing", "", "f/x", "d"]) {
+    try { readlinkSync(p); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+    try { await readlink(p); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+  }
+  for (const p of ["missing", "dl", "", "f/x", "no/x/.."]) {
+    try { const r = await realpath(p); console.log(r); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
+  }`, (dir) => {
+    mkdirSync(join(dir, "d"));
+    writeFileSync(join(dir, "f"), "hi");
+    symlinkSync("nowhere", join(dir, "dl"));
+  });
+});

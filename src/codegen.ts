@@ -6959,9 +6959,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         break;
       }
       case "pathReal":
+      case "pathRealNative":
+      case "pathReadLink":
       case "dirTemp": {
         const out = alloca("ptr");
-        emit(`${status} = call i32 @fsh_rt_fs_${name === "pathReal" ? "realpath" : "mkdtemp"}(ptr ${path}, ptr ${out}, ptr ${parts})`);
+        const callee = { pathReal: "realpath", pathRealNative: "realpath_native", pathReadLink: "readlink", dirTemp: "mkdtemp" }[name];
+        emit(`${status} = call i32 @fsh_rt_fs_${callee}(ptr ${path}, ptr ${out}, ptr ${parts})`);
         read = filled("ptr", out);
         break;
       }
@@ -7024,6 +7027,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         emit(`${status} = call i32 @fsh_rt_fs_${name === "fileCopy" ? "copyfile" : "rename"}(ptr ${path}, ptr ${to}, ${flags}ptr ${parts})`);
         break;
       }
+      case "pathLink": {
+        const [to, symbolic] = [operand(e.args[1]!, e.args.slice(2)), temp()];
+        emit(`${symbolic} = zext i1 ${value(e.args[2]!)} to i32`);
+        emit(`${status} = call i32 @fsh_rt_fs_link(ptr ${path}, ptr ${to}, i32 ${symbolic}, ptr ${parts})`);
+        break;
+      }
       case "pathUnlink":
         emit(`${status} = call i32 @fsh_rt_fs_unlink(ptr ${path}, ptr ${parts})`);
         break;
@@ -7061,7 +7070,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (!read) return undefined;
     const result = read();
     // Unused, as a statement, what a call gives is released when the statement ends.
-    const gives: Record<string, Type> = { processSpawn: typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), fileReadSync: typing.arrayType("u8"), dirRead: typing.arrayType("string"), pathReal: "string", dirTemp: "string", dirMake: typing.unionType(["string", "null"]) };
+    const gives: Record<string, Type> = { processSpawn: typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), fileReadSync: typing.arrayType("u8"), dirRead: typing.arrayType("string"), pathReal: "string", pathRealNative: "string", pathReadLink: "string", dirTemp: "string", dirMake: typing.unionType(["string", "null"]) };
     if (!types.has(e) && gives[name]) pending.push({ v: result, type: gives[name]! });
     return result;
   }

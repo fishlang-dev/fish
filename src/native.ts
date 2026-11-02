@@ -6308,6 +6308,57 @@ int32_t fsh_rt_fs_chmod(fsh_str *path, int64_t mode, fsh_str **error) {
   return result;
 }
 
+// symlinkSync, or with symbolic 0 linkSync: path made a link to target.
+int32_t fsh_rt_fs_link(fsh_str *target, fsh_str *path, int32_t symbolic, fsh_str **error) {
+  const char *syscall = symbolic ? "symlink" : "link";
+  char *a = fsh_rt_str_cstring(target), *b = fsh_rt_str_cstring(path);
+  int32_t result = !a || !b ? fsh_fs_failed_two(error, EINVAL, syscall, a ? a : "", b ? b : "")
+    : (symbolic ? symlink(a, b) : link(a, b)) != 0 ? fsh_fs_failed_two(error, errno, syscall, a, b) : 1;
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return result;
+}
+
+// readlinkSync: a link's text, read into a buffer grown until it holds all of it.
+int32_t fsh_rt_fs_readlink(fsh_str *path, fsh_str **out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "readlink", "");
+  for (size_t room = 256;; room *= 2) {
+    char *text = fsh_rt_alloc(room);
+    ssize_t n = readlink(c, text, room);
+    if (n >= 0 && (size_t)n < room) {
+      text[n] = 0;
+      *out = fsh_rt_str_from_cstring(text);
+      fsh_rt_free(text);
+      fsh_rt_free(c);
+      return 1;
+    }
+    fsh_rt_free(text);
+    if (n < 0) {
+      int32_t failed = fsh_fs_failed(error, errno, "readlink", c);
+      fsh_rt_free(c);
+      return failed;
+    }
+  }
+}
+
+// fs/promises realpath: libuv's realpath(3), unlike realpathSync's walk, every failure named
+// realpath with the path as given.
+int32_t fsh_rt_fs_realpath_native(fsh_str *path, fsh_str **out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "realpath", "");
+  char *resolved = realpath(c, NULL);
+  if (!resolved) {
+    int32_t failed = fsh_fs_failed(error, errno, "realpath", c);
+    fsh_rt_free(c);
+    return failed;
+  }
+  fsh_rt_free(c);
+  *out = fsh_rt_str_from_cstring(resolved);
+  free(resolved);
+  return 1;
+}
+
 // A time in seconds as libuv 1.51 hands it to utimensat, cut to whole microseconds.
 static struct timespec fsh_utime_spec(double time) {
   struct timespec ts;
