@@ -5447,7 +5447,9 @@ export class Expressions implements Union {
           return this.typeOf(this.become(e, { id: nextId(this.ids), kind: "binary", op: "||", left: removed, right: { id: nextId(this.ids), kind: "bool", value: true, ...at }, ...at }));
         }
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
-        const type = this.operand(e.operand);
+        const operand = this.operand(e.operand);
+        // A brand's operators work on its base; a unit negated keeps its unit.
+        const type = this.typing.unbranded(operand);
         // The smallest i64 is written as the negation of a literal one past the largest.
         if (e.op === "-" && e.operand.kind === "int" && e.operand.value === I64_MAX + 1n) this.ctx.exprsState.fitted.add(e.operand);
         if (e.op === "!" ? type !== "boolean" : type !== "bigint" && (e.op === "~" ? !isInteger(type) : !isNumeric(type))) {
@@ -5456,7 +5458,8 @@ export class Expressions implements Union {
         if (e.op === "-" && isInteger(type) && !INTEGERS[type].signed) {
           throw new CompileError("E0110", `'${this.typing.show(type)}' is unsigned, so it can't be negated; convert it to a signed type with 'as' first`, e.start, e.end);
         }
-        return type;
+        const brand = this.recOf(operand);
+        return e.op === "-" && brand?.kind === "brand" && brand.unit ? operand : type;
       }
       case "assign": {
         if (this.staticWrite(e)) throw new CompileError("E0705", "a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);

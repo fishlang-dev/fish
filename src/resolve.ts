@@ -6,7 +6,7 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap, walk } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { unitPowers, isNumeric, type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./layout.ts";
@@ -437,6 +437,13 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     if (t.name === "FixedArray") return this.fixedArray(t);
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return this.reference(t);
+    if (t.name === "Unit") {
+      const [of, text] = t.args;
+      const base = of && this.resolveType(of);
+      const powers = text?.kind === "literal" && text.value.kind === "string" ? unitPowers(text.value.value) : undefined;
+      if (t.args.length !== 2 || !isNumeric(base!) || !powers) throw new CompileError("E0116", "'Unit' takes a number type and its unit, like 'Unit<f64, \"m/s\">', the unit names with powers over at most one '/'", t.start, t.end);
+      return this.typing.unitType(base!, powers);
+    }
     if (t.name === "Brand") {
       if (t.args.length !== 2) throw new CompileError("E0116", "'Brand' takes the type it brands and a tag naming it, like 'Brand<usize, \"UserId\">'", t.start, t.end);
       return this.brand(this.resolveType(t.args[0]!), this.resolveType(t.args[1]!), t.args[0]!, t.args[1]!);
@@ -1238,7 +1245,7 @@ export function collection(typing: Typing, key: Type, value: Type, set: boolean,
 
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Brand", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Brand", "Unit", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {

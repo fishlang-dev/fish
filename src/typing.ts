@@ -146,6 +146,32 @@ export type PatternRecord = { kind: "pattern"; quasis: string[]; holes: Hole[]; 
 export type PatternType = TypeId<PatternRecord>;
 export type Hole = "string" | Numeric;
 
+// The powers of each base unit a unit's text writes, as `"kg*m/s^2"` does: names with integer
+// powers, multiplied with `*`, over at most one `/`. Undefined for text of another form.
+export function unitPowers(text: string): Record<string, number> | undefined {
+  const [top, bottom, extra] = text.split("/");
+  if (extra !== undefined) return undefined;
+  const powers: Record<string, number> = {};
+  const add = (part: string, sign: number): boolean => {
+    if (part.trim() === "1") return true;
+    for (const factor of part.split("*")) {
+      const m = /^\s*([A-Za-z_]\w*)\s*(?:\^\s*(-?\d+))?\s*$/.exec(factor);
+      if (!m) return false;
+      powers[m[1]!] = (powers[m[1]!] ?? 0) + sign * Number(m[2] ?? 1);
+    }
+    return true;
+  };
+  return add(top!, 1) && (bottom === undefined || add(bottom, -1)) ? powers : undefined;
+}
+
+// A unit's text in one form for each unit: names in order, positive powers over negative ones.
+export function unitText(powers: Record<string, number>): string {
+  const names = Object.keys(powers).sort();
+  const part = (ns: string[]) => ns.map((n) => (Math.abs(powers[n]!) === 1 ? n : `${n}^${Math.abs(powers[n]!)}`)).join("*");
+  const [top, bottom] = [names.filter((n) => powers[n]! > 0), names.filter((n) => powers[n]! < 0)];
+  return `${top.length > 0 ? part(top) : "1"}${bottom.length > 0 ? `/${part(bottom)}` : ""}`;
+}
+
 // A brand: the values of a primitive `base` under a `tag`, as `Brand<usize, "UserId">` writes
 // it, laid out as its base, which `lower` makes it. A brand fits its base and a family brand
 // whose tag its tag fits; its base fits it only through `as`, unless it is `loose`, as
@@ -835,6 +861,14 @@ export class Typing {
       this.patterns.set(key, t);
     }
     return t;
+  }
+
+  // A unit over a numeric base, or the base alone when no unit is left, as `m / m` leaves none.
+  unitType(this: Mut<this>, base: Type, powers: Record<string, number>): Type {
+    const names = Object.keys(powers).filter((n) => powers[n] !== 0).sort();
+    if (names.length === 0) return base;
+    const unit = Object.fromEntries(names.map((n) => [n, powers[n]!]));
+    return this.brandType(base, this.literalType(unitText(unit)), { unit });
   }
 
   // A brand's base, or the type itself.
