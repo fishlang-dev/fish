@@ -1100,7 +1100,7 @@ export function shareable(typing: Typing, given: Type, at: Span): SharedType {
   });
   if (typing.holdsHandle(held)) throw new CompileError("E0303", "a 'shared' value can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only", at.start, at.end);
   if (blocker) {
-    const why = kindOf(blocker) === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from one place, which other threads can't keep alive";
+    const why = kindOf(blocker) === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from one place, which other threads can't keep alive";
     throw new CompileError("E0303", `a 'shared' value is used from many threads at once, so it can't hold a '${typing.show(blocker)}', which ${why}`, at.start, at.end);
   }
   return typing.sharedType(of);
@@ -1136,15 +1136,19 @@ export function channel(typing: Typing, given: Type, at: Span): BlockType {
     blocker = u;
     return true;
   });
-  if (blocker) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made"}`, at.start, at.end);
+  if (blocker) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made"}`, at.start, at.end);
   return typing.blockType("Channel", of);
 }
 
-// Whether a part of a value can't cross to another thread: a reference, a raw pointer or a Cell.
+// Why an Rc or a Weak can't cross to another thread.
+export const COUNTED_UNLOCKED = "counts its owners without atomics, so only one thread may use it; use a 'shared' value instead";
+
+// Whether a part of a value can't cross to another thread: a reference, a raw pointer, a Cell,
+// an Rc or a Weak.
 function unlocked(typing: Typing, u: Type): boolean {
   if (typeof u === "string") return false;
   const r = typing.rec(u);
-  return r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell");
+  return r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "shared" && r.which !== "shared");
 }
 
 // A key a Map or a Set hashes: a string or a sized integer, or a union of literals of one of

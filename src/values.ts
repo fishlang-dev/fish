@@ -10,7 +10,7 @@ import { didYouMean } from "./suggest.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { channel, collection, fields, counted, interior, shareable, tagStrings } from "./resolve.ts";
+import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
@@ -1427,7 +1427,7 @@ export class Expressions implements Union {
       if (r?.kind !== "future" || t === YIELD_NOW || t === SLEEP || this.typing.leafOf.has(t as FutureType)) throw new CompileError("E0305", `'spawn' needs a Promise from an async function's call, not '${this.typing.show(t)}'`, e.args[0]!.start, e.args[0]!.end);
       const blocker = this.unsent(t);
       if (blocker) {
-        throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${this.typing.show(blocker)}', which ${typeof blocker !== "string" && this.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
+        throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${this.typing.show(blocker)}', which ${typeof blocker !== "string" && this.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "shared" ? COUNTED_UNLOCKED : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
       }
       return { type: this.typing.handleType(r.gives, r.throws), what: "'spawn'" };
     }
@@ -4114,13 +4114,14 @@ export class Expressions implements Union {
   }
 
   // What keeps a value from moving to another thread: a reference, which borrows from the
-  // thread that made it, a raw pointer, which nothing checks, or a Cell, which changes unlocked.
+  // thread that made it, a raw pointer, which nothing checks, a Cell, which changes unlocked, or
+  // an Rc or a Weak, whose counts do.
   private unsent(t: Type, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
     // A type holding itself is looked into once.
     if (typeof t === "string" || seen.has(t)) return undefined;
     seen.add(t);
     const r = this.typing.rec(t);
-    if (r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "dyn" && this.typing.borrowing.has(r.of))) return t;
+    if (r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "shared" && r.which !== "shared") || (r.kind === "dyn" && this.typing.borrowing.has(r.of))) return t;
     // A Rust type is Send, which the shim asserts.
     if (rustClassOf(this.typing, t)) return undefined;
     const parts = r.kind === "interior" ? [r.of] : r.kind === "future" || r.kind === "generator" ? r.params.map((f) => f.type)
@@ -6319,7 +6320,7 @@ export class Expressions implements Union {
     if (reason) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
     const blocker = this.unsent(held);
     if (blocker) {
-      const why = typeof blocker !== "string" && this.typing.rec(blocker).kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for" : "borrows from where it was made";
+      const why = typeof blocker !== "string" && this.typing.rec(blocker).kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for" : typeof blocker !== "string" && this.typing.rec(blocker).kind === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made";
       throw new CompileError("E0303", `a '${this.typing.show(to)}' may cross to another thread, so it can't hold a '${this.typing.show(blocker)}', which ${why}`, e.start, e.end);
     }
     // A Dyn of a generic interface made in a generic body is keyed as codegen finds it, lowered.

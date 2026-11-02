@@ -1,3 +1,17 @@
+// case: rc_across_await
+// expect: 2 2
+async function count(r: Rc<{ n: i64 }>): Promise<i64> {
+  await yieldNow();
+  r.update((v) => v.n++);
+  return r.n;
+}
+
+async function main() {
+  const r = new Rc({ n: 1 });
+  const got = await count(r.clone());
+  await yieldNow();
+  console.log(got, r.n);
+}
 // case: rc_counts_and_fields
 // expect: root 2 20 4
 // expect: x
@@ -180,4 +194,53 @@ function main() {
   const a = new Rc({ n: 1 });
   const b = a.clone();
   console.log(a === b);
+}
+// case: rc_spawn
+// error: 'spawn' runs this Promise on another thread, so it must own everything it uses; it holds a 'Rc<{ n: i64 }>', which counts its owners without atomics, so only one thread may use it; use a 'shared' value instead
+async function read(r: Rc<{ n: i64 }>): Promise<i64> {
+  return r.n;
+}
+
+async function main() {
+  const h = spawn(read(new Rc({ n: 1 })));
+  console.log(await h);
+}
+// case: rc_weak_spawn
+// error: it holds a 'Weak<{ n: i64 }>', which counts its owners without atomics
+class Holder {
+  w: Weak<{ n: i64 }>;
+  constructor(w: Weak<{ n: i64 }>) { this.w = w; }
+}
+
+async function read(h: Holder): Promise<i64> {
+  return 1;
+}
+
+async function main() {
+  const r = new Rc({ n: 1 });
+  const h = spawn(read(new Holder(r.downgrade())));
+  console.log(await h);
+}
+// case: rc_in_shared
+// error: a 'shared' value is used from many threads at once, so it can't hold a 'Rc<i64>', which counts its owners without atomics
+function main() {
+  const s = shared({ r: new Rc(1) });
+}
+// case: rc_in_channel
+// error: a 'Channel' carries values to other tasks, so it can't carry a 'Rc<i64>', which counts its owners without atomics
+function main() {
+  const c = new Channel<Rc<i64>>(1);
+}
+// case: rc_in_dyn
+// error: may cross to another thread, so it can't hold a 'Rc<i64>', which counts its owners without atomics
+interface Named { name(): string }
+class Tag {
+  r: Rc<i64>;
+  constructor(r: Rc<i64>) { this.r = r; }
+  name(): string { return "tag"; }
+}
+
+function main() {
+  const d: Dyn<Named> = new Tag(new Rc(1));
+  console.log(d.name());
 }
