@@ -221,3 +221,53 @@ function f<T>(x: Brand<usize, T>) {}
 
 function main() {}
 // error: brand tags holding type parameters are not supported yet
+// case: brand_idiom
+type InstanceId = usize & { readonly __arena?: "instance" }
+type BodyId = usize & { readonly __arena?: "body" }
+type Id = i64 & { __brand: "Id" }
+type Name = { readonly __brand: "Name" } & string
+
+class Arenas {
+  names: string[] = []
+  add(this: Mut<this>, name: string): InstanceId {
+    this.names.push(name)
+    return this.names.length
+  }
+  nameOf(id: InstanceId): string {
+    return this.names[id - 1]
+  }
+}
+
+function main() {
+  let arenas = new Arenas()
+  const a = arenas.add("a")
+  const b: InstanceId = 2
+  arenas.add("b")
+  console.log(arenas.nameOf(a), arenas.nameOf(b), a + b)
+  const id = 7 as Id
+  const n = "fish" as Name
+  console.log(id, n, n.length)
+  let ids = new Map<InstanceId, BodyId>()
+  ids.set(a, 3)
+  console.log(ids.get(a))
+}
+// expect: a b 3
+// expect: 7 fish 4
+// expect: 3
+// case: brand_idiom_other
+type InstanceId = usize & { readonly __arena?: "instance" }
+type BodyId = usize & { readonly __arena?: "body" }
+
+function main() {
+  const a: InstanceId = 1
+  const b: BodyId = a
+}
+// error: type 'usize & { __arena?: "instance" }' is not assignable to type 'usize & { __arena?: "body" }'
+// case: brand_idiom_strict
+type Id = i64 & { __brand: "Id" }
+
+function main() {
+  const n: i64 = 1
+  const id: Id = n
+}
+// error: type 'i64' is not assignable to type 'i64 & { __brand: "Id" }'; make one with 'as i64 & { __brand: "Id" }'

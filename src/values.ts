@@ -592,6 +592,9 @@ export class Expressions implements Union {
   // A float literal only becomes a float type.
   adapt(this: Mut<this>, e: Expr, to: Type): boolean {
     e = this.rewrites.current(e);
+    // A loose brand takes its base's literals, which fit it.
+    const brand = this.recOf(to);
+    if (brand?.kind === "brand" && brand.loose) to = brand.base;
     if (!isNumeric(to)) return false;
     if (e.kind === "unsafe" || e.kind === "comptime") {
       if (!this.adapt(e.expr, to)) return false;
@@ -5966,7 +5969,7 @@ export class Expressions implements Union {
     }
     if (isNumeric(type) && isNumeric(to)) throw new CompileError("E0101", `${message}; convert it with 'as ${this.typing.show(to)}'`, e.start, e.end);
     // A brand is made from its base only by saying so.
-    if (tr?.kind === "brand" && message !== "" && (type === tr.base || (isNumeric(type) && isNumeric(tr.base)))) throw new CompileError("E0101", `${message}; make one with 'as ${this.typing.show(to)}'`, e.start, e.end);
+    if (tr?.kind === "brand" && !tr.loose && message !== "" && (type === tr.base || (isNumeric(type) && isNumeric(tr.base)))) throw new CompileError("E0101", `${message}; make one with 'as ${this.typing.show(to)}'`, e.start, e.end);
     if (tr?.kind === "ref" && (typeof type === "string" || this.typing.rec(type).kind !== "ref")) {
       this.borrow(e, type, to as RefType, message);
       return;

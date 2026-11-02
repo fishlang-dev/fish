@@ -2264,7 +2264,7 @@ export class Typing {
       return `\`${r.quasis.map((q, i) => (i === 0 ? text(q) : `\${${this.show(r.holes[i - 1]!)}}${text(q)}`)).join("")}\``;
     }
     if (r.kind === "union") return r.name ?? r.members.map((t) => this.show(t)).join(" | ");
-    if (r.kind === "brand") return r.field !== undefined ? `${this.show(r.base)} & { readonly ${r.field}${r.loose ? "?" : ""}: ${this.show(r.tag)} }` : `${r.unit ? "Unit" : "Brand"}<${this.show(r.base)}, ${this.show(r.tag)}>`;
+    if (r.kind === "brand") return r.field !== undefined ? `${this.show(r.base)} & { ${r.field}${r.loose ? "?" : ""}: ${this.show(r.tag)} }` : `${r.unit ? "Unit" : "Brand"}<${this.show(r.base)}, ${this.show(r.tag)}>`;
     if (r.kind === "ref") return `${r.mutable ? "Mut" : "Ref"}<${this.show(r.to)}>`;
     if (r.kind === "pointer") return `${r.mutable ? "MutPtr" : "Ptr"}<${this.show(r.to)}>`;
     if (r.kind === "regex") return "RegExp";

@@ -566,6 +566,22 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     throw new CompileError("E0105", `cannot find type '${t.name}'${didYouMean(t.name, [...this.host.resolverState.scope.keys(), ...BUILT_IN_TYPES, "Array", "FixedArray", "never", ...ITERATORS, ...UTILITIES.keys(), ...this.host.typeNames(t.start)])}`, t.start, t.end);
   }
 
+  // TypeScript's brand idiom, `usize & { readonly __brand: "X" }`: a primitive and an object of
+  // one property, whose type names the brand. An optional property makes a loose brand, which
+  // the base fits too, as it does in TypeScript.
+  private brandIdiom(this: Mut<this>, nodes: TypeNode[], sides: Type[]): Type | undefined {
+    if (sides.length !== 2) return undefined;
+    const at = typeof sides[0] === "string" ? 0 : 1;
+    const [base, other] = [sides[at]!, sides[1 - at]!];
+    const r = this.recOf(other);
+    if (typeof base !== "string" || r?.kind !== "object" || r.tuple || r.fields.length !== 1) return undefined;
+    const field = r.fields[0]!;
+    const tag = field.optional === "added" ? this.typing.withoutNull(field.type) : field.type;
+    // A property of a plain type, as in `i64 & { a: i64 }`, describes a value rather than naming one.
+    if (typeof tag === "string") return undefined;
+    return this.brand(base, tag, nodes[at]!, nodes[1 - at]!, { field: field.name, ...(field.optional && { loose: true as const }) });
+  }
+
   // A brand's base is a primitive, and its tag is known where it is written, since nothing infers
   // a tag from a value.
   private brand(this: Mut<this>, base: Type, tag: Type, baseNode: Span, tagNode: Span, how: Parameters<Typing["brandType"]>[2] = {}): Type {
@@ -627,8 +643,11 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   // is a combined bound: an interface with every side's fields and methods. A union of object
   // types as a side distributes, as in TypeScript: `A & (B | C)` is `(A & B) | (A & C)`.
   private intersection(this: Mut<this>, nodes: TypeNode[]): Type {
-    const sides = nodes.map((node): ObjectType | InterfaceType | UnionType => {
-      const s = this.resolveType(node);
+    const resolved = nodes.map((node) => this.resolveType(node));
+    const branded = this.brandIdiom(nodes, resolved);
+    if (branded !== undefined) return branded;
+    const sides = nodes.map((node, i): ObjectType | InterfaceType | UnionType => {
+      const s = resolved[i]!;
       const t = this.recOf(s);
       if (t?.kind === "object" || t?.kind === "interface") return s as ObjectType | InterfaceType;
       if (t?.kind === "union" && t.members.every((m) => this.recOf(m)?.kind === "object")) return s as UnionType;
