@@ -103,3 +103,17 @@ let f = (x: i64) => x + 1;
 function main() {
   console.log(f(1));
 }
+// case: top_level_const_function_value
+// error: a top-level const holding a function is supported when its value is an arrow written in place
+function twice(x: i64): i64 {
+  return x * 2;
+}
+const f = twice;
+function main() {}
+// case: top_level_const_called
+// error: 'f' is a top-level const, and calling a function value one holds isn't supported yet
+const o = { f: (x: i64) => x + 1 };
+const f = o.f;
+function main() {
+  console.log(f(1));
+}

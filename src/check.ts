@@ -3208,7 +3208,10 @@ class BodyChecker implements Context, Outer, Sight {
         // A closure returned is boxed into the callable the function declares.
         // A generic function value is returned as it is, capturing nothing.
         const r = this.cx.recOf(type);
-        if (r?.kind === "closure" && !r.generic && this.cx.recOf(this.declared)?.kind !== "dyn") throw unsupported("functions returned without a function return type", s.value!);
+        if (r?.kind === "closure" && !r.generic && this.cx.recOf(this.declared)?.kind !== "dyn") {
+          if (this.f.comptime === "const") throw new CompileError("E0801", "a top-level const holding a function is supported when its value is an arrow written in place, as in 'const f = (x: i64) => ...'; declare the function with 'function', or call it by its own name", s.value!.start, s.value!.end);
+          throw unsupported("functions returned without a function return type", s.value!);
+        }
         // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
         if (!this.declared && this.cx.recOf(this.inferred)?.kind === "regex" && r?.kind === "regex" && this.inferred !== type) this.inferred = ANY_REGEX;
         const expected = this.declared ?? this.inferred;

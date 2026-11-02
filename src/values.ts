@@ -1623,6 +1623,7 @@ export class Expressions implements Union {
     const stdOnly = callee.kind === "ident" && callee.name === "__tlsClient" && e.start < STD_BASE && stdModuleAt(this.files, e.start) === undefined;
     if (!target || stdOnly) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
+      if (callee.kind === "ident" && this.byName.has(`const ${callee.name}`)) throw new CompileError("E0801", `'${callee.name}' is a top-level const, and calling a function value one holds isn't supported yet; write its value as an arrow, as in 'const ${callee.name} = (x: i64) => ...', or declare it with 'function'`, callee.start, callee.end);
       throw new CompileError("E0401", `unknown function ${name}${callee.kind === "ident" ? didYouMean(callee.name, this.ctx.names(callee.start)) : ""}`, callee.start, callee.end);
     }
     if (target.foreign && !target.rust) this.needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
