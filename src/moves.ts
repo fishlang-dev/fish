@@ -616,7 +616,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       case "unary":
         if (e.op === "await") {
           // The future runs across suspensions, after this statement's temporaries are gone.
-          for (const s of borrowsFrom.get(e.operand) ?? []) if (sourceTemporary(s, true)) throw outlived(s, "the awaited Promise");
+          for (const s of awaitedSources(e.operand)) if (sourceTemporary(s, true)) throw outlived(s, "the awaited Promise");
           expr(e.operand, (p) => `'${p}' moved here: awaiting a Promise runs it to completion, after which it is gone`);
           // An awaited async call raises what it throws here, where the await finishes it.
           if (instance.raises.has(e)) raising();
@@ -1119,6 +1119,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     if (lentTemporary(s, across)) return true;
     if (s.kind === "string" && !across && !f.generator && !f.async) return false;
     return key(through(s)) === undefined && !typing.holdsRef(coercionOf(s) ?? types.get(s)!);
+  }
+
+  // What an awaited future borrows from: a combinator's are those of each future in its list.
+  function awaitedSources(e: Expr): Expr[] {
+    const list = combinedCalls.has(e) ? (e as Extract<Expr, { kind: "call" }>).args[0] : undefined;
+    if (list?.kind === "array") return (list.elements as Expr[]).flatMap((x) => awaitedSources(x));
+    return borrowsFrom.get(e) ?? [];
   }
 
   // A borrow kept past its statement can't point at a temporary, which is gone once the

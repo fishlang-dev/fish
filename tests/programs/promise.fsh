@@ -610,3 +610,48 @@ function main() {
   const x: Box<i64> | Box<string> = new Box<i64>(1);
   if (x instanceof Box) console.log("box");
 }
+// case: promise_all_temporary_receiver
+class A {
+  s: string;
+  constructor(s: string) { this.s = s; }
+  async f(): Promise<string> { return this.s + "!"; }
+}
+async function main() {
+  const r = await Promise.all([new A("a" + 1).f(), new A("b" + 2).f()]);
+  console.log(r);
+}
+// error: 7:32: error[E0204]: the awaited Promise would keep borrowing this temporary
+// case: promise_all_temporary_argument
+async function lend(x: Ref<string>): Promise<string> { return x + "L"; }
+async function main() {
+  const r = await Promise.all([lend("a" + 1), lend("b" + 2)]);
+  console.log(r);
+}
+// error: 3:37: error[E0204]: the awaited Promise would keep borrowing this temporary
+// case: promise_any_temporary_receiver
+class A {
+  s: string;
+  constructor(s: string) { this.s = s; }
+  async f(): Promise<string> { return this.s + "!"; }
+}
+function mk(): A { return new A("m" + 1); }
+async function main() {
+  const q = await Promise.any([mk().f()]);
+  console.log(q);
+}
+// error: 8:32: error[E0204]: the awaited Promise would keep borrowing this temporary
+// case: promise_all_named_receivers
+class A {
+  s: string;
+  constructor(s: string) { this.s = s; }
+  async f(): Promise<string> { return this.s + "!"; }
+}
+async function lend(x: Ref<string>): Promise<string> { return x + "L"; }
+async function main() {
+  const a = new A("a" + 1);
+  const b = new A("b" + 1);
+  const s = "s" + 1;
+  const r = await Promise.all([a.f(), b.f(), lend(s)]);
+  console.log(r);
+}
+// expect: [ 'a1!', 'b1!', 's1L' ]
