@@ -3,7 +3,7 @@ import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./modules.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
-import { nextId, renumber, Rewrites, walk as walkTree, type Ids } from "./nodes.ts";
+import { nextId, renumber, Rewrites, someNode, walk as walkTree, type AnyNode, type Ids } from "./nodes.ts";
 import { rebuiltExpr, rebuiltStmt, rebuiltTypeNode } from "./rebuild.ts";
 import type { ObjectType, Type, UnionType, Typing } from "./typing.ts";
 
@@ -23,6 +23,12 @@ export type Quote = { tree: Expr | Stmt | TypeNode; category: Category; holes: E
 // The tree a quote's text parses to: a type for `quoteType`, else an expression when the whole
 // text is one and doesn't start as JavaScript's statements do, else one statement or
 // declaration. `parsedQuotes` holds each quote parsed so far.
+// Whether `tree` uses `import.meta`.
+function usesImportMeta(tree: Expr | Stmt, expression: boolean): boolean {
+  const found = (n: AnyNode) => n.node !== undefined && (n.node as { kind?: string; name?: string }).kind === "meta" && (n.node as { name?: string }).name === "import.meta";
+  return expression ? someNode("expr", tree as Expr, found) : someNode("stmt", tree as Stmt, found);
+}
+
 export function quoted({ parsedQuotes: parsed, ids }: Tables, e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Quote {
   const made = parsed.get(e);
   if (made) return made;
@@ -66,6 +72,8 @@ export function quoted({ parsedQuotes: parsed, ids }: Tables, e: Extract<Expr, {
       quote = { tree: stmts[0]!, category: "AstStmt", holes: template.exprs, asExpressions: new Set(), names: new Set() };
     }
   }
+  // A quote is checked where the macro puts it, so whose file `import.meta` would name is open.
+  if (!asType && usesImportMeta(quote.tree as Expr | Stmt, quote.category === "AstExpr")) throw new CompileError("E1105", "'import.meta' in a quote isn't supported yet: whether it names the macro's file or the file using the macro isn't decided", e.start, e.end);
   parsed.set(e, quote);
   return quote;
 }
