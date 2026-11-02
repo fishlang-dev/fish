@@ -57,8 +57,9 @@ export function assignedNames(body: Stmt[] | undefined): Set<string> {
 // switch case or other list declaring it is still read whole, which errs toward "assigned".
 export function assignsOwn(body: Stmt[], name: string): boolean {
   const declares = (list: unknown[]) => list.some((s) => {
-    const d = s as { kind?: string; name?: string; declarations?: { target: unknown }[] };
-    return (d.kind === "let" && d.declarations!.some((x) => patternNames(x.target).includes(name))) || ((d.kind === "function" || d.kind === "class") && d.name === name);
+    // An array pattern's holes are missing elements.
+    const d = s as { kind?: string; name?: string; declarations?: { target: unknown }[] } | undefined;
+    return (d?.kind === "let" && d.declarations!.some((x) => patternNames(x.target).includes(name))) || ((d?.kind === "function" || d?.kind === "class") && d.name === name);
   });
   const visit = (v: unknown): boolean => {
     if (Array.isArray(v)) return !declares(v) && v.some(visit);
