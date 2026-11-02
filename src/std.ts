@@ -1416,6 +1416,8 @@ function __wsLimitsOf(options: WebSocketOptions | null): __wsLimits {
   const idle = options.idleTimeout;
   if (idle !== null) limits.idleTimeout = idle;
   assert(limits.maxMessageSize >= 0 && limits.maxBuffered >= 0 && limits.idleTimeout >= 0, "a WebSocket route's maxMessageSize, maxBuffered and idleTimeout can't be negative");
+  // A frame's end, its length past a 14-byte head, then stays far from the i64 maximum.
+  if (limits.maxMessageSize > 281474976710656) limits.maxMessageSize = 281474976710656;
   return limits;
 }
 
@@ -1762,12 +1764,14 @@ async function __wsFrames(conn: Ref<TcpStream>, buffer: Mut<u8[]>, socket: Ref<W
       head = length === 126 ? 4 : 10;
       const sized = await __wsFill(conn, buffer, head, socket, signal, limits.idleTimeout);
       if (!sized) return null;
+      // The 8-byte form's top bit must be clear, so the length fits an i64.
+      if (head === 10 && ((buffer[2] as i64) & 128) !== 0) return { code: 1009, reason: "message too big", heard: false };
       length = 0;
       for (let i = 2; i < head; i++) length = (length << 8) | (buffer[i as usize] as i64);
-      if (head === 10 && ((buffer[2] as i64) & 128) !== 0) return { code: 1009, reason: "message too big", heard: false };
     }
     if (opcode >= 8 && (!fin || length > 125)) return { code: 1002, reason: "control frames are whole and at most 125 bytes", heard: false };
-    if (opcode < 8 && (message.length as i64) + length > limits.maxMessageSize) return { code: 1009, reason: "message too big", heard: false };
+    // Compared without adding, since a client's length can be near the i64 maximum.
+    if (opcode < 8 && length > limits.maxMessageSize - (message.length as i64)) return { code: 1009, reason: "message too big", heard: false };
     const end = head + 4 + length;
     const whole = await __wsFill(conn, buffer, end, socket, signal, limits.idleTimeout);
     if (!whole) return null;

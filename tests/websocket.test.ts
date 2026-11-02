@@ -190,10 +190,14 @@ async function rawClient(port: number, path: string, extra = "") {
     buf = buf.subarray(at + length);
     return f;
   };
-  const send = (opcode: number, payload: Buffer | string, { fin = true, mask = true } = {}) => {
+  // claim writes the length in the 8-byte form, which may say more than the payload holds.
+  const send = (opcode: number, payload: Buffer | string, { fin = true, mask = true, claim = undefined as bigint | undefined } = {}) => {
     const data = Buffer.from(payload);
     const key = Buffer.from([1, 2, 3, 4]);
-    const size = data.length < 126 ? Buffer.from([data.length | (mask ? 128 : 0)]) : Buffer.from([126 | (mask ? 128 : 0), data.length >> 8, data.length & 255]);
+    const long = Buffer.alloc(9);
+    long[0] = 127 | (mask ? 128 : 0);
+    long.writeBigUInt64BE(claim ?? 0n, 1);
+    const size = claim !== undefined ? long : data.length < 126 ? Buffer.from([data.length | (mask ? 128 : 0)]) : Buffer.from([126 | (mask ? 128 : 0), data.length >> 8, data.length & 255]);
     const body = mask ? Buffer.from(data.map((b, i) => b ^ key[i & 3]!)) : data;
     sock.write(Buffer.concat([Buffer.from([(fin ? 128 : 0) | opcode]), size, ...(mask ? [key] : []), body]));
   };
@@ -310,6 +314,8 @@ test("protocol errors close the connection with RFC 6455's codes", async () => {
       ["/small", (c) => c.send(2, Buffer.alloc(11)), "1009 message too big"],
       ["/small", (c) => (c.send(1, "123456", { fin: false }), c.send(0, "78901")), "1009 message too big"],
       ["/small", (c) => c.send(1, "flood"), "1013 send buffer full"],
+      // A continuation claiming the largest length a frame can, after a fragment.
+      ["/echo", (c) => (c.send(1, "a", { fin: false }), c.send(0, "", { claim: 0x7fffffffffffffffn })), "1009 message too big"],
     ];
     for (const [path, act, close] of cases) {
       const c = await rawClient(server.port, path);
@@ -318,6 +324,14 @@ test("protocol errors close the connection with RFC 6455's codes", async () => {
       expect(frames.at(-1)).toEqual([8, close]);
       await until("the server to end the connection", c.ended);
     }
+    // None of it stopped the server.
+    const after = bunClient(`ws://127.0.0.1:${server.port}/echo`);
+    await after.opened;
+    after.ws.send("still serving");
+    await until("the echo", () => after.events.length === 1);
+    expect(after.events[0]).toBe("still serving");
+    after.ws.close();
+    await after.closed;
   } finally {
     await server.stop();
   }
