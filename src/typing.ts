@@ -153,7 +153,9 @@ export const INTEGERS: Record<Integer, { bits: usize; signed: boolean }> = {
 
 // JavaScript's typed arrays, by the element each holds; an ArrayBuffer is its bytes.
 export const TYPED_ARRAYS = { Uint8Array: "u8", Int8Array: "i8", Uint16Array: "u16", Int16Array: "i16", Uint32Array: "u32", Int32Array: "i32", Float32Array: "f32", Float64Array: "f64", ArrayBuffer: "u8" } as const;
-export type TypedName = keyof typeof TYPED_ARRAYS;
+// Written out rather than read from TYPED_ARRAYS, since a class's fields name it before Fish has
+// worked out the constant's type.
+export type TypedName = "Uint8Array" | "Int8Array" | "Uint16Array" | "Int16Array" | "Uint32Array" | "Int32Array" | "Float32Array" | "Float64Array" | "ArrayBuffer";
 export const isTypedName = (name: string): name is TypedName => Object.hasOwn(TYPED_ARRAYS, name);
 // The bytes each element of a typed array takes, its BYTES_PER_ELEMENT.
 export const typedSize = (name: TypedName): usize => {
