@@ -414,3 +414,19 @@ function main() {
   console.log(xs.length);
 }
 // error: property 'js' has type 'null | J' on one side of '&' and 'null | string' on the other
+// case: intersection_recursive_alias_moved_into_block
+type Span = { start: usize; end: usize };
+type J = { module: string; overloads?: N[] };
+type N = Span & { kind: "n"; name: string; js?: J };
+type B = { name: string; js?: J };
+function main() {
+  const b: B = { name: "b", js: { module: "m" } };
+  const n: N = { start: 0, end: 1, kind: "n", name: "n", js: b.js };
+  console.log(n.js!.module);
+  const j: J = { module: "k" };
+  const x: N & B = { start: 2, end: 3, kind: "n", name: "x", js: j };
+  const n1: N = x;
+  console.log(n1.js!.module);
+}
+// expect: m
+// expect: k
