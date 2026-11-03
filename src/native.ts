@@ -8395,3 +8395,101 @@ const char *fsh_rt_crypto_missing(void) {
 }
 `;
 }
+
+// The zlib half of the runtime, a unit of its own compiled into a program, with -lz linked, only
+// when its IR calls it. One call runs a whole compression or decompression into a buffer as Node's
+// sync calls do, then a second copies it out.
+export const ZLIB_NATIVE = String.raw`
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+
+// The output, or on failure zlib's message, and its length.
+typedef struct { uint8_t *data; int64_t length; } fsh_zlib_run;
+
+static void *fsh_zlib_grow(void *p, size_t n) {
+  void *q = realloc(p, n ? n : 1);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+// A failure as Node reports it: zlib's message when it gave one, else Node's own.
+static fsh_zlib_run *fsh_zlib_fail(z_stream *s, fsh_zlib_run *r, int err, const char *own, int64_t *result) {
+  const char *message = s->msg ? s->msg : own;
+  size_t n = strlen(message);
+  r->data = fsh_zlib_grow(r->data, n);
+  memcpy(r->data, message, n);
+  r->length = (int64_t)n;
+  result[0] = 1;
+  result[1] = err;
+  result[2] = r->length;
+  return r;
+}
+
+// Deflates or inflates data whole. windowBits picks the format: 15 zlib, 31 gzip, -15 raw, and
+// 47 either zlib or gzip when inflating, as unzip does. result is [failed, errno, length].
+fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, const uint8_t *data, int64_t length, int64_t *result) {
+  fsh_zlib_run *r = fsh_zlib_grow(NULL, sizeof *r);
+  r->data = NULL;
+  r->length = 0;
+  z_stream s;
+  memset(&s, 0, sizeof s);
+  int err = inflating ? inflateInit2(&s, (int)bits) : deflateInit2(&s, (int)level, Z_DEFLATED, (int)bits, 8, Z_DEFAULT_STRATEGY);
+  if (err != Z_OK) return fsh_zlib_fail(&s, r, err, "Init error", result);
+  // Concatenated gzip members are read as one, as Node's gunzip reads them; unzip does so once
+  // its input starts as gzip.
+  int members = bits == 31 || (bits == 47 && length >= 2 && data[0] == 0x1f && data[1] == 0x8b);
+  size_t cap = inflating ? (size_t)length * 4 + 64 : deflateBound(&s, (uLong)length);
+  r->data = fsh_zlib_grow(NULL, cap);
+  const uint8_t *next = data;
+  int64_t left = length;
+  for (;;) {
+    if (s.avail_in == 0 && left > 0) {
+      s.next_in = (Bytef *)next;
+      s.avail_in = left > UINT_MAX ? UINT_MAX : (uInt)left;
+      next += s.avail_in;
+      left -= s.avail_in;
+    }
+    if ((size_t)r->length == cap) {
+      cap *= 2;
+      r->data = fsh_zlib_grow(r->data, cap);
+    }
+    size_t room = cap - (size_t)r->length;
+    s.next_out = r->data + r->length;
+    s.avail_out = room > UINT_MAX ? UINT_MAX : (uInt)room;
+    uInt before = s.avail_out;
+    err = inflating ? inflate(&s, Z_FINISH) : deflate(&s, Z_FINISH);
+    r->length += before - s.avail_out;
+    if (err == Z_STREAM_END) {
+      // Trailing zero bytes are padding; anything else starts another member.
+      if (!inflating || !members || (s.avail_in == 0 && left == 0) || (s.avail_in > 0 ? *s.next_in : *next) == 0) break;
+      inflateReset(&s);
+      continue;
+    }
+    if (err == Z_OK || err == Z_BUF_ERROR) {
+      if (s.avail_out == 0 || (s.avail_in == 0 && left > 0)) continue;
+    }
+    fsh_zlib_fail(&s, r, err, err == Z_NEED_DICT ? "Missing dictionary" : err == Z_OK || err == Z_BUF_ERROR ? "unexpected end of file" : "Zlib error", result);
+    if (inflating) inflateEnd(&s); else deflateEnd(&s);
+    return r;
+  }
+  if (inflating) inflateEnd(&s); else deflateEnd(&s);
+  result[0] = 0;
+  result[1] = 0;
+  result[2] = r->length;
+  return r;
+}
+
+// Copies a run's bytes, its output or its message, to out, and frees the run.
+void fsh_rt_zlib_take(fsh_zlib_run *r, uint8_t *out) {
+  if (r->length > 0) memcpy(out, r->data, (size_t)r->length);
+  free(r->data);
+  free(r);
+}
+`;
