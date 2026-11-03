@@ -6265,12 +6265,16 @@ function runnable(path: string): boolean {
 // The executable file a command names, as an absolute path: a path given with a slash, or the
 // first on PATH.
 export function which(command: string): string | null {
+  return found(command, process.env.PATH ?? "");
+}
+
+function found(command: string, path: string): string | null {
   if (command === "") return null;
   if (command.includes("/")) return runnable(command) ? resolve(command) : null;
-  for (const dir of (process.env.PATH ?? "").split(":")) {
+  for (const dir of path.split(":")) {
     if (dir === "") continue;
-    const path = dir + "/" + command;
-    if (runnable(path)) return path;
+    const at = resolve(dir, command);
+    if (runnable(at)) return at;
   }
   return null;
 }
@@ -6301,19 +6305,24 @@ function streamMode(given: SpawnStdio | null): i64 {
   return given === "inherit" ? 1 : 2;
 }
 
+// Bun's TypeError for a string the C call would cut short, as an IoError with its code.
+function nulFree(s: string, what: string): void throws IoError {
+  if (!s.includes("\0")) return;
+  let bad = new IoError("The " + what + " must be a string without null bytes. Received " + JSON.stringify(s));
+  bad.code = "ERR_INVALID_ARG_VALUE";
+  throw bad;
+}
+
 // Runs a command to its end. stdin is /dev/null unless given, and stdout and stderr are piped
-// unless asked otherwise; env, when given, is the child's whole environment.
+// unless asked otherwise; env, when given, is the child's whole environment, and its PATH, when
+// it has one, is where the command is looked for.
 export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubprocess throws IoError {
   if (cmd.length === 0) throw new IoError("cmd must not be empty");
+  for (let i: usize = 0; i < cmd.length; i++) nulFree(cmd[i], "argument 'args[" + i + "]'");
   const command = cmd[0];
-  if (!command.includes("/") && which(command) === null) {
-    let missing = new IoError('Executable not found in $PATH: "' + command + '"');
-    missing.code = "ENOENT";
-    missing.path = command;
-    throw missing;
-  }
   let input: u8[] = [];
-  let flags: i64 = 2 + 4 * streamMode(options.stdout) + 16 * streamMode(options.stderr) + 128;
+  // argv[0] travels in the arguments, so the command can be its path while keeping its name.
+  let flags: i64 = 2 + 4 * streamMode(options.stdout) + 16 * streamMode(options.stderr) + 128 + 256;
   const given = options.stdin;
   if (given === "inherit") flags = flags - 1;
   else if (given !== null && given !== "ignore") {
@@ -6321,12 +6330,29 @@ export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubpro
     input = given;
   }
   let pairs: string[] = [];
+  let path = process.env.PATH ?? "";
   const env = options.env;
   if (env !== null) {
     flags = flags + 64;
-    for (const [key, value] of Object.entries(env)) pairs.push(key + "=" + value);
+    for (const [key, value] of Object.entries(env)) {
+      nulFree(key, "property 'options.env['" + key + "']'");
+      nulFree(value, "property 'options.env['" + key + "']'");
+      if (key === "PATH") path = value;
+      pairs.push(key + "=" + value);
+    }
   }
-  const [pid, status, signo, stdout, stderr] = processSpawn(command, cmd.slice(1), options.cwd ?? "", input, flags, pairs);
+  let file = command;
+  if (!command.includes("/")) {
+    const at = found(command, path);
+    if (at === null) {
+      let missing = new IoError('Executable not found in $PATH: "' + command + '"');
+      missing.code = "ENOENT";
+      missing.path = command;
+      throw missing;
+    }
+    file = at;
+  }
+  const [pid, status, signo, stdout, stderr] = processSpawn(file, cmd, options.cwd ?? "", input, flags, pairs);
   const signal = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
   return new SyncSubprocess(pid, status < 0 ? null : status, signal, stdout, stderr);
 }

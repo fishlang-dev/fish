@@ -749,7 +749,10 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
       if (space.explicit && space.from.whole) throw new CompileError("E0902", `'${space.from.file}' has no export '${name}'`, n.start as usize, n.end as usize);
       if (space.explicit) throw new CompileError("E0902", `'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as usize, n.end as usize);
       // Nothing else in a program is named Bun, so a member it lacks is one outside Fish's subset.
-      if (space.from.path === "std:Bun") throw new CompileError("E0902", `'Bun.${name}' isn't in Fish's subset of Bun yet; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as usize, n.end as usize);
+      if (space.from.path === "std:Bun") {
+        const members = space.from.statements.flatMap((s) => (s.kind === "export" && s.body.kind === "function" ? [s.body.name] : s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.alias ?? sp.name) : []));
+        throw new CompileError("E0902", `'Bun.${name}' isn't in Fish's subset of Bun yet; it has ${members.map((e) => `'${e}'`).join(", ")}`, n.start as usize, n.end as usize);
+      }
       return false;
     }
     const kind = valuesOf(space.from)[name];

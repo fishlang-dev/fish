@@ -10,7 +10,7 @@ setDefaultTimeout(30_000);
 // their own, output compared, with absolute paths printed as `<dir>`.
 const tmp = mkdtempSync(join(tmpdir(), "fish-bun-"));
 
-function compare(name: string, body: string, stdin = "", setup: (dir: string) => void = () => {}) {
+function compare(name: string, body: string, stdin = "", setup: (dir: string) => void = () => {}, env: Record<string, string> = {}) {
   const dirs = [mkdtempSync(join(tmp, `${name}-fish-`)), mkdtempSync(join(tmp, `${name}-bun-`))];
   dirs.forEach(setup);
   const program = join(tmp, `${name}.fsh`);
@@ -19,10 +19,10 @@ function compare(name: string, body: string, stdin = "", setup: (dir: string) =>
   const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
   expect(built.stderr.toString()).toBe("");
   const input = new TextEncoder().encode(stdin);
-  const fish = Bun.spawnSync([out], { cwd: dirs[0], stdin: input, env: { ...process.env, FISH_LEAKS: "1" } });
+  const fish = Bun.spawnSync([out], { cwd: dirs[0], stdin: input, env: { ...process.env, ...env, FISH_LEAKS: "1" } });
   const script = join(tmp, `${name}.ts`);
   writeFileSync(script, `await (async () => {${body}\n})();\n`);
-  const bun = Bun.spawnSync(["bun", script], { cwd: dirs[1], stdin: input });
+  const bun = Bun.spawnSync([process.execPath, script], { cwd: dirs[1], stdin: input, env: { ...process.env, ...env } });
   const shown = (out: Buffer, dir: string) => out.toString().replaceAll(realpathSync(dir), "<dir>");
   expect(shown(fish.stderr, dirs[0]!)).toBe(shown(bun.stderr, dirs[1]!));
   expect(shown(fish.stdout, dirs[0]!)).toBe(shown(bun.stdout, dirs[1]!));
@@ -83,6 +83,29 @@ test("which finds executables on PATH, or by a path with a slash", () => {
     chmodSync(join(dir, "bin", "tool"), 0o755);
     writeFileSync(join(dir, "plain"), "");
   });
+});
+
+test("a command is looked for on env's PATH when given, relative entries from the working directory", () => {
+  const out = compare("path", `
+  const d = new TextDecoder();
+  const r = Bun.spawnSync(["tool", "x"], { env: { PATH: "bin" } });
+  console.log(d.decode(r.stdout));
+  console.log(Bun.which("tool"));
+  const bad = (cmd: string[], env: Record<string, string>) => {
+    try {
+      Bun.spawnSync(cmd, { env });
+    } catch (e) {
+      console.log(e.message.split(". Received")[0], e.code);
+    }
+  };
+  bad(["sh", "-c", "a\\0b"], {});
+  bad(["s\\0h"], {});
+  bad(["sh"], { A: "x\\0y" });`, "", (dir) => {
+    mkdirSync(join(dir, "bin"));
+    writeFileSync(join(dir, "bin", "tool"), "#!/bin/sh\necho \"ran $1\"\n");
+    chmodSync(join(dir, "bin", "tool"), 0o755);
+  }, { PATH: `bin::${process.env.PATH}` });
+  expect(out).toBe("ran x\n\n<dir>/bin/tool\nThe argument 'args[2]' must be a string without null bytes ERR_INVALID_ARG_VALUE\nThe argument 'args[0]' must be a string without null bytes ERR_INVALID_ARG_VALUE\nThe property 'options.env['A']' must be a string without null bytes ERR_INVALID_ARG_VALUE\n");
 });
 
 test("file, write, stdin, env, argv and the sleeps", () => {

@@ -27,7 +27,7 @@ function main(): void throws IoError {
   console.log(new TextDecoder().decode(r.stdout), r.exitCode, r.success);
 }
 // case: bun_unknown_member
-// error: 'Bun.spawn' isn't in Fish's subset of Bun yet; it has
+// error: 'Bun.spawn' isn't in Fish's subset of Bun yet; it has 'file', 'stdin', 'write', 'env', 'argv', 'sleepSync', 'version', 'which', 'spawnSync', 'sleep', 'serve'
 function main() {
   Bun.spawn(["true"]);
 }

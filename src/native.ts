@@ -6615,20 +6615,23 @@ static ssize_t fsh_drain(int fd, fsh_array *into) {
 // it. Gives 1 with numbers its pid, exit status (-1 when a signal ended it) and signal (0 for
 // none), or 5 with the IoError's parts, in Node's words, when it couldn't start. flags holds two
 // bits per stream from stdin up, 0 piped, 1 inherited and 2 /dev/null; bit 6 has env, "K=V"
-// strings, replace the environment; bit 7 words a failure as Bun does.
+// strings, replace the environment; bit 7 words a failure as Bun does; bit 8 has args begin with
+// argv[0].
 int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd, const fsh_array *input, int64_t flags, const fsh_array *env, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
   out->data = err->data = NULL;
   out->length = out->capacity = err->length = err->capacity = 0;
   char *file = fsh_rt_str_cstring(command);
   char *dir = fsh_rt_str_units(cwd) > 0 ? fsh_rt_str_cstring(cwd) : NULL;
-  char **argv = fsh_rt_alloc((args->length + 2) * sizeof(char *));
+  // With bit 8, args holds argv[0] too, so a command found on another PATH keeps its name.
+  int64_t skip = (flags & 256) && args->length > 0 ? 0 : 1;
+  char **argv = fsh_rt_alloc((args->length + skip + 1) * sizeof(char *));
   int bad = !file || (fsh_rt_str_units(cwd) > 0 && !dir);
   argv[0] = file;
   for (int64_t i = 0; i < args->length; i++) {
-    argv[i + 1] = fsh_rt_str_cstring(((fsh_str **)args->data)[i]);
-    bad |= !argv[i + 1];
+    argv[i + skip] = fsh_rt_str_cstring(((fsh_str **)args->data)[i]);
+    bad |= !argv[i + skip];
   }
-  argv[args->length + 1] = NULL;
+  argv[args->length + skip] = NULL;
   extern char **environ;
   char **envp = environ;
   if (flags & 64) {
@@ -6737,7 +6740,7 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     numbers[2] = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
   }
   if (failure) {
-    const char *name = file ? file : "";
+    const char *name = !skip && argv[0] ? argv[0] : file ? file : "";
     char code[32], text[200];
     fsh_errno_words(failure, code, sizeof code, text, sizeof text);
     size_t size = 2 * strlen(name) + strlen(text) + 64;
@@ -6757,7 +6760,8 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     out->data = err->data = NULL;
     out->length = out->capacity = err->length = err->capacity = 0;
   }
-  for (int64_t i = 0; i <= args->length; i++) fsh_rt_free(argv[i]);
+  for (int64_t i = 0; i < args->length + skip; i++) fsh_rt_free(argv[i]);
+  if (!skip) fsh_rt_free(file);
   fsh_rt_free(argv);
   if (envp != environ) {
     for (int64_t i = 0; i < env->length; i++) fsh_rt_free(envp[i]);
