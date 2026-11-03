@@ -6371,29 +6371,64 @@ int64_t fsh_rt_fd_call(int64_t which, int64_t fd, int64_t value) {
 }
 
 // A FileHandle's descriptor: counted, and closed when the last count goes unless close took it
-// first, so a handle dropped without close still closes its file.
-typedef struct fsh_fd { int64_t count; int64_t fd; } fsh_fd;
+// first, so a handle dropped without close still closes its file. A call on the blocking pool
+// holds the descriptor in flight from just before its system call until just after, so a close
+// from another task can't free the number for reuse under it: the close then falls to the last
+// call to finish.
+typedef struct fsh_fd { int64_t count; int64_t fd; int64_t busy; int32_t closing; pthread_mutex_t lock; } fsh_fd;
 
 fsh_fd *fsh_rt_fd_hold(int64_t fd) {
   fsh_fd *f = fsh_rt_alloc(sizeof *f);
   f->count = 1;
   f->fd = fd;
+  f->busy = 0;
+  f->closing = 0;
+  pthread_mutex_init(&f->lock, NULL);
   return f;
 }
 
-// The descriptor, or -1 once closed. A borrowed block crosses as the place holding it.
+// The descriptor, or -1 once close was called. A borrowed block crosses as the place holding it.
 int64_t fsh_rt_fd_of(fsh_fd **f) {
-  return __atomic_load_n(&(*f)->fd, __ATOMIC_ACQUIRE);
+  pthread_mutex_lock(&(*f)->lock);
+  int64_t fd = (*f)->closing ? -1 : (*f)->fd;
+  pthread_mutex_unlock(&(*f)->lock);
+  return fd;
 }
 
-// close takes the descriptor to close it, leaving -1, so the release doesn't close it again.
+// A call's start: the descriptor, now in flight, or -1 once close was called.
+int64_t fsh_rt_fd_begin(fsh_fd **f) {
+  pthread_mutex_lock(&(*f)->lock);
+  int64_t fd = (*f)->closing ? -1 : (*f)->fd;
+  if (fd >= 0) (*f)->busy++;
+  pthread_mutex_unlock(&(*f)->lock);
+  return fd;
+}
+
+// A call's end; the last one after a close closes the file.
+void fsh_rt_fd_end(fsh_fd **f) {
+  pthread_mutex_lock(&(*f)->lock);
+  int64_t shut = --(*f)->busy == 0 && (*f)->closing ? (*f)->fd : -1;
+  if (shut >= 0) (*f)->fd = -1;
+  pthread_mutex_unlock(&(*f)->lock);
+  if (shut >= 0) fsh_rt_fd_call(3, shut, 0);
+}
+
+// close: the descriptor for the caller to close, -2 when calls in flight will close it as they
+// finish, or -1 when close was called before.
 int64_t fsh_rt_fd_take(fsh_fd **f) {
-  return __atomic_exchange_n(&(*f)->fd, -1, __ATOMIC_ACQ_REL);
+  pthread_mutex_lock(&(*f)->lock);
+  int64_t fd = (*f)->closing ? -1 : (*f)->fd;
+  (*f)->closing = 1;
+  if (fd >= 0 && (*f)->busy > 0) fd = -2;
+  else if (fd >= 0) (*f)->fd = -1;
+  pthread_mutex_unlock(&(*f)->lock);
+  return fd;
 }
 
 void fsh_rt_fd_release(fsh_fd *f) {
   if (!f || __atomic_sub_fetch(&f->count, 1, __ATOMIC_ACQ_REL) > 0) return;
   if (f->fd >= 0) fsh_rt_fd_call(3, f->fd, 0);
+  pthread_mutex_destroy(&f->lock);
   fsh_rt_free(f);
 }
 

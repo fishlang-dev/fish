@@ -267,6 +267,7 @@ test("open gives a FileHandle whose calls give what node's give, closed when dro
   console.log(statSync("f").size, statSync("f").mode & 0o777);
   try { await fh.read(b, 0, 5); } catch (e) { console.log(e.message, e.code); }
   try { await fh.write(b.slice(), 5); } catch (e) { console.log(e.message, e.code); }
+  try { await fh.read(b, 0, 4294967300); } catch (e) { console.log(e.message, e.code); }
   await fh.close();
   await fh.close();
   console.log(fh.fd);
@@ -298,4 +299,61 @@ test("open gives a FileHandle whose calls give what node's give, closed when dro
     writeFileSync(join(dir, "f"), "hello world");
     writeFileSync(join(dir, "g"), "abc");
   }, body + dropped.replace("await drop();", "await (await open(\"g\")).close();"), true);
+});
+
+// A call queued on the blocking pool when another task closes the handle must not run on the
+// descriptor's number, which the next open reuses. The pool's threads are first all held by reads
+// of a FIFO, so the write waits in the queue across the close and the open.
+test("a FileHandle call queued across close() fails instead of writing to the file that reuses its descriptor", () => {
+  const dir = mkdtempSync(join(tmp, "queued-"));
+  expect(Bun.spawnSync(["mkfifo", join(dir, "fifo")]).exitCode).toBe(0);
+  const program = join(dir, "main.fsh");
+  writeFileSync(program, `import { open, readFile } from "node:fs/promises";
+import { openSync, readSync, writeSync, closeSync } from "node:fs";
+function hold(fifo: i64): i64 {
+  let one = new Uint8Array(1);
+  try {
+    return readSync(fifo, one);
+  } catch (e) {
+    return -1;
+  }
+}
+async function main(): Promise<void> throws IoError {
+  const fifo = openSync("fifo", "r+");
+  const fh = await open("a", "w");
+  const other = fh.clone();
+  let hogs: JoinHandle<i64>[] = [];
+  for (let i = 0; i < 520; i++) hogs.push(spawn(async () => { const n = await spawnBlocking(() => hold(fifo)); return n; }));
+  await sleep(200);
+  const writer = spawn(async () => {
+    const r = await other.write("SECRET");
+    return r.bytesWritten;
+  });
+  await sleep(50);
+  await fh.close();
+  const b = openSync("b", "w");
+  writeSync(fifo, new Uint8Array(520));
+  while (hogs.length > 0) {
+    const h = hogs.pop()!;
+    await h;
+  }
+  try {
+    const n = await writer;
+    console.log("wrote", n);
+  } catch (e) {
+    console.log(e.message, e.code, e.syscall);
+  }
+  closeSync(b);
+  closeSync(fifo);
+  const inB = await readFile("b");
+  const inA = await readFile("a");
+  console.log(inB.length, inA.length);
+}
+`);
+  const out = join(dir, "main");
+  const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
+  expect(built.stderr.toString()).toBe("");
+  const run = Bun.spawnSync([out], { cwd: dir, env: { ...process.env, FISH_LEAKS: "1" } });
+  expect(run.stderr.toString()).toBe("");
+  expect(run.stdout.toString()).toBe("file closed EBADF write\n0 0\n");
 });

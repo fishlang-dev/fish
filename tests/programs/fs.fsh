@@ -79,3 +79,9 @@ import { writeSync } from "node:fs";
 function main(): void throws IoError {
   writeSync(1, "ab", 0, "hex");
 }
+// case: fs_descriptor_block_std_only
+// error: a C function can't return a 'FileDescriptor'
+declare function fsh_rt_fd_hold(fd: i64): __FileDescriptor;
+function main() {
+  const held = unsafe { fsh_rt_fd_hold(1) };
+}

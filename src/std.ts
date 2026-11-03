@@ -4184,17 +4184,21 @@ export function readSync(fd: i64, buffer: Mut<u8[]>): i64 throws IoError;
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64, length: i64, position?: i64 | null): i64 throws IoError;
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64 = 0, length?: i64, position?: i64 | null): i64 throws IoError {
   checkFd(fd, false);
+  // Node's length |= 0, which FileHandle's read doesn't do.
+  const n = ((length ?? (buffer.length as i64) - offset) as i32) as i64;
+  return readInto(fd, buffer, offset, n, position ?? -1);
+}
+
+// A read's checks in Node's order, then the read.
+function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64): i64 throws IoError {
   if (offset < 0 || offset > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", offset);
   const size = buffer.length as i64;
-  // Node's length |= 0.
-  const n = ((length ?? size - offset) as i32) as i64;
   if (n === 0) return 0;
   if (size === 0) throw invalid("The argument 'buffer' is empty and cannot be written. Received Uint8Array(0) []");
   if (n < 0) throw outOfRange("length", ">= 0", n);
   if (offset + n > size) throw outOfRange("length", "<= " + String(size - offset), n);
-  const at = position ?? -1;
-  if (at < -1 || at > SAFE) throw outOfRange("position", ">= -1 && <= 9007199254740991", at);
-  const got = unsafe { fsh_rt_fd_read(fd, mutPtrOf(buffer[offset as usize]), n, at) };
+  if (position < -1 || position > SAFE) throw outOfRange("position", ">= -1 && <= 9007199254740991", position);
+  const got = unsafe { fsh_rt_fd_read(fd, mutPtrOf(buffer[offset as usize]), n, position) };
   if (got < 0) throw failed(got, "read", null);
   return got;
 }
@@ -4938,10 +4942,29 @@ export async function writeFile(path: string, data: string | u8[]): Promise<void
 ${FILES.replaceAll("export ", "")}
 declare function fsh_rt_fd_hold(fd: i64): __FileDescriptor;
 declare function fsh_rt_fd_of(held: Ref<__FileDescriptor>): i64;
+declare function fsh_rt_fd_begin(held: Ref<__FileDescriptor>): i64;
+declare function fsh_rt_fd_end(held: Ref<__FileDescriptor>): void;
 declare function fsh_rt_fd_take(held: Ref<__FileDescriptor>): i64;
 
+// Node's error for a call on a closed handle.
+function closed(syscall: string): IoError {
+  let e = new IoError("file closed");
+  e.code = "EBADF";
+  e.syscall = syscall;
+  return e;
+}
+
+// A call's descriptor, held in flight until fsh_rt_fd_end, so a close from another task waits for
+// the call rather than letting the number be reused under it.
+function begin(held: Ref<__FileDescriptor>, syscall: string): i64 throws IoError {
+  const fd = unsafe { fsh_rt_fd_begin(held) };
+  if (fd < 0) throw closed(syscall);
+  return fd;
+}
+
 // An open file, from open(). Its calls run on the blocking pool; dropped without close, it still
-// closes its file.
+// closes its file. Its descriptor is the handle's: closing it with closeSync, rather than through
+// close(), leaves the handle to close whatever file reuses the number.
 export class FileHandle {
   #held: __FileDescriptor;
   constructor(held: __FileDescriptor) {
@@ -4953,27 +4976,29 @@ export class FileHandle {
     return unsafe { fsh_rt_fd_of(this.#held) };
   }
 
-  // The descriptor for a call, or Node's error for a closed handle.
-  #open(syscall: string): i64 throws IoError {
-    const fd = this.fd;
-    if (fd >= 0) return fd;
-    let e = new IoError("file closed");
-    e.code = "EBADF";
-    e.syscall = syscall;
-    throw e;
+  // Node's error for a closed handle, before a call's arguments are looked at.
+  #open(syscall: string): void throws IoError {
+    if (this.fd < 0) throw closed(syscall);
   }
 
   // What's read lands at offset; a null or -1 position reads from the file's own.
   async read(buffer: Mut<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): Promise<{ bytesRead: i64 }> throws IoError {
-    const fd = this.#open("read");
+    this.#open("read");
+    const held = this.#held.clone();
     const size = buffer.length as i64;
     const from = offset ?? 0;
     const n = length ?? size - from;
+    const at = position ?? -1;
     // The read fills a copy of its own, since the buffer stays here, then lands in the buffer.
     const done = await spawnBlocking(() => {
+      const fd = begin(held, "read");
       let copy: u8[] = new Array(size).fill(0 as u8);
-      const got = readSync(fd, copy, from, n, position);
-      return { got, copy };
+      try {
+        const got = readInto(fd, copy, from, n, at);
+        return { got, copy };
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
     });
     for (let i = from; i < from + done.got; i++) buffer[i as usize] = done.copy[i as usize];
     return { bytesRead: done.got };
@@ -4984,48 +5009,89 @@ export class FileHandle {
   // file's own. The bytes are taken, as the write runs on the blocking pool; one signature, since
   // async methods can't be overloaded yet.
   async write(data: string | u8[], second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): Promise<{ bytesWritten: i64 }> throws IoError {
-    const fd = this.#open("write");
-    if (typeof data === "string") {
-      const wrote = await spawnBlocking(() => writeSync(fd, data, second));
-      return { bytesWritten: wrote };
-    }
-    if (data.length === 0) return { bytesWritten: 0 };
+    this.#open("write");
+    if (typeof data !== "string" && data.length === 0) return { bytesWritten: 0 };
+    const held = this.#held.clone();
     const length = typeof third === "number" ? third : null;
-    const wrote = await spawnBlocking(() => writeSync(fd, data, second, length, position));
+    const wrote = await spawnBlocking(() => {
+      const fd = begin(held, "write");
+      try {
+        if (typeof data === "string") return writeSync(fd, data, second);
+        return writeSync(fd, data, second, length, position);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
     return { bytesWritten: wrote };
   }
 
   async stat(): Promise<Stats> throws IoError {
-    const fd = this.#open("fstat");
-    return await spawnBlocking(() => fstatSync(fd));
+    this.#open("fstat");
+    const held = this.#held.clone();
+    return await spawnBlocking(() => {
+      const fd = begin(held, "fstat");
+      try {
+        return fstatSync(fd);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
   }
 
   async truncate(len: i64 = 0): Promise<void> throws IoError {
-    const fd = this.#open("ftruncate");
-    await spawnBlocking(() => ftruncateSync(fd, len));
+    this.#open("ftruncate");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "ftruncate");
+      try {
+        ftruncateSync(fd, len);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
   }
 
   async sync(): Promise<void> throws IoError {
-    const fd = this.#open("fsync");
-    await spawnBlocking(() => fsyncSync(fd));
+    this.#open("fsync");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "fsync");
+      try {
+        fsyncSync(fd);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
   }
 
   async chmod(mode: i64): Promise<void> throws IoError {
-    const fd = this.#open("fchmod");
-    await spawnBlocking(() => fchmodSync(fd, mode));
+    this.#open("fchmod");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "fchmod");
+      try {
+        fchmodSync(fd, mode);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
   }
 
-  // Closing a closed handle does nothing, as Node's does.
+  // Closing a closed handle does nothing, as Node's does. With calls in flight, the last of them
+  // closes the file as it finishes; later calls throw "file closed" at once.
   async close(): Promise<void> throws IoError {
     const fd = unsafe { fsh_rt_fd_take(this.#held) };
     if (fd >= 0) closeSync(fd);
   }
 }
 
-// Node's string flags, as "r" or "a+", or a number given to open as it is.
+// Node's string flags, as "r" or "a+", or a number given to open as it is. The handle is made in
+// the same job as the descriptor, so a caller that stops waiting still has it closed.
 export async function open(path: string, flags: string | i64 = "r", mode: i64 = 0o666): Promise<FileHandle> throws IoError {
-  const fd = await spawnBlocking(() => openSync(path, flags, mode));
-  return new FileHandle(unsafe { fsh_rt_fd_hold(fd) });
+  return await spawnBlocking(() => {
+    const fd = openSync(path, flags, mode);
+    return new FileHandle(unsafe { fsh_rt_fd_hold(fd) });
+  });
 }
 `,
   fs: String.raw`
