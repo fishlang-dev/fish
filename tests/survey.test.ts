@@ -608,8 +608,8 @@ test("generic arrows not held by a const are portable", () => {
 });
 
 test("node:fs members the std module answers are portable; others are Node built-ins", () => {
-  project({ "a.ts": "import { readFileSync, statSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync } from \"node:fs\";\nimport { open } from \"node:fs/promises\";\n", "b.ts": "import { accessSync } from \"fs\";\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
+  project({ "a.ts": "import { readFileSync, statSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, constants, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync } from \"node:fs\";\n", "c.ts": "import { access, utimes, lutimes, chmod, symlink, link, readlink, realpath, constants, open } from \"fs/promises\";\n", "b.ts": "import { appendFileSync } from \"fs\";\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"], []]);
   });
 });
 

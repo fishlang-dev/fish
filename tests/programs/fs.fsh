@@ -63,9 +63,9 @@ async function main(): Promise<void> throws IoError {
   console.log(existsSync("/tmp/fish-sync-in-async.txt"), readFileSync("/tmp/fish-sync-in-async.txt", "utf8"));
 }
 // case: fs_sync_unknown_member
-// error: 'node:fs' has no export named 'accessSync'
+// error: 'node:fs' has no export named 'appendFileSync'
 import * as fs from "node:fs";
-function main(): void { fs.accessSync("x"); }
+function main(): void { fs.appendFileSync("x"); }
 // case: fs_read_sync_offset_without_length
 // error: no overload of 'readSync' takes (i64, Uint8Array, i64)
 import { readSync } from "node:fs";

@@ -4925,6 +4925,8 @@ export function format(pathObject: FormatInputPathObject): string {
   // Files read and written on the runtime's blocking pool. A call naming an encoding, as
   // readFile(path, "utf8"), is linked to readFileText, which gives a string.
   "fs/promises": String.raw`
+import { chmodSync } from "fs";
+
 export async function readFile(path: string): Promise<u8[]> throws IoError {
   return await fileRead(path);
 }
@@ -5093,6 +5095,49 @@ export async function open(path: string, flags: string | i64 = "r", mode: i64 = 
     return new FileHandle(unsafe { fsh_rt_fd_hold(fd) });
   });
 }
+
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+
+export async function access(path: string, mode: i64 = 0): Promise<void> throws IoError {
+  await spawnBlocking(() => pathAccess(path, mode));
+}
+
+// A time as utimes takes it, as Node's toUnixTimestamp reads one: a Date's seconds, and a
+// negative finite number now; NaN and the infinities pass on to be refused.
+function seconds(time: f64 | Date): f64 {
+  if (time instanceof Date) return (time.getTime() as f64) / 1000;
+  return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
+}
+
+export async function utimes(path: string, atime: f64 | Date, mtime: f64 | Date): Promise<void> throws IoError {
+  const [a, m] = [seconds(atime), seconds(mtime)];
+  await spawnBlocking(() => pathUtimes(path, a, m, true));
+}
+
+export async function lutimes(path: string, atime: f64 | Date, mtime: f64 | Date): Promise<void> throws IoError {
+  const [a, m] = [seconds(atime), seconds(mtime)];
+  await spawnBlocking(() => pathUtimes(path, a, m, false));
+}
+
+export async function chmod(path: string, mode: i64 | string): Promise<void> throws IoError {
+  await spawnBlocking(() => chmodSync(path, mode));
+}
+
+export async function symlink(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): Promise<void> throws IoError {
+  await spawnBlocking(() => pathLink(target, path, true));
+}
+
+export async function link(existingPath: string, newPath: string): Promise<void> throws IoError {
+  await spawnBlocking(() => pathLink(existingPath, newPath, false));
+}
+
+export async function readlink(path: string): Promise<string> throws IoError {
+  return await spawnBlocking(() => pathReadLink(path));
+}
+
+export async function realpath(path: string): Promise<string> throws IoError {
+  return await spawnBlocking(() => pathRealNative(path));
+}
 `,
   fs: String.raw`
 export function readFileSync(path: string): u8[] throws IoError {
@@ -5156,7 +5201,7 @@ export function renameSync(oldPath: string, newPath: string): void throws IoErro
   pathRename(oldPath, newPath);
 }
 
-export const constants = { COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
 
 export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
   fileCopy(src, dest, mode);
@@ -5167,6 +5212,87 @@ export function unlinkSync(path: string): void throws IoError {
 }
 
 ${FILES}
+
+export function accessSync(path: string, mode: i64 = 0): void throws IoError {
+  pathAccess(path, mode);
+}
+
+// A time as utimes takes it, as Node's toUnixTimestamp reads one: a Date's seconds, and a
+// negative finite number now; NaN and the infinities pass on to be refused.
+function seconds(time: f64 | Date): f64 {
+  if (time instanceof Date) return (time.getTime() as f64) / 1000;
+  return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
+}
+
+export function utimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
+  pathUtimes(path, seconds(atime), seconds(mtime), true);
+}
+
+// A link's own times, not its target's.
+export function lutimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
+  pathUtimes(path, seconds(atime), seconds(mtime), false);
+}
+
+// A string as Node's inspect quotes it in an argument error, cut at 128 characters: in single
+// quotes, unless it holds one and another quote kind is free; with all taken, its ' escaped.
+function quoted(text: string): string {
+  const backtick = !text.includes("${"`"}") && !text.includes("$" + "{");
+  const quote = !text.includes("'") ? "'" : !text.includes("\"") ? "\"" : backtick ? "${"`"}" : "'";
+  const shown = quote + (quote === "'" ? text.replaceAll("'", "\\'") : text) + quote;
+  return shown.length > 128 ? shown.slice(0, 128) + "..." : shown;
+}
+
+// A number as Node prints it in a range error: grouped by threes with _ above 2 ** 32.
+function grouped(n: f64): string {
+  const text = String(n);
+  if (n <= 4294967296 && n >= -4294967296) return text;
+  const start = text.startsWith("-") ? 1 : 0;
+  let rest = "";
+  let i = text.length as i64;
+  for (; i >= start + 4; i -= 3) rest = "_" + text.slice(i - 3, i) + rest;
+  return text.slice(0, i) + rest;
+}
+
+// The mode as Node's parseFileMode reads it: a number as given, a string as octal digits, then
+// checked as a 32-bit unsigned integer.
+function fileMode(mode: i64 | string): i64 throws IoError {
+  let n: f64 = 0;
+  if (typeof mode === "string") {
+    let octal = mode.length > 0;
+    for (const d of mode) {
+      octal = octal && d >= "0" && d <= "7";
+      n = n * 8 + ((d.charCodeAt(0) as f64) - 48);
+    }
+    if (!octal) {
+      let e = new IoError("The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received " + quoted(mode));
+      e.code = "ERR_INVALID_ARG_VALUE";
+      throw e;
+    }
+  } else n = mode as f64;
+  if (n < 0 || n > 4294967295) {
+    let e = new IoError("The value of \"mode\" is out of range. It must be >= 0 && <= 4294967295. Received " + grouped(n));
+    e.code = "ERR_OUT_OF_RANGE";
+    throw e;
+  }
+  return n as i64;
+}
+
+export function chmodSync(path: string, mode: i64 | string): void throws IoError {
+  pathChmod(path, fileMode(mode));
+}
+
+// The link type matters only on Windows, so it is checked and then unused.
+export function symlinkSync(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): void throws IoError {
+  pathLink(target, path, true);
+}
+
+export function linkSync(existingPath: string, newPath: string): void throws IoError {
+  pathLink(existingPath, newPath, false);
+}
+
+export function readlinkSync(path: string): string throws IoError {
+  return pathReadLink(path);
+}
 `,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;

@@ -6432,6 +6432,109 @@ void fsh_rt_fd_release(fsh_fd *f) {
   fsh_rt_free(f);
 }
 
+// accessSync, its mode the bits of R_OK, W_OK and X_OK, checked first as Node checks it.
+int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
+  if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "access", "");
+  int32_t result = access(c, (int)mode) == 0 ? 1 : fsh_fs_failed(error, errno, "access", c);
+  fsh_rt_free(c);
+  return result;
+}
+
+// chmodSync, its mode already checked by std as Node checks it.
+int32_t fsh_rt_fs_chmod(fsh_str *path, int64_t mode, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "chmod", "");
+  int32_t result = chmod(c, (mode_t)mode) == 0 ? 1 : fsh_fs_failed(error, errno, "chmod", c);
+  fsh_rt_free(c);
+  return result;
+}
+
+// symlinkSync, or with symbolic 0 linkSync: path made a link to target.
+int32_t fsh_rt_fs_link(fsh_str *target, fsh_str *path, int32_t symbolic, fsh_str **error) {
+  const char *syscall = symbolic ? "symlink" : "link";
+  char *a = fsh_rt_str_cstring(target), *b = fsh_rt_str_cstring(path);
+  int32_t result = !a || !b ? fsh_fs_failed_two(error, EINVAL, syscall, a ? a : "", b ? b : "")
+    : (symbolic ? symlink(a, b) : link(a, b)) != 0 ? fsh_fs_failed_two(error, errno, syscall, a, b) : 1;
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return result;
+}
+
+// readlinkSync: a link's text, read into a buffer grown until it holds all of it.
+int32_t fsh_rt_fs_readlink(fsh_str *path, fsh_str **out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "readlink", "");
+  for (size_t room = 256;; room *= 2) {
+    char *text = fsh_rt_alloc(room);
+    ssize_t n = readlink(c, text, room);
+    if (n >= 0 && (size_t)n < room) {
+      text[n] = 0;
+      *out = fsh_rt_str_from_cstring(text);
+      fsh_rt_free(text);
+      fsh_rt_free(c);
+      return 1;
+    }
+    int failure = errno;
+    fsh_rt_free(text);
+    if (n < 0) {
+      int32_t failed = fsh_fs_failed(error, failure, "readlink", c);
+      fsh_rt_free(c);
+      return failed;
+    }
+  }
+}
+
+// fs/promises realpath: libuv's realpath(3), unlike realpathSync's walk, every failure named
+// realpath with the path as given.
+int32_t fsh_rt_fs_realpath_native(fsh_str *path, fsh_str **out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "realpath", "");
+  char *resolved = realpath(c, NULL);
+  if (!resolved) {
+    int32_t failed = fsh_fs_failed(error, errno, "realpath", c);
+    fsh_rt_free(c);
+    return failed;
+  }
+  fsh_rt_free(c);
+  *out = fsh_rt_str_from_cstring(resolved);
+  free(resolved);
+  return 1;
+}
+
+// A time in seconds as libuv 1.51 hands it to utimensat, cut to whole microseconds.
+static struct timespec fsh_utime_spec(double time) {
+  struct timespec ts;
+  ts.tv_sec = time;
+  ts.tv_nsec = (time - ts.tv_sec) * 1e9;
+  ts.tv_nsec -= ts.tv_nsec % 1000;
+  if (ts.tv_nsec < 0) {
+    ts.tv_nsec += 1e9;
+    ts.tv_sec -= 1;
+  }
+  return ts;
+}
+
+// utimesSync, or with follow 0 lutimesSync, its times in seconds; NaN and the infinities are
+// refused first, atime before mtime, as Node refuses them.
+int32_t fsh_rt_fs_utimes(fsh_str *path, double atime, double mtime, int32_t follow, fsh_str **error) {
+  double times[2] = {atime, mtime};
+  for (int i = 0; i < 2; i++) {
+    if (isfinite(times[i])) continue;
+    char message[160];
+    snprintf(message, sizeof message, "The \"time\" argument must be an instance of Date or an Time in seconds. Received type number (%s)", isnan(times[i]) ? "NaN" : times[i] > 0 ? "Infinity" : "-Infinity");
+    return fsh_io_parts(error, message, "ERR_INVALID_ARG_TYPE", "", NULL);
+  }
+  const char *syscall = follow ? "utime" : "lutime";
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, syscall, "");
+  struct timespec ts[2] = {fsh_utime_spec(atime), fsh_utime_spec(mtime)};
+  int32_t result = utimensat(AT_FDCWD, c, ts, follow ? 0 : AT_SYMLINK_NOFOLLOW) == 0 ? 1 : fsh_fs_failed(error, errno, syscall, c);
+  fsh_rt_free(c);
+  return result;
+}
+
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;
