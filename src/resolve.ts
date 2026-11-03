@@ -115,6 +115,8 @@ export class ResolverState {
   // `typeof` can't name the locals and parameters of yet; unset where only top-level names are.
   sights: Sight[] = [];
   sight: usize | undefined;
+  // The sight of each body's signature, which sees only its parameters, made once per body.
+  signatures = new Map<BodyId, usize>();
   // The data-carrying enums being made, to catch one that holds itself.
   making = new NodeMap<DataEnum, string>();
   // Where a data-carrying enum instance holds itself, by enum and type arguments.
@@ -174,6 +176,14 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
   openSight(this: Mut<this>, body: BodyId, outer: usize | undefined): usize {
     this.host.resolverState.sights.push({ body, scopes: [new Map()], outer });
     return this.host.resolverState.sights.length - 1;
+  }
+  // The sight a body's signature is resolved in: its parameters' names, where written inside it.
+  signatureSight(this: Mut<this>, body: BodyId): usize {
+    const known = this.host.resolverState.signatures.get(body);
+    if (known !== undefined) return known;
+    const made = this.openSight(body, undefined);
+    this.host.resolverState.signatures.set(body, made);
+    return made;
   }
   setSight(this: Mut<this>, names: usize | undefined) {
     this.host.resolverState.sight = names;

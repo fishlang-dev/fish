@@ -879,7 +879,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // A body's own signature, where its parameter names shadow top-level ones.
   signing<T>(this: Mut<this>, f: Body, run: () => T): T {
-    return this.resolver().withSight(this.resolver().openSight(f.bodyId, undefined), run);
+    return this.resolver().withSight(this.resolver().signatureSight(f.bodyId), run);
   }
 
   classParams(f: Body): TypeParam[] {

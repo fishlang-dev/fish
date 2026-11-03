@@ -664,7 +664,7 @@ class Interpreter {
         }
         if (redundantBang(e)) return this.expr(f, e.expr);
         const v = this.unwrap(this.expr(f, e.expr));
-        if (v === null) this.panic("called `Option::this.unwrap()` on a `None` value", e);
+        if (v === null) this.panic("called `Option::unwrap()` on a `None` value", e);
         return v;
       }
       case "object": {
