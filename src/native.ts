@@ -6644,6 +6644,8 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
   int failure = bad ? EINVAL : 0;
   for (int fd = 0; fd < 3 && !failure; fd++) if (((flags >> (2 * fd)) & 3) == 0 && fsh_pipe(pipes[fd]) != 0) failure = errno;
   pid_t pid = 0;
+  // What this process printed comes before what a child writes to a stream they share.
+  if (!failure && (flags & 60)) fflush(NULL);
   if (!failure) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);

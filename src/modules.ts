@@ -65,7 +65,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
   const modules: Module[] = [];
   const sources: Source[] = [];
   const byPath = new Map<string, Module>();
-  const std = (name: string) => visit(`std:${name}`, STD_MODULES[name]!, `node:${name}`);
+  const std = (name: string) => visit(`std:${name}`, STD_MODULES[name]!, name === "Bun" ? "bun" : `node:${name}`);
   const visit = (path: string, text: string, file: string): Module => {
     if (!path.startsWith("std:")) compilation.looked.push(resolve(path));
     const key = path.startsWith("std:") ? path : realpathSync(path);
@@ -743,11 +743,13 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
   // `os.hostname` into the name imported from the module, called when it is a value member.
   const rewrite = (n: Record<string, unknown>, space: { from: Module; explicit: boolean }, owner: string, read: boolean): boolean => {
     const name = n.name as string;
-    const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : []));
+    const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.alias ?? sp.name) : []));
     if (!exports.includes(name)) {
       // A package's module holds only the members the file uses, so what else it has isn't listed.
       if (space.explicit && space.from.whole) throw new CompileError("E0902", `'${space.from.file}' has no export '${name}'`, n.start as usize, n.end as usize);
       if (space.explicit) throw new CompileError("E0902", `'${space.from.file}' has no export named '${name}'; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as usize, n.end as usize);
+      // Nothing else in a program is named Bun, so a member it lacks is one outside Fish's subset.
+      if (space.from.path === "std:Bun") throw new CompileError("E0902", `'Bun.${name}' isn't in Fish's subset of Bun yet; it has ${exports.map((e) => `'${e}'`).join(", ")}`, n.start as usize, n.end as usize);
       return false;
     }
     const kind = valuesOf(space.from)[name];

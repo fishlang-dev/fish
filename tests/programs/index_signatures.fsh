@@ -135,3 +135,18 @@ function main() { let d: { [i: i64]: string } = {}; }
 // case: index_signatures_key
 // error: a dictionary's keys are strings, not 'i64'
 function main() { let d: Record<string, i64> = {}; d[1] = 2; }
+// case: index_signature_literal_in_field
+// expect: a 1
+// expect: b 2
+// expect: none
+type Options = { env?: { [name: string]: string }; tags: Record<string, string> };
+function show(o: Options): void {
+  const env = o.env;
+  if (env === null) console.log("none");
+  else for (const [k, v] of Object.entries(env)) console.log(k, v);
+}
+function main() {
+  show({ env: { a: "1" }, tags: {} });
+  show({ tags: { b: "2" }, env: { b: "2" } });
+  show({ tags: {} });
+}
