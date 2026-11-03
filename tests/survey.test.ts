@@ -101,6 +101,9 @@ test("forms that look alike are told apart", () => {
   expect(counts("function f() {\n  const a = process.argv[2];\n  const h = process.env.HOME;\n  process.exit(1);\n}\n")).toEqual({});
   expect(counts("function f() {\n  process.env.X = \"y\";\n  delete process.env.Y;\n  const p = process.pid;\n}\n")).toEqual({ process: 3, R3: 1 });
   expect(counts("function f() {\n  const { HOME } = process.env;\n  const k = Object.keys(process.env);\n  const h = process.env?.HOME;\n  process.env.N++;\n}\n")).toEqual({ process: 4 });
+  expect(counts("async function f() {\n  const t = await Bun.file(\"a\").text();\n  Bun.spawnSync([\"ls\"], { cwd: Bun.env.HOME });\n  await Bun.sleep(1);\n  return Bun.which(\"sh\") + Bun.version;\n}\n")).toEqual({});
+  expect(counts("function f() {\n  const c = Bun.spawn([\"ls\"]);\n  return Bun.build({ entrypoints: [] });\n}\n")).toEqual({ bunGlobals: 2 });
+  expect(counts("import { which, sleep, serve } from \"bun\";\nimport { spawn } from \"bun\";\n")).toEqual({ bunModules: 1 });
   expect(counts("type F = (x: number) => void;\nconst g = function () { return 1; };\n")).toEqual({ A9: 1 });
   expect(counts("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n")).toEqual({ A4: 2 });
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({});
@@ -213,7 +216,7 @@ test("the JSON lists every rule, with zero counts", () => {
   const run = fishc("survey", sample, "--json");
   const r = JSON.parse(run.stdout.toString());
   expect(r).toEqual(survey(sample));
-  expect(r.rules.length + r.waiting.length).toBe(56);
+  expect(r.rules.length + r.waiting.length).toBe(57);
 });
 
 test("fishc survey prints the grade, the rewrites and what Fish still needs, with locations", () => {

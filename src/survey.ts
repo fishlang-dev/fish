@@ -84,6 +84,7 @@ const RULES: Rule[] = [
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
+  { id: "bunGlobals", action: "unsupported", title: "Bun members besides file, stdin, write, env, argv, sleep, sleepSync, which, spawnSync, serve and version" },
   { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url, main, dirname and filename members" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
@@ -401,6 +402,8 @@ type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures:
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
 // `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
+// The members of Bun's global that std's Bun module has.
+const BUN_MEMBERS = ["file", "stdin", "write", "env", "argv", "sleep", "sleepSync", "which", "spawnSync", "serve", "version"];
 const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
 
 function classify({ path, envKeys, statementDestructures, metaRead }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean): [string, usize, string?][] {
@@ -417,6 +420,7 @@ function classify({ path, envKeys, statementDestructures, metaRead }: Scanning, 
     case "member":
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
+      if (named(n.object, "Bun") && !BUN_MEMBERS.includes(n.name as string)) push("bunGlobals");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
       if (isNode(n.object) && n.object.kind === "meta" && IMPORT_META_MEMBERS.includes(n.name as string)) metaRead.add(n.object);
       break;
@@ -543,7 +547,7 @@ const NAME_MODULES: Record<string, Record<string, string>> = { crypto: { randomB
 // What a std module exports that ports as written: its functions and its consts, less those.
 function stdExports(name: string): Set<string> {
   const names = NAME_MODULES[name] ?? {};
-  return new Set(parse(STD_MODULES[name]!, { last: 0 }).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])).filter((n) => !Object.hasOwn(names, n)));
+  return new Set(parse(STD_MODULES[name]!, { last: 0 }).flatMap((s) => (s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.alias ?? sp.name) : s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])).filter((n) => !Object.hasOwn(names, n)));
 }
 
 // The built-ins an import waits on, one for each that a name std lacks is filed under, so a file
