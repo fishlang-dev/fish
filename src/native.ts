@@ -6289,6 +6289,149 @@ int32_t fsh_rt_fs_unlink(fsh_str *path, fsh_str **error) {
   return result;
 }
 
+// An errno's Node code and wording, for std's fd calls to make an IoError from: written into
+// code and text as C strings.
+void fsh_rt_errno_words(int64_t number, char *code, int64_t code_size, char *text, int64_t text_size) {
+  fsh_errno_words((int)number, code, (size_t)code_size, text, (size_t)text_size);
+}
+
+// Node's string flags for open, as libuv's table reads them, in this system's bits; -1 for one
+// it doesn't know.
+int64_t fsh_rt_fd_flags(const char *s) {
+  size_t length = strlen(s);
+  static const struct { const char *names; int64_t bits; } table[] = {
+    {"r", O_RDONLY}, {"rs sr", O_RDONLY | O_SYNC}, {"r+", O_RDWR}, {"rs+ sr+", O_RDWR | O_SYNC},
+    {"w", O_TRUNC | O_CREAT | O_WRONLY}, {"wx xw", O_TRUNC | O_CREAT | O_WRONLY | O_EXCL},
+    {"w+", O_TRUNC | O_CREAT | O_RDWR}, {"wx+ xw+", O_TRUNC | O_CREAT | O_RDWR | O_EXCL},
+    {"a", O_APPEND | O_CREAT | O_WRONLY}, {"ax xa", O_APPEND | O_CREAT | O_WRONLY | O_EXCL},
+    {"as sa", O_APPEND | O_CREAT | O_WRONLY | O_SYNC}, {"a+", O_APPEND | O_CREAT | O_RDWR},
+    {"ax+ xa+", O_APPEND | O_CREAT | O_RDWR | O_EXCL}, {"as+ sa+", O_APPEND | O_CREAT | O_RDWR | O_SYNC},
+  };
+  for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
+    for (const char *at = table[i].names; *at;) {
+      size_t n = strcspn(at, " ");
+      if (n == length && memcmp(at, s, n) == 0) return table[i].bits;
+      at += n + (at[n] == ' ');
+    }
+  }
+  return -1;
+}
+
+// openSync: the new descriptor, or -errno.
+int64_t fsh_rt_fd_open(const char *path, int64_t flags, int64_t mode) {
+  int fd;
+  do fd = open(path, (int)flags | O_CLOEXEC, (int)mode);
+  while (fd < 0 && errno == EINTR);
+  return fd < 0 ? -errno : fd;
+}
+
+// readSync and writeSync: the count moved, or -errno; a position below 0 is the file's own.
+int64_t fsh_rt_fd_read(int64_t fd, uint8_t *at, int64_t length, int64_t position) {
+  ssize_t n;
+  do n = position < 0 ? read((int)fd, at, (size_t)length) : pread((int)fd, at, (size_t)length, (off_t)position);
+  while (n < 0 && errno == EINTR);
+  return n < 0 ? -errno : n;
+}
+
+int64_t fsh_rt_fd_write(int64_t fd, const uint8_t *at, int64_t length, int64_t position) {
+  ssize_t n;
+  do n = position < 0 ? write((int)fd, at, (size_t)length) : pwrite((int)fd, at, (size_t)length, (off_t)position);
+  while (n < 0 && errno == EINTR);
+  return n < 0 ? -errno : n;
+}
+
+// fstatSync: 0 with size, mode and kind in out and the modification time in mtime, as statSync
+// gives them, or -errno.
+int64_t fsh_rt_fd_stat(int64_t fd, int64_t *out, double *mtime) {
+  struct stat st;
+  if (fstat((int)fd, &st) != 0) return -errno;
+  out[0] = st.st_size;
+  out[1] = st.st_mode;
+  out[2] = S_ISREG(st.st_mode) ? 1 : S_ISDIR(st.st_mode) ? 2 : S_ISLNK(st.st_mode) ? 3 : 0;
+#ifdef __APPLE__
+  struct timespec m = st.st_mtimespec;
+#else
+  struct timespec m = st.st_mtim;
+#endif
+  *mtime = (double)m.tv_sec * 1000 + (double)m.tv_nsec / 1e6;
+  return 0;
+}
+
+// ftruncateSync, fchmodSync, fsyncSync and closeSync on a bare descriptor, by which: 0, or -errno.
+// close's EINTR has still closed it, as libuv takes it.
+int64_t fsh_rt_fd_call(int64_t which, int64_t fd, int64_t value) {
+  int r;
+  switch (which) {
+    case 0: do r = ftruncate((int)fd, (off_t)value); while (r < 0 && errno == EINTR); break;
+    case 1: do r = fchmod((int)fd, (mode_t)value); while (r < 0 && errno == EINTR); break;
+    case 2: r = fsync((int)fd); break;
+    default: r = close((int)fd); if (r < 0 && errno == EINTR) r = 0; break;
+  }
+  return r < 0 ? -errno : 0;
+}
+
+// A FileHandle's descriptor: counted, and closed when the last count goes unless close took it
+// first, so a handle dropped without close still closes its file. A call on the blocking pool
+// holds the descriptor in flight from just before its system call until just after, so a close
+// from another task can't free the number for reuse under it: the close then falls to the last
+// call to finish.
+typedef struct fsh_fd { int64_t count; int64_t fd; int64_t busy; int32_t closing; pthread_mutex_t lock; } fsh_fd;
+
+fsh_fd *fsh_rt_fd_hold(int64_t fd) {
+  fsh_fd *f = fsh_rt_alloc(sizeof *f);
+  f->count = 1;
+  f->fd = fd;
+  f->busy = 0;
+  f->closing = 0;
+  pthread_mutex_init(&f->lock, NULL);
+  return f;
+}
+
+// The descriptor, or -1 once close was called. A borrowed block crosses as the place holding it.
+int64_t fsh_rt_fd_of(fsh_fd **f) {
+  pthread_mutex_lock(&(*f)->lock);
+  int64_t fd = (*f)->closing ? -1 : (*f)->fd;
+  pthread_mutex_unlock(&(*f)->lock);
+  return fd;
+}
+
+// A call's start: the descriptor, now in flight, or -1 once close was called.
+int64_t fsh_rt_fd_begin(fsh_fd **f) {
+  pthread_mutex_lock(&(*f)->lock);
+  int64_t fd = (*f)->closing ? -1 : (*f)->fd;
+  if (fd >= 0) (*f)->busy++;
+  pthread_mutex_unlock(&(*f)->lock);
+  return fd;
+}
+
+// A call's end; the last one after a close closes the file.
+void fsh_rt_fd_end(fsh_fd **f) {
+  pthread_mutex_lock(&(*f)->lock);
+  int64_t shut = --(*f)->busy == 0 && (*f)->closing ? (*f)->fd : -1;
+  if (shut >= 0) (*f)->fd = -1;
+  pthread_mutex_unlock(&(*f)->lock);
+  if (shut >= 0) fsh_rt_fd_call(3, shut, 0);
+}
+
+// close: the descriptor for the caller to close, -2 when calls in flight will close it as they
+// finish, or -1 when close was called before.
+int64_t fsh_rt_fd_take(fsh_fd **f) {
+  pthread_mutex_lock(&(*f)->lock);
+  int64_t fd = (*f)->closing ? -1 : (*f)->fd;
+  (*f)->closing = 1;
+  if (fd >= 0 && (*f)->busy > 0) fd = -2;
+  else if (fd >= 0) (*f)->fd = -1;
+  pthread_mutex_unlock(&(*f)->lock);
+  return fd;
+}
+
+void fsh_rt_fd_release(fsh_fd *f) {
+  if (!f || __atomic_sub_fetch(&f->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (f->fd >= 0) fsh_rt_fd_call(3, f->fd, 0);
+  pthread_mutex_destroy(&f->lock);
+  fsh_rt_free(f);
+}
+
 // accessSync, its mode the bits of R_OK, W_OK and X_OK, checked first as Node checks it.
 int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
   if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
@@ -6470,30 +6613,53 @@ static ssize_t fsh_drain(int fd, fsh_array *into) {
 // spawnSync: runs a command found on PATH with its arguments, in cwd unless that is empty,
 // writing input to its stdin and reading its stdout and stderr until both close, then waiting for
 // it. Gives 1 with numbers its pid, exit status (-1 when a signal ended it) and signal (0 for
-// none), or 5 with the IoError's parts, in Node's words, when it couldn't start.
-int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd, const fsh_array *input, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
+// none), or 5 with the IoError's parts, in Node's words, when it couldn't start. flags holds two
+// bits per stream from stdin up, 0 piped, 1 inherited and 2 /dev/null; bit 6 has env, "K=V"
+// strings, replace the environment; bit 7 words a failure as Bun does; bit 8 has args begin with
+// argv[0].
+int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd, const fsh_array *input, int64_t flags, const fsh_array *env, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
   out->data = err->data = NULL;
   out->length = out->capacity = err->length = err->capacity = 0;
   char *file = fsh_rt_str_cstring(command);
   char *dir = fsh_rt_str_units(cwd) > 0 ? fsh_rt_str_cstring(cwd) : NULL;
-  char **argv = fsh_rt_alloc((args->length + 2) * sizeof(char *));
+  // With bit 8, args holds argv[0] too, so a command found on another PATH keeps its name.
+  int64_t skip = (flags & 256) && args->length > 0 ? 0 : 1;
+  char **argv = fsh_rt_alloc((args->length + skip + 1) * sizeof(char *));
   int bad = !file || (fsh_rt_str_units(cwd) > 0 && !dir);
   argv[0] = file;
   for (int64_t i = 0; i < args->length; i++) {
-    argv[i + 1] = fsh_rt_str_cstring(((fsh_str **)args->data)[i]);
-    bad |= !argv[i + 1];
+    argv[i + skip] = fsh_rt_str_cstring(((fsh_str **)args->data)[i]);
+    bad |= !argv[i + skip];
   }
-  argv[args->length + 1] = NULL;
+  argv[args->length + skip] = NULL;
+  extern char **environ;
+  char **envp = environ;
+  if (flags & 64) {
+    envp = fsh_rt_alloc((env->length + 1) * sizeof(char *));
+    for (int64_t i = 0; i < env->length; i++) {
+      envp[i] = fsh_rt_str_cstring(((fsh_str **)env->data)[i]);
+      bad |= !envp[i];
+    }
+    envp[env->length] = NULL;
+  }
   int in[2] = { -1, -1 }, outp[2] = { -1, -1 }, errp[2] = { -1, -1 };
+  int *pipes[3] = { in, outp, errp };
   int failure = bad ? EINVAL : 0;
-  if (!failure && (fsh_pipe(in) != 0 || fsh_pipe(outp) != 0 || fsh_pipe(errp) != 0)) failure = errno;
+  for (int fd = 0; fd < 3 && !failure; fd++) if (((flags >> (2 * fd)) & 3) == 0 && fsh_pipe(pipes[fd]) != 0) failure = errno;
   pid_t pid = 0;
+  // What this process printed comes before what a child writes to a stream they share.
+  if (!failure && (flags & 60)) fflush(NULL);
   if (!failure) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, in[0], 0);
-    posix_spawn_file_actions_adddup2(&actions, outp[1], 1);
-    posix_spawn_file_actions_adddup2(&actions, errp[1], 2);
+    for (int fd = 0; fd < 3; fd++) {
+      int mode = (flags >> (2 * fd)) & 3;
+      // A descriptor dup2'd onto itself loses close-on-exec, so an inherited one survives
+      // POSIX_SPAWN_CLOEXEC_DEFAULT.
+      if (mode == 0) posix_spawn_file_actions_adddup2(&actions, pipes[fd][fd == 0 ? 0 : 1], fd);
+      else if (mode == 1) posix_spawn_file_actions_adddup2(&actions, fd, fd);
+      else posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0);
+    }
     if (dir) posix_spawn_file_actions_addchdir_np(&actions, dir);
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
@@ -6501,8 +6667,7 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     // Only the three pipes reach the child, whatever other threads have open.
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
 #endif
-    extern char **environ;
-    failure = posix_spawnp(&pid, file, &actions, &attributes, argv, environ);
+    failure = posix_spawnp(&pid, file, &actions, &attributes, argv, envp);
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
   }
@@ -6512,18 +6677,18 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     if (failure && errp[i] >= 0) close(errp[i]);
   }
   if (!failure) {
-    close(in[0]);
-    close(outp[1]);
-    close(errp[1]);
+    if (in[0] >= 0) close(in[0]);
+    if (outp[1] >= 0) close(outp[1]);
+    if (errp[1] >= 0) close(errp[1]);
     // A child that exits before reading all its input mustn't end this process with SIGPIPE: the
     // signal is held back on this thread while writing and a pending one taken.
     sigset_t pipe_only, before;
     sigemptyset(&pipe_only);
     sigaddset(&pipe_only, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &pipe_only, &before);
-    fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
+    if (in[1] >= 0) fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
     int64_t written = 0;
-    if (input->length == 0) {
+    if (in[1] >= 0 && input->length == 0) {
       close(in[1]);
       in[1] = -1;
     }
@@ -6575,13 +6740,18 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     numbers[2] = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
   }
   if (failure) {
-    const char *name = file ? file : "";
+    const char *name = !skip && argv[0] ? argv[0] : file ? file : "";
     char code[32], text[200];
     fsh_errno_words(failure, code, sizeof code, text, sizeof text);
-    size_t size = 2 * strlen(name) + 64;
+    size_t size = 2 * strlen(name) + strlen(text) + 64;
     char *syscall = fsh_rt_alloc(size), *message = fsh_rt_alloc(size);
-    snprintf(syscall, size, "spawnSync %s", name);
-    snprintf(message, size, "spawnSync %s %s", name, code);
+    if (flags & 128) {
+      snprintf(syscall, size, "posix_spawn");
+      snprintf(message, size, "%s: %s, posix_spawn '%s'", code, text, name);
+    } else {
+      snprintf(syscall, size, "spawnSync %s", name);
+      snprintf(message, size, "spawnSync %s %s", name, code);
+    }
     fsh_io_parts(error, message, code, syscall, name);
     fsh_rt_free(syscall);
     fsh_rt_free(message);
@@ -6590,8 +6760,13 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     out->data = err->data = NULL;
     out->length = out->capacity = err->length = err->capacity = 0;
   }
-  for (int64_t i = 0; i <= args->length; i++) fsh_rt_free(argv[i]);
+  for (int64_t i = 0; i < args->length + skip; i++) fsh_rt_free(argv[i]);
+  if (!skip) fsh_rt_free(file);
   fsh_rt_free(argv);
+  if (envp != environ) {
+    for (int64_t i = 0; i < env->length; i++) fsh_rt_free(envp[i]);
+    fsh_rt_free(envp);
+  }
   fsh_rt_free(dir);
   return failure ? 5 : 1;
 }
@@ -8395,3 +8570,108 @@ const char *fsh_rt_crypto_missing(void) {
 }
 `;
 }
+
+// The zlib half of the runtime, a unit of its own compiled into a program, with -lz linked, only
+// when its IR calls it. One call runs a whole compression or decompression into a buffer as Node's
+// sync calls do, then a second copies it out.
+export const ZLIB_NATIVE = String.raw`
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+
+// The most input given zlib at once, as its counts are 32-bit; a test lowers it to feed several.
+#ifndef FSH_ZLIB_CHUNK
+#define FSH_ZLIB_CHUNK UINT_MAX
+#endif
+
+// The output, or on failure zlib's message, and its length.
+typedef struct { uint8_t *data; int64_t length; } fsh_zlib_run;
+
+static void *fsh_zlib_grow(void *p, size_t n) {
+  void *q = realloc(p, n ? n : 1);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+// A failure as Node reports it: zlib's message when it gave one, else Node's own.
+static fsh_zlib_run *fsh_zlib_fail(z_stream *s, fsh_zlib_run *r, int err, const char *own, int64_t *result) {
+  const char *message = s->msg ? s->msg : own;
+  size_t n = strlen(message);
+  r->data = fsh_zlib_grow(r->data, n);
+  memcpy(r->data, message, n);
+  r->length = (int64_t)n;
+  result[0] = 1;
+  result[1] = err;
+  result[2] = r->length;
+  return r;
+}
+
+// Deflates or inflates data whole. windowBits picks the format: 15 zlib, 31 gzip, -15 raw, and
+// 47 either zlib or gzip when inflating, as unzip does. result is [failed, errno, length].
+fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, const uint8_t *data, int64_t length, int64_t *result) {
+  fsh_zlib_run *r = fsh_zlib_grow(NULL, sizeof *r);
+  r->data = NULL;
+  r->length = 0;
+  z_stream s;
+  memset(&s, 0, sizeof s);
+  int err = inflating ? inflateInit2(&s, (int)bits) : deflateInit2(&s, (int)level, Z_DEFLATED, (int)bits, 8, Z_DEFAULT_STRATEGY);
+  if (err != Z_OK) return fsh_zlib_fail(&s, r, err, "Init error", result);
+  // Concatenated gzip members are read as one, as Node's gunzip reads them; unzip does so once
+  // its input starts as gzip.
+  int members = bits == 31 || (bits == 47 && length >= 2 && data[0] == 0x1f && data[1] == 0x8b);
+  size_t cap = inflating ? (size_t)length * 4 + 64 : deflateBound(&s, (uLong)length);
+  r->data = fsh_zlib_grow(NULL, cap);
+  const uint8_t *next = data;
+  int64_t left = length;
+  for (;;) {
+    if (s.avail_in == 0 && left > 0) {
+      s.next_in = (Bytef *)next;
+      s.avail_in = left > FSH_ZLIB_CHUNK ? FSH_ZLIB_CHUNK : (uInt)left;
+      next += s.avail_in;
+      left -= s.avail_in;
+    }
+    if ((size_t)r->length == cap) {
+      cap *= 2;
+      r->data = fsh_zlib_grow(r->data, cap);
+    }
+    size_t room = cap - (size_t)r->length;
+    s.next_out = r->data + r->length;
+    s.avail_out = room > UINT_MAX ? UINT_MAX : (uInt)room;
+    uInt before = s.avail_out;
+    // Z_FINISH only once the last of the input is in: deflate would end the stream at the first chunk.
+    int flush = left > 0 ? Z_NO_FLUSH : Z_FINISH;
+    err = inflating ? inflate(&s, flush) : deflate(&s, flush);
+    r->length += before - s.avail_out;
+    if (err == Z_STREAM_END) {
+      // Trailing zero bytes are padding; anything else starts another member.
+      if (!inflating || !members || (s.avail_in == 0 && left == 0) || (s.avail_in > 0 ? *s.next_in : *next) == 0) break;
+      inflateReset(&s);
+      continue;
+    }
+    if (err == Z_OK || err == Z_BUF_ERROR) {
+      if (s.avail_out == 0 || (s.avail_in == 0 && left > 0)) continue;
+    }
+    fsh_zlib_fail(&s, r, err, err == Z_NEED_DICT ? "Missing dictionary" : err == Z_OK || err == Z_BUF_ERROR ? "unexpected end of file" : "Zlib error", result);
+    if (inflating) inflateEnd(&s); else deflateEnd(&s);
+    return r;
+  }
+  if (inflating) inflateEnd(&s); else deflateEnd(&s);
+  result[0] = 0;
+  result[1] = 0;
+  result[2] = r->length;
+  return r;
+}
+
+// Copies a run's bytes, its output or its message, to out, and frees the run.
+void fsh_rt_zlib_take(fsh_zlib_run *r, uint8_t *out) {
+  if (r->length > 0) memcpy(out, r->data, (size_t)r->length);
+  free(r->data);
+  free(r);
+}
+`;

@@ -351,3 +351,82 @@ function main() {
 // expect:     right: { kind: 'num', start: 4, value: 3n }
 // expect:   }
 // expect: }
+// case: intersection_recursive_alias_declared_first
+type Span = { start: usize; end: usize };
+type J = { module: string; overloads?: N[] };
+type N = Span & { kind: "n"; name: string; js?: J };
+type B = { name: string; js?: J };
+function asN(n: Ref<N>): string { return n.js?.module ?? "none"; }
+function asB(b: Ref<B>): string { return b.js?.module ?? "none"; }
+function main() {
+  const inner: N = { start: 0, end: 1, kind: "n", name: "inner" };
+  const x: N & B = { start: 2, end: 3, kind: "n", name: "x", js: { module: "m", overloads: [inner] } };
+  console.log(asN(x));
+  console.log(asB(x));
+  const xs: (N & B)[] = [x];
+  console.log(xs.length, xs[0]!.js!.overloads!.length, xs[0]!.js!.overloads![0]!.name);
+  const n: N = { start: 0, end: 1, kind: "n", name: "y", js: { module: "k" } };
+  const y: N & B = n;
+  console.log(y.js!.module);
+}
+// expect: m
+// expect: m
+// expect: 1 1 inner
+// expect: k
+// case: intersection_recursive_alias_declared_after
+type Span = { start: usize; end: usize };
+type N = Span & { kind: "n"; name: string; js?: J };
+type J = { module: string; overloads?: N[] };
+type B = { name: string; js?: J };
+function asN(n: Ref<N>): string { return n.js?.module ?? "none"; }
+function asB(b: Ref<B>): string { return b.js?.module ?? "none"; }
+function main() {
+  const inner: N = { start: 0, end: 1, kind: "n", name: "inner" };
+  const x: N & B = { start: 2, end: 3, kind: "n", name: "x", js: { module: "m", overloads: [inner] } };
+  console.log(asN(x));
+  console.log(asB(x));
+  const xs: (N & B)[] = [x];
+  console.log(xs.length, xs[0]!.js!.overloads!.length, xs[0]!.js!.overloads![0]!.name);
+  const n: N = { start: 0, end: 1, kind: "n", name: "y", js: { module: "k" } };
+  const y: N & B = n;
+  console.log(y.js!.module);
+}
+// expect: m
+// expect: m
+// expect: 1 1 inner
+// expect: k
+// case: intersection_recursive_alias_array
+type Span = { start: usize; end: usize };
+type J = { module: string; overloads?: N[] };
+type N = Span & { kind: "n"; name: string; js?: J };
+type B = { name: string; js?: J };
+function main() {
+  const xs: (N & B)[] = [];
+  console.log(xs.length);
+}
+// expect: 0
+// case: intersection_recursive_alias_conflict
+type J = { module: string; overloads?: N[] };
+type N = { name: string; js?: J };
+type B = { name: string; js?: string };
+function main() {
+  const xs: (N & B)[] = [];
+  console.log(xs.length);
+}
+// error: property 'js' has type 'null | J' on one side of '&' and 'null | string' on the other
+// case: intersection_recursive_alias_moved_into_block
+type Span = { start: usize; end: usize };
+type J = { module: string; overloads?: N[] };
+type N = Span & { kind: "n"; name: string; js?: J };
+type B = { name: string; js?: J };
+function main() {
+  const b: B = { name: "b", js: { module: "m" } };
+  const n: N = { start: 0, end: 1, kind: "n", name: "n", js: b.js };
+  console.log(n.js!.module);
+  const j: J = { module: "k" };
+  const x: N & B = { start: 2, end: 3, kind: "n", name: "x", js: j };
+  const n1: N = x;
+  console.log(n1.js!.module);
+}
+// expect: m
+// expect: k

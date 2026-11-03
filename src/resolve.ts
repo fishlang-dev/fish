@@ -516,6 +516,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
       if (t.args.length !== 0) throw new CompileError("E0106", `'${t.name}' takes no type arguments`, t.start, t.end);
       return this.typing.blockType(t.name);
     }
+    // std's FileHandle's counted descriptor, which closes its file when the last count goes.
+    if (t.name === "__FileDescriptor" && t.args.length === 0) return this.typing.blockType("FileDescriptor");
     if (t.name === "Channel") {
       if (t.args.length !== 1) throw new CompileError("E0116", "'Channel' takes the type it carries, like 'Channel<string>'", t.start, t.end);
       return channel(this.typing, this.resolveType(t.args[0]!), t);
@@ -1191,13 +1193,23 @@ function merged(typing: Typing, a: ObjectType, b: ObjectType, from: Span, to: Sp
       fields[i] = { ...kept, ...(g.readonly && f.readonly && { readonly: true }) };
       continue;
     }
-    if (g.type !== f.type && !(x && y)) {
+    // A side met while an alias it reaches was still being made holds that alias as a recursive
+    // type, where the other holds the finished type: one type either way, kept as the finished one.
+    const finished = g.type !== f.type && settled(typing, g.type) && settled(typing, f.type) && typing.unfolded(g.type) === typing.unfolded(f.type) ? typing.unfolded(f.type) : undefined;
+    if (g.type !== f.type && !finished && !(x && y)) {
       throw new CompileError("E0114", `property '${f.name}' has type '${typing.show(g.type)}' on one side of '&' and '${typing.show(f.type)}' on the other`, from.start, to.end);
     }
-    const type = x && y ? merged(typing, x, y, from, to) : f.type;
+    const type = x && y ? merged(typing, x, y, from, to) : finished ?? f.type;
     fields[i] = { name: f.name, type, ...(g.readonly && f.readonly && { readonly: true }), ...(g.optional && f.optional && { optional: f.optional }) };
   }
   return typing.objectType(fields);
+}
+
+// Whether every recursive type `t` is, or holds as a union member, knows the type it stands for.
+function settled(typing: Typing, t: Type): boolean {
+  const r = typing.recOf(t);
+  const parts = r?.kind === "union" ? r.members : [t];
+  return parts.every((m) => { const p = typing.recOf(m); return p?.kind !== "recursive" || p.of !== "never"; });
 }
 
 // What each other kind of type is called when it can't be a side of `&`.

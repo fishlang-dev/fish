@@ -4,7 +4,7 @@ import { newTables, timed, type Compilation, type Tables } from "./compilation.t
 import { CompileError, CompileErrors, named } from "./diag.ts";
 import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
-import { FILE_SPAN } from "./program.ts";
+import { FILE_SPAN, stdModuleAt } from "./program.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
@@ -1401,7 +1401,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (f.name === "main") throw new CompileError("E1002", "'main' can't be a C function; it is where the program starts", f.start, f.end);
     if (f.throws) throw new CompileError("E1002", "a C function can't throw; C reports failures in its result", f.throws.start, f.throws.end);
     if (!f.returnType) throw new CompileError("E1002", "a C function needs its return type written, 'void' if it returns nothing", f.start, f.end);
-    const crosses = (t: Type) => isNumeric(t) || t === "boolean" || this.recOf(t)?.kind === "pointer";
+    // std's FileHandle hands its counted descriptor to the runtime, which is a pointer to C; only
+    // std may, as a program could otherwise make one that closes a descriptor it doesn't own.
+    const descriptor = (t: Type) => {
+      if (stdModuleAt(this.tables.files, f.start) === undefined) return false;
+      const r = this.recOf(t);
+      const held = r?.kind === "ref" ? this.recOf(r.to) : r;
+      return held?.kind === "block" && held.which === "FileDescriptor";
+    };
+    const crosses = (t: Type) => isNumeric(t) || t === "boolean" || this.recOf(t)?.kind === "pointer" || descriptor(t);
     const params = this.instancing().paramTypes(instance, this.instancing().scopeOf(instance));
     f.params.forEach((p, i) => {
       if (p.rest || p.optional || p.default) throw unsupported("rest, optional and default parameters on C functions", p);

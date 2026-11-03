@@ -3906,7 +3906,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${from} ]`);
       }
     } else if (r.kind === "block") {
-      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", UnixListener: "fsh_rt_socket_release", UnixStream: "fsh_rt_socket_release", UdpSocket: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release", JsValue: "fsh_rt_js_release" }[r.which];
+      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", UnixListener: "fsh_rt_socket_release", UnixStream: "fsh_rt_socket_release", UdpSocket: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release", JsValue: "fsh_rt_js_release", FileDescriptor: "fsh_rt_fd_release" }[r.which];
       emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (r.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
@@ -6795,7 +6795,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const r = recOf(t);
       return r?.kind === "union" ? r.members : [t];
     };
-    if (!needsDrop(from) || isDyn(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to)) return true;
+    // Types that lower to the same one convert as they are, as `convert` takes them.
+    if (!needsDrop(from) || isDyn(to) || typing.lower(from) === typing.lower(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to)) return true;
     return members(from).every((m) => members(to).some((t) => keepsPart(m, t)));
   }
 
@@ -6996,9 +6997,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         const [args, input] = [alloca(ARRAY), alloca(ARRAY)];
         emit(`store ${ARRAY} ${operand(e.args[1]!, e.args.slice(2))}, ptr ${args}`);
         const cwd = operand(e.args[2]!, e.args.slice(3));
-        emit(`store ${ARRAY} ${value(e.args[3]!)}, ptr ${input}`);
+        emit(`store ${ARRAY} ${operand(e.args[3]!, e.args.slice(4))}, ptr ${input}`);
+        const flags = operand(e.args[4]!, e.args.slice(5));
+        const env = alloca(ARRAY);
+        emit(`store ${ARRAY} ${value(e.args[5]!)}, ptr ${env}`);
         const [numbers, out, err] = [alloca("[3 x i64]"), alloca(ARRAY), alloca(ARRAY)];
-        emit(`${status} = call i32 @fsh_rt_spawn_sync(ptr ${path}, ptr ${args}, ptr ${cwd}, ptr ${input}, ptr ${numbers}, ptr ${out}, ptr ${err}, ptr ${parts})`);
+        emit(`${status} = call i32 @fsh_rt_spawn_sync(ptr ${path}, ptr ${args}, ptr ${cwd}, ptr ${input}, i64 ${flags}, ptr ${env}, ptr ${numbers}, ptr ${out}, ptr ${err}, ptr ${parts})`);
         read = () => {
           const tuple = typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]) as ObjectType;
           let made = "zeroinitializer";
@@ -7396,7 +7400,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const before = spills.length;
     // A nested function calling itself runs with the captures it was called with.
-    const pointer = bodyOf(target).closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!.env) : receiver(e.callee)) : bodyOf(target).self && object ? thisPointer(target, object) : undefined;
+    const pointer = bodyOf(target).closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!.env) : !target.generator && !target.future && fresh(e.callee) && !unwraps(e.callee) ? calledClosure(e.callee) : receiver(e.callee)) : bodyOf(target).self && object ? thisPointer(target, object) : undefined;
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
     const values = argValues(e.args, target, bodyOf(target).closure ? bodyOf(target).params.length : e.args.length);
@@ -9336,6 +9340,19 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const v = owns ? spill(spilled, types.get(object)!, read) : read;
     emit(`store ${type} ${v}, ptr ${spilled}`);
     return spilled;
+  }
+
+  // A closure made for its call, as in `(() => f(xs))()`, moves into the slot the call runs on.
+  // Its body may move a capture out of that slot, so what it leaves is dropped from the slot
+  // once the call returns, not from the value as it was made.
+  function calledClosure(callee: Expr): string {
+    const type = valueType(callee);
+    const slot = alloca(llvm(type));
+    const copy = { v: value(callee, true), type };
+    emit(`store ${llvm(type)} ${copy.v}, ptr ${slot}`);
+    pending.push(copy);
+    spills.push({ slot, type, copy });
+    return slot;
   }
 
   // An expression's value, copied down to the declared type it meets when that is narrower.

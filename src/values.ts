@@ -707,6 +707,9 @@ export class Expressions<C extends Context> implements Union {
     // A literal lent to a reference is a temporary of the type it refers to.
     if ((e.kind === "object" || e.kind === "array") && this.isRefType(t)) t = this.typing.unfolded(this.typing.rec(t).to);
     if (e.kind === "object" && t !== undefined && this.dictOf(t)) return this.dictLiteral(e, t as MapType);
+    // An optional field's dictionary, too.
+    const dict = e.kind === "object" ? this.optionalDict(t) : undefined;
+    if (e.kind === "object" && dict) return this.dictLiteral(e, dict);
     // A generic function value meeting a function type that isn't generic is the one instance
     // that type gives it: an arrow calling it, its parameters typed from there.
     const r = this.recOf(t);
@@ -1822,7 +1825,8 @@ export class Expressions<C extends Context> implements Union {
         for (const p of a.props) {
           const declared = p.kind === "property" ? this.typing.field(t, p.key as string)?.type : undefined;
           const boxes = declared !== undefined && this.boxedIn(declared) !== undefined;
-          const want = p.kind === "property" && (p.value.kind === "arrow" || boxes) ? declared : undefined;
+          const dict = p.kind === "property" && p.value.kind === "object" && declared !== undefined && (this.dictOf(declared) || this.optionalDict(declared));
+          const want = p.kind === "property" && (p.value.kind === "arrow" || boxes || dict) ? declared : undefined;
           if (want && p.kind === "property") this.expect(p.value, want);
         }
       }
@@ -5057,6 +5061,13 @@ export class Expressions<C extends Context> implements Union {
     return this.rewrites.replace(e, { ...to, start: e.start, end: e.end });
   }
 
+  // The dictionary an Option of one holds.
+  private optionalDict(t: Type | undefined): MapType | undefined {
+    const r = this.recOf(t);
+    if (r?.kind !== "union" || r.members.length !== 2 || !r.members.includes("null")) return undefined;
+    return this.dictOf(r.members.find((m) => m !== "null")!);
+  }
+
   // The dictionary a value is, or a reference to one is.
   private dictOf(t: Type): MapType | undefined {
     const r = this.recOf(t);
@@ -7658,9 +7669,10 @@ const syncFileSignatures = (typing: Typing): Record<string, [Type[], Type, boole
   pathLink: [["string", "string", "boolean"], "void", true],
   // A path, atime and mtime in seconds, and whether a link is followed.
   pathUtimes: [["string", "f64", "f64", "boolean"], "void", true],
-  // A command, its arguments, the working directory ("" for this one's) and stdin, giving the
-  // pid, exit status (-1 for a signal), signal number, stdout and stderr.
-  processSpawn: [["string", typing.arrayType("string"), "string", typing.arrayType("u8")], typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), true],
+  // A command, its arguments, the working directory ("" for this one's), stdin, the runtime's
+  // flags and "K=V" environment, giving the pid, exit status (-1 for a signal), signal number,
+  // stdout and stderr.
+  processSpawn: [["string", typing.arrayType("string"), "string", typing.arrayType("u8"), "i64", typing.arrayType("string")], typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), true],
 });
 
 // Each string method: its parameters, what it returns, and how many arguments it needs.

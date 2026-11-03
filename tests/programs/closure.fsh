@@ -867,3 +867,24 @@ function main() {
   const f = (a) => a
 }
 // error: parameter 'a' implicitly has an 'any' type; add a type annotation
+// case: closure_called_where_made_moves_capture
+// expect: 3
+// expect: 1
+// expect: long
+function f(data: u8[]): i64 { return data.length as i64; }
+function peek(data: Ref<u8[]>): i64 { return data.length as i64; }
+function maker(xs: u8[]): () => i64 { return () => peek(xs); }
+function fails(data: u8[]): i64 throws Error {
+  throw new Error("long");
+}
+function main() {
+  const xs: u8[] = [1, 2, 3];
+  console.log((() => f(xs))());
+  console.log(maker([9])());
+  const ys: u8[] = [1];
+  try {
+    console.log((() => fails(ys))());
+  } catch (e) {
+    console.log(e.message);
+  }
+}

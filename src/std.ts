@@ -4084,6 +4084,184 @@ async function __tlsClient(conn: Ref<TcpStream>, serverName: string, ca: string,
 
 // The std modules a program reaches by a Node specifier, as `node:os` or `os`, or by naming one
 // as a global, each Fish source loaded like a file of the program.
+// node:fs's Stats and descriptor calls, which fs exports and fs/promises' FileHandle runs on.
+const FILES = String.raw`
+export class Stats {
+  size: i64;
+  mode: i64;
+  mtimeMs: f64;
+  kind: i64;
+  constructor(size: i64, mode: i64, mtimeMs: f64, kind: i64) {
+    this.size = size;
+    this.mode = mode;
+    this.mtimeMs = mtimeMs;
+    this.kind = kind;
+  }
+  isFile(): boolean { return this.kind === 1; }
+  isDirectory(): boolean { return this.kind === 2; }
+  isSymbolicLink(): boolean { return this.kind === 3; }
+}
+
+declare function fsh_rt_errno_words(number: i64, code: MutPtr<u8>, codeSize: i64, text: MutPtr<u8>, textSize: i64): void;
+declare function fsh_rt_fd_flags(flags: Ptr<u8>): i64;
+declare function fsh_rt_fd_open(path: Ptr<u8>, flags: i64, mode: i64): i64;
+declare function fsh_rt_fd_read(fd: i64, at: MutPtr<u8>, length: i64, position: i64): i64;
+declare function fsh_rt_fd_write(fd: i64, at: Ptr<u8>, length: i64, position: i64): i64;
+declare function fsh_rt_fd_stat(fd: i64, out: MutPtr<i64>, mtime: MutPtr<f64>): i64;
+declare function fsh_rt_fd_call(which: i64, fd: i64, value: i64): i64;
+
+// A failed descriptor call's IoError, from the -errno the runtime gave: Node's code and words,
+// naming the path only for open.
+function failed(result: i64, syscall: string, path: string | null): IoError {
+  let code: u8[] = new Array(32).fill(0 as u8);
+  let text: u8[] = new Array(200).fill(0 as u8);
+  unsafe { fsh_rt_errno_words(-result, mutPtrOf(code[0]), 32, mutPtrOf(text[0]), 200) };
+  const name = unsafe { fromCString(ptrOf(code[0])) };
+  let e = new IoError(name + ": " + unsafe { fromCString(ptrOf(text[0])) } + ", " + syscall + (path === null ? "" : " '" + path + "'"));
+  e.code = name;
+  e.syscall = syscall;
+  e.path = path;
+  return e;
+}
+
+// Node's RangeError for a number outside what a call takes, the number grouped by threes past
+// 2^32 as Node writes it.
+// Node's own checks in C++ write it plainly, as given by plain.
+function outOfRange(name: string, range: string, n: i64, plain: boolean = false): IoError {
+  let shown = String(n);
+  if (!plain && (n > 4294967296 || n < -4294967296)) {
+    const start = n < 0 ? 1 : 0;
+    let grouped = "";
+    let i = shown.length as i64;
+    for (; i >= start + 4; i -= 3) grouped = "_" + shown.slice(i - 3, i) + grouped;
+    shown = shown.slice(0, i) + grouped;
+  }
+  let e = new IoError("The value of \"" + name + "\" is out of range. It must be " + range + ". Received " + shown);
+  e.code = "ERR_OUT_OF_RANGE";
+  return e;
+}
+
+function invalid(message: string): IoError {
+  let e = new IoError(message);
+  e.code = "ERR_INVALID_ARG_VALUE";
+  return e;
+}
+
+const SAFE = 9007199254740991;
+
+function checkFd(fd: i64, plain: boolean = true): void throws IoError {
+  if (fd < 0 || fd > 2147483647) throw outOfRange("fd", ">= 0 && <= 2147483647", fd, plain);
+}
+
+function checkMode(mode: i64): void throws IoError {
+  if (mode < 0 || mode > 4294967295) throw outOfRange("mode", ">= 0 && <= 4294967295", mode);
+}
+
+// Node's string flags, as "r" or "wx+", or a number given to open as it is.
+export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o666): i64 throws IoError {
+  if (path.includes("\0")) throw invalid("The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received '" + path.replaceAll("\0", "\\x00") + "'");
+  let bits = 0;
+  if (typeof flags === "string") {
+    bits = flags.includes("\0") ? -1 : unsafe { fsh_rt_fd_flags(cString(flags)) };
+    if (bits < 0) throw invalid("The argument 'flags' is invalid. Received '" + flags + "'");
+  } else {
+    bits = flags;
+  }
+  checkMode(mode);
+  const fd = unsafe { fsh_rt_fd_open(cString(path), bits, mode) };
+  if (fd < 0) throw failed(fd, "open", path);
+  return fd;
+}
+
+export function closeSync(fd: i64): void throws IoError {
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(3, fd, 0) };
+  if (r < 0) throw failed(r, "close", null);
+}
+
+// What's read lands at offset; a null or -1 position reads from the file's own, which moves.
+export function readSync(fd: i64, buffer: Mut<u8[]>): i64 throws IoError;
+export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64, length: i64, position?: i64 | null): i64 throws IoError;
+export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64 = 0, length?: i64, position?: i64 | null): i64 throws IoError {
+  checkFd(fd, false);
+  // Node's length |= 0, which FileHandle's read doesn't do.
+  const n = ((length ?? (buffer.length as i64) - offset) as i32) as i64;
+  return readInto(fd, buffer, offset, n, position ?? -1);
+}
+
+// A read's checks in Node's order, then the read.
+function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64): i64 throws IoError {
+  if (offset < 0 || offset > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", offset);
+  const size = buffer.length as i64;
+  if (n === 0) return 0;
+  if (size === 0) throw invalid("The argument 'buffer' is empty and cannot be written. Received Uint8Array(0) []");
+  if (n < 0) throw outOfRange("length", ">= 0", n);
+  if (offset + n > size) throw outOfRange("length", "<= " + String(size - offset), n);
+  if (position < -1 || position > SAFE) throw outOfRange("position", ">= -1 && <= 9007199254740991", position);
+  const got = unsafe { fsh_rt_fd_read(fd, mutPtrOf(buffer[offset as usize]), n, position) };
+  if (got < 0) throw failed(got, "read", null);
+  return got;
+}
+
+// A write of length bytes from offset, or of a string's UTF-8; a negative or missing position
+// writes at the file's own.
+export function writeSync(fd: i64, buffer: Ref<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): i64 throws IoError;
+export function writeSync(fd: i64, text: string, position?: i64 | null, encoding?: "utf8" | "utf-8"): i64 throws IoError;
+export function writeSync(fd: i64, data: Ref<string | u8[]>, second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): i64 throws IoError {
+  checkFd(fd, false);
+  if (typeof data === "string") {
+    const bytes = new TextEncoder().encode(data);
+    return written(fd, bytes, 0, bytes.length as i64, second ?? -1);
+  }
+  const size = data.length as i64;
+  const offset = second ?? 0;
+  if (offset < 0 || offset > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", offset);
+  const n = typeof third === "number" ? third : size - offset;
+  if (offset > size) throw outOfRange("offset", "<= " + String(size), offset);
+  if (n > size - offset) throw outOfRange("length", "<= " + String(size - offset), n);
+  if (n < 0) throw outOfRange("length", ">= 0", n);
+  return written(fd, data, offset, n, position ?? -1);
+}
+
+function written(fd: i64, bytes: Ref<u8[]>, offset: i64, n: i64, position: i64): i64 throws IoError {
+  // A pointer for an empty write, which still reaches the system as Node's does.
+  const none: u8[] = [0];
+  const r = unsafe { fsh_rt_fd_write(fd, n === 0 ? ptrOf(none[0]) : ptrOf(bytes[offset as usize]), n, position) };
+  if (r < 0) throw failed(r, "write", null);
+  return r;
+}
+
+export function fstatSync(fd: i64): Stats throws IoError {
+  checkFd(fd);
+  let out: i64[] = [0, 0, 0];
+  let mtime: f64 = 0;
+  const r = unsafe { fsh_rt_fd_stat(fd, mutPtrOf(out[0]), mutPtrOf(mtime)) };
+  if (r < 0) throw failed(r, "fstat", null);
+  return new Stats(out[0], out[1], mtime, out[2]);
+}
+
+// A negative length truncates to nothing, as Node's does.
+export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
+  if (len < -SAFE || len > SAFE) throw outOfRange("len", ">= -9007199254740991 && <= 9007199254740991", len);
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(0, fd, len < 0 ? 0 : len) };
+  if (r < 0) throw failed(r, "ftruncate", null);
+}
+
+export function fchmodSync(fd: i64, mode: i64): void throws IoError {
+  checkMode(mode);
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(1, fd, mode) };
+  if (r < 0) throw failed(r, "fchmod", null);
+}
+
+export function fsyncSync(fd: i64): void throws IoError {
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(2, fd, 0) };
+  if (r < 0) throw failed(r, "fsync", null);
+}
+`;
+
 export const STD_MODULES: Record<string, string> = {
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
   // they panic where they are made.
@@ -4763,6 +4941,161 @@ export async function writeFile(path: string, data: string | u8[]): Promise<void
   await fileWrite(path, bytes);
 }
 
+${FILES.replaceAll("export ", "")}
+declare function fsh_rt_fd_hold(fd: i64): __FileDescriptor;
+declare function fsh_rt_fd_of(held: Ref<__FileDescriptor>): i64;
+declare function fsh_rt_fd_begin(held: Ref<__FileDescriptor>): i64;
+declare function fsh_rt_fd_end(held: Ref<__FileDescriptor>): void;
+declare function fsh_rt_fd_take(held: Ref<__FileDescriptor>): i64;
+
+// Node's error for a call on a closed handle.
+function closed(syscall: string): IoError {
+  let e = new IoError("file closed");
+  e.code = "EBADF";
+  e.syscall = syscall;
+  return e;
+}
+
+// A call's descriptor, held in flight until fsh_rt_fd_end, so a close from another task waits for
+// the call rather than letting the number be reused under it.
+function begin(held: Ref<__FileDescriptor>, syscall: string): i64 throws IoError {
+  const fd = unsafe { fsh_rt_fd_begin(held) };
+  if (fd < 0) throw closed(syscall);
+  return fd;
+}
+
+// An open file, from open(). Its calls run on the blocking pool; dropped without close, it still
+// closes its file. Its descriptor is the handle's: closing it with closeSync, rather than through
+// close(), leaves the handle to close whatever file reuses the number.
+export class FileHandle {
+  #held: __FileDescriptor;
+  constructor(held: __FileDescriptor) {
+    this.#held = held;
+  }
+
+  // The descriptor, or -1 once closed.
+  get fd(): i64 {
+    return unsafe { fsh_rt_fd_of(this.#held) };
+  }
+
+  // Node's error for a closed handle, before a call's arguments are looked at.
+  #open(syscall: string): void throws IoError {
+    if (this.fd < 0) throw closed(syscall);
+  }
+
+  // What's read lands at offset; a null or -1 position reads from the file's own.
+  async read(buffer: Mut<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): Promise<{ bytesRead: i64 }> throws IoError {
+    this.#open("read");
+    const held = this.#held.clone();
+    const size = buffer.length as i64;
+    const from = offset ?? 0;
+    const n = length ?? size - from;
+    const at = position ?? -1;
+    // The read fills a copy of its own, since the buffer stays here, then lands in the buffer.
+    const done = await spawnBlocking(() => {
+      const fd = begin(held, "read");
+      let copy: u8[] = new Array(size).fill(0 as u8);
+      try {
+        const got = readInto(fd, copy, from, n, at);
+        return { got, copy };
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+    for (let i = from; i < from + done.got; i++) buffer[i as usize] = done.copy[i as usize];
+    return { bytesRead: done.got };
+  }
+
+  // write(buffer, offset?, length?, position?), or write(text, position?, encoding?) for a
+  // string's UTF-8, as Node reads its arguments by what it's given; a null position writes at the
+  // file's own. The bytes are taken, as the write runs on the blocking pool; one signature, since
+  // async methods can't be overloaded yet.
+  async write(data: string | u8[], second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): Promise<{ bytesWritten: i64 }> throws IoError {
+    this.#open("write");
+    if (typeof data !== "string" && data.length === 0) return { bytesWritten: 0 };
+    const held = this.#held.clone();
+    const length = typeof third === "number" ? third : null;
+    const wrote = await spawnBlocking(() => {
+      const fd = begin(held, "write");
+      try {
+        if (typeof data === "string") return writeSync(fd, data, second);
+        return writeSync(fd, data, second, length, position);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+    return { bytesWritten: wrote };
+  }
+
+  async stat(): Promise<Stats> throws IoError {
+    this.#open("fstat");
+    const held = this.#held.clone();
+    return await spawnBlocking(() => {
+      const fd = begin(held, "fstat");
+      try {
+        return fstatSync(fd);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+  }
+
+  async truncate(len: i64 = 0): Promise<void> throws IoError {
+    this.#open("ftruncate");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "ftruncate");
+      try {
+        ftruncateSync(fd, len);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+  }
+
+  async sync(): Promise<void> throws IoError {
+    this.#open("fsync");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "fsync");
+      try {
+        fsyncSync(fd);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+  }
+
+  async chmod(mode: i64): Promise<void> throws IoError {
+    this.#open("fchmod");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "fchmod");
+      try {
+        fchmodSync(fd, mode);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+  }
+
+  // Closing a closed handle does nothing, as Node's does. With calls in flight, the last of them
+  // closes the file as it finishes; later calls throw "file closed" at once.
+  async close(): Promise<void> throws IoError {
+    const fd = unsafe { fsh_rt_fd_take(this.#held) };
+    if (fd >= 0) closeSync(fd);
+  }
+}
+
+// Node's string flags, as "r" or "a+", or a number given to open as it is. The handle is made in
+// the same job as the descriptor, so a caller that stops waiting still has it closed.
+export async function open(path: string, flags: string | i64 = "r", mode: i64 = 0o666): Promise<FileHandle> throws IoError {
+  return await spawnBlocking(() => {
+    const fd = openSync(path, flags, mode);
+    return new FileHandle(unsafe { fsh_rt_fd_hold(fd) });
+  });
+}
+
 export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
 
 export async function access(path: string, mode: i64 = 0): Promise<void> throws IoError {
@@ -4825,22 +5158,6 @@ export function existsSync(path: string): boolean {
   return pathExists(path);
 }
 
-export class Stats {
-  size: i64;
-  mode: i64;
-  mtimeMs: f64;
-  kind: i64;
-  constructor(size: i64, mode: i64, mtimeMs: f64, kind: i64) {
-    this.size = size;
-    this.mode = mode;
-    this.mtimeMs = mtimeMs;
-    this.kind = kind;
-  }
-  isFile(): boolean { return this.kind === 1; }
-  isDirectory(): boolean { return this.kind === 2; }
-  isSymbolicLink(): boolean { return this.kind === 3; }
-}
-
 function stats(path: string, follow: boolean): Stats throws IoError {
   const [size, mode, mtimeMs, kind] = pathStat(path, follow);
   return new Stats(size, mode, mtimeMs, kind);
@@ -4893,6 +5210,8 @@ export function copyFileSync(src: string, dest: string, mode: i64 = 0): void thr
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
 }
+
+${FILES}
 
 export function accessSync(path: string, mode: i64 = 0): void throws IoError {
   pathAccess(path, mode);
@@ -4975,6 +5294,142 @@ export function readlinkSync(path: string): string throws IoError {
   return pathReadLink(path);
 }
 `,
+  // Whole-buffer compression and decompression over the system zlib, which links into a program
+  // only when it calls these. The async forms run the sync ones on the blocking pool.
+  zlib: String.raw`
+declare function fsh_rt_zlib_run(inflating: i64, bits: i64, level: i64, data: Ptr<u8>, length: i64, result: MutPtr<i64>): Ptr<u8>;
+declare function fsh_rt_zlib_take(run: Ptr<u8>, out: MutPtr<u8>): void;
+
+// What a compression or decompression throws, as Node's errors carry zlib's: the message, zlib's
+// error number and its name. A level out of range is Node's RangeError, with no errno.
+export class ZlibError extends Error {
+  errno: i64 | null;
+  code: string;
+  constructor(message: string, errno: i64 | null, code: string) {
+    super(message);
+    this.errno = errno;
+    this.code = code;
+  }
+}
+
+export type ZlibOptions = { level?: i64 };
+
+export const constants = { Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9, Z_DEFAULT_COMPRESSION: -1 };
+
+function codeOf(errno: i64): string {
+  switch (errno) {
+    case 2: return "Z_NEED_DICT";
+    case -2: return "Z_STREAM_ERROR";
+    case -3: return "Z_DATA_ERROR";
+    case -4: return "Z_MEM_ERROR";
+    case -5: return "Z_BUF_ERROR";
+    case -6: return "Z_VERSION_ERROR";
+  }
+  return "Z_ERRNO";
+}
+
+// A number as Node's range errors show it, grouped by underscores beyond 2 ** 32.
+function shown(n: i64): string {
+  const text = String(n);
+  if (n <= 4294967296 && n >= -4294967296) return text;
+  const start = n < 0 ? 1 : 0;
+  let i = text.length as i64;
+  let grouped = "";
+  for (; i >= start + 4; i -= 3) grouped = "_" + text.slice(i - 3, i) + grouped;
+  return text.slice(0, i) + grouped;
+}
+
+// Runs zlib over the whole of data; bits picks the format as windowBits does.
+function run(inflating: boolean, bits: i64, data: string | u8[], options: ZlibOptions): u8[] throws ZlibError {
+  const input = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  return checked(inflating, bits, options.level ?? -1, input);
+}
+
+function checked(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>): u8[] throws ZlibError {
+  if (level < -1 || level > 9) {
+    let e = new ZlibError("The value of \"options.level\" is out of range. It must be >= -1 and <= 9. Received " + shown(level), null, "ERR_OUT_OF_RANGE");
+    e.name = "RangeError";
+    throw e;
+  }
+  // A pointer is taken to an element, so empty input is passed as one byte of length 0.
+  const none: u8[] = [0 as u8];
+  let result: i64[] = [0, 0, 0];
+  const done = input.length === 0
+    ? unsafe { fsh_rt_zlib_run(inflating ? 1 : 0, bits, level, ptrOf(none[0]), 0, mutPtrOf(result[0])) }
+    : unsafe { fsh_rt_zlib_run(inflating ? 1 : 0, bits, level, ptrOf(input[0]), input.length as i64, mutPtrOf(result[0])) };
+  let out: u8[] = new Array(result[2] === 0 ? 1 : result[2]).fill(0 as u8);
+  unsafe { fsh_rt_zlib_take(done, mutPtrOf(out[0])) };
+  if (result[2] === 0) out = [];
+  if (result[0] !== 0) throw new ZlibError(new TextDecoder().decode(out), result[1], codeOf(result[1]));
+  return out;
+}
+
+export function gzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
+  return run(false, 31, data, options);
+}
+
+export function gunzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
+  return run(true, 31, data, options);
+}
+
+export function deflateSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
+  return run(false, 15, data, options);
+}
+
+export function inflateSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
+  return run(true, 15, data, options);
+}
+
+export function deflateRawSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
+  return run(false, -15, data, options);
+}
+
+export function inflateRawSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
+  return run(true, -15, data, options);
+}
+
+// Gzip or zlib, whichever the input's header says.
+export function unzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
+  return run(true, 47, data, options);
+}
+
+// Node's async calls take a callback; these give a promise instead, as promisify would.
+// The closure borrows the input rather than moving it into the call: a blocking task that moves
+// an array it captured frees it twice.
+async function runAsync(inflating: boolean, bits: i64, data: string | u8[], options: ZlibOptions): Promise<u8[]> throws ZlibError {
+  const input = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  const level = options.level ?? -1;
+  return await spawnBlocking(() => checked(inflating, bits, level, input));
+}
+
+export async function gzip(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(false, 31, data, options);
+}
+
+export async function gunzip(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(true, 31, data, options);
+}
+
+export async function deflate(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(false, 15, data, options);
+}
+
+export async function inflate(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(true, 15, data, options);
+}
+
+export async function deflateRaw(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(false, -15, data, options);
+}
+
+export async function inflateRaw(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(true, -15, data, options);
+}
+
+export async function unzip(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(true, 47, data, options);
+}
+`,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
@@ -5004,7 +5459,7 @@ export function spawnSync(command: string, args: string[] = [], options: SpawnSy
   const input = options.input ?? "";
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
   try {
-    const [pid, status, signo, stdout, stderr] = processSpawn(command, args, options.cwd ?? "", bytes);
+    const [pid, status, signo, stdout, stderr] = processSpawn(command, args, options.cwd ?? "", bytes, 0, []);
     const name = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
     return new SpawnSyncReturns<u8[]>(pid, status < 0 ? null : status, name, stdout, stderr, null);
   } catch (e) {
@@ -5711,6 +6166,210 @@ export function exit(code: i64 = 0): never {
   while (true) {}
 }
 `,
+  // Bun's global, as the subset this module documents: file, stdin, write, env, argv, sleep,
+  // sleepSync, which, spawnSync, serve and version, each as Bun 1.4.3 gives it for the shapes here.
+  // Bun.spawn's running child and Bun.build aren't here. spawnSync's stdout and stderr are u8[],
+  // empty when not piped, where Bun gives a Buffer, or undefined.
+  Bun: String.raw`
+import { statSync } from "fs";
+import { dirname, resolve } from "path";
+import { bytes as stdinBytes } from "stdin";
+
+declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+declare function usleep(microseconds: u32): i32;
+
+// A file read when asked, by its path, or standard input's when name is null. Its calls take it
+// over, so a temporary's, as in Bun.file(path).text(), outlives its statement.
+export class BunFile {
+  name: string | null;
+  constructor(name: string | null) {
+    this.name = name;
+  }
+
+  async bytes(this: Own<this>): Promise<u8[]> throws IoError {
+    const name = this.name;
+    if (name === null) return await stdinBytes();
+    return await fileRead(name);
+  }
+
+  async text(this: Own<this>): Promise<string> throws IoError {
+    const all = await this.bytes();
+    return new TextDecoder().decode(all);
+  }
+
+  // Whether a regular file is there: a directory isn't one.
+  async exists(this: Own<this>): Promise<boolean> {
+    const name = this.name;
+    if (name === null) return true;
+    try {
+      return statSync(name).isFile();
+    } catch (_e) {
+      return false;
+    }
+  }
+}
+
+export function file(path: string): BunFile {
+  return new BunFile(path);
+}
+
+export function stdin(): BunFile {
+  return new BunFile(null);
+}
+
+// Writes a file whole, making the directories it is in, and gives how many bytes it wrote.
+export async function write(destination: string, data: string | u8[]): Promise<i64> throws IoError {
+  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  dirMake(dirname(destination), true, 511);
+  const length = bytes.length as i64;
+  await fileWrite(destination, bytes);
+  return length;
+}
+
+export function env(name: string): string | null {
+  return process.env[name];
+}
+
+export function argv(): string[] {
+  return process.argv;
+}
+
+// The prelude's sleep, which this module's own name would hide.
+async function sleeping(ms: i64): Promise<void> {
+  await sleep(ms);
+}
+
+export function sleepSync(ms: i64): void {
+  let left = ms;
+  while (left > 0) {
+    const now = left < 1000 ? left : 1000;
+    unsafe { usleep((now * 1000) as u32) };
+    left = left - now;
+  }
+}
+
+// The Bun release whose API this subset follows, since a Fish program has no Bun of its own.
+export function version(): string {
+  return "1.4.3";
+}
+
+function runnable(path: string): boolean {
+  try {
+    pathAccess(path, 1);
+    return statSync(path).isFile();
+  } catch (_e) {
+    return false;
+  }
+}
+
+// The executable file a command names, as an absolute path: a path given with a slash, or the
+// first on PATH.
+export function which(command: string): string | null {
+  return found(command, process.env.PATH ?? "");
+}
+
+function found(command: string, path: string): string | null {
+  if (command === "") return null;
+  if (command.includes("/")) return runnable(command) ? resolve(command) : null;
+  for (const dir of path.split(":")) {
+    if (dir === "") continue;
+    const at = resolve(dir, command);
+    if (runnable(at)) return at;
+  }
+  return null;
+}
+
+export type SpawnStdio = "pipe" | "inherit" | "ignore";
+export type SpawnOptions = { cwd?: string; env?: { [name: string]: string }; stdin?: u8[] | "inherit" | "ignore"; stdout?: SpawnStdio; stderr?: SpawnStdio };
+
+export class SyncSubprocess {
+  pid: i64;
+  exitCode: i64 | null;
+  signalCode: string | null;
+  success: boolean;
+  stdout: u8[];
+  stderr: u8[];
+  constructor(pid: i64, exitCode: i64 | null, signalCode: string | null, stdout: u8[], stderr: u8[]) {
+    this.pid = pid;
+    this.exitCode = exitCode;
+    this.signalCode = signalCode;
+    this.success = exitCode === 0;
+    this.stdout = stdout;
+    this.stderr = stderr;
+  }
+}
+
+// The runtime's two bits for a stream: piped, inherited or /dev/null.
+function streamMode(given: SpawnStdio | null): i64 {
+  if (given === null || given === "pipe") return 0;
+  return given === "inherit" ? 1 : 2;
+}
+
+// Bun's TypeError for a string the C call would cut short, as an IoError with its code.
+function nulFree(s: string, what: string): void throws IoError {
+  if (!s.includes("\0")) return;
+  let bad = new IoError("The " + what + " must be a string without null bytes. Received " + JSON.stringify(s));
+  bad.code = "ERR_INVALID_ARG_VALUE";
+  throw bad;
+}
+
+// Runs a command to its end. stdin is /dev/null unless given, and stdout and stderr are piped
+// unless asked otherwise; env, when given, is the child's whole environment, and its PATH, when
+// it has one, is where the command is looked for.
+export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubprocess throws IoError {
+  if (cmd.length === 0) throw new IoError("cmd must not be empty");
+  for (let i: usize = 0; i < cmd.length; i++) nulFree(cmd[i], "argument 'args[" + i + "]'");
+  const command = cmd[0];
+  let input: u8[] = [];
+  // argv[0] travels in the arguments, so the command can be its path while keeping its name.
+  let flags: i64 = 2 + 4 * streamMode(options.stdout) + 16 * streamMode(options.stderr) + 128 + 256;
+  const given = options.stdin;
+  if (given === "inherit") flags = flags - 1;
+  else if (given !== null && given !== "ignore") {
+    flags = flags - 2;
+    input = given;
+  }
+  let pairs: string[] = [];
+  let path = process.env.PATH ?? "";
+  const env = options.env;
+  if (env !== null) {
+    flags = flags + 64;
+    for (const [key, value] of Object.entries(env)) {
+      nulFree(key, "property 'options.env['" + key + "']'");
+      nulFree(value, "property 'options.env['" + key + "']'");
+      if (key === "PATH") path = value;
+      pairs.push(key + "=" + value);
+    }
+  }
+  let file = command;
+  if (!command.includes("/")) {
+    const at = found(command, path);
+    if (at === null) {
+      let missing = new IoError('Executable not found in $PATH: "' + command + '"');
+      missing.code = "ENOENT";
+      missing.path = command;
+      throw missing;
+    }
+    file = at;
+  }
+  const [pid, status, signo, stdout, stderr] = processSpawn(file, cmd, options.cwd ?? "", input, flags, pairs);
+  const signal = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
+  return new SyncSubprocess(pid, status < 0 ? null : status, signal, stdout, stderr);
+}
+
+// Bun.serve's options this subset takes. fetch is async, and the port 3000 unless given.
+export type BunServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; fetch: (req: Request) => Promise<Response> };
+
+// Serves until the signal, or the first SIGINT or SIGTERM, stops it: unlike Bun's, it is awaited,
+// or spawned to run beside the rest of the program, and gives no Server.
+async function serving(options: BunServeOptions): Promise<void> throws IoError {
+  const unix = options.unix;
+  const port = unix === null ? options.port ?? 3000 : options.port;
+  await serve({ port, hostname: options.hostname, unix, tls: options.tls, signal: options.signal }, options.fetch);
+}
+
+export { sleeping as sleep, serving as serve };
+`,
 };
 
 // Members of a std module read as values, each through a function of its: `argv` as
@@ -5718,6 +6377,7 @@ export function exit(code: i64 = 0): never {
 // `process.env[name]` calling it with the key.
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
   process: { argv: "value", env: "table", shutdown: "value" },
+  Bun: { argv: "value", env: "table", stdin: "value", version: "value" },
 };
 
 // The compiler's own tests run JS through this module, which no program may import: Fish has no
@@ -5732,7 +6392,7 @@ export function evaluate(module: string): JsValue {
 export function stdModule(specifier: string): string | undefined {
   const bare = specifier.startsWith("node:") ? specifier.slice("node:".length) : specifier;
   // "path/posix" is "path", which is POSIX's here.
-  const name = bare === "path/posix" ? "path" : bare;
+  const name = bare === "path/posix" ? "path" : bare === "bun" ? "Bun" : bare;
   return Object.hasOwn(STD_MODULES, name) ? name : undefined;
 }
 
