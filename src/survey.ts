@@ -84,6 +84,7 @@ const RULES: Rule[] = [
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
+  { id: "bunGlobals", action: "unsupported", title: "Bun members besides file, stdin, write, env, argv, sleep, sleepSync, which, spawnSync, serve and version" },
   { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url, main, dirname and filename members" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
@@ -301,7 +302,7 @@ function scan(path: string, program: unknown[], note: (id: string, offset: usize
     if (name && whole) wholes.set(whole, { module: builtinModule(s.module), has: stdExports(name), names: NAME_MODULES[name] ?? {} });
   }
   const stack: [unknown, usize, boolean][] = program.map((s) => [s, 0, false]);
-  const scanning: Scanning = { path, envKeys: new WeakSet(), statementDestructures: new WeakSet(), metaRead: new WeakSet() };
+  const scanning: Scanning = { path, envKeys: new WeakSet(), statementDestructures: new WeakSet(), metaRead: new WeakSet(), ownBun: program.some(declaresBun) };
   const heads = new WeakSet<object>();
   // Spreads written as call arguments, which fill only a rest parameter unless they spread a
   // name the file declares as a tuple, judged once its tuples are known.
@@ -396,14 +397,26 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: usiz
 // What a scan of one file at `path` notes as it goes: the `process.env` nodes read by key, which
 // Fish takes (any other use of it, it doesn't), and the destructuring assignments written as
 // statements of their own.
-type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures: WeakSet<object>; metaRead: WeakSet<object> };
+type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures: WeakSet<object>; metaRead: WeakSet<object>; ownBun: boolean };
+
+// Whether a top-level statement names something Bun, so the file's Bun isn't Bun's global. A local
+// of that name inside a function isn't seen.
+function declaresBun(s: unknown): boolean {
+  const top = isNode(s) && (s.kind === "export" || s.kind === "declare") && isNode(s.body) ? s.body : s;
+  if (!isNode(top)) return false;
+  if (top.kind === "import") return [top.default, top.namespace, ...((top.named ?? []) as { name: string; alias?: string }[]).map((sp) => sp.alias ?? sp.name)].includes("Bun");
+  if (top.kind === "let") return (top.declarations as Node[]).some((d) => isNode(d.target) && d.target.kind === "ident" && d.target.name === "Bun");
+  return top.name === "Bun";
+}
 
 // The rules a node shows by itself, each with where to point: a call's own method name rather
 // than the start of a long chain.
 // `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
+// The members of Bun's global that std's Bun module has.
+const BUN_MEMBERS = ["file", "stdin", "write", "env", "argv", "sleep", "sleepSync", "which", "spawnSync", "serve", "version"];
 const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
 
-function classify({ path, envKeys, statementDestructures, metaRead }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean): [string, usize, string?][] {
+function classify({ path, envKeys, statementDestructures, metaRead, ownBun }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean): [string, usize, string?][] {
   const found: [string, usize, string?][] = [];
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
@@ -417,6 +430,7 @@ function classify({ path, envKeys, statementDestructures, metaRead }: Scanning, 
     case "member":
       if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
+      if (!ownBun && named(n.object, "Bun") && !BUN_MEMBERS.includes(n.name as string)) push("bunGlobals");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);
       if (isNode(n.object) && n.object.kind === "meta" && IMPORT_META_MEMBERS.includes(n.name as string)) metaRead.add(n.object);
       break;
@@ -543,7 +557,7 @@ const NAME_MODULES: Record<string, Record<string, string>> = { crypto: { randomB
 // What a std module exports that ports as written: its functions and its consts, less those.
 function stdExports(name: string): Set<string> {
   const names = NAME_MODULES[name] ?? {};
-  return new Set(parse(STD_MODULES[name]!, { last: 0 }).flatMap((s) => (s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])).filter((n) => !Object.hasOwn(names, n)));
+  return new Set(parse(STD_MODULES[name]!, { last: 0 }).flatMap((s) => (s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.alias ?? sp.name) : s.kind !== "export" ? [] : s.body.kind === "function" ? [s.body.name] : s.body.kind === "let" ? s.body.declarations.flatMap((d) => (d.target.kind === "ident" ? [d.target.name] : [])) : [])).filter((n) => !Object.hasOwn(names, n)));
 }
 
 // The built-ins an import waits on, one for each that a name std lacks is filed under, so a file

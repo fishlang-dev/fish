@@ -5459,7 +5459,7 @@ export function spawnSync(command: string, args: string[] = [], options: SpawnSy
   const input = options.input ?? "";
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
   try {
-    const [pid, status, signo, stdout, stderr] = processSpawn(command, args, options.cwd ?? "", bytes);
+    const [pid, status, signo, stdout, stderr] = processSpawn(command, args, options.cwd ?? "", bytes, 0, []);
     const name = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
     return new SpawnSyncReturns<u8[]>(pid, status < 0 ? null : status, name, stdout, stderr, null);
   } catch (e) {
@@ -6166,6 +6166,210 @@ export function exit(code: i64 = 0): never {
   while (true) {}
 }
 `,
+  // Bun's global, as the subset this module documents: file, stdin, write, env, argv, sleep,
+  // sleepSync, which, spawnSync, serve and version, each as Bun 1.4.3 gives it for the shapes here.
+  // Bun.spawn's running child and Bun.build aren't here. spawnSync's stdout and stderr are u8[],
+  // empty when not piped, where Bun gives a Buffer, or undefined.
+  Bun: String.raw`
+import { statSync } from "fs";
+import { dirname, resolve } from "path";
+import { bytes as stdinBytes } from "stdin";
+
+declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+declare function usleep(microseconds: u32): i32;
+
+// A file read when asked, by its path, or standard input's when name is null. Its calls take it
+// over, so a temporary's, as in Bun.file(path).text(), outlives its statement.
+export class BunFile {
+  name: string | null;
+  constructor(name: string | null) {
+    this.name = name;
+  }
+
+  async bytes(this: Own<this>): Promise<u8[]> throws IoError {
+    const name = this.name;
+    if (name === null) return await stdinBytes();
+    return await fileRead(name);
+  }
+
+  async text(this: Own<this>): Promise<string> throws IoError {
+    const all = await this.bytes();
+    return new TextDecoder().decode(all);
+  }
+
+  // Whether a regular file is there: a directory isn't one.
+  async exists(this: Own<this>): Promise<boolean> {
+    const name = this.name;
+    if (name === null) return true;
+    try {
+      return statSync(name).isFile();
+    } catch (_e) {
+      return false;
+    }
+  }
+}
+
+export function file(path: string): BunFile {
+  return new BunFile(path);
+}
+
+export function stdin(): BunFile {
+  return new BunFile(null);
+}
+
+// Writes a file whole, making the directories it is in, and gives how many bytes it wrote.
+export async function write(destination: string, data: string | u8[]): Promise<i64> throws IoError {
+  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  dirMake(dirname(destination), true, 511);
+  const length = bytes.length as i64;
+  await fileWrite(destination, bytes);
+  return length;
+}
+
+export function env(name: string): string | null {
+  return process.env[name];
+}
+
+export function argv(): string[] {
+  return process.argv;
+}
+
+// The prelude's sleep, which this module's own name would hide.
+async function sleeping(ms: i64): Promise<void> {
+  await sleep(ms);
+}
+
+export function sleepSync(ms: i64): void {
+  let left = ms;
+  while (left > 0) {
+    const now = left < 1000 ? left : 1000;
+    unsafe { usleep((now * 1000) as u32) };
+    left = left - now;
+  }
+}
+
+// The Bun release whose API this subset follows, since a Fish program has no Bun of its own.
+export function version(): string {
+  return "1.4.3";
+}
+
+function runnable(path: string): boolean {
+  try {
+    pathAccess(path, 1);
+    return statSync(path).isFile();
+  } catch (_e) {
+    return false;
+  }
+}
+
+// The executable file a command names, as an absolute path: a path given with a slash, or the
+// first on PATH.
+export function which(command: string): string | null {
+  return found(command, process.env.PATH ?? "");
+}
+
+function found(command: string, path: string): string | null {
+  if (command === "") return null;
+  if (command.includes("/")) return runnable(command) ? resolve(command) : null;
+  for (const dir of path.split(":")) {
+    if (dir === "") continue;
+    const at = resolve(dir, command);
+    if (runnable(at)) return at;
+  }
+  return null;
+}
+
+export type SpawnStdio = "pipe" | "inherit" | "ignore";
+export type SpawnOptions = { cwd?: string; env?: { [name: string]: string }; stdin?: u8[] | "inherit" | "ignore"; stdout?: SpawnStdio; stderr?: SpawnStdio };
+
+export class SyncSubprocess {
+  pid: i64;
+  exitCode: i64 | null;
+  signalCode: string | null;
+  success: boolean;
+  stdout: u8[];
+  stderr: u8[];
+  constructor(pid: i64, exitCode: i64 | null, signalCode: string | null, stdout: u8[], stderr: u8[]) {
+    this.pid = pid;
+    this.exitCode = exitCode;
+    this.signalCode = signalCode;
+    this.success = exitCode === 0;
+    this.stdout = stdout;
+    this.stderr = stderr;
+  }
+}
+
+// The runtime's two bits for a stream: piped, inherited or /dev/null.
+function streamMode(given: SpawnStdio | null): i64 {
+  if (given === null || given === "pipe") return 0;
+  return given === "inherit" ? 1 : 2;
+}
+
+// Bun's TypeError for a string the C call would cut short, as an IoError with its code.
+function nulFree(s: string, what: string): void throws IoError {
+  if (!s.includes("\0")) return;
+  let bad = new IoError("The " + what + " must be a string without null bytes. Received " + JSON.stringify(s));
+  bad.code = "ERR_INVALID_ARG_VALUE";
+  throw bad;
+}
+
+// Runs a command to its end. stdin is /dev/null unless given, and stdout and stderr are piped
+// unless asked otherwise; env, when given, is the child's whole environment, and its PATH, when
+// it has one, is where the command is looked for.
+export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubprocess throws IoError {
+  if (cmd.length === 0) throw new IoError("cmd must not be empty");
+  for (let i: usize = 0; i < cmd.length; i++) nulFree(cmd[i], "argument 'args[" + i + "]'");
+  const command = cmd[0];
+  let input: u8[] = [];
+  // argv[0] travels in the arguments, so the command can be its path while keeping its name.
+  let flags: i64 = 2 + 4 * streamMode(options.stdout) + 16 * streamMode(options.stderr) + 128 + 256;
+  const given = options.stdin;
+  if (given === "inherit") flags = flags - 1;
+  else if (given !== null && given !== "ignore") {
+    flags = flags - 2;
+    input = given;
+  }
+  let pairs: string[] = [];
+  let path = process.env.PATH ?? "";
+  const env = options.env;
+  if (env !== null) {
+    flags = flags + 64;
+    for (const [key, value] of Object.entries(env)) {
+      nulFree(key, "property 'options.env['" + key + "']'");
+      nulFree(value, "property 'options.env['" + key + "']'");
+      if (key === "PATH") path = value;
+      pairs.push(key + "=" + value);
+    }
+  }
+  let file = command;
+  if (!command.includes("/")) {
+    const at = found(command, path);
+    if (at === null) {
+      let missing = new IoError('Executable not found in $PATH: "' + command + '"');
+      missing.code = "ENOENT";
+      missing.path = command;
+      throw missing;
+    }
+    file = at;
+  }
+  const [pid, status, signo, stdout, stderr] = processSpawn(file, cmd, options.cwd ?? "", input, flags, pairs);
+  const signal = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
+  return new SyncSubprocess(pid, status < 0 ? null : status, signal, stdout, stderr);
+}
+
+// Bun.serve's options this subset takes. fetch is async, and the port 3000 unless given.
+export type BunServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; fetch: (req: Request) => Promise<Response> };
+
+// Serves until the signal, or the first SIGINT or SIGTERM, stops it: unlike Bun's, it is awaited,
+// or spawned to run beside the rest of the program, and gives no Server.
+async function serving(options: BunServeOptions): Promise<void> throws IoError {
+  const unix = options.unix;
+  const port = unix === null ? options.port ?? 3000 : options.port;
+  await serve({ port, hostname: options.hostname, unix, tls: options.tls, signal: options.signal }, options.fetch);
+}
+
+export { sleeping as sleep, serving as serve };
+`,
 };
 
 // Members of a std module read as values, each through a function of its: `argv` as
@@ -6173,6 +6377,7 @@ export function exit(code: i64 = 0): never {
 // `process.env[name]` calling it with the key.
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
   process: { argv: "value", env: "table", shutdown: "value" },
+  Bun: { argv: "value", env: "table", stdin: "value", version: "value" },
 };
 
 // The compiler's own tests run JS through this module, which no program may import: Fish has no
@@ -6187,7 +6392,7 @@ export function evaluate(module: string): JsValue {
 export function stdModule(specifier: string): string | undefined {
   const bare = specifier.startsWith("node:") ? specifier.slice("node:".length) : specifier;
   // "path/posix" is "path", which is POSIX's here.
-  const name = bare === "path/posix" ? "path" : bare;
+  const name = bare === "path/posix" ? "path" : bare === "bun" ? "Bun" : bare;
   return Object.hasOwn(STD_MODULES, name) ? name : undefined;
 }
 

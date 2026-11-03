@@ -6996,9 +6996,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         const [args, input] = [alloca(ARRAY), alloca(ARRAY)];
         emit(`store ${ARRAY} ${operand(e.args[1]!, e.args.slice(2))}, ptr ${args}`);
         const cwd = operand(e.args[2]!, e.args.slice(3));
-        emit(`store ${ARRAY} ${value(e.args[3]!)}, ptr ${input}`);
+        emit(`store ${ARRAY} ${operand(e.args[3]!, e.args.slice(4))}, ptr ${input}`);
+        const flags = operand(e.args[4]!, e.args.slice(5));
+        const env = alloca(ARRAY);
+        emit(`store ${ARRAY} ${value(e.args[5]!)}, ptr ${env}`);
         const [numbers, out, err] = [alloca("[3 x i64]"), alloca(ARRAY), alloca(ARRAY)];
-        emit(`${status} = call i32 @fsh_rt_spawn_sync(ptr ${path}, ptr ${args}, ptr ${cwd}, ptr ${input}, ptr ${numbers}, ptr ${out}, ptr ${err}, ptr ${parts})`);
+        emit(`${status} = call i32 @fsh_rt_spawn_sync(ptr ${path}, ptr ${args}, ptr ${cwd}, ptr ${input}, i64 ${flags}, ptr ${env}, ptr ${numbers}, ptr ${out}, ptr ${err}, ptr ${parts})`);
         read = () => {
           const tuple = typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]) as ObjectType;
           let made = "zeroinitializer";

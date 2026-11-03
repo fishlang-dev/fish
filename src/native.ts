@@ -6613,30 +6613,53 @@ static ssize_t fsh_drain(int fd, fsh_array *into) {
 // spawnSync: runs a command found on PATH with its arguments, in cwd unless that is empty,
 // writing input to its stdin and reading its stdout and stderr until both close, then waiting for
 // it. Gives 1 with numbers its pid, exit status (-1 when a signal ended it) and signal (0 for
-// none), or 5 with the IoError's parts, in Node's words, when it couldn't start.
-int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd, const fsh_array *input, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
+// none), or 5 with the IoError's parts, in Node's words, when it couldn't start. flags holds two
+// bits per stream from stdin up, 0 piped, 1 inherited and 2 /dev/null; bit 6 has env, "K=V"
+// strings, replace the environment; bit 7 words a failure as Bun does; bit 8 has args begin with
+// argv[0].
+int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd, const fsh_array *input, int64_t flags, const fsh_array *env, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
   out->data = err->data = NULL;
   out->length = out->capacity = err->length = err->capacity = 0;
   char *file = fsh_rt_str_cstring(command);
   char *dir = fsh_rt_str_units(cwd) > 0 ? fsh_rt_str_cstring(cwd) : NULL;
-  char **argv = fsh_rt_alloc((args->length + 2) * sizeof(char *));
+  // With bit 8, args holds argv[0] too, so a command found on another PATH keeps its name.
+  int64_t skip = (flags & 256) && args->length > 0 ? 0 : 1;
+  char **argv = fsh_rt_alloc((args->length + skip + 1) * sizeof(char *));
   int bad = !file || (fsh_rt_str_units(cwd) > 0 && !dir);
   argv[0] = file;
   for (int64_t i = 0; i < args->length; i++) {
-    argv[i + 1] = fsh_rt_str_cstring(((fsh_str **)args->data)[i]);
-    bad |= !argv[i + 1];
+    argv[i + skip] = fsh_rt_str_cstring(((fsh_str **)args->data)[i]);
+    bad |= !argv[i + skip];
   }
-  argv[args->length + 1] = NULL;
+  argv[args->length + skip] = NULL;
+  extern char **environ;
+  char **envp = environ;
+  if (flags & 64) {
+    envp = fsh_rt_alloc((env->length + 1) * sizeof(char *));
+    for (int64_t i = 0; i < env->length; i++) {
+      envp[i] = fsh_rt_str_cstring(((fsh_str **)env->data)[i]);
+      bad |= !envp[i];
+    }
+    envp[env->length] = NULL;
+  }
   int in[2] = { -1, -1 }, outp[2] = { -1, -1 }, errp[2] = { -1, -1 };
+  int *pipes[3] = { in, outp, errp };
   int failure = bad ? EINVAL : 0;
-  if (!failure && (fsh_pipe(in) != 0 || fsh_pipe(outp) != 0 || fsh_pipe(errp) != 0)) failure = errno;
+  for (int fd = 0; fd < 3 && !failure; fd++) if (((flags >> (2 * fd)) & 3) == 0 && fsh_pipe(pipes[fd]) != 0) failure = errno;
   pid_t pid = 0;
+  // What this process printed comes before what a child writes to a stream they share.
+  if (!failure && (flags & 60)) fflush(NULL);
   if (!failure) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, in[0], 0);
-    posix_spawn_file_actions_adddup2(&actions, outp[1], 1);
-    posix_spawn_file_actions_adddup2(&actions, errp[1], 2);
+    for (int fd = 0; fd < 3; fd++) {
+      int mode = (flags >> (2 * fd)) & 3;
+      // A descriptor dup2'd onto itself loses close-on-exec, so an inherited one survives
+      // POSIX_SPAWN_CLOEXEC_DEFAULT.
+      if (mode == 0) posix_spawn_file_actions_adddup2(&actions, pipes[fd][fd == 0 ? 0 : 1], fd);
+      else if (mode == 1) posix_spawn_file_actions_adddup2(&actions, fd, fd);
+      else posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0);
+    }
     if (dir) posix_spawn_file_actions_addchdir_np(&actions, dir);
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
@@ -6644,8 +6667,7 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     // Only the three pipes reach the child, whatever other threads have open.
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
 #endif
-    extern char **environ;
-    failure = posix_spawnp(&pid, file, &actions, &attributes, argv, environ);
+    failure = posix_spawnp(&pid, file, &actions, &attributes, argv, envp);
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
   }
@@ -6655,18 +6677,18 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     if (failure && errp[i] >= 0) close(errp[i]);
   }
   if (!failure) {
-    close(in[0]);
-    close(outp[1]);
-    close(errp[1]);
+    if (in[0] >= 0) close(in[0]);
+    if (outp[1] >= 0) close(outp[1]);
+    if (errp[1] >= 0) close(errp[1]);
     // A child that exits before reading all its input mustn't end this process with SIGPIPE: the
     // signal is held back on this thread while writing and a pending one taken.
     sigset_t pipe_only, before;
     sigemptyset(&pipe_only);
     sigaddset(&pipe_only, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &pipe_only, &before);
-    fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
+    if (in[1] >= 0) fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
     int64_t written = 0;
-    if (input->length == 0) {
+    if (in[1] >= 0 && input->length == 0) {
       close(in[1]);
       in[1] = -1;
     }
@@ -6718,13 +6740,18 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     numbers[2] = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
   }
   if (failure) {
-    const char *name = file ? file : "";
+    const char *name = !skip && argv[0] ? argv[0] : file ? file : "";
     char code[32], text[200];
     fsh_errno_words(failure, code, sizeof code, text, sizeof text);
-    size_t size = 2 * strlen(name) + 64;
+    size_t size = 2 * strlen(name) + strlen(text) + 64;
     char *syscall = fsh_rt_alloc(size), *message = fsh_rt_alloc(size);
-    snprintf(syscall, size, "spawnSync %s", name);
-    snprintf(message, size, "spawnSync %s %s", name, code);
+    if (flags & 128) {
+      snprintf(syscall, size, "posix_spawn");
+      snprintf(message, size, "%s: %s, posix_spawn '%s'", code, text, name);
+    } else {
+      snprintf(syscall, size, "spawnSync %s", name);
+      snprintf(message, size, "spawnSync %s %s", name, code);
+    }
     fsh_io_parts(error, message, code, syscall, name);
     fsh_rt_free(syscall);
     fsh_rt_free(message);
@@ -6733,8 +6760,13 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     out->data = err->data = NULL;
     out->length = out->capacity = err->length = err->capacity = 0;
   }
-  for (int64_t i = 0; i <= args->length; i++) fsh_rt_free(argv[i]);
+  for (int64_t i = 0; i < args->length + skip; i++) fsh_rt_free(argv[i]);
+  if (!skip) fsh_rt_free(file);
   fsh_rt_free(argv);
+  if (envp != environ) {
+    for (int64_t i = 0; i < env->length; i++) fsh_rt_free(envp[i]);
+    fsh_rt_free(envp);
+  }
   fsh_rt_free(dir);
   return failure ? 5 : 1;
 }
