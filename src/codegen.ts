@@ -6795,7 +6795,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const r = recOf(t);
       return r?.kind === "union" ? r.members : [t];
     };
-    if (!needsDrop(from) || isDyn(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to)) return true;
+    // Types that lower to the same one convert as they are, as `convert` takes them.
+    if (!needsDrop(from) || isDyn(to) || typing.lower(from) === typing.lower(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to)) return true;
     return members(from).every((m) => members(to).some((t) => keepsPart(m, t)));
   }
 
