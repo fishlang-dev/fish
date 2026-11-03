@@ -6,7 +6,7 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap, walk, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { unitPowers, isNumeric, type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { unitPowers, isNumeric, type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
@@ -558,6 +558,11 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
     // A package's interface or class is a JS handle of its shape.
     if (trait?.js) return this.typing.blockType("JsValue", this.interfaceOf(trait, args, t));
     if (trait) return this.interfaceOf(trait, args.map((t) => this.typing.heldArgument(t)), t);
+    // JavaScript's typed arrays, unless the program declares its own of the name.
+    if (isTypedName(t.name)) {
+      if (t.args.length > 0) throw new CompileError("E0106", `'${t.name}' takes no type arguments`, t.start, t.end);
+      return this.typing.typedArray(t.name);
+    }
     // Brands and units, unless the program declares its own of the name.
     if (t.name === "Unit") {
       const [of, text] = t.args;

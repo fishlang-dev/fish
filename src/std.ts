@@ -3,6 +3,7 @@ import type { Source } from "./diag.ts";
 import { AST } from "./ast.ts";
 import { nextId, renumber, shiftSpans, someNode, walk } from "./nodes.ts";
 import { parse, type Pattern, type Stmt } from "./parser.ts";
+import { TYPED_ARRAYS } from "./typing.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
@@ -3788,6 +3789,118 @@ function __arrayFromHex(s: string): u8[] throws TypeError {
   return out;
 }
 `;
+// The typed arrays' helpers, in a program that names a typed array or DataView. Every typed array
+// owns its elements, so one made over an ArrayBuffer takes it and copies out the range it views,
+// reading the bytes in the host's order, little-endian on every target Fish builds for.
+const TYPED = String.raw`
+declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, count: i64): void;
+function __arrayTypedZeros<T>(length: i64, zero: T): T[] {
+  assert(length >= 0, "RangeError: Invalid typed array length: " + String(length));
+  return new Array(length).fill(zero);
+}
+${["U8", "I8", "U16", "I16", "U32", "I32", "F32", "F64"].map((name) => {
+  const t = name.toLowerCase();
+  return `function __arrayFromBuffer${name}(buffer: ArrayBuffer, byteOffset: i64, length: i64, size: i64, name: string): ${t}[] {
+  const total = buffer.length as i64;
+  assert(byteOffset % size === 0, "RangeError: start offset of " + name + " should be a multiple of " + String(size));
+  assert(byteOffset >= 0 && byteOffset <= total, "RangeError: Start offset " + String(byteOffset) + " is outside the bounds of the buffer");
+  let n = length;
+  if (n < 0) {
+    assert((total - byteOffset) % size === 0, "RangeError: byte length of " + name + " should be a multiple of " + String(size));
+    n = (total - byteOffset) / size;
+  }
+  assert(byteOffset + n * size <= total, "RangeError: Invalid typed array length: " + String(n));
+  let out: ${t}[] = new Array(n).fill(0 as ${t});
+  if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(out[0]) as MutPtr<u8>, ptrOf(buffer[byteOffset as usize]), n * size) };
+  return out;
+}
+function __arrayTypedBuffer${name}(xs: Ref<${t}[]>, size: i64): ArrayBuffer {
+  const n = (xs.length as i64) * size;
+  let out: ArrayBuffer = new Array(n).fill(0 as u8);
+  if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(out[0]), ptrOf(xs[0]) as Ptr<u8>, n) };
+  return out;
+}
+function __arrayTypedSet${name}(source: Ref<${t}[]>, target: Mut<${t}[]>, offset: i64, size: i64): void {
+  const n = source.length as i64;
+  assert(offset >= 0 && offset + n <= (target.length as i64), "RangeError: offset is out of bounds");
+  if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(target[offset as usize]) as MutPtr<u8>, ptrOf(source[0]) as Ptr<u8>, n * size) };
+}`;
+}).join("\n")}
+`;
+
+// DataView over an ArrayBuffer it owns, reading and writing numbers of each width in either byte
+// order, big-endian unless told otherwise, as JavaScript's does.
+const DATA_VIEW = String.raw`
+class DataView {
+  byteLength: usize;
+  byteOffset: usize;
+  buffer: ArrayBuffer;
+  constructor(buffer: ArrayBuffer, byteOffset?: i64, byteLength?: i64) {
+    const total = buffer.length as i64;
+    const offset = byteOffset ?? 0;
+    assert(offset >= 0 && offset <= total, "RangeError: Start offset " + String(offset) + " is outside the bounds of the buffer");
+    const length = byteLength ?? total - offset;
+    assert(length >= 0 && offset + length <= total, "RangeError: Invalid DataView length " + String(length));
+    this.byteLength = length as usize;
+    this.byteOffset = offset as usize;
+    this.buffer = buffer;
+  }
+  #at(offset: i64, size: i64): i64 {
+    assert(offset >= 0 && offset + size <= (this.byteLength as i64), "RangeError: Offset is outside the bounds of the DataView");
+    return (this.byteOffset as i64) + offset;
+  }
+  #read(offset: i64, size: i64, little: boolean): u64 {
+    const at = this.#at(offset, size);
+    let v: u64 = 0;
+    for (let i = 0; i < size; i++) v = (v << 8) | (this.buffer[(at + (little ? size - 1 - i : i)) as usize] as u64);
+    return v;
+  }
+  #write(this: Mut<this>, offset: i64, size: i64, little: boolean, value: u64): void {
+    const at = this.#at(offset, size);
+    for (let i = 0; i < size; i++) this.buffer[(at + (little ? i : size - 1 - i)) as usize] = ((value >> ((8 * i) as u64)) & 255) as u8;
+  }
+  getUint8(byteOffset: i64): u8 { return this.#read(byteOffset, 1, false) as u8; }
+  getInt8(byteOffset: i64): i8 { return this.#read(byteOffset, 1, false) as i8; }
+  getUint16(byteOffset: i64, littleEndian?: boolean): u16 { return this.#read(byteOffset, 2, littleEndian === true) as u16; }
+  getInt16(byteOffset: i64, littleEndian?: boolean): i16 { return this.#read(byteOffset, 2, littleEndian === true) as i16; }
+  getUint32(byteOffset: i64, littleEndian?: boolean): u32 { return this.#read(byteOffset, 4, littleEndian === true) as u32; }
+  getInt32(byteOffset: i64, littleEndian?: boolean): i32 { return this.#read(byteOffset, 4, littleEndian === true) as i32; }
+  getBigUint64(byteOffset: i64, littleEndian?: boolean): bigint { return BigInt(this.#read(byteOffset, 8, littleEndian === true)); }
+  getBigInt64(byteOffset: i64, littleEndian?: boolean): bigint { return BigInt(this.#read(byteOffset, 8, littleEndian === true) as i64); }
+  getFloat32(byteOffset: i64, littleEndian?: boolean): f64 {
+    const bits = this.#read(byteOffset, 4, littleEndian === true) as u32;
+    let x: f32 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 4) };
+    return x as f64;
+  }
+  getFloat64(byteOffset: i64, littleEndian?: boolean): f64 {
+    const bits = this.#read(byteOffset, 8, littleEndian === true);
+    let x: f64 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 8) };
+    return x;
+  }
+  setUint8(this: Mut<this>, byteOffset: i64, value: u8): void { this.#write(byteOffset, 1, false, value as u64); }
+  setInt8(this: Mut<this>, byteOffset: i64, value: i8): void { this.#write(byteOffset, 1, false, value as u64); }
+  setUint16(this: Mut<this>, byteOffset: i64, value: u16, littleEndian?: boolean): void { this.#write(byteOffset, 2, littleEndian === true, value as u64); }
+  setInt16(this: Mut<this>, byteOffset: i64, value: i16, littleEndian?: boolean): void { this.#write(byteOffset, 2, littleEndian === true, value as u64); }
+  setUint32(this: Mut<this>, byteOffset: i64, value: u32, littleEndian?: boolean): void { this.#write(byteOffset, 4, littleEndian === true, value as u64); }
+  setInt32(this: Mut<this>, byteOffset: i64, value: i32, littleEndian?: boolean): void { this.#write(byteOffset, 4, littleEndian === true, value as u64); }
+  setBigUint64(this: Mut<this>, byteOffset: i64, value: bigint, littleEndian?: boolean): void { this.#write(byteOffset, 8, littleEndian === true, value as u64); }
+  setBigInt64(this: Mut<this>, byteOffset: i64, value: bigint, littleEndian?: boolean): void { this.#write(byteOffset, 8, littleEndian === true, (value as i64) as u64); }
+  setFloat32(this: Mut<this>, byteOffset: i64, value: f64, littleEndian?: boolean): void {
+    const x = value as f32;
+    let bits: u32 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(x) as Ptr<u8>, 4) };
+    this.#write(byteOffset, 4, littleEndian === true, bits as u64);
+  }
+  setFloat64(this: Mut<this>, byteOffset: i64, value: f64, littleEndian?: boolean): void {
+    let bits: u64 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(value) as Ptr<u8>, 8) };
+    this.#write(byteOffset, 8, littleEndian === true, bits);
+  }
+}
+`;
+
 // btoa and atob, each in a program that names it and doesn't declare it, so a program's own
 // polyfill of one keeps its name and std's other stays.
 const BTOA = `
@@ -4634,6 +4747,8 @@ export function format(pathObject: FormatInputPathObject): string {
   // Files read and written on the runtime's blocking pool. A call naming an encoding, as
   // readFile(path, "utf8"), is linked to readFileText, which gives a string.
   "fs/promises": String.raw`
+import { chmodSync } from "fs";
+
 export async function readFile(path: string): Promise<u8[]> throws IoError {
   return await fileRead(path);
 }
@@ -4646,6 +4761,49 @@ export async function readFileText(path: string): Promise<string> throws IoError
 export async function writeFile(path: string, data: string | u8[]): Promise<void> throws IoError {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
   await fileWrite(path, bytes);
+}
+
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+
+export async function access(path: string, mode: i64 = 0): Promise<void> throws IoError {
+  await spawnBlocking(() => pathAccess(path, mode));
+}
+
+// A time as utimes takes it, as Node's toUnixTimestamp reads one: a Date's seconds, and a
+// negative finite number now; NaN and the infinities pass on to be refused.
+function seconds(time: f64 | Date): f64 {
+  if (time instanceof Date) return (time.getTime() as f64) / 1000;
+  return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
+}
+
+export async function utimes(path: string, atime: f64 | Date, mtime: f64 | Date): Promise<void> throws IoError {
+  const [a, m] = [seconds(atime), seconds(mtime)];
+  await spawnBlocking(() => pathUtimes(path, a, m, true));
+}
+
+export async function lutimes(path: string, atime: f64 | Date, mtime: f64 | Date): Promise<void> throws IoError {
+  const [a, m] = [seconds(atime), seconds(mtime)];
+  await spawnBlocking(() => pathUtimes(path, a, m, false));
+}
+
+export async function chmod(path: string, mode: i64 | string): Promise<void> throws IoError {
+  await spawnBlocking(() => chmodSync(path, mode));
+}
+
+export async function symlink(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): Promise<void> throws IoError {
+  await spawnBlocking(() => pathLink(target, path, true));
+}
+
+export async function link(existingPath: string, newPath: string): Promise<void> throws IoError {
+  await spawnBlocking(() => pathLink(existingPath, newPath, false));
+}
+
+export async function readlink(path: string): Promise<string> throws IoError {
+  return await spawnBlocking(() => pathReadLink(path));
+}
+
+export async function realpath(path: string): Promise<string> throws IoError {
+  return await spawnBlocking(() => pathRealNative(path));
 }
 `,
   fs: String.raw`
@@ -4726,7 +4884,7 @@ export function renameSync(oldPath: string, newPath: string): void throws IoErro
   pathRename(oldPath, newPath);
 }
 
-export const constants = { COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
 
 export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
   fileCopy(src, dest, mode);
@@ -4734,6 +4892,87 @@ export function copyFileSync(src: string, dest: string, mode: i64 = 0): void thr
 
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
+}
+
+export function accessSync(path: string, mode: i64 = 0): void throws IoError {
+  pathAccess(path, mode);
+}
+
+// A time as utimes takes it, as Node's toUnixTimestamp reads one: a Date's seconds, and a
+// negative finite number now; NaN and the infinities pass on to be refused.
+function seconds(time: f64 | Date): f64 {
+  if (time instanceof Date) return (time.getTime() as f64) / 1000;
+  return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
+}
+
+export function utimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
+  pathUtimes(path, seconds(atime), seconds(mtime), true);
+}
+
+// A link's own times, not its target's.
+export function lutimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
+  pathUtimes(path, seconds(atime), seconds(mtime), false);
+}
+
+// A string as Node's inspect quotes it in an argument error, cut at 128 characters: in single
+// quotes, unless it holds one and another quote kind is free; with all taken, its ' escaped.
+function quoted(text: string): string {
+  const backtick = !text.includes("${"`"}") && !text.includes("$" + "{");
+  const quote = !text.includes("'") ? "'" : !text.includes("\"") ? "\"" : backtick ? "${"`"}" : "'";
+  const shown = quote + (quote === "'" ? text.replaceAll("'", "\\'") : text) + quote;
+  return shown.length > 128 ? shown.slice(0, 128) + "..." : shown;
+}
+
+// A number as Node prints it in a range error: grouped by threes with _ above 2 ** 32.
+function grouped(n: f64): string {
+  const text = String(n);
+  if (n <= 4294967296 && n >= -4294967296) return text;
+  const start = text.startsWith("-") ? 1 : 0;
+  let rest = "";
+  let i = text.length as i64;
+  for (; i >= start + 4; i -= 3) rest = "_" + text.slice(i - 3, i) + rest;
+  return text.slice(0, i) + rest;
+}
+
+// The mode as Node's parseFileMode reads it: a number as given, a string as octal digits, then
+// checked as a 32-bit unsigned integer.
+function fileMode(mode: i64 | string): i64 throws IoError {
+  let n: f64 = 0;
+  if (typeof mode === "string") {
+    let octal = mode.length > 0;
+    for (const d of mode) {
+      octal = octal && d >= "0" && d <= "7";
+      n = n * 8 + ((d.charCodeAt(0) as f64) - 48);
+    }
+    if (!octal) {
+      let e = new IoError("The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received " + quoted(mode));
+      e.code = "ERR_INVALID_ARG_VALUE";
+      throw e;
+    }
+  } else n = mode as f64;
+  if (n < 0 || n > 4294967295) {
+    let e = new IoError("The value of \"mode\" is out of range. It must be >= 0 && <= 4294967295. Received " + grouped(n));
+    e.code = "ERR_OUT_OF_RANGE";
+    throw e;
+  }
+  return n as i64;
+}
+
+export function chmodSync(path: string, mode: i64 | string): void throws IoError {
+  pathChmod(path, fileMode(mode));
+}
+
+// The link type matters only on Windows, so it is checked and then unused.
+export function symlinkSync(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): void throws IoError {
+  pathLink(target, path, true);
+}
+
+export function linkSync(existingPath: string, newPath: string): void throws IoError {
+  pathLink(existingPath, newPath, false);
+}
+
+export function readlinkSync(path: string): string throws IoError {
+  return pathReadLink(path);
 }
 `,
   child_process: String.raw`
@@ -5510,7 +5749,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + BTOA + ATOB + DATE + STDIN + TLS;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BTOA + ATOB + DATE + STDIN + TLS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -5543,6 +5782,8 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const ast = next(AST + AST_HELPERS);
   const js = next(JS_ERROR);
   const bytes = next(BYTES);
+  const typed = next(TYPED);
+  const dataView = next(DATA_VIEW);
   const btoa = next(BTOA);
   const atob = next(ATOB);
   const dates = next(DATE);
@@ -5550,7 +5791,7 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const tls = next(TLS);
   renameValue([...json, ...jsonName]);
   const astNames = ast.flatMap(declaredNames);
-  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [btoa, ["btoa"]], [atob, ["atob"]], [reading, ["readLine"]]] as const;
+  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [dataView, ["DataView"]], [btoa, ["btoa"]], [atob, ["atob"]], [reading, ["readLine"]]] as const;
   const packages = written.some(fromPackage);
   // A program's own URL, URLSearchParams or TypeError keeps its name, and std's takes one no
   // program can write.
@@ -5569,7 +5810,9 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const encoding = httpUsed || linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
   const dated = httpUsed || uses(written, dates, ["Date"]);
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
-  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(secure ? tls : [])];
+  // The checker turns typed arrays' constructors and methods into calls of these helpers.
+  const typing = linked.some((s) => dataView.includes(s)) || mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && Object.hasOwn(TYPED_ARRAYS, n.name));
+  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(typing ? typed : []), ...(secure ? tls : [])];
 }
 
 // A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.

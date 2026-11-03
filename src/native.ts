@@ -887,6 +887,11 @@ void *fsh_rt_array_zeroed(int64_t bytes) {
   return p;
 }
 
+// Bytes copied between typed arrays, or a number's bits taken as another's, for std's DataView.
+void fsh_rt_bytes_copy(void *to, const void *from, int64_t count) {
+  if (count > 0) memmove(to, from, count);
+}
+
 // A Map or a Set: its entries in insertion order, each a state word (0 never used, 1 live, 2
 // removed), the key's hash, the key's bits, then the key and value as the program lays them out,
 // and an open-addressing index of entry numbers plus one. A key's bits are a sized integer
@@ -3137,6 +3142,8 @@ typedef struct fsh_insp {
   // An Error's OBJECT, its text the bracketed header Node prints in place of its stack, and
   // what it is past the depth, its class's name bracketed.
   int32_t error;
+  // An OBJECT whose bracketed keys are written as they are, as Node writes keys it shows itself.
+  int32_t shown;
   char *cut;
 } fsh_insp;
 
@@ -3345,6 +3352,30 @@ static void fsh_sb_spaces(fsh_sb *b, int64_t n) {
 static char *fsh_sb_done(fsh_sb *b) {
   if (!b->p) fsh_sb_put(b, "", 0);
   return b->p;
+}
+
+// An ArrayBuffer as Node shows one: its first 100 bytes in hex, then its length.
+fsh_insp *fsh_rt_insp_buffer(const uint8_t *data, int64_t length) {
+  fsh_insp *v = fsh_rt_insp_object("ArrayBuffer");
+  v->shown = 1;
+  fsh_sb b = {0};
+  fsh_sb_str(&b, "<");
+  for (int64_t i = 0; i < length && i < 100; i++) {
+    char hex[4];
+    snprintf(hex, sizeof hex, i > 0 ? " %02x" : "%02x", data[i]);
+    fsh_sb_str(&b, hex);
+  }
+  if (length > 100) {
+    char more[64];
+    snprintf(more, sizeof more, " ... %lld more byte%s", (long long)(length - 100), length > 101 ? "s" : "");
+    fsh_sb_str(&b, more);
+  }
+  fsh_sb_str(&b, ">");
+  char *contents = fsh_sb_done(&b);
+  fsh_insp_add(v, fsh_rt_insp_text(contents), "[Uint8Contents]");
+  fsh_rt_free(contents);
+  fsh_insp_add(v, fsh_rt_insp_i64(length), "byteLength");
+  return v;
 }
 
 // An Error as Node prints one with no stack lines: its name and message, the class's name when
@@ -3706,7 +3737,11 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   char *text = v->error ? fsh_insp_indented(v->text, c->indent) : fsh_insp_copy(v->text);
   int64_t room = strlen(text) + 40;
   char *open = fsh_rt_alloc(room), *cut = fsh_rt_alloc(room);
-  if (v->kind == FSH_INSP_ARRAY) {
+  if (v->kind == FSH_INSP_ARRAY && v->length) {
+    // A typed array, under its name.
+    snprintf(open, room, "%s(%lld) [", text, (long long)size);
+    snprintf(cut, room, "[%s]", text);
+  } else if (v->kind == FSH_INSP_ARRAY) {
     strcpy(open, "[");
     strcpy(cut, "[Array]");
   } else if (v->kind == FSH_INSP_OBJECT) {
@@ -3768,7 +3803,7 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     int64_t length = v->lengths[i];
     // An own key named __proto__ is bracketed, as Node writes it apart from the prototype.
     if (length == 9 && strcmp(key, "__proto__") == 0) fsh_sb_str(&b, "['__proto__']");
-    else if ((fsh_insp_identifier(key) && (int64_t)strlen(key) == length) || (v->error && key[0] == '[')) fsh_sb_str(&b, key);
+    else if ((fsh_insp_identifier(key) && (int64_t)strlen(key) == length) || ((v->error || v->shown) && key[0] == '[')) fsh_sb_str(&b, key);
     else fsh_insp_quote(&b, key, length);
     fsh_sb_str(&b, ": ");
     fsh_sb_str(&b, x);
@@ -6250,6 +6285,109 @@ int32_t fsh_rt_fs_unlink(fsh_str *path, fsh_str **error) {
   char *c = fsh_rt_str_cstring(path);
   if (!c) return fsh_fs_failed(error, EINVAL, "unlink", "");
   int32_t result = unlink(c) == 0 ? 1 : fsh_fs_failed(error, errno, "unlink", c);
+  fsh_rt_free(c);
+  return result;
+}
+
+// accessSync, its mode the bits of R_OK, W_OK and X_OK, checked first as Node checks it.
+int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
+  if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "access", "");
+  int32_t result = access(c, (int)mode) == 0 ? 1 : fsh_fs_failed(error, errno, "access", c);
+  fsh_rt_free(c);
+  return result;
+}
+
+// chmodSync, its mode already checked by std as Node checks it.
+int32_t fsh_rt_fs_chmod(fsh_str *path, int64_t mode, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "chmod", "");
+  int32_t result = chmod(c, (mode_t)mode) == 0 ? 1 : fsh_fs_failed(error, errno, "chmod", c);
+  fsh_rt_free(c);
+  return result;
+}
+
+// symlinkSync, or with symbolic 0 linkSync: path made a link to target.
+int32_t fsh_rt_fs_link(fsh_str *target, fsh_str *path, int32_t symbolic, fsh_str **error) {
+  const char *syscall = symbolic ? "symlink" : "link";
+  char *a = fsh_rt_str_cstring(target), *b = fsh_rt_str_cstring(path);
+  int32_t result = !a || !b ? fsh_fs_failed_two(error, EINVAL, syscall, a ? a : "", b ? b : "")
+    : (symbolic ? symlink(a, b) : link(a, b)) != 0 ? fsh_fs_failed_two(error, errno, syscall, a, b) : 1;
+  fsh_rt_free(a);
+  fsh_rt_free(b);
+  return result;
+}
+
+// readlinkSync: a link's text, read into a buffer grown until it holds all of it.
+int32_t fsh_rt_fs_readlink(fsh_str *path, fsh_str **out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "readlink", "");
+  for (size_t room = 256;; room *= 2) {
+    char *text = fsh_rt_alloc(room);
+    ssize_t n = readlink(c, text, room);
+    if (n >= 0 && (size_t)n < room) {
+      text[n] = 0;
+      *out = fsh_rt_str_from_cstring(text);
+      fsh_rt_free(text);
+      fsh_rt_free(c);
+      return 1;
+    }
+    int failure = errno;
+    fsh_rt_free(text);
+    if (n < 0) {
+      int32_t failed = fsh_fs_failed(error, failure, "readlink", c);
+      fsh_rt_free(c);
+      return failed;
+    }
+  }
+}
+
+// fs/promises realpath: libuv's realpath(3), unlike realpathSync's walk, every failure named
+// realpath with the path as given.
+int32_t fsh_rt_fs_realpath_native(fsh_str *path, fsh_str **out, fsh_str **error) {
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, "realpath", "");
+  char *resolved = realpath(c, NULL);
+  if (!resolved) {
+    int32_t failed = fsh_fs_failed(error, errno, "realpath", c);
+    fsh_rt_free(c);
+    return failed;
+  }
+  fsh_rt_free(c);
+  *out = fsh_rt_str_from_cstring(resolved);
+  free(resolved);
+  return 1;
+}
+
+// A time in seconds as libuv 1.51 hands it to utimensat, cut to whole microseconds.
+static struct timespec fsh_utime_spec(double time) {
+  struct timespec ts;
+  ts.tv_sec = time;
+  ts.tv_nsec = (time - ts.tv_sec) * 1e9;
+  ts.tv_nsec -= ts.tv_nsec % 1000;
+  if (ts.tv_nsec < 0) {
+    ts.tv_nsec += 1e9;
+    ts.tv_sec -= 1;
+  }
+  return ts;
+}
+
+// utimesSync, or with follow 0 lutimesSync, its times in seconds; NaN and the infinities are
+// refused first, atime before mtime, as Node refuses them.
+int32_t fsh_rt_fs_utimes(fsh_str *path, double atime, double mtime, int32_t follow, fsh_str **error) {
+  double times[2] = {atime, mtime};
+  for (int i = 0; i < 2; i++) {
+    if (isfinite(times[i])) continue;
+    char message[160];
+    snprintf(message, sizeof message, "The \"time\" argument must be an instance of Date or an Time in seconds. Received type number (%s)", isnan(times[i]) ? "NaN" : times[i] > 0 ? "Infinity" : "-Infinity");
+    return fsh_io_parts(error, message, "ERR_INVALID_ARG_TYPE", "", NULL);
+  }
+  const char *syscall = follow ? "utime" : "lutime";
+  char *c = fsh_rt_str_cstring(path);
+  if (!c) return fsh_fs_failed(error, EINVAL, syscall, "");
+  struct timespec ts[2] = {fsh_utime_spec(atime), fsh_utime_spec(mtime)};
+  int32_t result = utimensat(AT_FDCWD, c, ts, follow ? 0 : AT_SYMLINK_NOFOLLOW) == 0 ? 1 : fsh_fs_failed(error, errno, syscall, c);
   fsh_rt_free(c);
   return result;
 }

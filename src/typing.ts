@@ -101,7 +101,9 @@ export type VariantType = TypeId<VariantRecord>;
 
 // An owned array of elements of one type, growable like Rust's Vec. One per element type, so
 // `===` is identity. It has no fields; its length and elements are reached by name and index.
-export type ArrayRecord = { kind: "array"; element: Type; fields: Field[] };
+// A typed array, such as `Uint8Array`, is one of its sized element tagged with its name, which
+// lowering drops, so it is laid out as the plain array and the two fit each other.
+export type ArrayRecord = { kind: "array"; element: Type; fields: Field[]; typed?: TypedName };
 export type ArrayType = TypeId<ArrayRecord>;
 
 // `FixedArray<T, N>`: exactly `size` elements stored inline, laid out as `[size x T]`; interned,
@@ -147,6 +149,16 @@ export const INTEGERS: Record<Integer, { bits: usize; signed: boolean }> = {
   i64: { bits: 64, signed: true }, i128: { bits: 128, signed: true }, isize: { bits: 64, signed: true },
   u8: { bits: 8, signed: false }, u16: { bits: 16, signed: false }, u32: { bits: 32, signed: false },
   u64: { bits: 64, signed: false }, u128: { bits: 128, signed: false }, usize: { bits: 64, signed: false },
+};
+
+// JavaScript's typed arrays, by the element each holds; an ArrayBuffer is its bytes.
+export const TYPED_ARRAYS = { Uint8Array: "u8", Int8Array: "i8", Uint16Array: "u16", Int16Array: "i16", Uint32Array: "u32", Int32Array: "i32", Float32Array: "f32", Float64Array: "f64", ArrayBuffer: "u8" } as const;
+export type TypedName = keyof typeof TYPED_ARRAYS;
+export const isTypedName = (name: string): name is TypedName => Object.hasOwn(TYPED_ARRAYS, name);
+// The bytes each element of a typed array takes, its BYTES_PER_ELEMENT.
+export const typedSize = (name: TypedName): usize => {
+  const e = TYPED_ARRAYS[name];
+  return e === "f32" ? 4 : e === "f64" ? 8 : INTEGERS[e].bits / 8;
 };
 
 export const isInteger = (t: Type): t is Integer => typeof t === "string" && t in INTEGERS;
@@ -1172,7 +1184,7 @@ export class Typing {
     if (r.kind === "function") return this.callableType(t as FunctionType);
     // A `Promise<T>` stored holds a future, boxed.
     if (r.kind === "interface" && this.promised.has(t as InterfaceType)) return this.dynType(t as InterfaceType);
-    if (r.kind === "array") return this.arrayType(this.stored(r.element));
+    if (r.kind === "array") return this.arrayType(this.stored(r.element), r.typed);
     if (r.kind === "fixed") return this.fixedType(this.stored(r.element), r.size);
     if (r.kind === "map") return this.mapType(r.key, this.stored(r.value), r.set, r.dict);
     return t;
@@ -1899,17 +1911,27 @@ export class Typing {
   }
   private fixeds = new Map<string, FixedType>();
 
-  arrayType(this: Mut<this>, element: Type): ArrayType {
-    const key = `[${this.keyOf(element)}]`;
+  arrayType(this: Mut<this>, element: Type, typed?: TypedName): ArrayType {
+    const key = `[${this.keyOf(element)}]${typed ?? ""}`;
     let t = this.arrays.get(key);
     if (!t) {
-      t = this.made<ArrayType>({ kind: "array", element, fields: [] }, key);
+      t = this.made<ArrayType>({ kind: "array", element, fields: [], ...(typed && { typed }) }, key);
       this.arrays.set(key, t);
     }
     return t;
   }
 
   private arrays = new Map<string, ArrayType>();
+
+  typedArray(this: Mut<this>, name: TypedName): ArrayType {
+    return this.arrayType(TYPED_ARRAYS[name], name);
+  }
+
+  // The name of the typed array a type is, if it is one.
+  typedName(this: Mut<this>, t: Type): TypedName | undefined {
+    const r = this.recOf(t);
+    return r?.kind === "array" ? r.typed : undefined;
+  }
 
   // Sets the type a recursive type stands for. An array is on the heap already, so where the
   // type reaches itself through one, that array holds the type itself rather than a block, and is
@@ -2148,7 +2170,7 @@ export class Typing {
       const made = this.replaced(fn, swap);
       return made === fn ? t : this.callableType(made as FunctionType);
     }
-    if (r.kind === "array") return this.arrayType(this.replaced(r.element, swap));
+    if (r.kind === "array") return this.arrayType(this.replaced(r.element, swap), r.typed);
     if (r.kind === "fixed") return this.fixedType(this.replaced(r.element, swap), r.size);
     if (r.kind === "map") return this.mapType(this.replaced(r.key, swap), this.heldArgument(this.replaced(r.value, swap)), r.set, r.dict);
     // What a lock, a shared value or a channel holds is a type argument, boxed as one.
@@ -2473,6 +2495,7 @@ export class Typing {
     if (r.kind === "ref") return `${r.mutable ? "Mut" : "Ref"}<${this.show(r.to)}>`;
     if (r.kind === "pointer") return `${r.mutable ? "MutPtr" : "Ptr"}<${this.show(r.to)}>`;
     if (r.kind === "regex") return "RegExp";
+    if (r.kind === "array" && r.typed) return r.typed;
     if (r.kind === "array") {
       const e = r.element;
       const er = this.recOf(e);

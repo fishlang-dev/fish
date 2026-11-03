@@ -3235,6 +3235,7 @@ class BodyChecker implements Context, Outer, Sight {
         const annotated = family ? undefined : declared;
         if (annotated) this.exprs().expect(d.init, annotated);
         const type = this.exprs().value(d.init);
+        if (s.keyword === "let") this.exprs().readOnlySubarray(d.init);
         if (annotated) this.exprs().coerce(d.init, type, annotated, `type '${this.cx.typing.show(type)}' is not assignable to type '${this.cx.typing.show(annotated)}'`);
         const closure = this.cx.recOf(type);
         if (family && !(closure?.kind === "closure" && closure.generic)) throw new CompileError("E0101", `type '${this.cx.typing.show(type)}' is not assignable to type '${this.cx.typing.show(family)}': it takes a generic function, one that works for every type`, d.init.start, d.init.end);

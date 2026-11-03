@@ -4658,6 +4658,19 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`${held} = load ${llvm(typing.lower(to))}, ptr ${v}`);
       return inspectTree(held, writtenPart(written, t, (x) => { const held = typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to, "%d");
     }
+    // A typed array prints as an array under its name, an ArrayBuffer as its bytes in hex.
+    const typed = typing.typedName(written);
+    if (typed === "ArrayBuffer") {
+      const [length, data, node] = [temp(), temp(), temp()];
+      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+      emit(`${node} = call ptr @fsh_rt_insp_buffer(ptr ${data}, i64 ${length})`);
+      return node;
+    }
+    const named = (node: string) => {
+      if (typed) emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${cString(typed)})`);
+      return node;
+    };
     // std's Date prints as its ISO string at any depth, as Node prints one.
     const iso = r.kind === "class" ? instances.find((i) => bodyOf(i).name === `${r.name}.toISOString` && bodyOf(i).start >= STD_BASE) : undefined;
     if (iso) {
@@ -4674,12 +4687,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`${deep} = icmp sgt i64 %d, 2`);
       emit(`br i1 ${deep}, label %${shell}, label %${full}`);
       startBlock(shell);
-      emit(`ret ptr ${inspectShell(v, t, written)}`);
+      emit(`ret ptr ${named(inspectShell(v, t, written))}`);
       startBlock(full);
     }
     const next = temp();
     emit(`${next} = add i64 %d, 1`);
-    if (r.kind === "array" || r.kind === "fixed") return inspectElements(v, t as ArrayType | FixedType, writtenPart(written, t, (x) => typing.rec(x as ArrayType).element) ?? r.element, next);
+    if (r.kind === "array" || r.kind === "fixed") return named(inspectElements(v, t as ArrayType | FixedType, writtenPart(written, t, (x) => typing.rec(x as ArrayType).element) ?? r.element, next, typed === "Float32Array"));
     if (r.kind === "map") return inspectEntries(v, t as MapType, writtenPart(written, t, (x) => typing.rec(x as MapType).value) ?? r.value, next);
     if (r.kind === "union") {
       const members = writtenMembers(written, t as UnionType);
@@ -4895,7 +4908,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   }
 
   // An array's first 100 elements, and how many it has.
-  function inspectElements(v: string, t: ArrayType | FixedType, written: Type, depth: string): string {
+  function inspectElements(v: string, t: ArrayType | FixedType, written: Type, depth: string, wide = false): string {
     const element = llvm(typing.lower(typing.rec(t).element));
     const [length, data] = [temp(), temp()];
     if (typing.rec(t).kind === "array") {
@@ -4925,7 +4938,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const [at, x, next] = [temp(), temp(), temp()];
     emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
     emit(`${x} = load ${element}, ptr ${at}`);
-    emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, written, depth)})`);
+    // A Float32Array's elements print as the doubles JavaScript reads them as.
+    let shown = x;
+    if (wide) {
+      shown = temp();
+      emit(`${shown} = fpext float ${x} to double`);
+    }
+    emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(shown, shown === x ? written : "f64", depth)})`);
     emit(`${next} = add i64 ${i}, 1`);
     emit(`store i64 ${next}, ptr ${index}`);
     emit(`br label %${head}`);
@@ -6940,9 +6959,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         break;
       }
       case "pathReal":
+      case "pathRealNative":
+      case "pathReadLink":
       case "dirTemp": {
         const out = alloca("ptr");
-        emit(`${status} = call i32 @fsh_rt_fs_${name === "pathReal" ? "realpath" : "mkdtemp"}(ptr ${path}, ptr ${out}, ptr ${parts})`);
+        const callee = { pathReal: "realpath", pathRealNative: "realpath_native", pathReadLink: "readlink", dirTemp: "mkdtemp" }[name];
+        emit(`${status} = call i32 @fsh_rt_fs_${callee}(ptr ${path}, ptr ${out}, ptr ${parts})`);
         read = filled("ptr", out);
         break;
       }
@@ -7005,9 +7027,25 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         emit(`${status} = call i32 @fsh_rt_fs_${name === "fileCopy" ? "copyfile" : "rename"}(ptr ${path}, ptr ${to}, ${flags}ptr ${parts})`);
         break;
       }
+      case "pathLink": {
+        const [to, symbolic] = [operand(e.args[1]!, e.args.slice(2)), temp()];
+        emit(`${symbolic} = zext i1 ${value(e.args[2]!)} to i32`);
+        emit(`${status} = call i32 @fsh_rt_fs_link(ptr ${path}, ptr ${to}, i32 ${symbolic}, ptr ${parts})`);
+        break;
+      }
       case "pathUnlink":
         emit(`${status} = call i32 @fsh_rt_fs_unlink(ptr ${path}, ptr ${parts})`);
         break;
+      case "pathAccess":
+      case "pathChmod":
+        emit(`${status} = call i32 @fsh_rt_fs_${name === "pathAccess" ? "access" : "chmod"}(ptr ${path}, i64 ${value(e.args[1]!)}, ptr ${parts})`);
+        break;
+      case "pathUtimes": {
+        const follow = temp();
+        emit(`${follow} = zext i1 ${value(e.args[3]!)} to i32`);
+        emit(`${status} = call i32 @fsh_rt_fs_utimes(ptr ${path}, double ${value(e.args[1]!)}, double ${value(e.args[2]!)}, i32 ${follow}, ptr ${parts})`);
+        break;
+      }
       case "dirMake": {
         const [recursive, out] = [temp(), alloca("ptr")];
         emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);
@@ -7032,7 +7070,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (!read) return undefined;
     const result = read();
     // Unused, as a statement, what a call gives is released when the statement ends.
-    const gives: Record<string, Type> = { processSpawn: typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), fileReadSync: typing.arrayType("u8"), dirRead: typing.arrayType("string"), pathReal: "string", dirTemp: "string", dirMake: typing.unionType(["string", "null"]) };
+    const gives: Record<string, Type> = { processSpawn: typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), fileReadSync: typing.arrayType("u8"), dirRead: typing.arrayType("string"), pathReal: "string", pathRealNative: "string", pathReadLink: "string", dirTemp: "string", dirMake: typing.unionType(["string", "null"]) };
     if (!types.has(e) && gives[name]) pending.push({ v: result, type: gives[name]! });
     return result;
   }

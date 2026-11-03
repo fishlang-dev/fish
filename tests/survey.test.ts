@@ -267,14 +267,14 @@ test("the curve picks the feature freeing the most lines first, and frees a file
   });
 });
 
-test("a project using Buffer waits on typed arrays, though std has base64 and hex", () => {
+test("a project using Buffer waits on Buffer, though std has typed arrays, base64 and hex", () => {
   projects([{
     "a.ts": "import { Buffer } from \"node:buffer\";\nexport function pack(a: Uint8Array): Buffer {\n  const head = Buffer.alloc(4);\n  head.writeUInt32BE(a.length, 0);\n  return Buffer.concat([head, Buffer.from(a)]);\n}\n",
     "b.ts": "export const one = 1;\n",
   }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start.share).toBeLessThan(100);
-    expect(r.curve.steps.map((s) => s.feature)).toEqual(["Typed arrays and DataView"]);
+    expect(r.curve.steps.map((s) => s.feature)).toEqual(["Buffer"]);
   });
 });
 
@@ -608,8 +608,8 @@ test("generic arrows not held by a const are portable", () => {
 });
 
 test("node:fs members the std module answers are portable; others are Node built-ins", () => {
-  project({ "a.ts": "import { readFileSync, statSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, constants } from \"node:fs\";\n", "b.ts": "import { openSync } from \"fs\";\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
+  project({ "a.ts": "import { readFileSync, statSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, constants } from \"node:fs\";\n", "c.ts": "import { access, utimes, lutimes, chmod, symlink, link, readlink, realpath, constants } from \"fs/promises\";\n", "b.ts": "import { openSync } from \"fs\";\n" }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"], []]);
   });
 });
 
@@ -668,13 +668,13 @@ test("static file packages are replaced by Router.static", () => {
   });
 });
 
-test("randomBytes waits on typed arrays, since Node's gives a Buffer and std's a u8[]", () => {
+test("randomBytes waits on Buffer, since Node's gives a Buffer and std's a u8[]", () => {
   project({
     "a.ts": "import { randomBytes } from \"node:crypto\";\nexport const t = randomBytes(16).toString(\"hex\");\n",
     "b.ts": "import crypto from \"crypto\";\nexport const b = crypto.randomBytes(8).readUInt32BE(0) + crypto.randomUUID().length;\n",
     "c.ts": "import { randomBytes, createHash } from \"crypto\";\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Typed arrays and DataView"], ["Typed arrays and DataView"], ["Typed arrays and DataView", "createHash, createHmac and randomBytes from node:crypto"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Buffer"], ["Buffer"], ["Buffer", "createHash, createHmac and randomBytes from node:crypto"]]);
     expect(survey(dir).builtins!.map((b) => b.module)).toEqual(["buffer", "crypto"]);
   });
 });
@@ -698,11 +698,11 @@ test("an import whose missing names wait on different features waits on each, an
     { "c.ts": "import crypto from \"crypto\";\nconsole.log(crypto.randomBytes(4), crypto.createHash(\"md5\"), crypto.randomUUID());\n" },
   ], ([a, b, c]) => {
     for (const [dir, other] of [[a!, "createHash, createHmac and randomBytes from node:crypto"], [b!, "Node built-ins"], [c!, "createHash, createHmac and randomBytes from node:crypto"]] as const) {
-      expect(scanFiles(dir).map(featuresOf)).toEqual([[other, "Typed arrays and DataView"].sort()]);
+      expect(scanFiles(dir).map(featuresOf)).toEqual([[other, "Buffer"].sort()]);
       const steps = rank([dir]).curve.steps;
       expect(steps.map((s) => [s.gained.files, s.portable.share])).toEqual([[0, 0], [1, 100]]);
     }
-    expect(survey(b!).builtins!.map((x) => [x.module, x.equivalent?.name])).toEqual([["buffer", "Typed arrays and DataView"], ["crypto.randomInt", undefined]]);
+    expect(survey(b!).builtins!.map((x) => [x.module, x.equivalent?.name])).toEqual([["buffer", "Buffer"], ["crypto.randomInt", undefined]]);
   });
 });
 
