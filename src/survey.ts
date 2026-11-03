@@ -189,7 +189,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // Node's own connect and its sockets with events.
   ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", PLANNED("import.meta.url and file URLs")], ["querystring", PLANNED("node:querystring")],
-  ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", PLANNED("Response compression")], ["stream", PLANNED("ReadableStream")],
+  ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", STD("zlib, for gzipSync, gunzipSync, deflateSync, inflateSync, deflateRawSync, inflateRawSync and unzipSync, and those seven as promises")], ["stream", PLANNED("ReadableStream")],
   ["buffer", PLANNED("Buffer")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
   // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
   // `buffer` is more than typed arrays and std's base64 and hex: `Buffer` is a Uint8Array with Node's

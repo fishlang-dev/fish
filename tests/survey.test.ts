@@ -529,8 +529,15 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     "b.ts": "import { test } from \"node:test\";\nimport http from \"node:http\";\nimport { Console } from \"console\";\n",
     "c.ts": "class A { constructor() {} }\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Response compression", "Terminal detection and styled text"], ["Jest-style test API", "The rest of console", "node:http server shim"], []]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([["Terminal detection and styled text"], ["Jest-style test API", "The rest of console", "node:http server shim"], []]);
     expect(scanFiles(dir)[2]!.findings).toEqual([]);
+  });
+  // zlib's whole-buffer calls are std's; brotli's aren't yet.
+  project({
+    "a.ts": "import { gzipSync, gunzipSync, deflateSync, inflateSync, deflateRawSync, inflateRawSync, unzipSync, gzip, unzip } from \"node:zlib\";\n",
+    "b.ts": "import { gzipSync, brotliCompressSync } from \"zlib\";\n",
+  }, (dir) => {
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
   });
   // The global URL and URLSearchParams are std's, but Fish refuses importing them from url, and
   // querystring has no std module.
