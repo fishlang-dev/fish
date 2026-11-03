@@ -5022,17 +5022,16 @@ function shown(n: i64): string {
 
 // Runs zlib over the whole of data; bits picks the format as windowBits does.
 function run(inflating: boolean, bits: i64, data: string | u8[], options: ZlibOptions): u8[] throws ZlibError {
-  const level = options.level ?? -1;
+  const input = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  return checked(inflating, bits, options.level ?? -1, input);
+}
+
+function checked(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>): u8[] throws ZlibError {
   if (level < -1 || level > 9) {
     let e = new ZlibError("The value of \"options.level\" is out of range. It must be >= -1 and <= 9. Received " + shown(level), null, "ERR_OUT_OF_RANGE");
     e.name = "RangeError";
     throw e;
   }
-  const input = typeof data === "string" ? new TextEncoder().encode(data) : data;
-  return runBytes(inflating, bits, level, input);
-}
-
-function runBytes(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>): u8[] throws ZlibError {
   // A pointer is taken to an element, so empty input is passed as one byte of length 0.
   const none: u8[] = [0 as u8];
   let result: i64[] = [0, 0, 0];
@@ -5073,6 +5072,43 @@ export function inflateRawSync(data: string | u8[], options: ZlibOptions = {}): 
 // Gzip or zlib, whichever the input's header says.
 export function unzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 47, data, options);
+}
+
+// Node's async calls take a callback; these give a promise instead, as promisify would.
+// The closure borrows the input rather than moving it into the call: a blocking task that moves
+// an array it captured frees it twice.
+async function runAsync(inflating: boolean, bits: i64, data: string | u8[], options: ZlibOptions): Promise<u8[]> throws ZlibError {
+  const input = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  const level = options.level ?? -1;
+  return await spawnBlocking(() => checked(inflating, bits, level, input));
+}
+
+export async function gzip(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(false, 31, data, options);
+}
+
+export async function gunzip(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(true, 31, data, options);
+}
+
+export async function deflate(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(false, 15, data, options);
+}
+
+export async function inflate(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(true, 15, data, options);
+}
+
+export async function deflateRaw(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(false, -15, data, options);
+}
+
+export async function inflateRaw(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(true, -15, data, options);
+}
+
+export async function unzip(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {
+  return await runAsync(true, 47, data, options);
 }
 `,
   child_process: String.raw`

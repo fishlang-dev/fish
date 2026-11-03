@@ -201,3 +201,37 @@ test("zlib is compiled and linked into a program only when it calls the module",
   expect(runtimeLinks(plain, HOST_TARGET)).not.toContain("-lz");
   expect(runtimeUnits(plain, false).map((u) => u.name)).not.toContain("zlib");
 });
+
+test("the promise forms give what node's promisified calls give", () => {
+  compare("promises", `
+  const gz = await gzip("hello", { level: 9 });
+  const df = await deflate("hello");
+  const raw = await deflateRaw(utf8("hello"), { level: 1 });
+  console.log(show(gz), show(df), show(raw));
+  const a = await gunzip(gz.clone());
+  const b = await inflate(df.clone());
+  const c = await inflateRaw(raw);
+  const d = await unzip(gz);
+  const e = await unzip(df);
+  console.log(text(a), text(b), text(c), text(d), text(e));
+  const big = utf8("abcdefgh ".repeat(5000));
+  const squeezed = await deflate(big.clone());
+  const size = squeezed.length;
+  const again = await inflate(squeezed);
+  console.log(size > 0, same(again, big));
+  try {
+    await gunzip("hello");
+  } catch (e) {
+    console.log(e.message, errnoOf(e), e.code);
+  }
+  try {
+    await inflateRaw([]);
+  } catch (e) {
+    console.log(e.message, errnoOf(e), e.code);
+  }
+  try {
+    await deflate("x", { level: 10 });
+  } catch (e) {
+    console.log(e.message, errnoOf(e), e.code);
+  }`);
+});
