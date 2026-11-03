@@ -486,6 +486,8 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
       if (t.args.length !== 0) throw new CompileError("E0106", `'${t.name}' takes no type arguments`, t.start, t.end);
       return this.typing.blockType(t.name);
     }
+    // std's FileHandle's counted descriptor, which closes its file when the last count goes.
+    if (t.name === "__FileDescriptor" && t.args.length === 0) return this.typing.blockType("FileDescriptor");
     if (t.name === "Channel") {
       if (t.args.length !== 1) throw new CompileError("E0116", "'Channel' takes the type it carries, like 'Channel<string>'", t.start, t.end);
       return channel(this.typing, this.resolveType(t.args[0]!), t);
