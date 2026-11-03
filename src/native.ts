@@ -8407,6 +8407,11 @@ export const ZLIB_NATIVE = String.raw`
 #include <string.h>
 #include <zlib.h>
 
+// The most input given zlib at once, as its counts are 32-bit; a test lowers it to feed several.
+#ifndef FSH_ZLIB_CHUNK
+#define FSH_ZLIB_CHUNK UINT_MAX
+#endif
+
 // The output, or on failure zlib's message, and its length.
 typedef struct { uint8_t *data; int64_t length; } fsh_zlib_run;
 
@@ -8452,7 +8457,7 @@ fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, co
   for (;;) {
     if (s.avail_in == 0 && left > 0) {
       s.next_in = (Bytef *)next;
-      s.avail_in = left > UINT_MAX ? UINT_MAX : (uInt)left;
+      s.avail_in = left > FSH_ZLIB_CHUNK ? FSH_ZLIB_CHUNK : (uInt)left;
       next += s.avail_in;
       left -= s.avail_in;
     }
@@ -8464,7 +8469,9 @@ fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, co
     s.next_out = r->data + r->length;
     s.avail_out = room > UINT_MAX ? UINT_MAX : (uInt)room;
     uInt before = s.avail_out;
-    err = inflating ? inflate(&s, Z_FINISH) : deflate(&s, Z_FINISH);
+    // Z_FINISH only once the last of the input is in: deflate would end the stream at the first chunk.
+    int flush = left > 0 ? Z_NO_FLUSH : Z_FINISH;
+    err = inflating ? inflate(&s, flush) : deflate(&s, flush);
     r->length += before - s.avail_out;
     if (err == Z_STREAM_END) {
       // Trailing zero bytes are padding; anything else starts another member.

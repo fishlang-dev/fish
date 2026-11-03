@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateRawSync, deflateSync, gunzipSync, gzipSync, inflateRawSync, inflateSync } from "node:zlib";
 import { compile, runtimeLinks, runtimeUnits } from "../src/main.ts";
+import { ZLIB_NATIVE } from "../src/native.ts";
 import { cachedSession } from "../src/stdcache.ts";
-import { HOST_TARGET } from "../src/target.ts";
+import { HOST_TARGET, sanitizedTarget } from "../src/target.ts";
 
 // Each test builds a program with clang, which can take past bun's 5 seconds on a busy CI runner.
 setDefaultTimeout(30_000);
@@ -234,4 +235,90 @@ test("the promise forms give what node's promisified calls give", () => {
   } catch (e) {
     console.log(e.message, errnoOf(e), e.code);
   }`);
+});
+
+// Input past zlib's 32-bit counts is fed in chunks; built with a 1000-byte chunk, the runtime must
+// still compress and decompress the whole of a larger input.
+test("input fed to zlib in several chunks is compressed and decompressed whole", () => {
+  const dir = mkdtempSync(join(tmp, "chunks-"));
+  const harness = `
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+typedef struct { uint8_t *data; int64_t length; } fsh_zlib_run;
+fsh_zlib_run *fsh_rt_zlib_run(int64_t, int64_t, int64_t, const uint8_t *, int64_t, int64_t *);
+void fsh_rt_zlib_take(fsh_zlib_run *, uint8_t *);
+static uint8_t in[100000], packed[200000], back[100000];
+int main(void) {
+  for (int i = 0; i < 100000; i++) in[i] = (uint8_t)('a' + ((int64_t)i * i * 7 + i) % 26);
+  int bits[] = {15, 31, -15};
+  for (int k = 0; k < 3; k++) {
+    int64_t r[3];
+    fsh_zlib_run *run = fsh_rt_zlib_run(0, bits[k], 6, in, sizeof in, r);
+    int64_t n = r[2];
+    fsh_rt_zlib_take(run, packed);
+    char name[16];
+    snprintf(name, sizeof name, "out%d", k);
+    FILE *f = fopen(name, "wb");
+    fwrite(packed, 1, n, f);
+    fclose(f);
+    run = fsh_rt_zlib_run(1, bits[k], -1, packed, n, r);
+    int64_t m = r[2];
+    fsh_rt_zlib_take(run, back);
+    printf("%d %lld %d\\n", (int)r[0], (long long)m, m == (int64_t)sizeof in && memcmp(in, back, sizeof in) == 0);
+  }
+  return 0;
+}
+`;
+  writeFileSync(join(dir, "zlib.c"), ZLIB_NATIVE);
+  writeFileSync(join(dir, "main.c"), harness);
+  const built = Bun.spawnSync(["clang", "-DFSH_ZLIB_CHUNK=1000", "zlib.c", "main.c", "-lz", "-o", "main"], { cwd: dir });
+  expect(built.stderr.toString()).toBe("");
+  const ran = Bun.spawnSync([join(dir, "main")], { cwd: dir });
+  expect(ran.stdout.toString()).toBe("0 100000 1\n".repeat(3));
+  const input = Buffer.from(Array.from({ length: 100000 }, (_, i) => 97 + ((i * i * 7 + i) % 26)));
+  expect(inflateSync(readFileSync(join(dir, "out0"))).equals(input)).toBe(true);
+  expect(gunzipSync(readFileSync(join(dir, "out1"))).equals(input)).toBe(true);
+  expect(inflateRawSync(readFileSync(join(dir, "out2"))).equals(input)).toBe(true);
+});
+
+// Whether clang can build for the host with the address sanitizer.
+const asan = (() => {
+  try {
+    sanitizedTarget(HOST_TARGET, ["address"]);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+// A promise form whose future is dropped, losing a race, leaves its job running on the blocking
+// pool; the job reads its own copy of the input, so the memory reused meanwhile is never its own.
+test.skipIf(!asan)("a promise form that loses a race finishes its job on memory of its own", () => {
+  const dir = mkdtempSync(join(tmp, "race-"));
+  writeFileSync(join(dir, "main.fsh"), `import { deflate, ZlibError } from "node:zlib";
+
+async function main(): Promise<void> throws ZlibError {
+  let input: u8[] = [];
+  let x = 1;
+  for (let i = 0; i < 8000000; i++) {
+    x = (x * 1103515245 + 12345) % 2147483648;
+    input.push(((x >> 16) & 7) as u8);
+  }
+  const r = await Promise.race([deflate(input, { level: 9 }), sleep(1)]);
+  console.log(r === undefined ? "sleep won" : "deflate won");
+  let total = 0;
+  for (let k = 0; k < 50; k++) {
+    let junk: u8[] = new Array(1000000).fill(7 as u8);
+    total += junk[k] as i64;
+  }
+  await sleep(3000);
+  console.log("done", total);
+}
+`);
+  const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", "main.fsh", "-o", "main", "--sanitize", "address"], { cwd: dir });
+  expect(built.exitCode).toBe(0);
+  const ran = Bun.spawnSync([join(dir, "main")], { cwd: dir, env: { ...process.env, FISH_LEAKS: "1" } });
+  expect(ran.stderr.toString()).toBe("");
+  expect(ran.stdout.toString()).toBe("sleep won\ndone 350\n");
 });
