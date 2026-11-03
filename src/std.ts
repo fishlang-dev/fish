@@ -6331,7 +6331,18 @@ export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubpro
   return new SyncSubprocess(pid, status < 0 ? null : status, signal, stdout, stderr);
 }
 
-export { sleeping as sleep };
+// Bun.serve's options this subset takes. fetch is async, and the port 3000 unless given.
+export type BunServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; fetch: (req: Request) => Promise<Response> };
+
+// Serves until the signal, or the first SIGINT or SIGTERM, stops it: unlike Bun's, it is awaited,
+// or spawned to run beside the rest of the program, and gives no Server.
+async function serving(options: BunServeOptions): Promise<void> throws IoError {
+  const unix = options.unix;
+  const port = unix === null ? options.port ?? 3000 : options.port;
+  await serve({ port, hostname: options.hostname, unix, tls: options.tls, signal: options.signal }, options.fetch);
+}
+
+export { sleeping as sleep, serving as serve };
 `,
 };
 

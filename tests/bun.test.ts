@@ -110,3 +110,41 @@ test("file, write, stdin, env, argv and the sleeps", () => {
   await Bun.sleep(20);
   console.log(Date.now() - start >= 40);`, "from stdin\n");
 });
+
+// Bun.serve gives a Server at once and Fish's is awaited, so each side has its own program: both
+// serve the same handler and print what a request through fetch got back.
+test("serve answers through fetch as Bun's does", async () => {
+  const free = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+  const port = free.port;
+  free.stop(true);
+  const handler = `async (req) => {
+    const sent = await req.text();
+    let headers = new Headers();
+    headers.set("x-from", "fetch");
+    return new Response("hi " + req.method + " " + req.url + " " + sent, { status: 201, headers });
+  }`;
+  const asked = `const res = await fetch("http://127.0.0.1:${port}/a/b?c=d", { method: "POST", body: "sent" });
+  const body = await res.text();
+  console.log(res.status, body, res.headers.get("x-from"));`;
+  const program = join(tmp, "serve.fsh");
+  writeFileSync(program, `async function main(): Promise<void> throws IoError | AbortError {
+  const stop = new AbortController();
+  const server = spawn(Bun.serve({ port: ${port}, hostname: "127.0.0.1", signal: stop.signal.clone(), fetch: ${handler} }));
+  await sleep(200);
+  ${asked}
+  stop.abort();
+  await server;
+}
+`);
+  const out = join(tmp, "serve");
+  const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
+  expect(built.stderr.toString()).toBe("");
+  const fish = Bun.spawnSync([out], { env: { ...process.env, FISH_LEAKS: "1" } });
+  const script = join(tmp, "serve.ts");
+  writeFileSync(script, `const server = Bun.serve({ port: ${port}, hostname: "127.0.0.1", fetch: ${handler} });\n${asked}\nserver.stop();\n`);
+  const bun = Bun.spawnSync(["bun", script]);
+  expect(fish.stderr.toString()).toBe("");
+  expect(bun.stderr.toString()).toBe("");
+  expect(fish.stdout.toString()).toBe(bun.stdout.toString());
+  expect(fish.stdout.toString()).toBe(`201 hi POST http://127.0.0.1:${port}/a/b?c=d sent fetch\n`);
+});
