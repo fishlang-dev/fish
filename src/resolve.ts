@@ -12,6 +12,7 @@ import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
 import { openParam, standIn, TypeFunctions, UTILITIES, type TypeFunctionsHost } from "./typefns.ts";
 import { mutates, owns, withoutUndefined } from "./classes.ts";
+import type { BodyId, LocalId } from "./arenas.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
 
@@ -81,10 +82,11 @@ export interface ResolverHost {
   typeNames(at: usize): string[];
 }
 
-// Whether a name is a local or parameter where a type written at `at` sits.
-export interface Sight {
-  inSight(name: string, at: Span): boolean;
-}
+// What a body being checked keeps in sight of a type written in it: its parameters, read from the
+// body, the scopes its checker opens and closes as it goes, and the sight of the body it is written
+// in. Kept here rather than in the checker, so resolving a `typeof` reads it without reaching back
+// into the checker.
+export type Sight = { body: BodyId; scopes: Map<string, LocalId>[]; outer: usize | undefined };
 
 // What resolving has made and where it is, kept by the host between uses.
 export class ResolverState {
@@ -109,9 +111,10 @@ export class ResolverState {
   deferring = 0;
   // How many alias instances computing the outermost type has needed, against the budget.
   computed = 0;
-  // Whether a name is a local or parameter where a type written at `at` sits, which `typeof`
-  // can't name yet; unset where only top-level names are in sight.
-  sight: Sight | undefined;
+  // Every body's sight, by the index its checker holds, and the one types are resolved in, which
+  // `typeof` can't name the locals and parameters of yet; unset where only top-level names are.
+  sights: Sight[] = [];
+  sight: usize | undefined;
   // The data-carrying enums being made, to catch one that holds itself.
   making = new NodeMap<DataEnum, string>();
   // Where a data-carrying enum instance holds itself, by enum and type arguments.
@@ -167,10 +170,27 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
   private typeFns(): TypeFunctions<Resolver<H>> {
     return new TypeFunctions(this.typing, this);
   }
-  setSight(this: Mut<this>, names: Sight | undefined) {
+  // A new sight for `body`, written in the body whose sight is `outer`, with one scope open.
+  openSight(this: Mut<this>, body: BodyId, outer: usize | undefined): usize {
+    this.host.resolverState.sights.push({ body, scopes: [new Map()], outer });
+    return this.host.resolverState.sights.length - 1;
+  }
+  setSight(this: Mut<this>, names: usize | undefined) {
     this.host.resolverState.sight = names;
   }
-  withSight<T>(this: Mut<this>, names: Sight | undefined, f: () => T): T {
+  // Whether a name is a local or parameter in sight of a type written at `at`: in a scope or the
+  // parameters of a body the type is written in, or of one around it.
+  inSight(name: string, at: Span): boolean {
+    for (let i = this.host.resolverState.sight; i !== undefined; ) {
+      const s = this.host.resolverState.sights[i]!;
+      const f = this.tables.arenas.bodyOf(s.body);
+      if (!(at.start >= f.start && at.end <= f.end)) return false;
+      if (s.scopes.some((scope) => scope.has(name)) || f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === name)) return true;
+      i = s.outer;
+    }
+    return false;
+  }
+  withSight<T>(this: Mut<this>, names: usize | undefined, f: () => T): T {
     const outer = this.host.resolverState.sight;
     this.host.resolverState.sight = names;
     try {
@@ -442,7 +462,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
     // `typeof f` or `typeof X`: a top-level function's or const's type.
     if (t.kind === "query") {
       if (t.target.kind !== "ref" || t.target.args.length > 0 || t.target.name.includes(".")) throw unsupported("'typeof' types other than of a top-level function or const", t);
-      return this.host.valueType(t.target.name, t, this.host.resolverState.sight?.inSight(t.target.name, t) === true);
+      return this.host.valueType(t.target.name, t, this.inSight(t.target.name, t));
     }
     if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
     const bound = this.host.resolverState.scope.get(t.name);

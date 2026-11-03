@@ -19,7 +19,7 @@ import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { Registry, RegistryState, type RegistryHost } from "./registry.ts";
-import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost, type Sight } from "./resolve.ts";
+import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
 import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type InstanceMaker, type Bound } from "./typing.ts";
@@ -879,7 +879,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // A body's own signature, where its parameter names shadow top-level ones.
   signing<T>(this: Mut<this>, f: Body, run: () => T): T {
-    return this.resolver().withSight(new ParamsInSight(f), run);
+    return this.resolver().withSight(this.resolver().openSight(f.bodyId, undefined), run);
   }
 
   classParams(f: Body): TypeParam[] {
@@ -1692,11 +1692,6 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 }
 
-// Whether a type written at `at` sits inside a body.
-function writtenIn(f: Body, at: Span): boolean {
-  return at.start >= f.start && at.end <= f.end;
-}
-
 // A class's members, for interface satisfaction, read through the checker.
 class ClassMembers implements Members {
   cx: Mut<Checker>;
@@ -1737,20 +1732,7 @@ class ClassMembers implements Members {
   }
 }
 
-// What a body's signature sees: its own parameters' names, where written inside it.
-class ParamsInSight implements Sight {
-  f: Body;
-
-  constructor(f: Body) {
-    this.f = f;
-  }
-
-  inSight(name: string, at: Span): boolean {
-    return writtenIn(this.f, at) && this.f.params.some((p) => p.pattern.kind === "ident" && p.pattern.name === name);
-  }
-}
-
-class BodyChecker implements Context, Sight {
+class BodyChecker implements Context {
   cx: Mut<Checker>;
   instance: Instance;
   // The body a closure is written in, which its body reaches back into as it is checked.
@@ -1783,7 +1765,8 @@ class BodyChecker implements Context, Sight {
   // How many statements with a `finally` enclose the code being checked: a generator dropped
   // at a `yield` there would never run the `finally`.
   finalizing: usize;
-  scopes: Map<string, LocalId>[];
+  // This body's sight in the resolver's state, which holds the scopes its bindings are declared in.
+  sight: usize;
   targets: Target[];
   // What the conditions guarding the code being checked prove, and what assignments set,
   // innermost last.
@@ -1909,8 +1892,8 @@ class BodyChecker implements Context, Sight {
     this.awaitable = new NodeSet<Expr>();
     this.yieldable = new NodeSet<Expr>();
     this.finalizing = 0;
-    this.scopes = [new Map()];
-    this.cx.resolver().setSight(this);
+    this.sight = this.cx.resolver().openSight(f.bodyId, outer?.sight);
+    this.cx.resolver().setSight(this.sight);
     this.targets = [];
     this.facts = [];
     this.handlers = [];
@@ -2242,14 +2225,11 @@ class BodyChecker implements Context, Sight {
     this.cx.inProgress.delete(this.instance.id);
   }
 
-  // Every type written from here on, in annotations, casts and closures, sees these names.
-  named(p: Param, name: string) {
-    return p.pattern.kind === "ident" && p.pattern.name === name;
-  }
-  // Only a type written inside the body sees them: one written elsewhere, a class's field or
-  // another signature, is resolved here only because the body needed it.
-  inSight(this: Mut<this>, name: string, at: Span): boolean {
-    return writtenIn(this.f, at) && (this.scopes.some((s) => s.has(name)) || this.f.params.some((p) => this.named(p, name)) || (this.outer?.inSight(name, at) ?? false));
+  // The scopes this body's bindings are declared in, innermost last. Every type written from here
+  // on, in annotations, casts and closures, sees their names; only a type written inside the body
+  // does, as one written elsewhere is resolved here only because the body needed it.
+  get scopes(): Map<string, LocalId>[] {
+    return this.cx.resolverState.sights[this.sight]!.scopes;
   }
   // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
   // A capture narrows as a variable of the closure's would. A binding holding no reference
@@ -3007,7 +2987,7 @@ class BodyChecker implements Context, Sight {
     inner.changed = new Set();
     inner.moved = new Set();
     this.cx.closures.push(inner.id);
-    this.cx.resolver().withSight(this, () => this.cx.checkInstance(inner, this));
+    this.cx.resolver().withSight(this.sight, () => this.cx.checkInstance(inner, this));
     const sup = [...inner.types.keys()].find((u) => u.kind === "super");
     if (sup) throw unsupported("'super' in closures", sup);
     const captured = [...inner.captures].map(([alias, from]): [Local, Local | "this"] => [this.cx.localOf(alias), from === "this" ? from : this.cx.localOf(from)]);
