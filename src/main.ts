@@ -19,7 +19,7 @@ import { expandMacros } from "./macros.ts";
 import { parse, parseWithComments, type Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
-import { NATIVE, TLS_NATIVE, tlsStub } from "./native.ts";
+import { NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.ts";
 import { cachedObject, cachedObjectAsync, files, mathObjects, mathObjectsAsync, type Unit } from "./mathlib.ts";
 import { dockerfile, dockerfilePath, findOpenSsl, HOST_TARGET, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
@@ -491,16 +491,20 @@ export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\
 // itself is called by its quoted name.
 export const callsTls = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_(?:tls|crypto)_/m.test(ir);
 
-// What links OpenSSL into a program calling the TLS runtime, when it was found; without it the
-// runtime's TLS calls say how to install it.
+// Whether the IR calls into the zlib half of the runtime, as the zlib module does.
+export const callsZlib = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_zlib_/m.test(ir);
+
+// What links OpenSSL into a program calling the TLS runtime, when it was found, without which the
+// runtime's TLS calls say how to install it, and zlib into one calling the zlib runtime.
 export function runtimeLinks(ir: string, target: Target): string[] {
-  if (!callsTls(ir)) return [];
+  const zlib = callsZlib(ir) ? ["-lz"] : [];
+  if (!callsTls(ir)) return zlib;
   const openssl = findOpenSsl(target);
-  return "link" in openssl ? openssl.link : [];
+  return [...("link" in openssl ? openssl.link : []), ...zlib];
 }
 
 // The C half of the runtime as cached objects, with the engine's glue and sources when the
-// program's IR calls the engine, and the TLS half when it calls that. They are built with unwind tables so a panic can unwind through
+// program's IR calls the engine, and the TLS and zlib halves when it calls those. They are built with unwind tables so a panic can unwind through
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
 export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = HOST_TARGET, leaks = false): Unit[] {
@@ -513,7 +517,8 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : [];
   const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : [])], stdin: source, inputs: js ? files(ENGINE) : [] };
   const engine = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
-  return [runtime, ...engine];
+  const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
+  return [runtime, ...engine, ...zlib];
 }
 
 // A build's optimization level. A sanitized dev build is optimized a little, as clang advises for
