@@ -215,12 +215,12 @@ export type Builder<V> = {
 // wherever its expansion lands; the spellings that pin them, `name-fsh<file>`, which the linker
 // gives the declaration the name means in that file; and the names of the program's enum
 // members, which a bare name in a quoted match means rather than binds. A fresh name is a name
-// with the expansion's `suffix`, noted in the compilation's made-up names, `local`.
-export type Hygiene = { declared: Map<string, string>; namesIn: Map<usize, Set<string>>; pins: Set<string>; members: Set<string>; suffix: string; local: Mut<Set<string>> };
+// with the expansion's `suffix`, noted in `made` for the compilation's made-up names.
+export type Hygiene = { declared: Map<string, string>; namesIn: Map<usize, Set<string>>; pins: Set<string>; members: Set<string>; suffix: string; made: Set<string> };
 
 // A name only this expansion's quotes write.
 export function freshName(h: Mut<Hygiene>, name: string): string {
-  h.local.add(`${name}${h.suffix}`);
+  h.made.add(`${name}${h.suffix}`);
   return `${name}${h.suffix}`;
 }
 

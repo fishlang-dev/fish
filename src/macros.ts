@@ -424,7 +424,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     const d = s.kind === "export" ? s.body : s;
     return d?.kind === "enum" ? d.members.map((x) => x.name) : [];
   })));
-  const hygiene: Hygiene = { declared: new Map(), namesIn: new Map(loaded.modules.map((m, i) => [i, namesIn(m)])), pins, members, suffix, local: compilation.names.local };
+  const hygiene: Hygiene = { declared: new Map(), namesIn: new Map(loaded.modules.map((m, i) => [i, namesIn(m)])), pins, members, suffix, made: new Set() };
   for (const n of declared) hygiene.declared.set(n, freshName(hygiene, n));
   // An argument taken as syntax is the argument as written; one taken as a value is its constant's.
   const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
@@ -436,7 +436,13 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     return built<Value>(checked.tables, { tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
-  const result = withHygiene(checked.tables, hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
+  let result: Value;
+  try {
+    result = withHygiene(checked.tables, hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
+  } finally {
+    // An error the expansion throws names them as written too.
+    for (const n of hygiene.made) compilation.names.local.add(n);
+  }
   const node = nodeOf(ids, result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
   markGenerated(compilation.generated, given);
