@@ -7657,9 +7657,10 @@ const syncFileSignatures = (typing: Typing): Record<string, [Type[], Type, boole
   pathLink: [["string", "string", "boolean"], "void", true],
   // A path, atime and mtime in seconds, and whether a link is followed.
   pathUtimes: [["string", "f64", "f64", "boolean"], "void", true],
-  // A command, its arguments, the working directory ("" for this one's) and stdin, giving the
-  // pid, exit status (-1 for a signal), signal number, stdout and stderr.
-  processSpawn: [["string", typing.arrayType("string"), "string", typing.arrayType("u8")], typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), true],
+  // A command, its arguments, the working directory ("" for this one's), stdin, the runtime's
+  // flags and "K=V" environment, giving the pid, exit status (-1 for a signal), signal number,
+  // stdout and stderr.
+  processSpawn: [["string", typing.arrayType("string"), "string", typing.arrayType("u8"), "i64", typing.arrayType("string")], typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), true],
 });
 
 // Each string method: its parameters, what it returns, and how many arguments it needs.

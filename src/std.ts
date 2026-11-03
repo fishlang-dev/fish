@@ -5459,7 +5459,7 @@ export function spawnSync(command: string, args: string[] = [], options: SpawnSy
   const input = options.input ?? "";
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
   try {
-    const [pid, status, signo, stdout, stderr] = processSpawn(command, args, options.cwd ?? "", bytes);
+    const [pid, status, signo, stdout, stderr] = processSpawn(command, args, options.cwd ?? "", bytes, 0, []);
     const name = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
     return new SpawnSyncReturns<u8[]>(pid, status < 0 ? null : status, name, stdout, stderr, null);
   } catch (e) {
