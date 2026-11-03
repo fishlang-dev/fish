@@ -7396,7 +7396,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const before = spills.length;
     // A nested function calling itself runs with the captures it was called with.
-    const pointer = bodyOf(target).closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!.env) : receiver(e.callee)) : bodyOf(target).self && object ? thisPointer(target, object) : undefined;
+    const pointer = bodyOf(target).closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!.env) : !target.generator && !target.future && fresh(e.callee) && !unwraps(e.callee) ? calledClosure(e.callee) : receiver(e.callee)) : bodyOf(target).self && object ? thisPointer(target, object) : undefined;
     const mine = spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
     const values = argValues(e.args, target, bodyOf(target).closure ? bodyOf(target).params.length : e.args.length);
@@ -9336,6 +9336,19 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const v = owns ? spill(spilled, types.get(object)!, read) : read;
     emit(`store ${type} ${v}, ptr ${spilled}`);
     return spilled;
+  }
+
+  // A closure made for its call, as in `(() => f(xs))()`, moves into the slot the call runs on.
+  // Its body may move a capture out of that slot, so what it leaves is dropped from the slot
+  // once the call returns, not from the value as it was made.
+  function calledClosure(callee: Expr): string {
+    const type = valueType(callee);
+    const slot = alloca(llvm(type));
+    const copy = { v: value(callee, true), type };
+    emit(`store ${llvm(type)} ${copy.v}, ptr ${slot}`);
+    pending.push(copy);
+    spills.push({ slot, type, copy });
+    return slot;
   }
 
   // An expression's value, copied down to the declared type it meets when that is narrower.

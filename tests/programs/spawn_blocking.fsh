@@ -183,3 +183,48 @@ async function main() {
   const v = await spawnBlocking(fs[1]!);
   console.log(v);
 }
+// case: spawn_blocking_moves_captured_array
+// expect: 3
+// expect: 2
+// expect: 1
+// expect: 4
+// expect: 2
+type Box = { data: u8[] };
+function f(data: u8[]): i64 { return data.length as i64; }
+function g(b: Box): i64 { return b.data.length as i64; }
+function h(m: Map<string, u8[]>): i64 { return m.size as i64; }
+function o(x: Option<u8[]>): i64 { return x === null ? 0 : x.length as i64; }
+function peek(data: Ref<u8[]>): i64 { return data.length as i64; }
+async function main() {
+  const xs: u8[] = [1, 2, 3];
+  const a = await spawnBlocking(() => f(xs));
+  console.log(a);
+  const box: Box = { data: [4, 5] };
+  const b = await spawnBlocking(() => g(box));
+  console.log(b);
+  let m = new Map<string, u8[]>();
+  m.set("a", [1]);
+  const c = await spawnBlocking(() => h(m));
+  console.log(c);
+  const opt: Option<u8[]> = [7, 8, 9, 10];
+  const d = await spawnBlocking(() => o(opt));
+  console.log(d);
+  const ys: u8[] = [1, 2];
+  const e = await spawnBlocking(() => peek(ys));
+  console.log(e);
+}
+// case: spawn_blocking_moved_capture_throws
+// expect: long
+function f(data: u8[]): i64 throws Error {
+  if (data.length > 2) throw new Error("long");
+  return data.length as i64;
+}
+async function main() {
+  const xs: u8[] = [1, 2, 3];
+  try {
+    const n = await spawnBlocking(() => f(xs));
+    console.log(n);
+  } catch (e) {
+    console.log(e.message);
+  }
+}
