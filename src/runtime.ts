@@ -145,6 +145,7 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_signal_shutdown()",
   "declare void @fsh_rt_socket_release(ptr)",
   "declare void @fsh_rt_js_release(ptr)",
+  "declare void @fsh_rt_fd_release(ptr)",
   "declare ptr @fsh_rt_js_evaluate(ptr, ptr)",
   "declare i32 @fsh_rt_js_typeof(ptr, ptr)",
   "declare ptr @fsh_rt_js_string(ptr)",

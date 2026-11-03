@@ -4084,6 +4084,184 @@ async function __tlsClient(conn: Ref<TcpStream>, serverName: string, ca: string,
 
 // The std modules a program reaches by a Node specifier, as `node:os` or `os`, or by naming one
 // as a global, each Fish source loaded like a file of the program.
+// node:fs's Stats and descriptor calls, which fs exports and fs/promises' FileHandle runs on.
+const FILES = String.raw`
+export class Stats {
+  size: i64;
+  mode: i64;
+  mtimeMs: f64;
+  kind: i64;
+  constructor(size: i64, mode: i64, mtimeMs: f64, kind: i64) {
+    this.size = size;
+    this.mode = mode;
+    this.mtimeMs = mtimeMs;
+    this.kind = kind;
+  }
+  isFile(): boolean { return this.kind === 1; }
+  isDirectory(): boolean { return this.kind === 2; }
+  isSymbolicLink(): boolean { return this.kind === 3; }
+}
+
+declare function fsh_rt_errno_words(number: i64, code: MutPtr<u8>, codeSize: i64, text: MutPtr<u8>, textSize: i64): void;
+declare function fsh_rt_fd_flags(flags: Ptr<u8>): i64;
+declare function fsh_rt_fd_open(path: Ptr<u8>, flags: i64, mode: i64): i64;
+declare function fsh_rt_fd_read(fd: i64, at: MutPtr<u8>, length: i64, position: i64): i64;
+declare function fsh_rt_fd_write(fd: i64, at: Ptr<u8>, length: i64, position: i64): i64;
+declare function fsh_rt_fd_stat(fd: i64, out: MutPtr<i64>, mtime: MutPtr<f64>): i64;
+declare function fsh_rt_fd_call(which: i64, fd: i64, value: i64): i64;
+
+// A failed descriptor call's IoError, from the -errno the runtime gave: Node's code and words,
+// naming the path only for open.
+function failed(result: i64, syscall: string, path: string | null): IoError {
+  let code: u8[] = new Array(32).fill(0 as u8);
+  let text: u8[] = new Array(200).fill(0 as u8);
+  unsafe { fsh_rt_errno_words(-result, mutPtrOf(code[0]), 32, mutPtrOf(text[0]), 200) };
+  const name = unsafe { fromCString(ptrOf(code[0])) };
+  let e = new IoError(name + ": " + unsafe { fromCString(ptrOf(text[0])) } + ", " + syscall + (path === null ? "" : " '" + path + "'"));
+  e.code = name;
+  e.syscall = syscall;
+  e.path = path;
+  return e;
+}
+
+// Node's RangeError for a number outside what a call takes, the number grouped by threes past
+// 2^32 as Node writes it.
+// Node's own checks in C++ write it plainly, as given by plain.
+function outOfRange(name: string, range: string, n: i64, plain: boolean = false): IoError {
+  let shown = String(n);
+  if (!plain && (n > 4294967296 || n < -4294967296)) {
+    const start = n < 0 ? 1 : 0;
+    let grouped = "";
+    let i = shown.length as i64;
+    for (; i >= start + 4; i -= 3) grouped = "_" + shown.slice(i - 3, i) + grouped;
+    shown = shown.slice(0, i) + grouped;
+  }
+  let e = new IoError("The value of \"" + name + "\" is out of range. It must be " + range + ". Received " + shown);
+  e.code = "ERR_OUT_OF_RANGE";
+  return e;
+}
+
+function invalid(message: string): IoError {
+  let e = new IoError(message);
+  e.code = "ERR_INVALID_ARG_VALUE";
+  return e;
+}
+
+const SAFE = 9007199254740991;
+
+function checkFd(fd: i64, plain: boolean = true): void throws IoError {
+  if (fd < 0 || fd > 2147483647) throw outOfRange("fd", ">= 0 && <= 2147483647", fd, plain);
+}
+
+function checkMode(mode: i64): void throws IoError {
+  if (mode < 0 || mode > 4294967295) throw outOfRange("mode", ">= 0 && <= 4294967295", mode);
+}
+
+// Node's string flags, as "r" or "wx+", or a number given to open as it is.
+export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o666): i64 throws IoError {
+  if (path.includes("\0")) throw invalid("The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received '" + path.replaceAll("\0", "\\x00") + "'");
+  let bits = 0;
+  if (typeof flags === "string") {
+    bits = flags.includes("\0") ? -1 : unsafe { fsh_rt_fd_flags(cString(flags)) };
+    if (bits < 0) throw invalid("The argument 'flags' is invalid. Received '" + flags + "'");
+  } else {
+    bits = flags;
+  }
+  checkMode(mode);
+  const fd = unsafe { fsh_rt_fd_open(cString(path), bits, mode) };
+  if (fd < 0) throw failed(fd, "open", path);
+  return fd;
+}
+
+export function closeSync(fd: i64): void throws IoError {
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(3, fd, 0) };
+  if (r < 0) throw failed(r, "close", null);
+}
+
+// What's read lands at offset; a null or -1 position reads from the file's own, which moves.
+export function readSync(fd: i64, buffer: Mut<u8[]>): i64 throws IoError;
+export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64, length: i64, position?: i64 | null): i64 throws IoError;
+export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64 = 0, length?: i64, position?: i64 | null): i64 throws IoError {
+  checkFd(fd, false);
+  // Node's length |= 0, which FileHandle's read doesn't do.
+  const n = ((length ?? (buffer.length as i64) - offset) as i32) as i64;
+  return readInto(fd, buffer, offset, n, position ?? -1);
+}
+
+// A read's checks in Node's order, then the read.
+function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64): i64 throws IoError {
+  if (offset < 0 || offset > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", offset);
+  const size = buffer.length as i64;
+  if (n === 0) return 0;
+  if (size === 0) throw invalid("The argument 'buffer' is empty and cannot be written. Received Uint8Array(0) []");
+  if (n < 0) throw outOfRange("length", ">= 0", n);
+  if (offset + n > size) throw outOfRange("length", "<= " + String(size - offset), n);
+  if (position < -1 || position > SAFE) throw outOfRange("position", ">= -1 && <= 9007199254740991", position);
+  const got = unsafe { fsh_rt_fd_read(fd, mutPtrOf(buffer[offset as usize]), n, position) };
+  if (got < 0) throw failed(got, "read", null);
+  return got;
+}
+
+// A write of length bytes from offset, or of a string's UTF-8; a negative or missing position
+// writes at the file's own.
+export function writeSync(fd: i64, buffer: Ref<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): i64 throws IoError;
+export function writeSync(fd: i64, text: string, position?: i64 | null, encoding?: "utf8" | "utf-8"): i64 throws IoError;
+export function writeSync(fd: i64, data: Ref<string | u8[]>, second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): i64 throws IoError {
+  checkFd(fd, false);
+  if (typeof data === "string") {
+    const bytes = new TextEncoder().encode(data);
+    return written(fd, bytes, 0, bytes.length as i64, second ?? -1);
+  }
+  const size = data.length as i64;
+  const offset = second ?? 0;
+  if (offset < 0 || offset > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", offset);
+  const n = typeof third === "number" ? third : size - offset;
+  if (offset > size) throw outOfRange("offset", "<= " + String(size), offset);
+  if (n > size - offset) throw outOfRange("length", "<= " + String(size - offset), n);
+  if (n < 0) throw outOfRange("length", ">= 0", n);
+  return written(fd, data, offset, n, position ?? -1);
+}
+
+function written(fd: i64, bytes: Ref<u8[]>, offset: i64, n: i64, position: i64): i64 throws IoError {
+  // A pointer for an empty write, which still reaches the system as Node's does.
+  const none: u8[] = [0];
+  const r = unsafe { fsh_rt_fd_write(fd, n === 0 ? ptrOf(none[0]) : ptrOf(bytes[offset as usize]), n, position) };
+  if (r < 0) throw failed(r, "write", null);
+  return r;
+}
+
+export function fstatSync(fd: i64): Stats throws IoError {
+  checkFd(fd);
+  let out: i64[] = [0, 0, 0];
+  let mtime: f64 = 0;
+  const r = unsafe { fsh_rt_fd_stat(fd, mutPtrOf(out[0]), mutPtrOf(mtime)) };
+  if (r < 0) throw failed(r, "fstat", null);
+  return new Stats(out[0], out[1], mtime, out[2]);
+}
+
+// A negative length truncates to nothing, as Node's does.
+export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
+  if (len < -SAFE || len > SAFE) throw outOfRange("len", ">= -9007199254740991 && <= 9007199254740991", len);
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(0, fd, len < 0 ? 0 : len) };
+  if (r < 0) throw failed(r, "ftruncate", null);
+}
+
+export function fchmodSync(fd: i64, mode: i64): void throws IoError {
+  checkMode(mode);
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(1, fd, mode) };
+  if (r < 0) throw failed(r, "fchmod", null);
+}
+
+export function fsyncSync(fd: i64): void throws IoError {
+  checkFd(fd);
+  const r = unsafe { fsh_rt_fd_call(2, fd, 0) };
+  if (r < 0) throw failed(r, "fsync", null);
+}
+`;
+
 export const STD_MODULES: Record<string, string> = {
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
   // they panic where they are made.
@@ -4763,6 +4941,161 @@ export async function writeFile(path: string, data: string | u8[]): Promise<void
   await fileWrite(path, bytes);
 }
 
+${FILES.replaceAll("export ", "")}
+declare function fsh_rt_fd_hold(fd: i64): __FileDescriptor;
+declare function fsh_rt_fd_of(held: Ref<__FileDescriptor>): i64;
+declare function fsh_rt_fd_begin(held: Ref<__FileDescriptor>): i64;
+declare function fsh_rt_fd_end(held: Ref<__FileDescriptor>): void;
+declare function fsh_rt_fd_take(held: Ref<__FileDescriptor>): i64;
+
+// Node's error for a call on a closed handle.
+function closed(syscall: string): IoError {
+  let e = new IoError("file closed");
+  e.code = "EBADF";
+  e.syscall = syscall;
+  return e;
+}
+
+// A call's descriptor, held in flight until fsh_rt_fd_end, so a close from another task waits for
+// the call rather than letting the number be reused under it.
+function begin(held: Ref<__FileDescriptor>, syscall: string): i64 throws IoError {
+  const fd = unsafe { fsh_rt_fd_begin(held) };
+  if (fd < 0) throw closed(syscall);
+  return fd;
+}
+
+// An open file, from open(). Its calls run on the blocking pool; dropped without close, it still
+// closes its file. Its descriptor is the handle's: closing it with closeSync, rather than through
+// close(), leaves the handle to close whatever file reuses the number.
+export class FileHandle {
+  #held: __FileDescriptor;
+  constructor(held: __FileDescriptor) {
+    this.#held = held;
+  }
+
+  // The descriptor, or -1 once closed.
+  get fd(): i64 {
+    return unsafe { fsh_rt_fd_of(this.#held) };
+  }
+
+  // Node's error for a closed handle, before a call's arguments are looked at.
+  #open(syscall: string): void throws IoError {
+    if (this.fd < 0) throw closed(syscall);
+  }
+
+  // What's read lands at offset; a null or -1 position reads from the file's own.
+  async read(buffer: Mut<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): Promise<{ bytesRead: i64 }> throws IoError {
+    this.#open("read");
+    const held = this.#held.clone();
+    const size = buffer.length as i64;
+    const from = offset ?? 0;
+    const n = length ?? size - from;
+    const at = position ?? -1;
+    // The read fills a copy of its own, since the buffer stays here, then lands in the buffer.
+    const done = await spawnBlocking(() => {
+      const fd = begin(held, "read");
+      let copy: u8[] = new Array(size).fill(0 as u8);
+      try {
+        const got = readInto(fd, copy, from, n, at);
+        return { got, copy };
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+    for (let i = from; i < from + done.got; i++) buffer[i as usize] = done.copy[i as usize];
+    return { bytesRead: done.got };
+  }
+
+  // write(buffer, offset?, length?, position?), or write(text, position?, encoding?) for a
+  // string's UTF-8, as Node reads its arguments by what it's given; a null position writes at the
+  // file's own. The bytes are taken, as the write runs on the blocking pool; one signature, since
+  // async methods can't be overloaded yet.
+  async write(data: string | u8[], second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): Promise<{ bytesWritten: i64 }> throws IoError {
+    this.#open("write");
+    if (typeof data !== "string" && data.length === 0) return { bytesWritten: 0 };
+    const held = this.#held.clone();
+    const length = typeof third === "number" ? third : null;
+    const wrote = await spawnBlocking(() => {
+      const fd = begin(held, "write");
+      try {
+        if (typeof data === "string") return writeSync(fd, data, second);
+        return writeSync(fd, data, second, length, position);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+    return { bytesWritten: wrote };
+  }
+
+  async stat(): Promise<Stats> throws IoError {
+    this.#open("fstat");
+    const held = this.#held.clone();
+    return await spawnBlocking(() => {
+      const fd = begin(held, "fstat");
+      try {
+        return fstatSync(fd);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+  }
+
+  async truncate(len: i64 = 0): Promise<void> throws IoError {
+    this.#open("ftruncate");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "ftruncate");
+      try {
+        ftruncateSync(fd, len);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+  }
+
+  async sync(): Promise<void> throws IoError {
+    this.#open("fsync");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "fsync");
+      try {
+        fsyncSync(fd);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+  }
+
+  async chmod(mode: i64): Promise<void> throws IoError {
+    this.#open("fchmod");
+    const held = this.#held.clone();
+    await spawnBlocking(() => {
+      const fd = begin(held, "fchmod");
+      try {
+        fchmodSync(fd, mode);
+      } finally {
+        unsafe { fsh_rt_fd_end(held) };
+      }
+    });
+  }
+
+  // Closing a closed handle does nothing, as Node's does. With calls in flight, the last of them
+  // closes the file as it finishes; later calls throw "file closed" at once.
+  async close(): Promise<void> throws IoError {
+    const fd = unsafe { fsh_rt_fd_take(this.#held) };
+    if (fd >= 0) closeSync(fd);
+  }
+}
+
+// Node's string flags, as "r" or "a+", or a number given to open as it is. The handle is made in
+// the same job as the descriptor, so a caller that stops waiting still has it closed.
+export async function open(path: string, flags: string | i64 = "r", mode: i64 = 0o666): Promise<FileHandle> throws IoError {
+  return await spawnBlocking(() => {
+    const fd = openSync(path, flags, mode);
+    return new FileHandle(unsafe { fsh_rt_fd_hold(fd) });
+  });
+}
+
 export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
 
 export async function access(path: string, mode: i64 = 0): Promise<void> throws IoError {
@@ -4825,22 +5158,6 @@ export function existsSync(path: string): boolean {
   return pathExists(path);
 }
 
-export class Stats {
-  size: i64;
-  mode: i64;
-  mtimeMs: f64;
-  kind: i64;
-  constructor(size: i64, mode: i64, mtimeMs: f64, kind: i64) {
-    this.size = size;
-    this.mode = mode;
-    this.mtimeMs = mtimeMs;
-    this.kind = kind;
-  }
-  isFile(): boolean { return this.kind === 1; }
-  isDirectory(): boolean { return this.kind === 2; }
-  isSymbolicLink(): boolean { return this.kind === 3; }
-}
-
 function stats(path: string, follow: boolean): Stats throws IoError {
   const [size, mode, mtimeMs, kind] = pathStat(path, follow);
   return new Stats(size, mode, mtimeMs, kind);
@@ -4893,6 +5210,8 @@ export function copyFileSync(src: string, dest: string, mode: i64 = 0): void thr
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
 }
+
+${FILES}
 
 export function accessSync(path: string, mode: i64 = 0): void throws IoError {
   pathAccess(path, mode);

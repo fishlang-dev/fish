@@ -415,7 +415,8 @@ export type DynType = TypeId<DynRecord>;
 // `AbortController` and its `AbortSignal`s are handles to one block.
 // A FileJob is a file read or write handed to the runtime's blocking pool.
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
-export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue"; of: Type; fields: Field[] };
+// A FileDescriptor is an open file's descriptor, closed when its last count goes.
+export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue" | "FileDescriptor"; of: Type; fields: Field[] };
 export type BlockType = TypeId<BlockRecord>;
 
 // The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
