@@ -120,15 +120,15 @@ export class ResolverState {
 
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
-export class Resolver implements TypeFunctionsHost, RecursiveMaker {
+export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, RecursiveMaker {
   tables: Tables;
   aliases: Map<string, TypeAlias>;
   interfaces: Map<string, Interface>;
   enums: Map<string, EnumInfo>;
   slots: Map<string, boolean[]>;
-  host: ResolverHost;
+  host: Mut<H>;
 
-  constructor(host: ResolverHost) {
+  constructor(host: Mut<H>) {
     this.host = host;
     this.tables = this.host.tables;
     this.aliases = this.tables.aliases;
@@ -164,7 +164,7 @@ export class Resolver implements TypeFunctionsHost, RecursiveMaker {
   conforms(from: Type, to: Type, at: Span): boolean {
     return this.host.conforms(from, to, at);
   }
-  private typeFns(): TypeFunctions {
+  private typeFns(): TypeFunctions<Resolver<H>> {
     return new TypeFunctions(this.typing, this);
   }
   setSight(this: Mut<this>, names: Sight | undefined) {

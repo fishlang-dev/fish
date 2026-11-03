@@ -214,8 +214,15 @@ export type Builder<V> = {
 // all of them; the names each file declares or imports, which a quote written there means
 // wherever its expansion lands; the spellings that pin them, `name-fsh<file>`, which the linker
 // gives the declaration the name means in that file; and the names of the program's enum
-// members, which a bare name in a quoted match means rather than binds.
-export type Hygiene = { declared: Map<string, string>; namesIn(file: usize): Set<string>; pins: Set<string>; members: Set<string>; fresh(name: string): string };
+// members, which a bare name in a quoted match means rather than binds. A fresh name is a name
+// with the expansion's `suffix`, noted in the compilation's made-up names, `local`.
+export type Hygiene = { declared: Map<string, string>; namesIn: Map<usize, Set<string>>; pins: Set<string>; members: Set<string>; suffix: string; local: Mut<Set<string>> };
+
+// A name only this expansion's quotes write.
+export function freshName(h: Mut<Hygiene>, name: string): string {
+  h.local.add(`${name}${h.suffix}`);
+  return `${name}${h.suffix}`;
+}
 
 // Runs `run` with the quotes it builds in the check `tables` belongs to taking hygiene `h`.
 export function withHygiene<T>(tables: Tables, h: Hygiene, run: () => T): T {
@@ -255,9 +262,9 @@ export type Free = Map<string, string>;
 function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode", h: Hygiene, file: usize, bound: Map<string, string>, free: Free): unknown {
   const copy = renumber(of, structuredClone(tree), () => nextId(ids));
   const rewrites = new Rewrites();
-  const names = h.namesIn(file);
+  const names = h.namesIn.get(file)!;
   const bind = (name: unknown) => {
-    if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, h.fresh(name));
+    if (typeof name === "string" && name !== "this" && nameSplice(name) === undefined && !bound.has(name) && !h.declared.has(name)) bound.set(name, freshName(h, name));
   };
   const pattern = (p: unknown, inMatch = false) => {
     if (!p || typeof p !== "object") return;

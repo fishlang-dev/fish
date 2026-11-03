@@ -5,7 +5,7 @@ import type { Compilation, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Param, type Stmt } from "./parser.ts";
-import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
+import { built, declaredBy, freshName, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
 import type { Id } from "./ids.ts";
@@ -417,10 +417,6 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     throw new CompileError("E1103", "a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
   }
   const suffix = `@m${compilation.counts.expansions++}`;
-  const fresh = (name: string) => {
-    compilation.names.local.add(`${name}${suffix}`);
-    return `${name}${suffix}`;
-  };
   // The declarations this macro's quotes make are known from the start, so a quote naming one
   // made by a quote it builds later means it.
   const declared = reached(code, macro).flatMap((s) => quoteDeclarations(ctx.checked.tables, s));
@@ -428,7 +424,8 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     const d = s.kind === "export" ? s.body : s;
     return d?.kind === "enum" ? d.members.map((x) => x.name) : [];
   })));
-  const hygiene: Hygiene = { declared: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins, members, fresh };
+  const hygiene: Hygiene = { declared: new Map(), namesIn: new Map(loaded.modules.map((m, i) => [i, namesIn(m)])), pins, members, suffix, local: compilation.names.local };
+  for (const n of declared) hygiene.declared.set(n, freshName(hygiene, n));
   // An argument taken as syntax is the argument as written; one taken as a value is its constant's.
   const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
   // Computed in the macro's hygiene, so a quote in an argument or a default means its file's names.

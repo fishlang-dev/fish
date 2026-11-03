@@ -47,10 +47,10 @@ export class RegistryState {
   wrapped = new TypeSet<ClassType>();
 }
 
-export class Registry {
-  host: RegistryHost;
+export class Registry<H extends RegistryHost> {
+  host: Mut<H>;
 
-  constructor(host: RegistryHost) {
+  constructor(host: Mut<H>) {
     this.host = host;
     this.typing = this.host.tables.typing;
     this.ids = this.host.tables.ids;

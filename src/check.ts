@@ -148,32 +148,6 @@ export type Instance = {
   iterators?: NodeMap<Stmt, Expr>;
 };
 
-// What a closure's body sees of the body it is written in, as it is where the closure is made.
-type Outer = {
-  lookup(name: string, at?: Expr | ObjectProp): Local | undefined;
-  // The binding a name refers to, without capturing it.
-  peek(name: string): Local | undefined;
-  // The names of the bindings in scope, for suggesting one.
-  inScope(): string[];
-  // This body's binding for a variable of a body around it, capturing it if need be.
-  reach(l: Local, at?: Expr | ObjectProp): Local;
-  narrowed(l: Local): Type | undefined;
-  // Whether a binding of this body is written anywhere in it.
-  reassigned(l: Local): boolean;
-  lendsWhole(l: Local, at: Expr): void;
-  narrowRead(l: Local, at: Expr): void;
-  // Notes a binding a nested function lends mutably, which any call of it could change.
-  lentPerCall(l: Local): void;
-  thisReady(e: Expr): boolean;
-  noteThis(e: Expr): void;
-  changesLocal(l: Local, path: string, action: string, target: Expr, throughMut: boolean): void;
-  changesThis(path: string, action: string, target: Expr): void;
-  // Whether a variable, followed through captures to where it is declared, can't change.
-  constant(l: Local): boolean;
-  // Whether a name is a local or parameter in sight of a type written at `at`, without capturing it.
-  inSight(name: string, at: Span): boolean;
-};
-
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 
 // What a `break` or `continue` can name: a loop, a switch, or a labeled statement, whose
@@ -809,19 +783,19 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // The modules that call back into the checker, each made over it where it is used; what
   // they keep between uses is the checker's.
-  registry(this: Mut<this>): Registry {
+  registry(this: Mut<this>): Registry<Checker> {
     return new Registry(this);
   }
 
-  genericClasses(this: Mut<this>): GenericClasses {
+  genericClasses(this: Mut<this>): GenericClasses<Checker> {
     return new GenericClasses(this);
   }
 
-  resolver(this: Mut<this>): Resolver {
+  resolver(this: Mut<this>): Resolver<Checker> {
     return new Resolver(this);
   }
 
-  instancing(this: Mut<this>): Instancing {
+  instancing(this: Mut<this>): Instancing<Checker> {
     return new Instancing(this);
   }
 
@@ -1697,7 +1671,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.inProgress.delete(instance.id);
   }
 
-  checkInstance(this: Mut<this>, instance: Instance, outer?: Outer) {
+  checkInstance(this: Mut<this>, instance: Instance, outer?: Mut<BodyChecker>) {
     const f = bodyOf(instance);
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async
     // function's or a generator's state, or given to an accessor, has no instance per value.
@@ -1776,10 +1750,11 @@ class ParamsInSight implements Sight {
   }
 }
 
-class BodyChecker implements Context, Outer, Sight {
+class BodyChecker implements Context, Sight {
   cx: Mut<Checker>;
   instance: Instance;
-  outer: Outer | undefined;
+  // The body a closure is written in, which its body reaches back into as it is checked.
+  outer: Mut<BodyChecker> | undefined;
   f: Body;
   types: Instance["types"];
   locals: Instance["locals"];
@@ -1896,7 +1871,7 @@ class BodyChecker implements Context, Outer, Sight {
   // A field initializer runs before the constructor's body, out of reach of its parameters.
   hidden: boolean;
 
-  constructor(cx: Mut<Checker>, instance: Instance, outer: Outer | undefined, f: Body) {
+  constructor(cx: Mut<Checker>, instance: Instance, outer: Mut<BodyChecker> | undefined, f: Body) {
     this.cx = cx;
     this.instance = instance;
     this.outer = outer;
@@ -2008,7 +1983,7 @@ class BodyChecker implements Context, Outer, Sight {
     this.hidden = false;
   }
   // The expression checker, made over this body where it is used.
-  exprs(this: Mut<this>): Expressions {
+  exprs(this: Mut<this>): Expressions<BodyChecker> {
     return new Expressions(this);
   }
 

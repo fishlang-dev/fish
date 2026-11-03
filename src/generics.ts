@@ -359,10 +359,10 @@ export class InstancingState {
   }
 }
 
-export class Instancing {
-  host: InstancingHost;
+export class Instancing<H extends InstancingHost> {
+  host: Mut<H>;
 
-  constructor(host: InstancingHost) {
+  constructor(host: Mut<H>) {
     this.host = host;
     this.typing = this.host.tables.typing;
   }
@@ -967,10 +967,10 @@ export class GenericClassesState {
 }
 
 // Generic classes: each set of type arguments declares the class again, on first use.
-export class GenericClasses {
-  host: GenericClassesHost;
+export class GenericClasses<H extends GenericClassesHost> {
+  host: Mut<H>;
 
-  constructor(host: GenericClassesHost) {
+  constructor(host: Mut<H>) {
     this.host = host;
     this.typing = this.host.tables.typing;
     this.arenas = this.host.tables.arenas;

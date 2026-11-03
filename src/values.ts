@@ -372,10 +372,10 @@ export class ExpressionsState {
   }
 }
 
-export class Expressions implements Union {
-  ctx: Context;
+export class Expressions<C extends Context> implements Union {
+  ctx: Mut<C>;
 
-  constructor(ctx: Context) {
+  constructor(ctx: Mut<C>) {
     this.ctx = ctx;
     this.asserts = this.ctx.tables.asserts;
     this.awaitedNow = this.ctx.tables.awaitedNow;

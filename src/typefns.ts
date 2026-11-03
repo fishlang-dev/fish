@@ -69,11 +69,11 @@ type Spelled = { quasis: string[]; holes: Hole[] };
 
 // TypeScript's type-level functions, computed while compiling into ordinary types: `keyof`,
 // indexed access, and the utility types. A class's fields are known once it is laid out.
-export class TypeFunctions {
+export class TypeFunctions<H extends TypeFunctionsHost> {
   typing: Typing;
-  host: TypeFunctionsHost;
+  host: Mut<H>;
 
-  constructor(typing: Typing, host: TypeFunctionsHost) {
+  constructor(typing: Typing, host: Mut<H>) {
     this.typing = typing;
     this.host = host;
   }
