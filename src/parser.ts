@@ -154,7 +154,7 @@ export type PropertyName = string | Expr;
 
 export type TypeMember = Span & Id & (
   | { kind: "property"; name: PropertyName; optional: boolean; readonly: boolean; type: TypeNode | undefined }
-  | { kind: "method"; name: PropertyName; optional: boolean; typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined }
+  | { kind: "method"; name: PropertyName; optional: boolean; typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined; throws?: TypeNode }
   | { kind: "call" | "construct"; typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined }
   | { kind: "index"; readonly: boolean; params: Param[]; type: TypeNode }
   | { kind: "get" | "set"; name: PropertyName; params: Param[]; returns: TypeNode | undefined }
@@ -704,7 +704,7 @@ function memberShape(src: string, m: Ref<TypeMember>): string {
   switch (m.kind) {
     case "property": return `property ${nameShape(src, m.name)} ${m.optional} ${m.readonly} ${optionalShape(src, m.type)}`;
     case "method":
-      return `method ${nameShape(src, m.name)} ${m.optional} <${typeParamShapes(src, m.typeParams)}>(${paramShapes(src, m.params)}) ${optionalShape(src, m.returns)}`;
+      return `method ${nameShape(src, m.name)} ${m.optional} <${typeParamShapes(src, m.typeParams)}>(${paramShapes(src, m.params)}) ${optionalShape(src, m.returns)} throws ${optionalShape(src, m.throws)}`;
     case "call":
     case "construct":
       return `${m.kind} <${typeParamShapes(src, m.typeParams)}>(${paramShapes(src, m.params)}) ${optionalShape(src, m.returns)}`;

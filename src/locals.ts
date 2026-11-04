@@ -20,6 +20,7 @@ const BODIED = new Set(["function", "arrow", "method", "constructor", "get", "se
 // Each name made is noted in `names`, and each node made numbered from `ids`. `captured`, when
 // given, is told of each local class or enum using a variable around it, which is otherwise an
 // error.
+/** @throws {CompileError} */
 export function hoistLocals({ names, ids }: { names: Names; ids: Ids }, program: Stmt[], captured?: (local: Local, name: string) => void): Stmt[] {
   const hoisted: Stmt[] = [];
   let count = 0;
@@ -163,6 +164,7 @@ function declares(s: Stmt, r: Rename): boolean {
 
 // Every use of the name under `node`, as a type or, for a class or enum, a value, made a use of
 // the hoisted name, the outer type parameters given first among its type arguments.
+/** @throws {CompileError} */
 function rename(written: AnyNode, r: Rename, rewrites: Rewrites, seen: Set<unknown> = new Set<unknown>()) {
   if (seen.has(written.node)) return;
   seen.add(written.node);
@@ -188,7 +190,7 @@ function rename(written: AnyNode, r: Rename, rewrites: Rewrites, seen: Set<unkno
   if (r.values && n.kind === "ident" && n.name === from) n.name = to;
   // A dotted name, as an enum member's type or a match pattern's variant, names it first.
   if ((n.kind === "ref" || n.kind === "variant") && typeof n.name === "string" && n.name.startsWith(`${from}.`)) n.name = `${to}${n.name.slice(from.length)}`;
-  forEachChild(node, (c) => rename(c, r, rewrites, seen));
+  for (const c of childrenOf(node)) rename(c, r, rewrites, seen);
 }
 
 // Whether a node names a declaration, as a type, a value or an enum member's type.

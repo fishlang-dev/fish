@@ -16,13 +16,17 @@ export type Union = {
   typing: Typing;
   types: NodeMap<Expr, Type>;
   coercions: NodeMap<Expr, Type>;
+  /** @throws {CompileError} */
   read(e: Expr): Type;
+  /** @throws {CompileError} */
   excess(e: Expr, to: Type): void;
   // The class a name declares, unless a variable shadows it.
   classNamed(name: string): ClassType | undefined;
   // Whether a class or a base it embeds declares a method, getter or setter of this name.
+  /** @throws {CompileError} */
   declares(c: ClassType, name: string): boolean;
   // Gives an expression of only number literals the number type it meets.
+  /** @throws {CompileError} */
   adapt(e: Expr, to: Type): boolean;
 };
 
@@ -93,6 +97,7 @@ export function literalShape(typing: Typing, e: Expr, to: Type, types: NodeMap<E
 // A field write must reach one member: through a union, which may hold any of several, the
 // field could sit anywhere, so the union has to be narrowed to one member first.
 // A mutating method call likewise needs its receiver in one member.
+/** @throws {CompileError} */
 export function intoMember(typing: Typing, target: Expr, types: NodeMap<Expr, Type>, action = "assign to") {
   const textLiteral = (m: Type) => {
     const r = typeof m === "string" ? undefined : typing.rec(m);
@@ -130,6 +135,7 @@ export function unionField(typing: Typing, union: UnionType, name: string, at: S
 
 // `x instanceof C` checks whether x holds an instance of C or of a class extending it; each
 // keeps its own type when narrowed, its base's fields reached through the base it embeds.
+/** @throws {CompileError} */
 export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, host: Union): Type {
   const left = host.read(e.left);
   const l = typeof left === "string" ? undefined : host.typing.rec(left);
@@ -167,6 +173,7 @@ export function instanceofCheck(e: Extract<Expr, { kind: "binary" }>, host: Unio
 // `"x" in v` checks whether v has key x, as JavaScript sees the value: an object by its fields, an
 // instance by its fields and its class's methods and accessors, known while compiling as for
 // `instanceof`. Each member's answer is recorded for narrowing and codegen.
+/** @throws {CompileError} */
 export function keyCheck(e: Extract<Expr, { kind: "binary" }>, host: Union): Type {
   const { typing } = host;
   if (e.left.kind !== "string") {
@@ -238,6 +245,7 @@ export function holdsArgument(typing: Typing, t: UnionType): boolean {
 }
 
 // A `?:` whose sides have different types makes the union of both, as in TypeScript.
+/** @throws {CompileError} */
 export function bothSides(typing: Typing, e: Extract<Expr, { kind: "conditional" }>, then: Type, otherwise: Type, coerce: Coerce): Type {
   const both = [then, otherwise];
   const kinds = both.map((t) => (typeof t === "string" ? t : typing.rec(t).kind));
@@ -251,10 +259,15 @@ export function bothSides(typing: Typing, e: Extract<Expr, { kind: "conditional"
   return union;
 }
 
+/** @throws {CompileError} */
 type Coerce = (e: Expr, type: Type, to: Type, message: string) => void;
+
+/** @throws {CompileError} */
+type AdaptNumber = (e: Expr, to: Type) => boolean;
 
 // A value goes into the one union member it is or fits; a literal expression may also be a
 // literal member with its value. A union goes into a wider one member by member.
+/** @throws {CompileError} */
 export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, host: Union) {
   const kindOf = (t: Type) => (typeof t === "string" ? undefined : host.typing.rec(t).kind);
   // A literal goes into the one number type a union holds.
@@ -305,6 +318,7 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, h
 }
 
 // `typeof x === "number"` checks which kind of value x holds, which for a union is its tag.
+/** @throws {CompileError} */
 export function typeofComparison(e: Expr, host: Union): Type | undefined {
   const test = typeofTest(e);
   if (!test) return undefined;
@@ -322,7 +336,8 @@ export function typeofComparison(e: Expr, host: Union): Type | undefined {
 
 // `x === v` with x a union compares the member x holds with v, so it needs a member v might
 // equal.
-export function unionComparison(e: Extract<Expr, { kind: "binary" }>, host: Union, adapt: (e: Expr, to: Type) => boolean): Type | undefined {
+/** @throws {CompileError} */
+export function unionComparison(e: Extract<Expr, { kind: "binary" }>, host: Union, adapt: AdaptNumber): Type | undefined {
   let [left, right] = [host.read(e.left), host.read(e.right)];
   // An `unknown` equals a value of the type it holds, compared as that type.
   if (host.typing.isUnknown(left) || host.typing.isUnknown(right)) return "boolean";

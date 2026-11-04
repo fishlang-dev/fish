@@ -232,3 +232,22 @@ function main() {
   print(a.n);
 }
 // error: 'main' must declare 'throws string' after its return type since 'new A' can throw 'string'
+// case: throws_array_callback
+// Array and Map callback methods propagate what their callback throws.
+function parseItem(s: Ref<string>): i64 throws string {
+  if (s === "bad") throw "bad item";
+  return s.length as i64;
+}
+function mapAll(xs: Ref<string[]>): i64[] throws string {
+  return xs.map((s) => parseItem(s));
+}
+function main() {
+  try {
+    print(mapAll(["a", "bc"]));
+    print(mapAll(["a", "bad"]));
+  } catch (e) {
+    print(`caught: ${e}`);
+  }
+}
+// expect: [ 1, 2 ]
+// expect: caught: bad item

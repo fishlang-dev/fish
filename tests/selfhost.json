@@ -46,7 +46,7 @@
     "quote.ts": "an indexed access type takes an object type or a class, not the interface 'Members', whose methods aren't values in Fish; any type with a method is an interface, so move its fields into a 'type' with no methods and use that",
     "rank.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
     "rebuild.ts": "'m.args[i1]' can't be moved out of its array; use 'm.args[i1].clone()' to take a copy, or 'pop()' to take the last element out",
-    "regex.ts": "'fail' must declare 'throws RegexSyntaxError' after its return type to throw here, or catch it with try/catch",
+    "regex.ts": "a comparator's number has to be able to be negative, and 'u32' can't; convert with 'as i64', or compare: 'a < b ? -1 : a > b ? 1 : 0'",
     "registry.ts": "an indexed access type takes an object type or a class, not the interface 'Members', whose methods aren't values in Fish; any type with a method is an interface, so move its fields into a 'type' with no methods and use that",
     "registry_index.ts": "'process.env' is read by key, as in 'process.env.HOME' or 'process.env[name]'",
     "resolve.ts": "an indexed access type takes an object type or a class, not the interface 'Members', whose methods aren't values in Fish; any type with a method is an interface, so move its fields into a 'type' with no methods and use that",

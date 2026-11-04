@@ -1,6 +1,6 @@
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Value } from "./comptime.ts";
-import type { Names } from "./diag.ts";
+import type { CompileError, Names } from "./diag.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 import { Rewrites, NodeMap, NodeSet, type Id, type Ids } from "./nodes.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
@@ -93,7 +93,7 @@ export type Tables = {
   // The name each local const holding a number literal gives as a computed key, which its type,
   // a plain number type, doesn't say; and the names top-level consts and enums give.
   numberKeys: Map<LocalId, string>;
-  topKeys?: (e: Expr) => string;
+  topKeys?: TopKeys;
   // The arrows nested function declarations became, with their names; they lend what they capture
   // per call.
   nestedFunctions: NodeMap<Expr, string>;
@@ -313,12 +313,21 @@ export type Tables = {
   stringArrays: TypeMap<LiteralType, string[]>;
   // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
   // function the checker hasn't reached yet.
-  ensureChecked: (instance: InstanceId) => boolean;
+  ensureChecked: EnsureChecked;
   // Each top-level const's value, once computed, and those being computed, which a const reading
   // itself would meet.
   constants: Map<InstanceId, Value>;
   computing: Set<InstanceId>;
 };
+
+/** @throws {CompileError} */
+export type TopKeys = (e: Expr) => string;
+
+/** @throws {CompileError} */
+export type EnsureChecked = (instance: InstanceId) => boolean;
+
+/** @throws {CompileError} */
+export type Timed<T> = () => T;
 
 export function newTables({ session, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
@@ -453,7 +462,8 @@ export function newTimings(now: () => f64 = () => performance.now()): Timings {
 }
 
 // Runs `run`, adding its own time to stage `name` when timing.
-export function timed<T>(timings: Timings | undefined, name: string, run: () => T): T {
+/** @throws {CompileError} */
+export function timed<T>(timings: Timings | undefined, name: string, run: Timed<T>): T {
   if (timings === undefined) return run();
   const outer = timings.inner;
   timings.inner = 0;

@@ -19,9 +19,11 @@ export type EnumInstance = { type: Type; variants: Map<string, VariantType> };
 type EnumNode = Span & { name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[]; derives?: string[] };
 
 // What an initializer that isn't a literal is worth, computed while compiling.
+/** @throws {CompileError} */
 export type Evaluate = (enumName: string, member: string, init: Expr) => unknown;
 
 // Each enum's id tells enums of one name apart: their members are literals of the same values.
+/** @throws {CompileError} */
 export function declareEnum(compilation: Compilation, node: EnumNode, evaluate: Evaluate): EnumInfo {
   const { counts } = compilation;
   if (node.typeParams.length > 0 || node.members.some((m) => m.payload)) return dataEnum(node, counts.enums++);
@@ -68,14 +70,17 @@ class Unsettled extends Map<string, LiteralType> {
     this.node = node;
     this.names = names;
   }
+  /** @throws {CompileError} */
   override get(name: string): LiteralType | undefined {
     this.ready(name);
     return super.get(name);
   }
+  /** @throws {CompileError} */
   override has(name: string): boolean {
     this.ready(name);
     return super.has(name);
   }
+  /** @throws {CompileError} */
   ready(name: string) {
     if (!this.names.has(name) || super.has(name)) return;
     const [start, end, member] = innermost(this.compilation, this.node);
@@ -86,6 +91,7 @@ class Unsettled extends Map<string, LiteralType> {
 // The innermost initializer being computed, as the span and name an error points at.
 const innermost = ({ enumInits }: Compilation, node: EnumNode): [usize, usize, string] => enumInits.at(-1) ?? [node.start, node.end, node.name];
 
+/** @throws {CompileError} */
 function settle(compilation: Compilation, node: EnumNode, id: usize, members: Map<string, LiteralType>, evaluate: Evaluate): EnumInfo {
   const typing = compilation.typing;
   let next: bigint | undefined = 0n;
@@ -106,6 +112,7 @@ function settle(compilation: Compilation, node: EnumNode, id: usize, members: Ma
 
 // A computed initializer's value, where a bare name of one of the enum's members means that
 // member, as in TypeScript.
+/** @throws {CompileError} */
 function computed({ enumInits, ids }: Compilation, node: EnumNode, m: EnumMember, init: Expr, evaluate: Evaluate): bigint | string {
   const names = new Set(node.members.map((x) => x.name));
   enumInits.push([init.start, init.end, m.name]);
@@ -140,6 +147,7 @@ function qualified(ids: Ids, node: unknown, enumName: string, names: Set<string>
 }
 
 // An enum either names values or holds data, never both, so each member means one thing.
+/** @throws {CompileError} */
 function dataEnum(node: EnumNode, id: usize): EnumInfo {
   const seen = new Set<string>();
   for (const m of node.members) {

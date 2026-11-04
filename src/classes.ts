@@ -129,6 +129,7 @@ export type ClassInfo = {
 // Collects a class declaration's fields and builds the constructor it compiles to. A generic
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
+/** @throws {CompileError} */
 export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
   const { arenas, genericStatics, ids, rust, typing } = tables;
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
@@ -247,6 +248,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   return arenas.addClass({ type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, overrides, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] });
 
   // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
+  /** @throws {CompileError} */
   function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
     if (node.typeParams.length > 0) throw unsupported("static fields in generic classes", m);
     if (!m.modifiers.includes("readonly")) throw new CompileError("E0706", `a static field that isn't 'readonly' would be a global that changes; declare it 'static readonly ${field}', whose value is computed while compiling, or hold an Atomic or a Lock in one`, m.start, m.end);
@@ -260,6 +262,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
 
   // TypeScript's rules: only an abstract class has abstract members, which are methods or
   // accessors without a body, never private or static.
+  /** @throws {CompileError} */
   function abstractMember(m: ClassMember) {
     if (!node.abstract) throw new CompileError("E0701", "abstract members can only appear in an abstract class", m.start, m.end);
     if (m.kind === "field") throw unsupported("abstract fields", m);
@@ -280,6 +283,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     abstracts.push({ name: m.name, table, access, start: m.start, end: m.end });
   }
 
+  /** @throws {CompileError} */
   function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
     const isStatic = m.modifiers.includes("static");
     if (isStatic && node.typeParams.length > 0) throw unsupported("static accessors in generic classes", m);
@@ -311,6 +315,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     }).bodyId);
   }
 
+  /** @throws {CompileError} */
   function method(m: Extract<ClassMember, { kind: "method" }>) {
     const isStatic = m.modifiers.includes("static");
     if (isStatic && shared) return;
@@ -352,6 +357,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
   }
 
   // As in TypeScript, a static member can't name the class's type parameters, only its own.
+  /** @throws {CompileError} */
   function classParamIn(m: Extract<ClassMember, { kind: "method" }>) {
     const outer = new Set(node.typeParams.map((p) => p.name));
     // A function inside declaring its own type parameter of that name hides the class's.
@@ -379,6 +385,7 @@ export function declareClass(tables: Tables, node: ClassNode & { name: string },
     return p;
   }
 
+  /** @throws {CompileError} */
   function add(f: FieldDecl): FieldDecl {
     if (fields.some((other) => other.name === f.name)) throw new CompileError("E0402", `duplicate property '${f.name}'`, f.start, f.end);
     fields.push(f);
@@ -427,7 +434,11 @@ function rustOf(rust: RustTables, m: ClassMember): { foreign?: true; rust?: Rust
 // Links a derived class to the base it embeds. Its constructor must start with
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
 // a constructor of its own it passes its arguments on to the base's.
-export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (name: string) => Type) {
+/** @throws {CompileError} */
+export type GlobalType = (name: string) => Type;
+
+/** @throws {CompileError} */
+export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: GlobalType) {
   const { arenas, defaulted, prologues, ids, typing } = tables;
   c.base = base.classId;
   typing.rec(c.type).base = base.type;
@@ -487,6 +498,7 @@ export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: (n
 // Links a class to the Map or Set it extends, held in the field `EMBEDDED`. Its constructor's
 // `super(...)` makes the collection, as `new Map<K, V>(...)` would; without a constructor of
 // its own it makes an empty one.
+/** @throws {CompileError} */
 export function embed(tables: Tables, c: ClassInfo, kind: "Map" | "Set") {
   const { arenas, ids, prologues } = tables;
   const named = c.node.extends!;
@@ -564,6 +576,7 @@ export function inherited(arenas: Arenas, c: ClassInfo, table: "methods" | "stat
 // With embedding, a base's own use of `this.m` keeps reaching the base's `m`, where
 // TypeScript would reach an override. Overriding such a member is an error rather than a
 // silent change in meaning; overriding one the base never reaches through `this` is fine.
+/** @throws {CompileError} */
 export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
   // A copied template is this class's only because a base declared it; the user wrote none of it.
   const own = [...c.methods, ...c.getters, ...c.setters].map(([name, m]): [string, Body] => [name, arenas.bodyOf(m)]).filter(([, m]) => m.copyOf === undefined);
@@ -603,6 +616,7 @@ export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
 }
 
 // TypeScript's rule: a member written `override` must replace one of its bases'.
+/** @throws {CompileError} */
 export function checkOverrideModifiers(arenas: Arenas, typing: Typing, c: ClassInfo) {
   const name = typing.rec(c.type).name;
   for (const o of c.overrides) {
@@ -632,6 +646,7 @@ const MEMBER_KINDS = { methods: "method", getters: "getter", setters: "setter" }
 // through another such member, become templates. A concrete class must implement every abstract
 // member, and gets its own copy of each template, which sees `this` as the concrete class, so
 // `this.area()` there runs the concrete class's `area`.
+/** @throws {CompileError} */
 export function implementAbstracts(tables: Tables, c: ClassInfo) {
   const { arenas, typing } = tables;
   const bases: ClassInfo[] = [];
@@ -715,6 +730,7 @@ export function copyFor({ arenas, ids, typing, defaulted, prologues }: Tables, c
 }
 
 // Marks an abstract class's templates, once its bases' are marked.
+/** @throws {CompileError} */
 function markTemplates(arenas: Arenas, typing: Typing, c: ClassInfo) {
   const names = new Set<string>();
   for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) {
@@ -782,6 +798,7 @@ function usesOnThis<K extends RootKind>(of: K, roots: NodeOf<K>[] | undefined, n
 }
 
 // `this: Mut<this>` mutates the instance; `this: Ref<this>` only reads it, as the default does.
+/** @throws {CompileError} */
 export function mutates(p: Param): boolean {
   if (wraps(p, "Mut") || wraps(p, "Own")) return true;
   if (wraps(p, "Ref")) return false;
@@ -804,6 +821,7 @@ function assignField(ids: Ids, name: string, value: Expr, at: Span): Stmt {
 }
 
 // A member's access, from its modifiers or a `#` name. `readonly` is read by the caller.
+/** @throws {CompileError} */
 function modifiers(list: string[], at: Span, name: string): Access {
   const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly" && m !== "override");
   if (other) throw unsupported(`'${other}' modifiers`, at);

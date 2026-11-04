@@ -1464,11 +1464,11 @@ function printer(attached: Attachment, ids: Ids) {
   }
 
   // A signature's parameters and return type; a method's return type is grouped on its own.
-  function memberSignature(m: { params: Param[]; returns: TypeNode | undefined; typeParams?: TypeParam[] }, parent: At<"type">, src: string, method = false): Doc[] {
-    const f: Fn = { params: m.params, typeParams: m.typeParams ?? [], returnType: m.returns };
+  function memberSignature(m: { params: Param[]; returns: TypeNode | undefined; typeParams?: TypeParam[]; throws?: TypeNode }, parent: At<"type">, src: string, method = false): Doc[] {
+    const f: Fn = { params: m.params, typeParams: m.typeParams ?? [], returnType: m.returns, throws: m.throws };
     const params = parameters(f, parent, src, false, typeParameters(f.typeParams, parent, src), m);
-    const returned = m.returns ? [": ", type(m.returns, "returnType", parent, src)] : "";
-    return [shouldGroupParameters(f, returned) ? group(params) : params, method && m.returns ? group(returned) : returned];
+    const returned: Doc = [m.returns ? [": ", type(m.returns, "returnType", parent, src)] : "", m.throws ? [" throws ", type(m.throws, "throws", parent, src)] : ""];
+    return [shouldGroupParameters(f, returned) ? group(params) : params, method && (m.returns || m.throws) ? group(returned) : returned];
   }
 
   // `{ readonly [K in T as N]?: V }`; one written with a line break after its `{` stays expanded.

@@ -1,5 +1,5 @@
 import type { Compilation } from "./compilation.ts";
-import type { Source } from "./diag.ts";
+import type { CompileError, Source } from "./diag.ts";
 import { AST } from "./ast.ts";
 import { nextId, renumber, shiftSpans, someNode, walk } from "./nodes.ts";
 import { parse, type Pattern, type Stmt } from "./parser.ts";
@@ -6415,6 +6415,7 @@ export const STD_FILE = "<fish std>";
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
 
 // The std statements a program is checked with, their spans moved past its own.
+/** @throws {CompileError} */
 export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // Each call takes its own copy, since the passes below change the tree, numbered as it is taken.
   const { std } = session;

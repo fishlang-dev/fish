@@ -25,6 +25,7 @@ export function openParam(typing: Typing, t: Type, deep: boolean, seen: TypeSet<
 // A type function can't look inside a type parameter: the type it stands for is known only per
 // instance. While a generic alias is checked before any use, the parameter stands in for the
 // result, so the rest of the alias is still checked; generic function code is refused.
+/** @throws {CompileError} */
 export function standIn(typing: Typing, types: Type[], what: string, at: Span, deep: boolean, deferring: () => boolean): Type | undefined {
   for (const t of types) {
     const open = openParam(typing, t, deep);
@@ -39,8 +40,10 @@ export function standIn(typing: Typing, types: Type[], what: string, at: Span, d
 // laying it out when first asked; whether a generic alias is being checked before any use; and
 // whether a type fits another, an interface by shape, as `extends` asks.
 export interface TypeFunctionsHost {
+  /** @throws {CompileError} */
   fieldsKnown(this: Mut<this>, c: ClassType): boolean;
   isDeferring(): boolean;
+  /** @throws {CompileError} */
   conforms(this: Mut<this>, from: Type, to: Type, at: Span): boolean;
 }
 
@@ -84,6 +87,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
 
   // The fields a type-level function reads: an object type's, or a class's public fields, which
   // are its data (a class's methods aren't values in Fish).
+  /** @throws {CompileError} */
   fieldsOf(this: Mut<this>, t: Type, what: string, at: Span): Field[] {
     const r = this.recOf(t);
     if (r?.kind === "object") return r.fields;
@@ -99,6 +103,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   }
 
   // The keys a type names: a string literal, or a union of them.
+  /** @throws {CompileError} */
   keysOf(k: Type, what: string, at: Span): string[] {
     const r = this.recOf(k);
     if (r?.kind === "param" && r.concrete) return this.keysOf(r.concrete, what, at);
@@ -110,6 +115,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   }
 
   // `keyof T`: the union of T's field names.
+  /** @throws {CompileError} */
   keyofType(this: Mut<this>, t: Type, at: Span): Type {
     const held = standIn(this.typing, [t], "'keyof'", at, false, () => this.host.isDeferring());
     if (held) return held;
@@ -120,6 +126,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
 
   // `T[K]`: the type of the field K names, or the union of those a union of keys names; an array's
   // `T[number]` is its element type.
+  /** @throws {CompileError} */
   indexedType(this: Mut<this>, t: Type, k: Type, at: Span, keyAt: Span): Type {
     const held = standIn(this.typing, [t, k], "an indexed access type", at, false, () => this.host.isDeferring());
     if (held) return held;
@@ -157,6 +164,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   }
 
   // The types of the fields `names` of t, which is a member of the union `whole` if given.
+  /** @throws {CompileError} */
   private fieldTypes(this: Mut<this>, t: Type, names: string[], at: Span, keyAt: Span, whole?: Type): Type[] {
     const fields = this.fieldsOf(t, "an indexed access type", at);
     return names.map((name) => {
@@ -168,11 +176,13 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
 
   // The utility type `name` applied to its type arguments, the span of the whole use and of each
   // argument, after the arguments it reads are checked for type parameters.
+  /** @throws {CompileError} */
   utility(this: Mut<this>, name: string, args: Type[], at: Span, argAt: Span[]): Type {
     const [, , read, deep] = UTILITIES.get(name)!;
     return standIn(this.typing, read.map((i) => args[i]!), `'${name}'`, at, deep, () => this.host.isDeferring()) ?? this.applyUtility(name, args, at, argAt);
   }
 
+  /** @throws {CompileError} */
   private applyUtility(this: Mut<this>, name: string, args: Type[], at: Span, argAt: Span[]): Type {
     switch (name) {
       case "Partial": return this.partialType(args, at);
@@ -195,27 +205,32 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
 
   // `Record<K, V>`: an object type with a field of type V for each key K names, or a dictionary
   // when K is `string`.
+  /** @throws {CompileError} */
   private recordType(this: Mut<this>, [k, v]: Type[], at: Span, [keyAt]: Span[]): Type {
     if (k === "string") return collection(this.typing, "string", v!, false, at, true);
     return this.typing.objectType(this.keysOf(k!, "'Record'", keyAt!).map((name) => ({ name, type: v! })));
   }
 
   // `Partial<T>`: every field optional.
+  /** @throws {CompileError} */
   private partialType(this: Mut<this>, [t]: Type[], at: Span): Type {
     return this.typing.objectType(this.fieldsOf(t!, "'Partial'", at).map((f) => (f.optional ? f : { ...f, ...this.typing.optionalField(f.name, f.type) })));
   }
 
   // `Required<T>`: no field optional, each without the empty value `?` added to it.
+  /** @throws {CompileError} */
   private requiredType(this: Mut<this>, [t]: Type[], at: Span): Type {
     return this.typing.objectType(this.fieldsOf(t!, "'Required'", at).map(({ optional, ...f }) => (optional === "added" ? { ...f, type: this.typing.withoutNull(f.type) } : f)));
   }
 
   // `Readonly<T>`: every field read-only.
+  /** @throws {CompileError} */
   private readonlyType(this: Mut<this>, [t]: Type[], at: Span): Type {
     return this.typing.objectType(this.fieldsOf(t!, "'Readonly'", at).map((f) => ({ ...f, readonly: true })));
   }
 
   // `Pick<T, K>`: only the fields K names, each of which T must have.
+  /** @throws {CompileError} */
   private pickType(this: Mut<this>, [t, k]: Type[], at: Span, [, keyAt]: Span[]): Type {
     const fields = this.fieldsOf(t!, "'Pick'", at);
     const names = this.keysOf(k!, "'Pick'", keyAt!);
@@ -224,6 +239,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   }
 
   // `Omit<T, K>`: every field but those K names; as in TypeScript, K may name fields T lacks.
+  /** @throws {CompileError} */
   private omitType(this: Mut<this>, [t, k]: Type[], at: Span, [, keyAt]: Span[]): Type {
     const names = this.keysOf(k!, "'Omit'", keyAt!);
     return this.typing.objectType(this.fieldsOf(t!, "'Omit'", at).filter((f) => !names.includes(f.name)));
@@ -241,11 +257,13 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   }
 
   // `Exclude<T, U>`: T's members that don't fit U.
+  /** @throws {CompileError} */
   private excludeType(this: Mut<this>, [t, u]: Type[], at: Span): Type {
     return this.kept(this.membersOf(t!, "'Exclude'", at).filter((m) => !this.host.conforms(m, u!, at)));
   }
 
   // `Extract<T, U>`: T's members that fit U.
+  /** @throws {CompileError} */
   private extractType(this: Mut<this>, [t, u]: Type[], at: Span): Type {
     return this.kept(this.membersOf(t!, "'Extract'", at).filter((m) => this.host.conforms(m, u!, at)));
   }
@@ -256,6 +274,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   }
 
   // `ReturnType<F>`: what a function of type F returns.
+  /** @throws {CompileError} */
   private returnType([given]: Type[], at: Span): Type {
     const f = given!;
     const r = this.recOf(f);
@@ -276,6 +295,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   // A template literal type: the union of every string it spells, where each hole is a literal
   // or a union of them, spelled as JavaScript would; a hole of `string` or a number type leaves a
   // pattern, the strings matching it, and a pattern in a hole is spliced in.
+  /** @throws {CompileError} */
   templateType(this: Mut<this>, quasis: string[], holes: Type[], at: Span, holeAt: Span[]): Type {
     let spelled: Spelled[] = [{ quasis: [quasis[0]!], holes: [] }];
     // A hole of `never` spells nothing, and `boolean` is `true | false`.
@@ -298,6 +318,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   }
 
   // `Uppercase<S>` and its kin: each string literal of S changed as JavaScript changes it.
+  /** @throws {CompileError} */
   private intrinsic(this: Mut<this>, what: string, [s]: Type[], at: Span, change: (s: string) => string): Type {
     return this.kept(this.membersOf(s!, `'${what}'`, at).map((m) => {
       const r = this.recOf(m);

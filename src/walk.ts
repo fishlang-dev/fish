@@ -663,6 +663,9 @@ export function childrenOfTypeMember<V extends Visitor>(n: Ref<TypeMember>, v: M
       if (n.returns !== undefined) {
         v.node({ of: "typeNode", node: n.returns! });
       }
+      if (n.throws !== undefined) {
+        v.node({ of: "typeNode", node: n.throws! });
+      }
       break;
     case "call":
       for (const x1 of n.typeParams) {

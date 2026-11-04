@@ -105,7 +105,7 @@ type AstPropertyName =
   string | AstExpr;
 type AstTypeMember =
   | { start: i64; end: i64; kind: "property"; name: AstPropertyName; optional: boolean; readonly: boolean; type: AstType | null }
-  | { start: i64; end: i64; kind: "method"; name: AstPropertyName; optional: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returns: AstType | null }
+  | { start: i64; end: i64; kind: "method"; name: AstPropertyName; optional: boolean; typeParams: AstTypeParam[]; params: AstParam[]; returns: AstType | null; throws?: AstType }
   | { start: i64; end: i64; kind: "call"; typeParams: AstTypeParam[]; params: AstParam[]; returns: AstType | null }
   | { start: i64; end: i64; kind: "construct"; typeParams: AstTypeParam[]; params: AstParam[]; returns: AstType | null }
   | { start: i64; end: i64; kind: "index"; readonly: boolean; params: AstParam[]; type: AstType }

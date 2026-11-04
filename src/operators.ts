@@ -20,6 +20,7 @@ export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
 };
 
 // The result of a binary operator, or an error when its operands don't suit it.
+/** @throws {CompileError} */
 export function binaryType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type {
   // A value of no type is in code an instance never reaches, where anything goes.
   if (left === "never" || right === "never") return ["===", "!==", "<", "<=", ">", ">=", "&&", "||"].includes(op) ? "boolean" : "never";
@@ -79,6 +80,7 @@ const BITWISE = new Set<BinaryOp>(["&", "|", "^", "<<", ">>", ">>>"]);
 
 // A brand compares with itself and with its base, and arithmetic on it gives its base, as
 // TypeScript's does; two different brands don't mix.
+/** @throws {CompileError} */
 function brandedType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type | undefined {
   const [l, r] = [typing.recOf(left), typing.recOf(right)];
   // A union of brands of one base works as that base with a plain number.
@@ -95,6 +97,7 @@ function brandedType(typing: Typing, op: BinaryOp, left: Type, right: Type, at: 
 
 // Units add, subtract and compare only with the same unit; multiplying and dividing combine
 // them, a plain number scaling one.
+/** @throws {CompileError} */
 function unitResult(typing: Typing, op: BinaryOp, left: Type, right: Type, at: Span): Type {
   const [l, r] = [typing.recOf(left), typing.recOf(right)];
   const unitOf = (t: Type, b: typeof l) => (b?.kind === "brand" ? b.unit : isNumeric(t) ? {} : undefined);

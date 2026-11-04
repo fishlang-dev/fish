@@ -1,3 +1,4 @@
+import assert from "node:assert";
 import type { Instance } from "./check.ts";
 import { bodyOf, type LocalId } from "./arenas.ts";
 import { CompileError } from "./diag.ts";
@@ -57,20 +58,20 @@ const SHORT = { kind: "short" } as const;
 // std's crypto functions, which comptime refuses as it refuses Math.random.
 const RANDOM = new Set(["getRandomValues", "randomBytes", "randomUUID"]);
 
-// A panic, or a refusal, while compiling: where it happened, and what it says.
+// A panic, or a refusal, while compiling: where it happened, and what it says; `assertion`
+// marks a false `assert`, which fails the build at the assert itself.
 class Stop {
   message: string;
   at: Span;
   panic: boolean;
-  constructor(message: string, at: Span, panic: boolean) {
+  assertion: boolean;
+  constructor(message: string, at: Span, panic: boolean, assertion = false) {
     this.message = message;
     this.at = at;
     this.panic = panic;
+    this.assertion = assertion;
   }
 }
-
-// A false `assert`, which fails the build at the assert itself.
-class Assertion extends Stop {}
 
 // A `return`, unwinding to its function's call or to its match arm.
 class Return {
@@ -104,16 +105,19 @@ type Frame = { instance: Instance; locals: Map<LocalId, Value>; self: Record | u
 
 
 // The value of `comptime expr`, written in `instance`.
+/** @throws {CompileError} */
 export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime" }): Value {
   return guarded(instance.tables, site, (run) => run.expr(seeded(instance), site.expr));
 }
 
 // Runs a `comptime { }` block written in `instance`, for what it checks.
+/** @throws {CompileError} */
 export function comptimeBlock(instance: Instance, site: Stmt & { kind: "comptime" }) {
   guarded(instance.tables, site, (run) => run.block(seeded(instance), site.body));
 }
 
 // A comptime parameter's argument at a call written in `instance`.
+/** @throws {CompileError} */
 export function comptimeArgument(instance: Instance, arg: Expr): Value {
   return guarded(instance.tables, arg, (run) => run.expr(seeded(instance), arg));
 }
@@ -141,11 +145,13 @@ function renameQuoted({ quotedSpans }: Tables, v: Value, from: string, to: strin
 
 // A function run while compiling with the given arguments, as a macro runs on a declaration;
 // a failure is reported at `site`.
+/** @throws {CompileError} */
 export function comptimeCall(instance: Instance, args: Value[], site: Span): Value {
   return guarded(instance.tables, site, (run) => run.call(instance, args, undefined, site));
 }
 
 // How a quoted tree, or a declaration a macro takes, becomes a value while compiling.
+/** @throws {CompileError} */
 export const astValues = (splice: (i: usize, into: Type) => Value, holes: Value[] = [], at: Span = { start: 0, end: 0 }): Builder<Value> => ({
   record: (t, fields) => ({ kind: "record", type: t, fields }),
   array: (items) => ({ kind: "array", items }),
@@ -155,7 +161,7 @@ export const astValues = (splice: (i: usize, into: Type) => Value, holes: Value[
   name: (i) => {
     const v = untagged(holes[i]);
     if (v && typeof v === "object" && v.kind === "record" && v.fields.get("kind") === "ident") return v.fields.get("name");
-    throw new Stop("a splice where a name goes takes an identifier, as 'ident(\"name\")' makes", at, false);
+    throw new CompileError("E1101", "a splice where a name goes takes an identifier, as 'ident(\"name\")' makes", at.start, at.end);
   },
   int: (n) => n,
   none: null,
@@ -197,13 +203,21 @@ function known(instance: Instance): Map<LocalId, Value> {
   return locals;
 }
 
+/** @throws {CompileError} */
+type InstanceCheck = (instance: Instance) => boolean;
+
+/** @throws {CompileError | Stop | Return | Jump | Thrown} */
+type ComptimeGo = (run: Mut<Interpreter>) => Value;
+
 // Makes sure an instance is checked before comptime runs it, as a comptime argument may call a
 // function the checker hasn't reached yet.
-export function comptimeChecks(tables: Tables, check: (instance: Instance) => boolean) {
+/** @throws {CompileError} */
+export function comptimeChecks(tables: Tables, check: InstanceCheck) {
   tables.ensureChecked = (id) => check(tables.arenas.instanceOf(id));
 }
 
 // A top-level const's value, or a `comptime { }` block run at the top level: its body.
+/** @throws {CompileError} */
 export function comptimeBody(instance: Instance): Value {
   const { constants } = instance.tables;
   if (constants.has(instance.id)) return constants.get(instance.id);
@@ -214,20 +228,23 @@ export function comptimeBody(instance: Instance): Value {
 
 // Runs comptime code; a panic, a refusal or an error it didn't catch is a compile error at the
 // comptime site, noting where inside it happened.
-function guarded(tables: Tables, site: Span, go: (run: Interpreter) => Value): Value {
-  try {
-    return timed(tables.timings, "comptime", () => go(new Interpreter(tables)));
-  } catch (e) {
-    let stop = e;
-    if (e instanceof Thrown) stop = new Stop(`this comptime code threw an error it didn't catch: ${described(tables.typing, e.value)}`, e.at, false);
-    // A string or array past what the compiler can hold.
-    if (e instanceof RangeError) stop = new Stop("this comptime code made a value too large to hold while compiling", site, false);
-    if (!(stop instanceof Stop)) throw e;
-    const inside = stop.at.start !== site.start || stop.at.end !== site.end;
-    if (stop instanceof Assertion) throw new CompileError("E1101", stop.message, stop.at.start, stop.at.end, inside ? { message: "while running this comptime code", start: site.start, end: site.end } : undefined);
-    const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
-    throw new CompileError("E1101", what, site.start, site.end, inside ? { message: stop.panic ? "it panicked here" : "here", start: stop.at.start, end: stop.at.end } : undefined);
-  }
+/** @throws {CompileError} */
+function guarded(tables: Tables, site: Span, go: ComptimeGo): Value {
+  return timed(tables.timings, "comptime", () => {
+    try {
+      return go(new Interpreter(tables));
+    } catch (e) {
+      let stop = e;
+      if (e instanceof Thrown) stop = new Stop(`this comptime code threw an error it didn't catch: ${described(tables.typing, e.value)}`, e.at, false);
+      // A string or array past what the compiler can hold.
+      if (e instanceof RangeError) stop = new Stop("this comptime code made a value too large to hold while compiling", site, false);
+      if (!(stop instanceof Stop)) throw e;
+      const inside = stop.at.start !== site.start || stop.at.end !== site.end;
+      if (stop.assertion) throw new CompileError("E1101", stop.message, stop.at.start, stop.at.end, inside ? { message: "while running this comptime code", start: site.start, end: site.end } : undefined);
+      const what = stop.panic ? `this comptime code panicked: ${stop.message}` : stop.message;
+      throw new CompileError("E1101", what, site.start, site.end, inside ? { message: stop.panic ? "it panicked here" : "here", start: stop.at.start, end: stop.at.end } : undefined);
+    }
+  });
 }
 
 const constName = (c: Instance) => bodyOf(c).name.slice("const ".length);
@@ -285,12 +302,14 @@ class Interpreter {
   private depth = 0;
 
   // A block's statements; the checker lets no `return`, `break` or `continue` leave it.
+  /** @throws {CompileError | Jump | Return | Stop | Thrown} */
   block(this: Mut<this>, f: Frame, body: Stmt[]): Value {
     this.statements(f, body);
     return undefined;
   }
 
   // A const's value, computed once; one that reads itself never ends, so it is refused.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   constant(this: Mut<this>, c: Instance, at: Span): Value {
     if (this.constants.has(c.id)) return this.constants.get(c.id);
     if (this.computing.has(c.id)) throw new Stop(`'${constName(c)}' needs its own value to compute its value${this.cycle([...this.computing].slice([...this.computing].indexOf(c.id)).map((i) => this.arenas.instanceOf(i)))}`, at, false);
@@ -312,36 +331,43 @@ class Interpreter {
     return `: ${named[0]} reads ${named.slice(1).join(", which reads ")}`;
   }
 
+  /** @throws {Stop} */
   private step(this: Mut<this>, at: Span) {
     if (++this.steps > STEPS) throw new Stop(`this comptime code took more than ${STEPS.toLocaleString("en-US")} steps; is there a loop that never ends?`, at, false);
   }
 
   // Code that reaches outside the program, or waits, which comptime never runs.
+  /** @throws {Stop} */
   private refuse(what: string, at: Span): never {
     throw new Stop(`${what} can't run while compiling: comptime code only computes values`, at, false);
   }
 
   // A source of randomness, whose one value comptime would bake into every run.
+  /** @throws {Stop} */
   private random(what: string, at: Span): never {
     throw new Stop(`${what} can't run while compiling; its value would be fixed into the program`, at, false);
   }
 
   // Pure code the interpreter doesn't run yet.
+  /** @throws {Stop} */
   private unsupported(what: string, at: Span): never {
     throw new Stop(`${what} isn't supported in comptime code yet`, at, false);
   }
 
+  /** @throws {Stop} */
   private panic(message: string, at: Span): never {
     throw new Stop(message, at, true);
   }
 
   // What a place holds, an accessor's read through its getter.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private read(this: Mut<this>, p: Place): Value {
     if (p.of !== "accessor") return readPlace(p);
     return p.getter ? this.call(p.getter, [], p.self, p.at) : p.self.fields.get(p.name);
   }
 
   // Writes `v` where a place is, an accessor's through its setter.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private write(this: Mut<this>, p: Place, v: Value) {
     switch (p.of) {
       case "this":
@@ -355,12 +381,12 @@ class Interpreter {
       case "char":
         return this.unsupported("changing a string's character", p.at);
       case "element":
-        checkedIndex(p.index, p.length, p.before, p.at);
         p.array.items[Number(p.index)] = v;
     }
   }
 
   // A value without a union's tag, read through a `Mut`'s place.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private unwrap(this: Mut<this>, v: Value): Value {
     if (isPlace(v)) return this.unwrap(this.read(v));
     return v && typeof v === "object" && v.kind === "member" ? this.unwrap(v.value) : v;
@@ -372,6 +398,7 @@ class Interpreter {
 
   // Calls a function, a `Mut` parameter given the place its argument names.
   // Instances of a class with an `equals` compare through it, as they do at run time.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private byEquals(this: Mut<this>, at: Span): Equals {
     return (a, b) => {
       const method = this.typing.rec(a.type).kind === "class" ? this.arenas.instanceOf(this.equalities.get(a.type as ClassType)) : undefined;
@@ -379,6 +406,7 @@ class Interpreter {
     };
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   call(this: Mut<this>, callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++this.depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
@@ -401,14 +429,17 @@ class Interpreter {
   }
 
   // The arguments of a call: a `Mut` parameter takes its argument's place, the rest values.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private args(this: Mut<this>, f: Frame, callee: Instance, list: Expr[]): Value[] {
     return list.map((a) => this.expr(f, a));
   }
 
+  /** @throws {CompileError | Jump | Return | Stop | Thrown} */
   private statements(this: Mut<this>, f: Frame, list: Stmt[]) {
     for (const s of list) this.statement(f, s);
   }
 
+  /** @throws {CompileError | Jump | Return | Stop | Thrown} */
   private statement(this: Mut<this>, f: Frame, s: Stmt) {
     this.step(s);
     switch (s.kind) {
@@ -495,6 +526,7 @@ class Interpreter {
 
   // A `try`: its catch takes a thrown error; its `finally` runs however the block is left, but
   // not for a panic, which skips both, as it does at run time.
+  /** @throws {CompileError | Jump | Return | Stop | Thrown} */
   private attempt(this: Mut<this>, f: Frame, s: Extract<Stmt, { kind: "try" }>) {
     let left: unknown;
     let leaving = false;
@@ -517,6 +549,7 @@ class Interpreter {
   }
 
   // Runs a loop's body once: false when a `break` leaves the loop.
+  /** @throws {CompileError} */
   private loopBody(this: Mut<this>, f: Frame, loop: Stmt, body: Stmt[]): boolean {
     try {
       this.statements(f, body);
@@ -527,6 +560,7 @@ class Interpreter {
     }
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   expr(this: Mut<this>, f: Frame, e: Expr): Value {
     const v = this.link(f, e);
     return isShort(v) ? this.typed(f, e, null) : v;
@@ -534,6 +568,7 @@ class Interpreter {
 
   // An expression's value; a member or call in an optional chain that met an empty Option
   // gives SHORT, which ends the chain as an empty Option.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private link(this: Mut<this>, f: Frame, e: Expr): Value | typeof SHORT {
     this.step(e);
     // A place lent to a `Mut`: the place itself, which reads and writes go through.
@@ -549,6 +584,7 @@ class Interpreter {
   // A value as the type it meets: a `Mut` stays a place, anything else reads through one; a float
   // where a literal meets one; a union's value tagged with the member its type says, in fields and
   // elements too; a member out of its union where a check narrowed it.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private typed(f: Frame, e: Expr, value: Value): Value {
     const own = f.instance.types.get(e);
     const target = f.instance.coercions.get(e) ?? own;
@@ -559,6 +595,7 @@ class Interpreter {
     return retag(this.typing, v, deref(this.typing, own), to);
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private raw(this: Mut<this>, f: Frame, e: Expr): Value | typeof SHORT {
     const type = f.instance.types.get(e)!;
     switch (e.kind) {
@@ -600,7 +637,13 @@ class Interpreter {
           }
           return retag(this.typing, v, holes[i]!.type, into);
         };
-        const made = built<Value>(this.tables, q, types, e, astValues(splice, holes.map((h) => h.value), e), scope, free);
+        let made: Value;
+        try {
+          made = built<Value>(this.tables, q, types, e, astValues(splice, holes.map((h) => h.value), e), scope, free);
+        } catch (err) {
+          if (err instanceof CompileError && err.code === "E1101") throw new Stop(err.message, e, false);
+          throw err;
+        }
         const u = untagged(made);
         if (u && typeof u === "object" && (u.kind === "record" || u.kind === "array")) {
           const at = (u.quote = nextId(this.tables.quoteValues));
@@ -716,6 +759,7 @@ class Interpreter {
     }
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private construct(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "new" }>, type: Type): Value {
     const r = typeof type === "string" ? undefined : this.typing.rec(type);
     if (r?.kind === "interior" && r.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: this.expr(f, e.args[0]!) };
@@ -735,6 +779,7 @@ class Interpreter {
     return made;
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private member(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "member" }>, type: Type): Value | typeof SHORT {
     // An enum's member, as `Color.Red`, is known from its type alone.
     const literal = literalValue(this.typing, type);
@@ -757,6 +802,7 @@ class Interpreter {
 
   // A tuple's length, as at run time: its required elements, up to the last optional one there,
   // then its rest.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private tupleLength(t: Record): bigint {
     const type = t.type as ObjectType;
     const count = this.typing.elementsOf(type).length;
@@ -766,6 +812,7 @@ class Interpreter {
     return BigInt(length + (rest && typeof rest === "object" && rest.kind === "array" ? rest.items.length : 0));
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private callExpr(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "call" }>, type: Type): Value | typeof SHORT {
     const callee = e.callee;
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") this.refuse("printing", e);
@@ -777,7 +824,7 @@ class Interpreter {
     }
     if (this.asserts.has(e)) {
       if (this.expr(f, e.args[0]!) === true) return undefined;
-      throw new Assertion(e.args[1] ? String(this.unwrap(this.expr(f, e.args[1]))) : `assertion failed: ${this.asserts.get(e)}`, e, true);
+      throw new Stop(e.args[1] ? String(this.unwrap(this.expr(f, e.args[1]))) : `assertion failed: ${this.asserts.get(e)}`, e, true, true);
     }
     const target = this.calledAt(f, e);
     if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return this.call(target, this.args(f, target, e.args), f.self, e);
@@ -820,6 +867,7 @@ class Interpreter {
   }
 
   // A Map's or a Set's method; `get` and the arrays of entries hand out clones, as at run time.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private tableMethod(this: Mut<this>, f: Frame, name: string, table: Table, e: Extract<Expr, { kind: "call" }>, type: Type): Value {
     const args = e.args.map((a) => this.expr(f, a));
     const key = () => this.keyName(args[0]);
@@ -852,6 +900,7 @@ class Interpreter {
   }
 
   // Puts a key and its value in a table: a key already there keeps its place, as JavaScript's does.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private put(table: Table, k: Value, v: Value) {
     const name = this.keyName(k);
     const was = table.entries.get(name);
@@ -861,22 +910,25 @@ class Interpreter {
 
   // The string a key is compared by, which for a float is SameValueZero's: `String` names every
   // NaN alike and -0 as 0.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private keyName(k: Value): string {
     const v = this.unwrap(k);
     return typeof v === "string" ? `s${v}` : `i${v as bigint | f64}`;
   }
 
   // A Map's entry as the pair of its key and value.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private pair(item: Value): [Value, Value] {
     const v = this.unwrap(item);
     if (v && typeof v === "object" && v.kind === "array") return [v.items[0], v.items[1]];
     if (v && typeof v === "object" && v.kind === "record") return [v.fields.get("0"), v.fields.get("1")];
-    throw new Error("internal error: a Map's entry that isn't a pair");
+    assert(false, "internal error: a Map's entry that isn't a pair");
   }
 
   // What looping over a value visits: a string's characters, an array's elements, a Set's
   // members, or a Map's entries as pairs of clones. A dictionary's entries come in the order
   // JavaScript gives an object's keys: integer keys first, from smallest.
+  /** @throws {Stop} */
   private iterated(this: Mut<this>, over: Value, at: Span): Value[] {
     if (typeof over === "string") return [...over];
     if (over && typeof over === "object" && over.kind === "array") return over.items;
@@ -893,6 +945,7 @@ class Interpreter {
     return entries.map(([k, v]): Record => ({ kind: "record", type: tuple, fields: new Map([["0", cloned(this.tables, k)], ["1", cloned(this.tables, v)]]) }));
   }
 
+  /** @throws {Stop} */
   private stringMethod(name: string, s: string, args: Value[], at: Span): Value {
     const n = (i: usize) => Number(args[i] as bigint);
     switch (name) {
@@ -956,16 +1009,19 @@ class Interpreter {
     }
   }
 
+  /** @throws {Stop} */
   private tooLong(at: Span): never {
     throw new Stop(`this comptime code made a string longer than ${LONGEST.toLocaleString("en-US")} characters`, at, false);
   }
 
   // Two strings joined, within the longest string comptime makes.
+  /** @throws {Stop} */
   private joined(a: string, b: string, at: Span): string {
     if (a.length + b.length > LONGEST) this.tooLong(at);
     return a + b;
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private unary(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "unary" }>): Value {
     if (e.op === "await") this.refuse("'await'", e);
     const held = this.expr(f, e.operand);
@@ -989,6 +1045,7 @@ class Interpreter {
     return this.unsupported(`'${e.op}'`, e);
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private binary(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "binary" }>): Value {
     if (e.op === "&&") return this.unwrap(this.expr(f, e.left)) ? this.expr(f, e.right) : false;
     if (e.op === "||") return this.unwrap(this.expr(f, e.left)) ? true : this.expr(f, e.right);
@@ -1029,6 +1086,7 @@ class Interpreter {
   }
 
   // The place is found first, then the value; a compound assignment reads the place once.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private assign(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "assign" }>): Value {
     const at = this.place(f, e.target);
     if (e.op === "=") {
@@ -1053,6 +1111,7 @@ class Interpreter {
 
   // Where an expression's value lives: a variable, a `Mut` parameter's place, an object's field,
   // or an array's element, its index read once.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private place(this: Mut<this>, f: Frame, target: Expr, object?: Value): Place {
     if (target.kind === "nonNull" && redundantBang(target)) return this.place(f, target.expr, object);
     if (target.kind === "this") return { kind: "place", of: "this", frame: f, at: target };
@@ -1090,6 +1149,7 @@ class Interpreter {
     return this.unsupported("changing this", target);
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private match(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "match" }>): Value {
     const subject = this.expr(f, e.subject);
     for (const arm of e.arms) {
@@ -1109,6 +1169,7 @@ class Interpreter {
     return this.unsupported("this match", e);
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private tests(this: Mut<this>, f: Frame, p: Pattern, value: Value): boolean {
     const info = f.instance.patterns.get(p)!;
     const tag = value && typeof value === "object" && value.kind === "member" ? value.type : undefined;
@@ -1143,6 +1204,7 @@ class Interpreter {
     }
   }
 
+  /** @throws {CompileError | Jump | Stop | Thrown} */
   private bind(f: Frame, p: Pattern, value: Value) {
     const info = f.instance.patterns.get(p)!;
     const v = this.unwrap(value);
@@ -1155,6 +1217,7 @@ class Interpreter {
 
   // An arithmetic or bitwise operator on numbers of `type`, panicking where the program would.
   // A bigint's operators as JavaScript has them, panicking where it throws a RangeError.
+  /** @throws {Stop} */
   private bigNumeric(op: string, a: bigint, b: bigint, at: Span): Value {
     if ((op === "/" || op === "%") && b === 0n) this.panic("Division by zero", at);
     if (op === "**" && b < 0n) this.panic("Exponent must be non-negative", at);
@@ -1174,6 +1237,7 @@ class Interpreter {
     return this.unsupported(`'${op}' on 'bigint'`, at);
   }
 
+  /** @throws {Stop} */
   private numeric(this: Mut<this>, op: string, a: bigint | f64, b: bigint | f64, type: Type, at: Span): Value {
     if (typeof a === "number" || typeof b === "number") {
       const [x, y] = [Number(a), Number(b)];
@@ -1229,6 +1293,7 @@ class Interpreter {
 
   // `x.checkedAdd(y)` and its kin, as the program computes them: the exact result, then null,
   // the wrapped value, the nearest bound, or the wrapped value and whether it overflowed.
+  /** @throws {Stop} */
   private integerValue(this: Mut<this>, name: string, a: bigint, b: bigint, type: Integer, result: Type, at: Span): Value {
     const [family, operation] = integerMethod(name)!;
     const { bits, signed } = INTEGERS[type];
@@ -1293,12 +1358,14 @@ class Interpreter {
 
   // Comptime checks overflow in every build: a value that would wrap in a release build is a
   // compile error rather than a different number baked.
+  /** @throws {Stop} */
   private checked(v: bigint, type: Integer, verb: string, at: Span): bigint {
     if (wrap(v, type) !== v) this.panic(`attempt to ${verb} with overflow`, at);
     return v;
   }
 
   // `x as T` between numbers, as Rust's `as` converts: integers wrap, floats truncate and saturate.
+  /** @throws {Stop} */
   private convert(v: Value, to: Type, at: Span): Value {
     if (typeof v === "boolean") v = v ? 1n : 0n;
     if (isFloat(to)) return typeof v === "bigint" && to === "f32" ? toF32(v) : fit(Number(v), to);
@@ -1338,6 +1405,7 @@ function unwrap(v: Value): Value {
 
 // Panics on an index outside a string or array of `length`, `before` counting a rest tuple's
 // fixed elements in what the message says.
+/** @throws {Stop} */
 function checkedIndex(i: bigint, length: bigint, before: bigint, at: Span) {
   if (i < 0n || i >= length) throw new Stop(`index out of bounds: the len is ${length + before} but the index is ${i + before}`, at, true);
 }
@@ -1352,12 +1420,10 @@ function readPlace(p: Place): Value {
     case "field":
       return p.holder.fields.get(p.name);
     case "accessor":
-      throw new Error("internal error: an accessor's place was read outside a run of the interpreter");
+      assert(false, "internal error: an accessor's place was read outside a run of the interpreter");
     case "char":
-      checkedIndex(p.index, p.length, p.before, p.at);
       return p.text[Number(p.index)];
     case "element":
-      checkedIndex(p.index, p.length, p.before, p.at);
       return p.array.items[Number(p.index)];
   }
 }

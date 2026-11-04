@@ -542,6 +542,9 @@ export function rebuiltTypeMember(n: TypeMember, r: Ref<Replacements>): TypeMemb
       if (m.returns !== undefined) {
         m.returns = rebuiltTypeNode(m.returns!, r);
       }
+      if (m.throws !== undefined) {
+        m.throws = rebuiltTypeNode(m.throws!, r);
+      }
       break;
     case "call":
       for (let i1 = 0; i1 < m.typeParams.length; i1++) {

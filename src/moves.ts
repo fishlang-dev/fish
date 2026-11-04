@@ -1,3 +1,4 @@
+import assert from "node:assert";
 import { bodyOf, type LocalId } from "./arenas.ts";
 import type { Instance, Local, Origin } from "./check.ts";
 import type { Body } from "./classes.ts";
@@ -20,6 +21,9 @@ import { nextId, NodeMap } from "./nodes.ts";
 // is a local's id, or `this`, followed by a field path, like `3.inner.x`.
 // A variable declared without a value is moved from the start, `unassigned`.
 type Move = { start: usize; end: usize; note: string; passes: NodeMap<Stmt, usize>; unassigned?: boolean };
+
+/** @throws {CompileError} */
+type MoveStep = () => void;
 
 // A place lent to references: shared or mutable, where it was lent, and who holds it, the
 // reference variables or, for an argument or receiver, the call it was lent to.
@@ -141,6 +145,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // Checks that no borrow of a variable that has gone out of scope by `end` is still held by a
   // variable from outside, and used after. A variable that is itself a reference only copies a
   // pointer to what it borrows, whose own loans are checked where that ends.
+  /** @throws {CompileError} */
   function dropped(gone: Local[], end: usize) {
     if (!state || gone.length === 0) return;
     const ids = new Map(gone.map((l) => [String(l.id), l]));
@@ -396,7 +401,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A loop runs its body until nothing new has moved or been lent by the time it comes round
   // again, so a move late in the body is caught at a use early in it.
-  function loop(s: Stmt, test: () => Expr | undefined, body: () => void, bodyFirst = false, update?: () => void) {
+  /** @throws {CompileError} */
+  function loop(s: Stmt, test: () => Expr | undefined, body: MoveStep, bodyFirst = false, update?: MoveStep) {
     const entry = state;
     let back: State = null;
     for (let pass = 0; ; pass++) {
@@ -444,6 +450,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // Evaluates an expression. `consume` says how its value is handed over, when it is; a
   // value that is only read, like a receiver or an operand, is borrowed. A statement's value
   // is discarded.
+  /** @throws {CompileError} */
   function expr(e: Expr, consume?: Consumer, discarded = false) {
     // A value lent to a reference stays where it is.
     const lentAs = coercions.get(e);
@@ -517,7 +524,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         const shown = (e as { shown?: string }).shown;
         const name = shown ? `'${shown}'` : e.callee.kind === "member" || e.callee.kind === "ident" ? `'${e.callee.name}'` : e.callee.kind === "super" ? "'super'" : "the function";
         // What the call may keep is held once its own loans have ended.
-        let keeps: (() => void) | undefined;
+        let keeps: MoveStep | undefined;
         during(e, () => {
           // A nested function called by name, itself included, uses what it captures for the
           // call: lent shared while its arguments run, so they may read it, then mutably for the
@@ -813,12 +820,13 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         state = null;
         return;
       default:
-        throw new Error(`the move checker has no case for '${e.kind}' expressions`);
+        assert(false, `the move checker has no case for '${e.kind}' expressions`);
     }
   }
 
   // A value that may keep references given to it holds them: a holder variable, or `this`, which
   // may be given only what points into this function's parameters, since it outlives the call.
+  /** @throws {CompileError} */
   function keep(target: Expr, values: Expr[]) {
     if (values.length === 0) return;
     // Keeping references in what a reference points to would need its owner to hold them.
@@ -913,7 +921,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // Runs a call's arguments, then ends the loans made for it.
-  function during(call: Expr, run: () => void) {
+  /** @throws {CompileError} */
+  function during(call: Expr, run: MoveStep) {
     run();
     if (!state) return;
     for (const [at, loan] of state.loans) if (loan.call && loan.callAt === call && loan.holders.size === 0) state.loans.delete(at);
@@ -921,6 +930,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // Reads or hands over a place, which must still hold its value and not be lent so as to
   // forbid it.
+  /** @throws {CompileError} */
   function use(e: Named, consume?: Consumer, type: Type = e.kind === "shorthand" ? localAt(e)!.type : types.get(e)!) {
     const place = key(e)!;
     usable(e, place);
@@ -962,6 +972,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // A place can't be used once it, something it is inside, or something inside it moved.
+  /** @throws {CompileError} */
   function usable(e: Named, place: string) {
     if (!state) return;
     for (const [moved, move] of state.moves) {
@@ -987,6 +998,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     return [...new Set(holders.map((id) => arenas.localOf(id)).map((h) => (h.name === "for...of" ? "a 'for...of' loop" : `'${h.name}'`)))];
   }
 
+  /** @throws {CompileError} */
   function free(place: string, e: Named, access: Access, at: usize = e.start) {
     if (!state) return;
     for (const loan of state.loans.values()) {
@@ -1028,6 +1040,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // A reference variable given a value holds what it borrows: a place lent to it, or what
   // the reference it copies, or the reference it borrows through, holds.
+  /** @throws {CompileError} */
   function hold(holder: Local, e: Expr) {
     if (!state) return;
     const outer = e;
@@ -1213,6 +1226,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // A value leaving the body may point only into what `allowed` says outlives it.
+  /** @throws {CompileError} */
   function outlives(e: Expr, allowed: Origin[], verb: string, instead: string) {
     const type = coercions.get(e) ?? types.get(e)!;
     if (!typing.holdsRef(type)) return;
@@ -1331,6 +1345,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
 
   // Assigning a place gives it a value again, along with everything inside it, but nothing
   // can be assigned inside a value that has moved, nor while it is lent.
+  /** @throws {CompileError} */
   function assign(target: Expr, at: usize) {
     const place = key(target);
     if (place === undefined || setters.has(target)) {
@@ -1415,6 +1430,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // What `x!` or `x ?? d` gives, handed over, can't come out of an Option that `x` only borrows.
+  /** @throws {CompileError} */
   function outOfBorrow(option: Expr, e: Expr, consume?: Consumer) {
     const t = types.get(option);
     if (consume && state && t && isRef(t) && !typing.isCopy(types.get(e)!)) {
@@ -1423,6 +1439,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   // A closure made here: what it borrows must be free to lend, and what it moves in leaves.
+  /** @throws {CompileError} */
   function made(e: Expr) {
     const parts = captured(e);
     // A copy the closure holds of a variable that a nested function it calls changes wouldn't
@@ -1558,6 +1575,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // A generator's variables live in the generator itself, which may move between `next()`
   // calls, so no reference into one may still be in use at a `yield`. What a reference
   // parameter points to, and an array's elements, live elsewhere.
+  /** @throws {CompileError} */
   function stillBorrowed(e: Expr) {
     if (!state) return;
     for (const loan of state.loans.values()) {
@@ -1804,7 +1822,7 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, t
       case "super":
         return;
       default:
-        throw new Error(`the last-use walk has no case for '${e.kind}' expressions`);
+        assert(false, `the last-use walk has no case for '${e.kind}' expressions`);
     }
   }
   stmts(body);

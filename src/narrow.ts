@@ -1,5 +1,6 @@
 import type { LocalId } from "./arenas.ts";
 import type { Local } from "./check.ts";
+import type { CompileError } from "./diag.ts";
 import type { Expr } from "./parser.ts";
 import type { Tables } from "./compilation.ts";
 import { isNumeric, type Type, type Typing } from "./typing.ts";
@@ -72,10 +73,15 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // variables may narrow; `types` gives each expression's type as checked.
 // What a call of a function with a type predicate proves: which argument is narrowed, and to what.
 // `narrows` hears whether its true and its false answers narrow, which codegen then checks.
+/** @throws {CompileError} */
 export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usize; type: Type; narrows(yes: boolean, no: boolean): void } | undefined;
 
+/** @throws {CompileError} */
+export type NarrowPath = (e: Expr) => string | undefined;
+
 // `path` gives the key a field path narrows under, if it may.
-export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, LocalId>, narrowable: (l: Local) => boolean, path: (e: Expr) => string | undefined, predicate?: Predicate): Guard {
+/** @throws {CompileError} */
+export function guard(tables: Tables, written: Expr, types: NodeMap<Expr, Type>, locals: NodeMap<Expr, LocalId>, narrowable: (l: Local) => boolean, path: NarrowPath, predicate?: Predicate): Guard {
   const { kindTests, typing, rewrites } = tables;
   const e = rewrites.current(written);
   const nothing: Guard = { yes: new Map(), no: new Map() };

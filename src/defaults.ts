@@ -1,5 +1,5 @@
 import type { Tables } from "./compilation.ts";
-import { nextId, Rewrites, walk, type Id, type Ids } from "./nodes.ts";
+import { nextId, nodesIn, Rewrites, type Id, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
 import { rebuiltStmts } from "./rebuild.ts";
@@ -10,16 +10,18 @@ import type { Type, Typing } from "./typing.ts";
 // so the default runs in the callee each time the argument is left out, after the parameters
 // before it, which it may read. The checker holds calls and defaults to `T` itself.
 
+/** @throws {CompileError} */
 export function lowerDefaults(tables: Tables, program: Stmt[]) {
   const rewrites = new Rewrites();
   // Whatever has parameters and a body: functions, arrows, methods, accessors and constructors.
-  walk("stmt", program, ({ node }) => {
+  for (const { node } of nodesIn("stmt", program)) {
     const f = node as { kind?: string; params?: unknown; body?: unknown };
     if (Array.isArray(f.params) && f.body !== undefined) lowered(tables, rewrites, f as Id & { kind?: string; params: Param[]; body: Expr | Stmt[] });
-  });
+  }
   rebuiltStmts(program, rewrites);
 }
 
+/** @throws {CompileError} */
 function lowered(tables: Tables, rewrites: Rewrites, f: Id & { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
   const { defaulted, fallbacks, renamed, prologues, ids } = tables;
   const firsts: Stmt[] = [];

@@ -2465,7 +2465,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       if (m.throws && target.throws) {
         const shape = resultType(target);
         const raw = temp();
-        unwinding(`call ${shape} ${symbol(target)}(${[`ptr ${self}`, ...args].join(", ")})`, raw);
+        unwinding(`call ${shape} ${symbol(target)}(${[`ptr ${self}`, ...args].join(", ")})`, raw, giveUp);
+        giveUp?.();
         result = failedOut(shape, raw, target.returns, target.throws, m);
       } else result = invoke(target, self, args, undefined, giveUp);
       if (result === undefined || m.returns === "void") {
@@ -7945,12 +7946,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       after?.();
       return result;
     }
-    return unpacked(resultType(target), result, type, at!, after);
+    return unpacked(resultType(target), result, type, at!, after, bodyOf(target).self?.constructor ? undefined : unwound);
   }
 
   // A throwing call's result: a call that failed raises its error where this function sends
   // it; one that didn't gives its value.
-  function unpacked(shape: string, result: string, type: Type, at: Expr, after?: () => void): string | undefined {
+  function unpacked(shape: string, result: string, type: Type, at: Expr, after?: () => void, unwound?: () => void): string | undefined {
     const [failed, bad, ok] = [temp(), label(), label()];
     emit(`${failed} = extractvalue ${shape} ${result}, 0`);
     emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
@@ -7958,6 +7959,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const error = temp();
     emit(`${error} = extractvalue ${shape} ${result}, 2`);
     after?.();
+    unwound?.();
     raised(at, error);
     startBlock(ok);
     after?.();

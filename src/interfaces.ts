@@ -1,15 +1,21 @@
 import type { Arenas } from "./arenas.ts";
 import { inherited, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import type { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
 import { TypeMap, TypeSet, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
 
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
+  /** @throws {CompileError} */
   classOf(t: ClassType): ClassInfo;
+  /** @throws {CompileError} */
   returnOf(f: Body, at: Span): Type;
+  /** @throws {CompileError} */
+  throwsOf(f: Body): Type | undefined;
   // A method's parameter types, resolved with its class's type arguments.
   paramTypesOf(f: Body): Type[];
   // A generic method's own type parameters' placeholders, in order.
+  /** @throws {CompileError} */
   typeParamsOf(f: Body): Type[];
   // A function declared at the top level, or lifted there, by its name.
   bodyNamed(name: string): Body | undefined;
@@ -25,6 +31,7 @@ export type Members = {
 // Why the generic function `f` can't be given where the generic function type `family` is, or
 // undefined when it can: as many type parameters, bounded alike, and the same signature with
 // them standing for the type's.
+/** @throws {CompileError} */
 export function familyMismatch(f: Body, family: FunctionType, members: Members, at: Span): string | undefined {
   const { typing } = members;
   const g = typing.rec(family).generic!;
@@ -73,6 +80,7 @@ function sameBounds(typing: Typing, a: Type, b: Type): boolean {
 // by shape: a public field or getter of a fitting type for each of the interface's fields,
 // and a public method taking exactly its parameter types and returning a fitting type for
 // each of its methods. `implements` is never needed.
+/** @throws {CompileError} */
 export function unsatisfied(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
   const { assuming, typing } = members;
   // An interface can name itself, as a builder's methods return the builder, so a pair already
@@ -110,6 +118,7 @@ function same(typing: Typing, a: Type, b: Type): boolean {
   return plain(a) === plain(b);
 }
 
+/** @throws {CompileError} */
 function check(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
   const { typing } = members;
   // A return type fits an interface method's when it fits, or, for an interface, satisfies it.
@@ -168,11 +177,12 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
       let swap = new TypeMap<Type, Type>();
       if (m.generic || found.generic) {
         if (found.generic?.names.length !== m.generic?.names.length) return `types of method '${m.name}' are incompatible`;
-        swap = byName(typing, [...found.params, found.returns], found.generic!.names, m.generic!.own);
+        swap = byName(typing, [...found.params, found.returns, ...(found.throws ? [found.throws] : [])], found.generic!.names, m.generic!.own);
         if (found.generic!.own.some((p, i) => !sameBounds(typing, p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: their type parameters' bounds differ`;
       }
       const params = found.params.map((p) => typing.replaced(p, swap));
-      if (params.some((p, i) => !same(typing, p, m.params[i]!)) || params.length !== m.params.length || !returns(typing.replaced(found.returns, swap), m.returns)) {
+      const thrown = found.throws && typing.replaced(found.throws, swap);
+      if (params.some((p, i) => !same(typing, p, m.params[i]!)) || params.length !== m.params.length || !returns(typing.replaced(found.returns, swap), m.returns) || (thrown !== undefined && (m.throws === undefined || !typing.fits(thrown, m.throws)))) {
         return `types of method '${m.name}' are incompatible`;
       }
       continue;
@@ -185,23 +195,23 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
     // An object's fields hold values, and a callable held in one isn't a method yet.
     if (t?.kind === "object") return `${missing("method", m.name)}; an object can't supply a method yet, so use a class`;
     if (!method || method.access !== "public") return missing("method", m.name);
-    // An interface's methods can't declare what they throw yet, so a throwing one can't
-    // stand in for one.
-    if (method.throws) return `method '${m.name}' can throw, and an interface's methods can't declare errors yet`;
+    if (method.throws && !m.throws) return `method '${m.name}' can throw, and an interface's methods can't declare errors yet`;
     // A generic method stands in for one with as many type parameters, compared with them
     // standing for the interface's.
     let swap = new TypeMap<Type, Type>();
     const written = members.paramTypesOf(method).map((p) => implicitBound(typing, p));
     const given = members.returnOf(method, at);
+    const thrown = members.throwsOf(method);
     if (m.generic) {
       const own = (method.typeParams ?? []).filter((p) => !isLifetime(p));
       if (own.length !== m.generic.names.length) return `method '${m.name}' must be generic with ${m.generic.names.length} type parameter${m.generic.names.length === 1 ? "" : "s"}, as '${typing.rec(trait).name}' declares it`;
-      swap = byName(typing, [...written, given], own.map((p) => p.name), m.generic.own);
+      swap = byName(typing, [...written, given, ...(thrown ? [thrown] : [])], own.map((p) => p.name), m.generic.own);
       if (members.typeParamsOf(method).some((p, i) => !sameBounds(typing, p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: its type parameters' bounds differ from '${typing.rec(trait).name}''s`;
     }
     const params = written.map((p) => typing.replaced(p, swap));
     const result = typing.replaced(given, swap);
-    if (params.length !== m.params.length || params.some((p, i) => !same(typing, p, m.params[i]!)) || !returns(result, m.returns)) {
+    const error = thrown && typing.replaced(thrown, swap);
+    if (params.length !== m.params.length || params.some((p, i) => !same(typing, p, m.params[i]!)) || !returns(result, m.returns) || (error !== undefined && (m.throws === undefined || !typing.fits(error, m.throws)))) {
       return `types of method '${m.name}' are incompatible`;
     }
     // An interface method's reference borrows from its receiver, so one borrowing from a

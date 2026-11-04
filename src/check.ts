@@ -1,14 +1,14 @@
 import { declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
 import { newTables, timed, type Compilation, type Tables } from "./compilation.ts";
-import { CompileError, CompileErrors, named } from "./diag.ts";
+import { CompileError, compileErrors, named } from "./diag.ts";
 import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
 import { FILE_SPAN, stdModuleAt } from "./program.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
-import { nextId, NodeMap, NodeSet, renumber, Rewrites, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
+import { nextId, NodeMap, NodeSet, nodesIn, renumber, Rewrites, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
 import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
@@ -19,7 +19,7 @@ import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import { Registry, RegistryState, type RegistryHost } from "./registry.ts";
-import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.ts";
+import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type InScope, type ResolverHost } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
 import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type InstanceMaker, type Bound } from "./typing.ts";
@@ -36,6 +36,12 @@ export type { Body } from "./classes.ts";
 
 // A function with a body; overload signatures and `declare function` are rejected first.
 type Func = Declared & { body: Stmt[] };
+
+/** @throws {CompileError} */
+type StmtCheck = (s: Stmt) => Facts | undefined;
+
+/** @throws {CompileError} */
+type StmtEach = (s: Stmt, check: StmtCheck) => Facts | undefined;
 
 // A local generic function's name stands for the function it was lifted to, `generic`. `id`
 // numbers it in its check, naming its slot in the IR; `localId` names it in the compilation's arena.
@@ -367,6 +373,7 @@ function arrowFunction(ids: Ids, name: string, arrow: Extract<Expr, { kind: "arr
 
 // A const's function type gives the arrow it holds the parameter, result and error types the
 // arrow leaves unwritten, as TypeScript's contextual typing does.
+/** @throws {CompileError} */
 function typedBy(arrow: Extract<Expr, { kind: "arrow" }>, fn: TypeNode | undefined): Extract<Expr, { kind: "arrow" }> {
   if (fn?.kind !== "function") return arrow;
   const extra = arrow.params[fn.params.length];
@@ -381,6 +388,7 @@ function typedBy(arrow: Extract<Expr, { kind: "arrow" }>, fn: TypeNode | undefin
 const MEMBERS = new Set(["field", "method", "constructor", "get", "set", "index", "staticBlock"]);
 
 // A macro takes the declaration it is applied to, and no type parameters.
+/** @throws {CompileError} */
 function macroShape(f: Func) {
   const shape = `as in 'macro function ${f.name.replace(/-fsh\d+$/, "")}(input: Ast): Ast'`;
   if (f.typeParams.length > 0) throw new CompileError("E1103", `a macro takes no type parameters, ${shape}`, f.typeParams[0]!.start, f.typeParams[0]!.end);
@@ -397,6 +405,7 @@ function macroShape(f: Func) {
 // With `macros`, the program is the macros and what they use, checked to run them, with no `main`.
 // With `module`, it may be a file another imports, checked on its own, so `main` is optional.
 // An error it throws names local declarations as they were written.
+/** @throws {CompileError} */
 export function check(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false = false, macros = false, module = false): Checked {
   try {
     const checked = checkAll(compilation, written, exportsToC, macros, module);
@@ -407,6 +416,7 @@ export function check(compilation: Compilation, written: Stmt[], exportsToC: Set
   }
 }
 
+/** @throws {CompileError} */
 function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): Checked {
   return new Checker(compilation, written, exportsToC, macros, module).run();
 }
@@ -510,6 +520,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // The error each failed body's check gave, which a call of it gives again rather than another.
   failed = new Map<BodyId, CompileError>();
 
+  /** @throws {CompileError} */
   constructor(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean) {
     this.compilation = compilation;
     this.written = written;
@@ -554,14 +565,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.madeArrows = this.tables.madeArrows;
     this.files = this.macros ? undefined : this.compilation.fileNames;
     // A macro applies only to a top-level declaration; the top-level ones are expanded already.
-    holdsNode("stmt", this.written, (n) => {
-      const decorators = (n as { kind?: string; decorators?: Expr[] }).decorators;
-      if (["function", "typeAlias", "interface", "enum"].includes(n.kind as string) && decorators && decorators.length > 0) throw new CompileError("E1103", "a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
-      // A member's decorator a top-level class's expansion didn't reach is on a class no macro runs on.
+    for (const { node: n } of nodesIn("stmt", this.written)) {
       const member = n as { kind?: string; decorators?: Expr[]; modifiers?: unknown };
-      if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && member.decorators && member.decorators.length > 0) throw new CompileError("E1103", "a macro on a member applies in a top-level class", member.decorators[0]!.start, member.decorators[0]!.end);
-      return false;
-    });
+      const decorators = member.decorators;
+      if (["function", "typeAlias", "interface", "enum"].includes(member.kind as string) && decorators && decorators.length > 0) throw new CompileError("E1103", "a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
+      // A member's decorator a top-level class's expansion didn't reach is on a class no macro runs on.
+      if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && decorators && decorators.length > 0) throw new CompileError("E1103", "a macro on a member applies in a top-level class", decorators[0]!.start, decorators[0]!.end);
+    }
     this.written = lowerOverloads(this.ids, this.written);
     localKeys(this.written);
     this.written = [...this.written, ...hoistLocals(this.compilation, this.written)];
@@ -754,6 +764,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.closureBodies = new TypeMap<ClosureType, InstanceId>();
   }
 
+  /** @throws {CompileError} */
   recover(this: Mut<this>, e: unknown) {
     if (!(e instanceof CompileError)) throw e;
     if (e.code === "E0113") this.unending = true;
@@ -768,12 +779,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return callees?.some((b) => this.failed.has(b) && !this.arenas.bodyOf(b).throws && !this.tryCallees.some(([x]) => x === this.failed.get(b))) ?? false;
   }
 
+  /** @throws {CompileError} */
   stopOnErrors(this: Mut<this>) {
     const held = this.errors.filter((e) => !this.followsOn(e));
     // Errors are never all held back, or a program that failed would build.
     const reported = held.length > 0 ? held : this.errors;
     if (reported.length === 1) throw reported[0];
-    if (reported.length > 1) throw new CompileErrors(reported.sort((a, b) => a.start - b.start || a.end - b.end));
+    if (reported.length > 1) throw compileErrors(reported.sort((a, b) => a.start - b.start || a.end - b.end));
   }
 
   // The error a body's check failed with, when it did.
@@ -804,22 +816,27 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return new ClassMembers(this);
   }
 
+  /** @throws {CompileError} */
   resolveType(this: Mut<this>, t: TypeNode): Type {
     return this.resolver().resolveType(t);
   }
 
-  withScope<T>(this: Mut<this>, bindings: Map<string, Type>, f: () => T): T {
+  /** @throws {CompileError} */
+  withScope<T>(this: Mut<this>, bindings: Map<string, Type>, f: InScope<T>): T {
     return this.resolver().withScope(bindings, f);
   }
 
+  /** @throws {CompileError} */
   paramType(this: Mut<this>, p: Param, property?: boolean): Type {
     return this.resolver().paramType(p, property);
   }
 
+  /** @throws {CompileError} */
   instanceOf(this: Mut<this>, f: Body): Instance {
     return this.instancing().instanceOf(f);
   }
 
+  /** @throws {CompileError} */
   definition(this: Mut<this>, f: Body): Instance {
     return this.instancing().definition(f);
   }
@@ -832,23 +849,28 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.registry().register(c);
   }
 
+  /** @throws {CompileError} */
   layout(this: Mut<this>, c: ClassInfo) {
     this.registry().layout(c);
   }
 
+  /** @throws {CompileError} */
   classNamed(this: Mut<this>, name: string, args: Type[], at: Span): ClassType | undefined {
     return this.genericClasses().classNamed(name, args, at);
   }
 
+  /** @throws {CompileError} */
   fieldsLaid(this: Mut<this>, c: ClassType): boolean {
     return this.registry().layout(this.registry().classOf(c));
   }
 
+  /** @throws {CompileError} */
   valueType(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type {
     return this.valueTypeOf(name, at, shadowed);
   }
 
   // An interface is met by shape, as a conditional type's `extends` asks of it.
+  /** @throws {CompileError} */
   conforms(this: Mut<this>, from: Type, to: Type, at: Span): boolean {
     const trait = this.recOf(to);
     return trait?.kind === "interface" ? unsatisfied(from, to as InterfaceType, this.members(), at) === undefined : this.typing.fits(from, to);
@@ -859,16 +881,19 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // A generic enum's variant made with other type arguments, while lowering.
+  /** @throws {CompileError} */
   variantInstance(this: Mut<this>, v: VariantType, args: Type[]): VariantType {
     const r = this.typing.rec(v);
     return this.resolver().enumInstance(this.enums.get(r.enum)!, args, (this.beingChecked && bodyOf(this.beingChecked)) ?? { start: 0, end: 0 }).variants.get(r.member)!;
   }
 
+  /** @throws {CompileError} */
   interfaceInstance(this: Mut<this>, t: InterfaceType, args: Type[]): InterfaceType {
     return this.resolver().interfaceInstance(t, args);
   }
 
   // A class first made while lowering is reported at the function being checked.
+  /** @throws {CompileError} */
   classInstance(this: Mut<this>, c: ClassType, args: Type[]): ClassType {
     return this.genericClasses().classNamed(this.typing.rec(c).generic!.name, args, (this.beingChecked && bodyOf(this.beingChecked)) ?? { start: 0, end: 0 }, true)!;
   }
@@ -878,18 +903,22 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // A body's own signature, where its parameter names shadow top-level ones.
-  signing<T>(this: Mut<this>, f: Body, run: () => T): T {
+  /** @throws {CompileError} */
+  signing<T>(this: Mut<this>, f: Body, run: InScope<T>): T {
     return this.resolver().withSight(this.resolver().signatureSight(f.bodyId), run);
   }
 
+  /** @throws {CompileError} */
   classParams(f: Body): TypeParam[] {
     return f.scope?.size && f.owner ? this.registry().classOf(f.owner).node.typeParams : [];
   }
 
+  /** @throws {CompileError} */
   comptimeArgument(this: Mut<this>, arg: Expr): Type {
     return this.comptimeLiteral(arg);
   }
 
+  /** @throws {CompileError} */
   run(this: Mut<this>): Checked {
 
     this.classes.forEach((c) => this.registry().link(this.arenas.classOf(c), new TypeSet()));
@@ -1028,6 +1057,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // A value given to `JSON.stringify` holding an `unknown` needs each type stored in one to have a
   // JSON form, which is known only now.
+  /** @throws {CompileError} */
   private unknownJson(this: Mut<this>) {
     const at = this.tables.unknownJson[0];
     if (at === undefined) return;
@@ -1096,6 +1126,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // What `typeof name` names in a type: a top-level const's type, or a non-generic function's,
   // whose result is checked from its body when it isn't written.
+  /** @throws {CompileError} */
   valueTypeOf(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type {
     if (shadowed) throw new CompileError("E0801", `'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
     if (this.classes.has(name)) throw new CompileError("E0801", `'typeof' of the class '${name}' isn't supported yet, since classes aren't values in Fish; name the class itself as the type`, at.start, at.end);
@@ -1115,6 +1146,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // A computed enum member's value: its initializer, run while compiling as a top-level const is.
+  /** @throws {CompileError} */
   enumMemberValue(this: Mut<this>, owner: string, member: string, init: Expr): Value {
     const giving: Stmt = { id: nextId(this.ids), kind: "return", value: init, start: init.start, end: init.end };
     const f = this.addBody(Object.assign({ id: nextId(this.ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start: init.start, end: init.end }, { comptime: "const" as const }));
@@ -1124,6 +1156,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // A result worked out from a body may need the class being laid out, whose fields aren't known.
+  /** @throws {CompileError} */
   unlaid(this: Mut<this>, name: string, at: Span) {
     const [mid] = this.registryState.laying.values();
     if (mid) throw new CompileError("E0114", `'typeof ${name}' needs ${name}'s result, worked out from its body, while the field types of '${this.typing.rec(this.arenas.classOf(mid).type).name}' are being worked out; write ${name}'s return type`, at.start, at.end);
@@ -1131,6 +1164,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // A function's type for `typeof`: a parameter typed with an object type, an interface or a
   // function type makes it generic in Fish, but its declared type is what `typeof` names.
+  /** @throws {CompileError} */
   functionTypeOf(this: Mut<this>, f: Body, at: Span): Type {
     const explicit = (f.typeParams ?? []).filter((p) => !(p.constraint?.kind === "ref" && p.constraint.name === "Lifetime"));
     if (explicit.length > 0 || f.params.some((p) => p.comptime)) {
@@ -1160,6 +1194,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // A comptime parameter's argument: its value, computed in the calling instance, as a literal
   // type. Inside a generic definition the caller's own values aren't known, so it stays open.
+  /** @throws {CompileError} */
   comptimeLiteral(this: Mut<this>, arg: Expr): Type {
     // The caller's own comptime parameter passed on: the same value, or in a definition the same
     // placeholder, so a call passing it on shares the caller's instance.
@@ -1229,6 +1264,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // What a function's returned reference borrows from: the parameters with its written
   // lifetime, or by elision `this` for a method, or the only reference parameter.
+  /** @throws {CompileError} */
   originsOf(this: Mut<this>, f: Body, params: Type[], returns: RefType): Origin[] {
     const at = f.returnType ?? f;
     const { life } = this.typing.rec(returns);
@@ -1272,6 +1308,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // What a call's returned reference, or returned value holding references, borrows from, as
   // the callee's signature says; with no lifetime written, whatever was lent to the call.
+  /** @throws {CompileError} */
   sourcesOf(this: Mut<this>, instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[] {
     const f = bodyOf(instance);
     const returns = this.returnOf(instance, at);
@@ -1283,17 +1320,18 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // Every lifetime a body writes must be one it declares.
+  /** @throws {CompileError} */
   lifetimes(f: Body) {
     const declared = new Set([...(f.typeParams ?? []), ...(f.owner ? this.classNode(this.typing.rec(f.owner).name)?.typeParams ?? [] : [])].filter(isLifetime).map((p) => p.name));
     const types = [...f.params.flatMap((p) => p.type ?? []), ...(f.returnType ? [f.returnType] : [])];
-    walk("typeNode", types, ({ of, node }) => {
-      if (of !== "typeNode" || node.kind !== "ref") return;
+    for (const { of, node } of nodesIn("typeNode", types)) {
+      if (of !== "typeNode" || node.kind !== "ref") continue;
       const lives = (node.name === "Ref" || node.name === "Mut") && node.args.length === 2 ? [node.args[1]!]
         : this.slots.get(node.name)?.length === node.args.length ? node.args.filter((_, i) => this.slots.get(node.name)![i]) : [];
       for (const life of lives as (Span & { name: string })[]) {
         if (!declared.has(life.name)) throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
       }
-    });
+    }
   }
 
   // The lifetimes a method's class declares.
@@ -1308,6 +1346,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // Codegen sees each type parameter as the concrete type it stands for.
+  /** @throws {CompileError} */
   lowerTables(this: Mut<this>, instance: Instance) {
     this.views.set(instance.id, instance.returns);
     // `JSON.stringify` and printing write a field by how it was spelled, which lowering forgets.
@@ -1350,6 +1389,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // A member of a generic class made from a type parameter runs as the same member of the
   // class made from what the parameter stands for. Both come from one template, so their
   // members are in the same order.
+  /** @throws {CompileError} */
   counterpart(this: Mut<this>, target: Instance): Instance {
     const owner = bodyOf(target).owner;
     const to = owner && (this.typing.lower(owner) as ClassType);
@@ -1365,6 +1405,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // An export in a library is a C function too, so its signature crosses to C as a declared
   // function's does, and it can't throw, be generic or be a generator, which C can't call.
+  /** @throws {CompileError} */
   exportable(this: Mut<this>, instance: Instance) {
     const f = bodyOf(instance);
     const crosses = (t: Type) => isNumeric(t) || t === "boolean" || this.recOf(t)?.kind === "pointer";
@@ -1392,6 +1433,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // A C function's signature, which must cross to C as it is: numbers, booleans and raw
   // pointers, with `void` for no result.
+  /** @throws {CompileError} */
   foreignSignature(this: Mut<this>, instance: Instance) {
     const f = bodyOf(instance);
     if (f.rust) return this.rustSignature(instance);
@@ -1423,6 +1465,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // A Rust function's signature: numbers and booleans, with `void` for no result, so far.
+  /** @throws {CompileError} */
   rustSignature(this: Mut<this>, instance: Instance) {
     const f = bodyOf(instance);
     const what = `the Rust function '${f.name}'`;
@@ -1468,6 +1511,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // between Fish and JS, as strings, booleans, numbers, Options, unions and literals of them,
   // arrays of them copied across, and opaque JS values.
   // One imported but not called yet is refused only where a program calls it.
+  /** @throws {CompileError} */
   jsSignature(this: Mut<this>, instance: Instance) {
     try {
       this.jsSigned(instance);
@@ -1480,6 +1524,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
   }
 
+  /** @throws {CompileError} */
   jsSigned(this: Mut<this>, instance: Instance) {
     const f = bodyOf(instance);
     const named = `'${f.js!.name}' from '${f.js!.module}'`;
@@ -1522,6 +1567,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // A call made inside an instance with one of its type parameters gets the type the definition
   // gave it: the callee's return with the callee's parameters as the ones the call passed.
+  /** @throws {CompileError} */
   resultOf(this: Mut<this>, instance: Instance, at: Span & Id): Type {
     // Checking the callee may instantiate from this call again, so its site is read first.
     const site = this.instancing().siteOf(at);
@@ -1536,6 +1582,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // Each member a class writes that implements an abstract member takes what the declaration
   // takes and gives what it gives, as a template calling it through the abstract class expects.
+  /** @throws {CompileError} */
   implementsSignatures(this: Mut<this>, c: ClassInfo) {
     for (const table of ["methods", "getters", "setters"] as const) {
       for (const [name, id] of c[table]) {
@@ -1560,6 +1607,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
   }
 
+  /** @throws {CompileError} */
   implementsSignature(this: Mut<this>, f: Body, declared: Body, b: ClassInfo) {
     const base = this.typing.rec(b.type).name;
     const why = (text: string) => new CompileError("E0701", `'${declared.name.slice(base.length + 1)}' ${text}, as '${base}' declares it abstract`, f.start, f.end);
@@ -1587,11 +1635,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // What a call of an instance may throw, as its caller sees it.
+  /** @throws {CompileError} */
   errorOf(this: Mut<this>, instance: Instance): Type | undefined {
     const f = bodyOf(instance);
     return f.throws && this.resolver().withScope(instance.bindings, () => this.resolver().resolveType(f.throws!));
   }
 
+  /** @throws {CompileError} */
   returnOf(this: Mut<this>, instance: Instance, at: Span): Type {
     const f = bodyOf(instance);
     // A package's function gives what its signature made of its declaration for JS; a generic
@@ -1615,6 +1665,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // The check of a generic body as written, before an instance's: a generic function's
   // definition, or the same member of its generic class's definition, with a closure's body
   // checked within the body it is written in.
+  /** @throws {CompileError} */
   asWritten(this: Mut<this>, instance: Instance): void {
     let f = bodyOf(instance);
     if (f.closure) return this.asWritten(this.arenas.instanceOf(f.closure.parent));
@@ -1626,6 +1677,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // Checks an instance with its type arguments in scope.
+  /** @throws {CompileError} */
   checkBody(this: Mut<this>, instance: Instance) {
     if (this.done.has(instance.id)) return;
     const outer = this.beingChecked;
@@ -1679,6 +1731,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.inProgress.delete(instance.id);
   }
 
+  /** @throws {CompileError} */
   checkInstance(this: Mut<this>, instance: Instance, outer?: Mut<BodyChecker>) {
     const f = bodyOf(instance);
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async
@@ -1716,12 +1769,20 @@ class ClassMembers implements Members {
     this.refused = cx.refused;
   }
 
+  /** @throws {CompileError} */
   classOf(t: ClassType): ClassInfo {
     return this.cx.registry().classOf(t);
   }
 
+  /** @throws {CompileError} */
   returnOf(this: Mut<this>, b: Body, at: Span): Type {
     return this.cx.returnOf(this.cx.instancing().definition(b), at);
+  }
+
+  /** @throws {CompileError} */
+  throwsOf(this: Mut<this>, b: Body): Type | undefined {
+    const instancing = this.cx.instancing();
+    return b.throws ? this.cx.resolver().withScope(instancing.scopeOf(instancing.definition(b)), () => this.cx.resolver().resolveType(b.throws!)) : undefined;
   }
 
   // A generic method's, with its own type parameters standing for themselves.
@@ -1734,6 +1795,7 @@ class ClassMembers implements Members {
     return this.cx.bodyNamed(name);
   }
 
+  /** @throws {CompileError} */
   typeParamsOf(this: Mut<this>, b: Body): Type[] {
     const scope = this.cx.instancing().scopeOf(this.cx.instancing().definition(b));
     return (b.typeParams ?? []).filter((p) => !isLifetime(p)).map((p) => scope.get(p.name)!);
@@ -1862,6 +1924,7 @@ class BodyChecker implements Context {
   // A field initializer runs before the constructor's body, out of reach of its parameters.
   hidden: boolean;
 
+  /** @throws {CompileError} */
   constructor(cx: Mut<Checker>, instance: Instance, outer: Mut<BodyChecker> | undefined, f: Body) {
     this.cx = cx;
     this.instance = instance;
@@ -1983,10 +2046,12 @@ class BodyChecker implements Context {
   }
 
 
+  /** @throws {CompileError} */
   enumInstance(this: Mut<this>, info: EnumInfo, args: Type[], at: Span): EnumInstance {
     return this.cx.resolver().enumInstance(info, args, at);
   }
 
+  /** @throws {CompileError} */
   construct(this: Mut<this>, name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined {
     return this.cx.genericClasses().construct(name, typeArgs, argTypes, at);
   }
@@ -1999,30 +2064,37 @@ class BodyChecker implements Context {
     return this.cx.genericClasses().definedClass(name);
   }
 
+  /** @throws {CompileError} */
   returnOf(this: Mut<this>, instance: Instance, at: Span): Type {
     return this.cx.returnOf(instance, at);
   }
 
+  /** @throws {CompileError} */
   resultOf(this: Mut<this>, instance: Instance, at: Span & Id): Type {
     return this.cx.resultOf(instance, at);
   }
 
+  /** @throws {CompileError} */
   sourcesOf(this: Mut<this>, instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[] {
     return this.cx.sourcesOf(instance, args, receiver, at, lends);
   }
 
+  /** @throws {CompileError} */
   classOf(t: ClassType): ClassInfo {
     return this.cx.registry().classOf(t);
   }
 
+  /** @throws {CompileError} */
   instanceOf(this: Mut<this>, f: Body, bindings?: Map<string, Type>): Instance {
     return this.cx.instancing().instanceOf(f, bindings);
   }
 
+  /** @throws {CompileError} */
   instantiate(this: Mut<this>, f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance {
     return this.cx.instancing().instantiate(f, typeArgs, args, argTypes, at as Span & Id);
   }
 
+  /** @throws {CompileError} */
   paramTypes(this: Mut<this>, instance: Instance): Type[] {
     return this.cx.instancing().paramTypes(instance);
   }
@@ -2035,6 +2107,7 @@ class BodyChecker implements Context {
     return this.cx.reached([...this.cx.classes.keys(), ...this.cx.templates.keys()], at);
   }
 
+  /** @throws {CompileError} */
   asWritten(this: Mut<this>) {
     this.cx.asWritten(this.instance);
   }
@@ -2048,7 +2121,8 @@ class BodyChecker implements Context {
   }
 
   // Runs a match arm in a scope of its own, holding the names its pattern binds.
-  arm<T>(this: Mut<this>, run: () => T): T {
+  /** @throws {CompileError} */
+  arm<T>(this: Mut<this>, run: InScope<T>): T {
     this.scopes.push(new Map());
     try {
       return run();
@@ -2057,6 +2131,7 @@ class BodyChecker implements Context {
     }
   }
 
+  /** @throws {CompileError} */
   block(this: Mut<this>, arm: Extract<Stmt, { kind: "block" }>, wanted: boolean): [Expr, Type][] {
     const target: Target = { stmt: arm, kind: "arm", wanted, gives: [] };
     this.within(target, () => this.statement(arm));
@@ -2066,6 +2141,7 @@ class BodyChecker implements Context {
     return target.gives!;
   }
 
+  /** @throws {CompileError} */
   bind(this: Mut<this>, name: string, type: Type, node: Expr): Local {
     this.declare(name, type, false, false, node);
     return this.cx.localOf(this.locals.get(node)!);
@@ -2075,7 +2151,8 @@ class BodyChecker implements Context {
     return this.captures?.has(l.localId) ?? false;
   }
 
-  comptime<T>(this: Mut<this>, check: () => T): T {
+  /** @throws {CompileError} */
+  comptime<T>(this: Mut<this>, check: InScope<T>): T {
     this.comptimeDepth++;
     try {
       return check();
@@ -2084,6 +2161,7 @@ class BodyChecker implements Context {
     }
   }
 
+  /** @throws {CompileError} */
   errorOf(this: Mut<this>, instance: Instance): Type | undefined {
     return this.cx.errorOf(instance);
   }
@@ -2100,6 +2178,7 @@ class BodyChecker implements Context {
     return this.depths.get(l.localId)!;
   }
 
+  /** @throws {CompileError} */
   resolveWith(this: Mut<this>, t: TypeNode, scope: Map<string, Type>): Type {
     return this.cx.resolver().withScope(scope, () => this.cx.resolver().resolveType(t));
   }
@@ -2108,18 +2187,22 @@ class BodyChecker implements Context {
     return this.cx.arenas.instanceOf(this.cx.closureBodies.get(t)!);
   }
 
+  /** @throws {CompileError} */
   resolveType(this: Mut<this>, t: TypeNode): Type {
     return this.cx.resolver().resolveType(t);
   }
 
+  /** @throws {CompileError} */
   implicitOf(this: Mut<this>, f: Body): Map<usize, Bound> {
     return this.cx.instancing().implicitOf(f);
   }
 
+  /** @throws {CompileError} */
   callbackType(this: Mut<this>, f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: usize, at: Span): FunctionType | undefined {
     return this.cx.instancing().callbackType(f, typeArgs, argTypes, i, at);
   }
 
+  /** @throws {CompileError} */
   constructs(this: Mut<this>, f: Body, args: Expr[], argTypes: Type[]) {
     this.cx.instancing().constructs(f, args, argTypes);
   }
@@ -2143,18 +2226,21 @@ class BodyChecker implements Context {
 
   // A closure's change to what it captures, which a call of it could make at any time, so all
   // that was known of the root's fields is forgotten.
+  /** @throws {CompileError} */
   changesLocal(this: Mut<this>, l: Local, path: string, action: string, target: Expr, throughMut: boolean) {
     this.closureChanged.add(String(l.localId));
     this.changesPath(l, "", action, target);
     this.exprs().changesLocal(l, path, action, target, throughMut);
   }
 
+  /** @throws {CompileError} */
   changesThis(this: Mut<this>, path: string, action: string, target: Expr) {
     this.closureChanged.add("this");
     this.changesPath("this", "", action, target);
     this.exprs().changesThis(path, action, target);
   }
 
+  /** @throws {CompileError} */
   check(this: Mut<this>) {
     this.statements(this.f.body, (s, check) => {
       const assigned = this.unset.size > 0 ? this.fieldAssignment(s) : undefined;
@@ -2291,6 +2377,7 @@ class BodyChecker implements Context {
   // in the body a closure captures it from too. A read earlier in a loop, checked as narrowed by
   // something from before the loop, would see the new member the next time round, so that is
   // refused.
+  /** @throws {CompileError} */
   lendsWhole(this: Mut<this>, l: Local, at: Expr) {
     if (this.cx.typing.holdsRef(l.type)) return;
     const outside = this.captures?.get(l.localId);
@@ -2346,6 +2433,7 @@ class BodyChecker implements Context {
   }
   // Whether something is known of the field paths at or below `prefix`. A change there, in a loop
   // that read one of them as narrowed by a check from before the loop, is refused.
+  /** @throws {CompileError} */
   loopChange(this: Mut<this>, prefix: string, action: string, shown: string, at: Expr): boolean {
     const from = this.facts.findIndex((f) => [...f.keys()].some((k) => isPath(k) && covers(prefix, k)));
     if (from < 0) return false;
@@ -2369,6 +2457,7 @@ class BodyChecker implements Context {
   // A change at `path` inside a binding or `this` forgets what was known of the field paths it
   // reaches, below an element all of the array's. Lending a path as the one member a check
   // narrowed it to, or updating it in place as `+=` does, keeps that member.
+  /** @throws {CompileError} */
   changesPath(this: Mut<this>, root: Local | "this", path: string, action: string, at: Expr) {
     const cut = path.indexOf("[...]");
     const prefix = `${root === "this" ? root : root.localId}${cut < 0 ? path : path.slice(0, cut)}`;
@@ -2381,6 +2470,7 @@ class BodyChecker implements Context {
     this.drop(below);
   }
   // A call of a function whose result is `x is T` narrows its argument for x to T.
+  /** @throws {CompileError} */
   predicate(this: Mut<this>, call: Extract<Expr, { kind: "call" }>) {
     const target = this.cx.arenas.instanceOf(this.calls.get(call));
     const p = target && bodyOf(target).returnType;
@@ -2390,6 +2480,7 @@ class BodyChecker implements Context {
     return { index, type, narrows: (yes: boolean, no: boolean) => void ((yes || no) && (this.instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no })) };
   }
   // A binding the condition itself writes isn't narrowed by it.
+  /** @throws {CompileError} */
   proves(e: Expr) {
     const proven = guard(this.cx.tables, e, this.types, this.locals as NodeMap<Expr, LocalId>, (l) => this.narrowable(l), (x) => this.pathKey(x), (call) => this.predicate(call));
     const inside = this.written.filter((w) => w.at >= e.start && w.at < e.end);
@@ -2433,6 +2524,7 @@ class BodyChecker implements Context {
   }
 
   // `name(...)` inside the nested function `name`: a call of itself, with its own captures.
+  /** @throws {CompileError} */
   selfCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): { type: Type; what: string } | undefined {
     const name = (e.callee as Extract<Expr, { kind: "ident" }>).name;
     // A name the body declares itself is that, not the function.
@@ -2455,6 +2547,7 @@ class BodyChecker implements Context {
 
   // `let x: T` declares a variable that holds nothing until assigned; the moves check refuses
   // every use before that, as TypeScript's definite assignment does.
+  /** @throws {CompileError} */
   unassigned(this: Mut<this>, s: Stmt, d: Declarator, name: string): undefined {
     if (!d.type) throw new CompileError("E0406", `'${name}' needs a type to be declared without a value, like 'let ${name}: string'; Fish doesn't work it out from later assignments`, d.start, d.end);
     const type = this.cx.typing.stored(this.cx.resolver().resolveType(d.type));
@@ -2471,6 +2564,7 @@ class BodyChecker implements Context {
   // target, after the targets before it. An array or object literal on the right is taken
   // part by part, each part typed as its target is, so a swap of values that move needs no
   // array and a literal meets its target's type.
+  /** @throws {CompileError} */
   destructuring(this: Mut<this>, e: Extract<Expr, { kind: "destructure" }>): Stmt[] {
     // Every part is read first, then every target written, so a target can't change what a
     // later part reads, as in '({ a: o.b, b: o.a } = o)'.
@@ -2600,6 +2694,7 @@ class BodyChecker implements Context {
 
   // `let a = 1, b = a` is a declaration per name, in order, each seeing those before it. A
   // `for` head's go in a block around the loop, which scopes them as the head does.
+  /** @throws {CompileError} */
   separate(this: Mut<this>, list: Stmt[]) {
     for (let i = list.length - 1; i >= 0; i--) {
       const s = this.cx.rewrites.current(list[i]!);
@@ -2623,7 +2718,8 @@ class BodyChecker implements Context {
   // Checks a list of statements in order. What an `if` that leaves early proves holds for
   // the statements after it, and so does what an assignment sets. Gives the type each binding
   // the list writes has at its end.
-  statements(this: Mut<this>, list: Stmt[], each: (s: Stmt, check: (s: Stmt) => Facts | undefined) => Facts | undefined = (s: Stmt, check: (s: Stmt) => Facts | undefined) => check(s)): Facts {
+  /** @throws {CompileError} */
+  statements(this: Mut<this>, list: Stmt[], each: StmtEach = (s: Stmt, check: StmtCheck) => check(s)): Facts {
     this.separate(list);
     this.hoist(list);
     const before = this.facts.length;
@@ -2656,6 +2752,7 @@ class BodyChecker implements Context {
   // in the list being checked, so the names own the parts as Rust's `let` does. A nested
   // pattern is a declaration of its own, destructured in turn. A default is taken when its
   // part is null.
+  /** @throws {CompileError} */
   destructured(this: Mut<this>, s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>, place: { list: Stmt[]; at: usize } | undefined): undefined {
     if (!place || this.cx.rewrites.current(place.list[place.at]!) !== s) throw unsupported("destructuring patterns here", pattern);
     // A place is read part by part where it is, so only the parts named move out of it, as in
@@ -2813,6 +2910,7 @@ class BodyChecker implements Context {
   // length choosing `t[0]`, `t[1]` and so on: each element is a copy when they all copy, typed
   // as their union, or lent when they share one type that doesn't. A union of references to
   // different types can't be held, so those are refused.
+  /** @throws {CompileError} */
   private tupleLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, tuple: ObjectType): Stmt {
     const typing = this.cx.typing;
     const ids = this.cx.ids;
@@ -2858,6 +2956,7 @@ class BodyChecker implements Context {
     return this.cx.rewrites.replace(s, { id: 0, kind: "for", init, test, update, body: [each, body], start: s.start, end: s.end });
   }
 
+  /** @throws {CompileError} */
   loopPattern(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>) {
     if (pattern.rest) throw unsupported("rest patterns", pattern.rest);
     const named = (p: Pattern | undefined): Extract<Pattern, { kind: "ident" }> | undefined => {
@@ -2888,6 +2987,7 @@ class BodyChecker implements Context {
   }
 
   // A name a loop's pattern binds: its part of the element, borrowed when the element is.
+  /** @throws {CompileError} */
   loopPart(this: Mut<this>, s: Extract<Stmt, { kind: "let" }>, d: Declarator): undefined {
     const init = d.init!;
     const object = init.kind === "index" || init.kind === "member" ? init.object : init;
@@ -2909,6 +3009,7 @@ class BodyChecker implements Context {
   // A whole value written through a narrowed `Mut` may be another member, so from here to the
   // end of each narrowing scope it is read as declared. A loop inside such a scope could come
   // back to reads already checked as narrowed.
+  /** @throws {CompileError} */
   rewritten(this: Mut<this>, l: Local, at: Expr) {
     const outside = this.captures?.get(l.localId);
     if (outside && outside !== "this" && this.outer!.narrowed(this.cx.localOf(outside))) {
@@ -2967,7 +3068,8 @@ class BodyChecker implements Context {
     return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => isPath(l) || !gone.includes(Number(l) as LocalId)));
   }
 
-  assume<T>(this: Mut<this>, proven: Facts, check: () => T): T {
+  /** @throws {CompileError} */
+  assume<T>(this: Mut<this>, proven: Facts, check: InScope<T>): T {
     this.facts.push(proven);
     try {
       return check();
@@ -2977,6 +3079,7 @@ class BodyChecker implements Context {
   }
 
   // An arrow function: its own type, and its body checked here, where it is written.
+  /** @throws {CompileError} */
   closure(this: Mut<this>, e: Arrow, expected?: FunctionType, unsafe = false, owning = false): ClosureType {
     // An async arrow's future usually outlives the call making it, so it owns its captures.
     owning ||= e.async;
@@ -3085,6 +3188,7 @@ class BodyChecker implements Context {
   }
 
   // A parameter's type is written, or else the one the function type the closure meets gives.
+  /** @throws {CompileError} */
   closureParam(this: Mut<this>, p: Param, i: usize, expected: FunctionType | undefined): Type {
     const takes = expected && this.cx.typing.rec(expected).params;
     const given = takes?.[i];
@@ -3105,6 +3209,7 @@ class BodyChecker implements Context {
     return type;
   }
 
+  /** @throws {CompileError} */
   statement(this: Mut<this>, written: Stmt): Facts | undefined {
     const s = this.cx.rewrites.current(written);
     if (s.kind !== "while" && s.kind !== "doWhile" && s.kind !== "for" && s.kind !== "forOf") return this.statementOf(s);
@@ -3118,6 +3223,7 @@ class BodyChecker implements Context {
     }
   }
 
+  /** @throws {CompileError} */
   statementOf(this: Mut<this>, s: Stmt): Facts | undefined {
     const declaration = unsupportedDeclaration(s);
     if (declaration) throw declaration;
@@ -3552,6 +3658,7 @@ class BodyChecker implements Context {
 
   // `for await`: an async generator gives each value it yields, as a generator's loop does, and
   // a Channel each value it receives until it is closed and drained.
+  /** @throws {CompileError} */
   awaitLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, name: string, mutable: boolean, through: Type, object: Type) {
     const yields = this.cx.typing.yieldsOf(object, true);
     const o = this.cx.recOf(object);
@@ -3573,6 +3680,7 @@ class BodyChecker implements Context {
   // `yield v;`: the generator gives `v` and stops until `next()` is called again. It runs as
   // a statement of its own, or as all of a declaration's initializer or an assignment's value,
   // so nothing the statement made is pending across it. Its value is what `next(x)` sends.
+  /** @throws {CompileError} */
   yielding(this: Mut<this>, e: Extract<Expr, { kind: "yield" }>): Type {
     if (!this.generatorType) throw new CompileError("E0606", "'yield' can only be used inside a 'function*'", e.start, e.end);
     if (this.yieldable.has(e) && this.f.async) throw unsupported("values sent into an async generator's 'next'", e);
@@ -3594,6 +3702,7 @@ class BodyChecker implements Context {
   // An `await` written as a statement of its own, or as all of a declaration's initializer,
   // an assignment's value or a return's: one the state machine can stop at with nothing else
   // of the statement pending.
+  /** @throws {CompileError} */
   awaiting(this: Mut<this>, e: Expr) {
     if (!this.f.async) return;
     if (this.targets.some((t) => t.kind === "arm")) throw unsupported("'await' inside match arms", e);
@@ -3601,6 +3710,7 @@ class BodyChecker implements Context {
     this.awaitable.add(e);
   }
 
+  /** @throws {CompileError} */
   fieldAssignment(this: Mut<this>, s: Stmt): Extract<Expr, { kind: "member" }> | undefined {
     if (s.kind !== "expr" || s.expr.kind !== "assign" || s.expr.op !== "=") return undefined;
     // This runs before the statement is checked; a `!` here that can unwrap is refused there.
@@ -3614,13 +3724,15 @@ class BodyChecker implements Context {
     return this.cx.registry().classOf(this.f.self!.type).fields.some((d) => d.name === target.name) || inherited ? target : undefined;
   }
 
-  within(this: Mut<this>, target: Target, check: () => void) {
+  /** @throws {CompileError} */
+  within(this: Mut<this>, target: Target, check: InScope<void>) {
     target.facts = this.facts.length;
     this.targets.push(target);
     check();
     this.targets.pop();
   }
 
+  /** @throws {CompileError} */
   jumpTarget(s: Jump): Stmt {
     const fits = (t: Target) => (s.label === undefined ? t.kind === "loop" || (s.kind === "break" && t.kind === "switch") : t.label === s.label);
     const found = this.targets.findLast((t) => t.kind === "arm" || fits(t));
@@ -3653,6 +3765,7 @@ class BodyChecker implements Context {
     return alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue";
   }
 
+  /** @throws {CompileError} */
   scoped(this: Mut<this>, stmts: Stmt[]): Facts {
     this.scopes.push(new Map());
     const ends = this.statements(stmts);
@@ -3660,6 +3773,7 @@ class BodyChecker implements Context {
     return ends;
   }
 
+  /** @throws {CompileError} */
   declare(this: Mut<this>, name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr) {
     const scope = this.scopes[this.scopes.length - 1]!;
     // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
@@ -3711,6 +3825,7 @@ class BodyChecker implements Context {
 
   // A generic function written in a body, or a generic arrow a const holds, is a generic
   // function of its own, instantiated per call, so it can use nothing of the body around it.
+  /** @throws {CompileError} */
   lift(this: Mut<this>, s: Stmt, name: string, fn: Func): undefined {
     this.lifted(s, name, fn, `'${name}'`);
     return this.statement(this.cx.rewrites.replace(s, { id: 0, kind: "empty", start: s.start, end: s.end })) as undefined;
@@ -3718,6 +3833,7 @@ class BodyChecker implements Context {
 
   // A generic arrow written as a value is a generic function of its own, as one a const holds
   // is, and the arrow becomes its name.
+  /** @throws {CompileError} */
   liftArrow(this: Mut<this>, e: Extract<Expr, { kind: "arrow" }>): Expr {
     const fn = this.lifted(e, "", arrowFunction(this.cx.ids, "", e, e), "this arrow");
     return this.cx.rewrites.replace(e, { id: 0, kind: "ident", name: fn.name, start: e.start, end: e.end });
@@ -3725,6 +3841,7 @@ class BodyChecker implements Context {
 
   // Lifts a generic function out of the body around it, once per place it is written. `who`
   // names it in messages.
+  /** @throws {CompileError} */
   lifted(this: Mut<this>, key: Stmt | Expr, name: string, fn: Func, who: string): Func {
     const own = fn as Extract<Stmt, { kind: "function" }>;
     if (holdsNode("stmt", fn.body, (n) => n.kind === "this")) {
@@ -3765,6 +3882,7 @@ class BodyChecker implements Context {
 
   // A closure changing what it captures captures it mutably, if it may change where the
   // closure is made.
+  /** @throws {CompileError} */
   changesCapture(this: Mut<this>, l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean) {
     const alias = l?.localId ?? [...this.captures!].find(([, from]) => from === "this")![0];
     const held = this.captures!.get(alias)!;
@@ -3793,6 +3911,7 @@ class BodyChecker implements Context {
 
   // `throw` returns an error of the type the function declares, or goes to a catch. A value
   // the error type takes is converted to it; another may be wrapped.
+  /** @throws {CompileError} */
   thrown(this: Mut<this>, at: Expr | Stmt, thrownValue: Expr) {
     const type = this.exprs().value(thrownValue);
     const into = this.errorType && this.handlers.length === 0 && (this.cx.typing.fits(type, this.errorType) || this.exprs().adapt(thrownValue, this.errorType));
@@ -3802,6 +3921,7 @@ class BodyChecker implements Context {
 
   // An error raised by a call or a `throw` goes to the function's caller, which needs a
   // `throws` clause it fits.
+  /** @throws {CompileError} */
   raise(this: Mut<this>, at: Expr | Stmt, type: Type, what: string) {
     if (this.cx.typing.holdsRef(type)) throw unsupported("errors holding references", at);
     const handler = this.handlers.at(-1);
@@ -3911,6 +4031,7 @@ function abstractPart(typing: Typing, t: Type): ClassType | undefined {
 // A net under the rules that decide what is compiled: no compiled function calls, and no
 // compiled Dyn's table holds, an instance that isn't compiled. Only a value of an abstract
 // class's own type, which escaped where no rule saw it, could reach one.
+/** @throws {CompileError} */
 export function unreached(typing: Typing, equalities: Tables["equalities"], arenas: Arenas, compiled: InstanceId[], dropped: (i: Instance) => boolean) {
   for (const i of compiled.map((id) => arenas.instanceOf(id))) {
     const reached: [Expr, InstanceId, string][] = [

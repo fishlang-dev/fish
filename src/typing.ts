@@ -11,6 +11,9 @@ import type { RustClass } from "./rust.ts";
 // counts toward a structural fit, as in TypeScript.
 export type Access = "public" | "private" | "protected";
 
+/** @throws {CompileError} */
+export type TypePred = (t: ClassType | VariantType) => boolean;
+
 // A readonly field can't be written after construction, at any depth.
 // `optional` marks a field written `name?: T`, whose type holds `null` for the value left out:
 // "added" when `?` added it, "held" when T already held it, so `Required` removes only the first.
@@ -615,7 +618,8 @@ export class Typing {
   // The part of a type that keeps `===` from comparing its values, or undefined when every part
   // compares: primitives, strings and literals, and objects, tuples, arrays and unions of them. A
   // class compares through its `equals`, and a data enum when it derives Eq; `eq` says which do.
-  unequal(t: Type, eq: (t: ClassType | VariantType) => boolean, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
+  /** @throws {CompileError} */
+  unequal(t: Type, eq: TypePred, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
     if (typeof t === "string" || seen.has(t)) return undefined;
     seen.add(t);
     const part = (u: Type) => this.unequal(u, eq, seen);
@@ -1549,7 +1553,8 @@ export class Typing {
   // undefined when every part is Json: booleans, numbers, strings and literals, and objects,
   // tuples, arrays, unions and string-keyed Maps of them, with the classes and data enums that
   // `json` says derive it. A class's `#private` fields aren't written, as in JavaScript.
-  unjson(this: Mut<this>, t: Type, json: (t: ClassType | VariantType) => boolean, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
+  /** @throws {CompileError} */
+  unjson(this: Mut<this>, t: Type, json: TypePred, seen: TypeSet<Type> = new TypeSet<Type>()): Type | undefined {
     // JavaScript throws for a bigint, which JSON has no number for.
     if (typeof t === "string") return t === "void" || t === "never" || t === "bigint" ? t : undefined;
     if (seen.has(t)) return undefined;
@@ -2552,12 +2557,16 @@ export class Typing {
 
 // What makes a recursive type again with other type arguments, for lowering.
 export interface RecursiveMaker {
+  /** @throws {CompileError} */
   remakeRecursive(this: Mut<this>, t: RecursiveType, args: Type[]): RecursiveType;
 }
 
 // What declares the instances of generic classes, interfaces and enums that lowering needs.
 export interface InstanceMaker {
+  /** @throws {CompileError} */
   classInstance(this: Mut<this>, c: ClassType, args: Type[]): ClassType;
+  /** @throws {CompileError} */
   interfaceInstance(this: Mut<this>, t: InterfaceType, args: Type[]): InterfaceType;
+  /** @throws {CompileError} */
   variantInstance(this: Mut<this>, v: VariantType, args: Type[]): VariantType;
 }

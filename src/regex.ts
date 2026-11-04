@@ -33,6 +33,7 @@ export class RegexSyntaxError {
   }
 }
 
+/** @throws {RegexSyntaxError} */
 const fail = (message: string): never => {
   throw new RegexSyntaxError(`invalid regular expression: ${message}`);
 };
@@ -82,6 +83,7 @@ export type RegexTables = { properties: Map<string, Ranges>; folds: Map<string, 
 
 // What a property escape matches, worked out from the engine running the compiler, which knows
 // Unicode's tables.
+/** @throws {RegexSyntaxError} */
 function property(tables: RegexTables, body: string, sets: boolean): Ranges {
   if (sets && STRING_PROPERTIES.has(body)) return fail("properties of strings are not supported yet");
   let found = tables.properties.get(body);
@@ -108,6 +110,7 @@ function property(tables: RegexTables, body: string, sets: boolean): Ranges {
   return found;
 }
 
+/** @throws {RegexSyntaxError} */
 export function parsePattern(source: string, flags: string, tables: RegexTables): Pattern {
   for (const [i, f] of [...flags].entries()) {
     if (!"dgimsuvy".includes(f) || flags.indexOf(f) !== i) fail(`invalid flags supplied to RegExp constructor '${flags}'`);
@@ -154,6 +157,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return items.length === 0 ? { kind: "empty" } : items.length === 1 ? items[0]! : { kind: "seq", items };
   }
 
+  /** @throws {RegexSyntaxError} */
   function term(): RegexNode {
     const first = captures.length;
     const [atom, quantifiable] = atomOrAssertion();
@@ -166,6 +170,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
 
   // A quantifier here, read and consumed, or none. Without `u`, a `{` that doesn't begin one is
   // an ordinary character.
+  /** @throws {RegexSyntaxError} */
   function quantifierHere(): [usize, f64, boolean] | undefined {
     const c = peek();
     let min: usize, max: f64;
@@ -183,6 +188,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return [min, max, !eat("?")];
   }
 
+  /** @throws {RegexSyntaxError} */
   function bracedQuantifier(): [usize, f64] | undefined {
     const start = pos;
     pos++;
@@ -203,6 +209,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return undefined;
   }
 
+  /** @throws {RegexSyntaxError} */
   function atomOrAssertion(): [RegexNode, boolean] {
     const c = peek()!;
     if (c === at("^")) {
@@ -234,6 +241,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return [{ kind: "char", c, fold }, true];
   }
 
+  /** @throws {RegexSyntaxError} */
   function group(): [RegexNode, boolean] {
     pos++;
     if (eat("?")) {
@@ -256,6 +264,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return capture(undefined);
   }
 
+  /** @throws {RegexSyntaxError} */
   function capture(name: string | undefined): [RegexNode, boolean] {
     if (name !== undefined) {
       if (alternativeNames.some((s) => s.has(name))) fail("duplicate group specifier name");
@@ -267,6 +276,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
   }
 
   // A group's body, its own scope for the names its alternatives use.
+  /** @throws {RegexSyntaxError} */
   function scoped(index: usize | undefined): [RegexNode, boolean] {
     const outer = alternativeNames;
     alternativeNames = [...outer, new Set()];
@@ -280,6 +290,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
   }
 
   // `(?ims-ims:...)` turns flags on or off inside the group.
+  /** @throws {RegexSyntaxError} */
   function modifiers(): [RegexNode, boolean] {
     let on = "", off = "", minus = false;
     for (;;) {
@@ -306,6 +317,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return result;
   }
 
+  /** @throws {RegexSyntaxError} */
   function groupName(): string {
     let name = "";
     for (;;) {
@@ -328,6 +340,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
 
   // After `\u`: four hex digits, a surrogate pair of them under `u`, or `{...}` under `u` (or in
   // a group name, always); undefined when what follows isn't one.
+  /** @throws {RegexSyntaxError} */
   function unicodeEscape(braces: boolean): u32 | undefined {
     const start = pos;
     if ((unicode || braces) && eat("{")) {
@@ -369,6 +382,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return v;
   }
 
+  /** @throws {RegexSyntaxError} */
   function atomEscape(): RegexNode {
     pos++;
     const c = peek() ?? fail("\\ at end of pattern");
@@ -434,6 +448,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
 
   // `\d`, `\w`, `\s`, their negations, and `\p{...}` under `u` or `v`, consumed; undefined for
   // anything else.
+  /** @throws {RegexSyntaxError} */
   function classEscape(): Extract<RegexNode, { kind: "set" }> | undefined {
     const c = peek()!;
     const upper = c >= at("A") && c <= at("Z");
@@ -457,6 +472,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
   }
 
   // A character escape's value; `inClass` for the forms only a class allows.
+  /** @throws {RegexSyntaxError} */
   function characterEscape(inClass: boolean): u32 {
     const c = text[pos++]!;
     switch (c) {
@@ -513,6 +529,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
   }
 
   // A class without `v`: atoms and ranges of them.
+  /** @throws {RegexSyntaxError} */
   function classRanges(): RegexNode {
     pos++;
     const negated = eat("^");
@@ -545,6 +562,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
     return s.negated ? complement(s.ranges, top) : s.ranges;
   }
 
+  /** @throws {RegexSyntaxError} */
   function classAtom(): u32 | Extract<RegexNode, { kind: "set" }> {
     const c = text[pos]!;
     if (c !== at("\\")) {
@@ -562,6 +580,7 @@ export function parsePattern(source: string, flags: string, tables: RegexTables)
 
   // A class under `v`: unions, intersections with `&&`, differences with `--`, nested classes
   // and `\q{...}` strings.
+  /** @throws {RegexSyntaxError} */
   function classSet(): Extract<RegexNode, { kind: "set" }> {
     pos++;
     const negated = eat("^");
@@ -713,6 +732,7 @@ export const BACKWARD = 32;
 export const HEADER = 4;
 export const PROGRAM_LIMIT = 1 << 20;
 
+/** @throws {RegexSyntaxError} */
 export function compile(p: Pattern, tables: RegexTables): u32[] {
   const code: u32[] = [];
   const emit = (...words: u32[]) => {

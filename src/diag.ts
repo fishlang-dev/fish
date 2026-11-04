@@ -79,6 +79,12 @@ export class CompileErrors extends CompileError {
   }
 }
 
+export function compileErrors(errors: CompileError[]): CompileError {
+  let out = new CompileError(errors[0]!.code, errors[0]!.message, errors[0]!.start, errors[0]!.end, errors[0]!.note === undefined ? undefined : { ...errors[0]!.note! });
+  out.errors = errors;
+  return out;
+}
+
 // Gives `e` the names its compilation made up, with the hoisted ones in its messages as written.
 export function named(e: CompileError, names: Names): CompileError {
   let out = e;

@@ -1,3 +1,4 @@
+import assert from "node:assert";
 import type { ClassMember, ClassNode, Func } from "./parser.ts";
 import type { Type, Typing } from "./typing.ts";
 import type { NodeMap } from "./nodes.ts";
@@ -37,9 +38,7 @@ export const rustSymbol = (crate: string, path: string) => `fsh_rust_${[crate.re
 // tree it came through isn't trusted to hold only what the declarations gave.
 export function trusted(name: RustName): RustName {
   const { crate, path, symbol } = name;
-  if (!validCrate(crate) || !path.split("::").every((p) => RUST_NAME.test(p)) || symbol !== rustSymbol(crate, path)) {
-    throw new Error(`internal error: a Rust function's name isn't one a declaration gives: ${JSON.stringify(name)}`);
-  }
+  assert(validCrate(crate) && path.split("::").every((p) => RUST_NAME.test(p)) && symbol === rustSymbol(crate, path), `internal error: a Rust function's name isn't one a declaration gives: ${JSON.stringify(name)}`);
   return name;
 }
 
@@ -103,7 +102,7 @@ function arrayCrossing(typing: Typing, element: Type, lent: boolean): Crossing |
 // A crossing the checker allowed, which code generation trusts.
 export function crossed(typing: Typing, t: Type, giving = false): Crossing {
   const c = crossingOf(typing, t, giving);
-  if (typeof c === "string") throw new Error(`internal error: a '${t}' reached the Rust boundary: ${c}`);
+  assert(typeof c !== "string", `internal error: a '${t}' reached the Rust boundary: ${String(c)}`);
   return c;
 }
 

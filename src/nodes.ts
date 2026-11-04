@@ -2,6 +2,7 @@
 // Node ids, and the tables keyed by them. Fish's `Map` and `Set` key on strings and integers,
 // not objects, so the compiler's per-node tables key on each node's `id`.
 
+import assert from "node:assert";
 import type { Id } from "./ids.ts";
 import type { ClassMember, Declarator, Expr, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { forEachChild as visitChildren, type AnyNode, type NodeTypes, type Visitor } from "./walk.ts";
@@ -57,6 +58,13 @@ export function walk<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K>[] |
   for (const node of list) walking.node({ of, node } as AnyNode);
 }
 
+// Every node under `roots`, nodes of type `of`, themselves included, each before those it holds.
+export function nodesIn<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K>[] | undefined): AnyNode[] {
+  const found: AnyNode[] = [];
+  walk(of, roots, (n) => void found.push(n));
+  return found;
+}
+
 // Whether `found` picks out a node under `roots`, nodes of type `of`, themselves included.
 export function someNode<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K>[] | undefined, found: (n: AnyNode) => boolean): boolean {
   let hit = false;
@@ -82,7 +90,7 @@ function markOf(n: AnyNode): string {
 function reachedBefore(seen: Map<usize, string>, id: usize, n: AnyNode): boolean {
   const was = seen.get(id);
   if (was === undefined) return false;
-  if (was !== markOf(n)) throw new Error(`internal error: two nodes share id ${id}`);
+  assert(was === markOf(n), `internal error: two nodes share id ${id}`);
   return true;
 }
 
@@ -124,7 +132,7 @@ export function shiftSpans<K extends RootKind>(of: K, tree: NodeOf<K> | NodeOf<K
 // one, so a table reads one entry for either.
 function idOf(node: Id): usize {
   const id = node.id;
-  if (typeof id !== "number") throw new Error(`internal error: a ${(node as { kind?: string }).kind ?? "node"} node has no id`);
+  assert(typeof id === "number", `internal error: a ${(node as { kind?: string }).kind ?? "node"} node has no id`);
   return id;
 }
 

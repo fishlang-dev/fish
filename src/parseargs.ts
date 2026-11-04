@@ -10,6 +10,7 @@ const OPTION_KEYS = ["type", "short", "multiple", "default"];
 // The arguments std's parseArgs takes in place of a call's config literal: the arguments to
 // read, the options as specs, the two settings Fish reads, and a builder of the values typed as
 // @types/node types them, a field per option, optional unless it has a default.
+/** @throws {CompileError} */
 export function parseArgsArgs(ids: Ids, e: Call): Expr[] {
   if (e.args.length > 1) throw new CompileError("E0504", "'parseArgs' takes one config object", e.args[1]!.start, e.args.at(-1)!.end);
   const config = e.args[0];
@@ -93,6 +94,7 @@ function literalOnly(at: Span, what: string): CompileError {
   return new CompileError("E0504", `'parseArgs' takes ${what} as an object literal written in the call, so its result's type is known while compiling`, at.start, at.end);
 }
 
+/** @throws {CompileError} */
 function keyOf(p: ObjectProp, within: string): string {
   if (p.kind === "shorthand") return p.name;
   if ((p.kind === "property" || p.kind === "method") && typeof p.key === "string") return p.key;

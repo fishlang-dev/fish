@@ -9,11 +9,17 @@ import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, TypeNode } from "./parser.ts";
-import { storable } from "./resolve.ts";
+import { storable, type InScope } from "./resolve.ts";
 import { EMBEDDED, type MapType, type RefType, type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
 
 // A member a class's `override` replaces: its name as shown, its parameters' types and its result.
 type Replaced = { name: string; params: (Type | undefined)[]; returns: Type | undefined };
+
+/** @throws {CompileError} */
+type SettleRun = () => void;
+
+/** @throws {CompileError} */
+type SettleEach = (run: SettleRun) => void;
 
 // Every class the program uses, declared or a generic class's instance: linked to its base,
 // laid out, checked against what it claims, and its members checked at their definitions.
@@ -26,10 +32,15 @@ export interface RegistryHost {
   templates: Map<string, ClassNode>;
   members(this: Mut<this>): Members;
   registryState: RegistryState;
+  /** @throws {CompileError} */
   resolveType(t: TypeNode): Type;
-  withScope<T>(bindings: Map<string, Type>, f: () => T): T;
+  /** @throws {CompileError} */
+  withScope<T>(bindings: Map<string, Type>, f: InScope<T>): T;
+  /** @throws {CompileError} */
   instanceOf(f: Body): Instance;
+  /** @throws {CompileError} */
   definition(f: Body): Instance;
+  /** @throws {CompileError} */
   checkBody(i: Instance): void;
   // The names of the classes a use at `at` reaches, for suggesting one.
   classNames(at: usize): string[];
@@ -67,7 +78,8 @@ export class Registry<H extends RegistryHost> {
 
   // Lays out a class, checks what it claims, and checks each of its members at its definition,
   // each through `each`, which may recover from one member's error to check the next.
-  settle(this: Mut<this>, c: ClassInfo, each: (run: () => void) => void = (run) => run()) {
+  /** @throws {CompileError} */
+  settle(this: Mut<this>, c: ClassInfo, each: SettleEach = (run) => run()) {
     this.layout(c);
     this.overrideSignatures(c);
     this.implemented(c);
@@ -80,6 +92,7 @@ export class Registry<H extends RegistryHost> {
 
   // Bases are linked first, since a derived constructor may take its base's parameters. An abstract
   // class's templates are marked, and a concrete class's copies made, before overrides are checked.
+  /** @throws {CompileError} */
   link(this: Mut<this>, c: ClassInfo, path: TypeSet<ClassType>) {
     if (this.host.registryState.linked.has(c.type)) return;
     if (c.baseName === undefined) {
@@ -113,6 +126,7 @@ export class Registry<H extends RegistryHost> {
   // A member written `override` takes what the member it replaces takes, as TypeScript checks:
   // each parameter that one is given fits this one's, any further parameter is optional, and its
   // result fits that one's.
+  /** @throws {CompileError} */
   private overrideSignatures(this: Mut<this>, c: ClassInfo) {
     for (const o of c.overrides) {
       const tables = o.static ? [["statics", o.name], ["statics", `get ${o.name}`], ["statics", `set ${o.name}`]] as const : [["methods", o.name], ["getters", o.name], ["setters", o.name]] as const;
@@ -166,6 +180,7 @@ export class Registry<H extends RegistryHost> {
     }
   }
 
+  /** @throws {CompileError} */
   private fitsOverride(this: Mut<this>, own: Body, replaced: Replaced) {
     const show = (t: Type) => this.typing.show(t);
     // A parameter naming the class itself, as `Ref<this>` does, names each class in turn.
@@ -194,6 +209,7 @@ export class Registry<H extends RegistryHost> {
 
   // The class `extends` names, a generic one made from the type arguments it is written with,
   // as this class's own type parameters stand for them.
+  /** @throws {CompileError} */
   private baseOf(c: ClassInfo, name: string): ClassInfo {
     const at = c.node.extends!;
     if (!this.host.classes.has(name) && !this.host.templates.has(name)) throw new CompileError("E0401", `cannot find class '${name}'${didYouMean(name, this.host.classNames(at.start))}`, at.start, at.end);
@@ -208,6 +224,7 @@ export class Registry<H extends RegistryHost> {
   // Resolves a class's field types. An unannotated field takes its initializer's type, which
   // is checked as the body of a function that returns it, so it may use other classes.
   // Whether its fields are known, which they aren't yet while its own fields are being resolved.
+  /** @throws {CompileError} */
   layout(this: Mut<this>, c: ClassInfo): boolean {
     const base = this.arenas.classOf(c.base);
     if (this.host.registryState.laidOut.has(c.type)) return !this.host.registryState.laying.has(c.type) && (!base || this.layout(base));
@@ -245,12 +262,14 @@ export class Registry<H extends RegistryHost> {
   }
 
   // `implements` is optional, since satisfying an interface is by shape, but checked when written.
+  /** @throws {CompileError} */
   private implemented(this: Mut<this>, c: ClassInfo) {
     this.claims(c);
     if (c.node.implements.some((node) => node.kind === "ref" && node.name === "From")) this.wrapsOf(c);
   }
 
   // Checks the interfaces and types a class says it implements, `From` aside.
+  /** @throws {CompileError} */
   claims(this: Mut<this>, c: ClassInfo) {
     for (const node of c.node.implements) {
       if (node.kind === "ref" && node.name === "From") continue;
@@ -269,6 +288,7 @@ export class Registry<H extends RegistryHost> {
   // `implements From<X>` makes the class's static `from` wrap an X as one, wherever an X is
   // raised where the class is thrown. Worked out when first asked, since a function raising
   // one may be checked before the class is settled.
+  /** @throws {CompileError} */
   wrapsOf(this: Mut<this>, c: ClassInfo): ClassInfo["wraps"] {
     if (this.host.registryState.wrapped.has(c.type)) return c.wraps;
     this.host.registryState.wrapped.add(c.type);
@@ -318,6 +338,7 @@ export class Registry<H extends RegistryHost> {
     return parts.some((p) => p === inner || this.contains(p, inner, seen));
   }
 
+  /** @throws {CompileError} */
   classOf(this: Mut<this>, t: ClassType): ClassInfo {
     const c = this.arenas.classOf(this.host.registryState.infoOf.get(t)!);
     this.layout(c);

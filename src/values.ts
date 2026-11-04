@@ -10,7 +10,7 @@ import { didYouMean } from "./suggest.ts";
 import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
 import type { Expr, Interface, ObjectProp, Param, Pattern, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
-import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.ts";
+import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings, type InScope } from "./resolve.ts";
 import { infer } from "./generics.ts";
 import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, INTEGERS, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.ts";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.ts";
@@ -26,7 +26,7 @@ import { bodyOf, type BodyId, type ClassId, type InstanceId, type LocalId } from
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
-import { forEachChild, nextId, NodeMap, NodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
+import { childrenOf, forEachChild, nextId, NodeMap, NodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
 import { rebuiltExpr } from "./rebuild.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
@@ -105,7 +105,9 @@ export type Context = {
   classes: Map<string, ClassId>;
   enums: Map<string, EnumInfo>;
   // A data-carrying enum made with these type arguments.
+  /** @throws {CompileError} */
   enumInstance(info: EnumInfo, args: Type[], at: Span): EnumInstance;
+  /** @throws {CompileError} */
   construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined;
   // A generic class's constructor parameters as written.
   templateParams(name: string): Param[] | undefined;
@@ -113,16 +115,23 @@ export type Context = {
   definedClass(name: string): ClassInfo | undefined;
   members(): Members;
   exprsState: ExpressionsState;
+  /** @throws {CompileError} */
   returnOf(instance: Instance, at: Span): Type;
   // What a call returns as the calling body sees it: in terms of the calling instance's own
   // type parameters, where it passed them.
+  /** @throws {CompileError} */
   resultOf(instance: Instance, at: Span): Type;
   // What a call's returned reference borrows from, and the record of it for each call.
+  /** @throws {CompileError} */
   sourcesOf(instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[];
   borrowsFrom: NodeMap<Expr, Expr[]>;
+  /** @throws {CompileError} */
   classOf(t: ClassType): ClassInfo;
+  /** @throws {CompileError} */
   instanceOf(f: Body, bindings?: Map<string, Type>): Instance;
+  /** @throws {CompileError} */
   instantiate(f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance;
+  /** @throws {CompileError} */
   paramTypes(instance: Instance): Type[];
   // The binding a name refers to; `at`, the use, is where a closure first captures it.
   lookup(name: string, at?: Expr | ObjectProp): Local | undefined;
@@ -149,24 +158,31 @@ export type Context = {
   // A derived constructor's `super(...)`, the one place a base constructor may be called.
   superCall: Expr | undefined;
   // A nested function calling itself by name, typed by its own signature.
+  /** @throws {CompileError} */
   selfCall(e: Call): { type: Type; what: string } | undefined;
   // Whether this `this` may be used: a constructor's can't until every field is assigned.
   thisReady(e: Expr): boolean;
   // Narrowing: what a condition proves, checking under what was proven, and a variable's
   // type where something narrowed it.
+  /** @throws {CompileError} */
   proves(e: Expr): Guard;
-  assume<T>(proven: Facts, check: () => T): T;
+  /** @throws {CompileError} */
+  assume<T>(proven: Facts, check: InScope<T>): T;
   // Runs a match arm in a scope of its own, holding the names its pattern binds.
-  arm<T>(check: () => T): T;
+  /** @throws {CompileError} */
+  arm<T>(check: InScope<T>): T;
   // Checks a match arm's block, whose `return`s give the arm its value: each value and its type.
+  /** @throws {CompileError} */
   block(arm: Extract<Stmt, { kind: "block" }>, wanted: boolean): [Expr, Type][];
   // What each match pattern tests, for codegen.
   patterns: NodeMap<Pattern, PatternInfo>;
   copiesOut: NodeSet<Expr>;
   // Declares a name a pattern binds, read-only, in the arm's scope.
+  /** @throws {CompileError} */
   bind(name: string, type: Type, node: Expr): Local;
   narrowed(l: Local): Type | undefined;
   forget(l: Local, at: Span): void;
+  /** @throws {CompileError} */
   lendsWhole(l: Local, at: Expr): void;
   // Notes a read of a variable as narrowed.
   narrowRead(l: Local, at: Expr): void;
@@ -175,22 +191,28 @@ export type Context = {
   narrowedField(e: Expr): Type | undefined;
   // Whether a check proved an interface's optional method there on a value.
   present(object: Expr, name: string): boolean;
+  /** @throws {CompileError} */
   changesPath(root: Local | "this", path: string, action: string, at: Expr): void;
   // The instance being checked.
   instance: Instance;
   // False for a binding declared in another case of a switch, which entering this case skips.
   reachable(l: Local): boolean;
   // Records an error a call raises, and what the instance called may throw.
+  /** @throws {CompileError} */
   raise(at: Expr, type: Type, what: string): void;
   // Checks comptime code, which may throw any error: one it doesn't catch is a compile error.
-  comptime<T>(check: () => T): T;
+  /** @throws {CompileError} */
+  comptime<T>(check: InScope<T>): T;
   // Checks what a `throw` raises.
+  /** @throws {CompileError} */
   thrown(at: Expr, value: Expr): void;
+  /** @throws {CompileError} */
   errorOf(instance: Instance): Type | undefined;
   // What the body's function declares it throws.
   throwsDeclared(): Type | undefined;
   // Checks the body as written first, when this is an instance of a generic one, so what that
   // check decides holds for every instance.
+  /** @throws {CompileError} */
   asWritten(): void;
   // Whether the body is a sync `main` run as an async one, as a program setting timers does.
   syncMain: boolean;
@@ -215,30 +237,40 @@ export type Context = {
   awaitable: NodeSet<Expr>;
   // The yields whose value is used where the generator can stop at them, and checking one.
   yieldable: NodeSet<Expr>;
+  /** @throws {CompileError} */
   yielding(e: Extract<Expr, { kind: "yield" }>): Type;
   // Whether the body is a closure written inside `unsafe`.
   unsafe: boolean;
+  /** @throws {CompileError} */
   changesCapture(l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean): void;
   // Records a whole write through a narrowed mutable reference that may change its member.
+  /** @throws {CompileError} */
   rewritten(l: Local, at: Expr): void;
   // How deeply nested the scope declaring a binding is.
   depthOf(l: Local): usize;
   // A written type, as this body sees it.
+  /** @throws {CompileError} */
   resolveType(t: TypeNode): Type;
   // An arrow function's type, its body checked; and the instance a closure type runs.
   // A closure written inside `unsafe` is checked inside it too.
+  /** @throws {CompileError} */
   closure(e: Extract<Expr, { kind: "arrow" }>, expected?: FunctionType, unsafe?: boolean, owning?: boolean): ClosureType;
   // Makes a generic arrow written as a value a generic function of its own, the arrow its name.
+  /** @throws {CompileError} */
   liftArrow(e: Extract<Expr, { kind: "arrow" }>): Expr;
   // A type node resolved with type parameters bound, as a generic function type's for a call.
+  /** @throws {CompileError} */
   resolveWith(t: TypeNode, scope: Map<string, Type>): Type;
   closureBody(t: ClosureType): Instance;
   // The bounds of a body's implicit type parameters, by parameter index.
+  /** @throws {CompileError} */
   implicitOf(f: Body): Map<usize, Bound>;
   // The type an arrow argument of a generic body is checked against, once the others are known.
+  /** @throws {CompileError} */
   callbackType(f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: usize, at: Span): FunctionType | undefined;
   // Rejects a constructor call lending a value mutably as a type parameter that would let its
   // read-only fields be written.
+  /** @throws {CompileError} */
   constructs(f: Body, args: Expr[], argTypes: Type[]): void;
   // Whether a variable whose type is still open takes `to`, for a use needing it.
   infer(e: Expr, to: Type): boolean;
@@ -615,7 +647,8 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // Runs a check inside \`unsafe\`, where raw pointers can be used.
-  unsafely<T>(this: Mut<this>, check: () => T): T {
+  /** @throws {CompileError} */
+  unsafely<T>(this: Mut<this>, check: InScope<T>): T {
     this.ctx.exprsState.unsafeDepth++;
     try {
       return check();
@@ -625,11 +658,13 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // Refuses an operation outside \`unsafe\`.
+  /** @throws {CompileError} */
   private needsUnsafe(what: string, at: Span, why = "the compiler can't check what a raw pointer points to") {
     if (this.ctx.exprsState.unsafeDepth === 0) throw new CompileError("E1001", `${what} can only happen inside 'unsafe { }': ${why}, so you vouch for it there`, at.start, at.end);
   }
 
   // Literals too large for an i64 that nothing gave a wider type.
+  /** @throws {CompileError} */
   finish() {
     const integral = this.ctx.exprsState.powers.find(([power]) => isInteger(this.types.get(power)!));
     if (integral) {
@@ -643,6 +678,7 @@ export class Expressions<C extends Context> implements Union {
   // An expression of only number literals and operators takes the number type it meets where
   // it is written, as `1` does in `let a: u8 = 1` or `a + 1`.
   // A float literal only becomes a float type.
+  /** @throws {CompileError} */
   adapt(this: Mut<this>, e: Expr, to: Type): boolean {
     e = this.rewrites.current(e);
     // A loose brand takes its base's literals, which fit it.
@@ -675,6 +711,7 @@ export class Expressions<C extends Context> implements Union {
     return e.kind === "binary" && LITERAL_OPERATORS.has(e.op) && (!floats || !BITWISE_OPERATORS.has(e.op)) && this.literalOnly(e.left, floats) && this.literalOnly(e.right, floats);
   }
 
+  /** @throws {CompileError} */
   private retype(this: Mut<this>, e: Expr, to: Numeric, negated: boolean): void {
     e = this.rewrites.current(e);
     this.types.set(e, to);
@@ -700,6 +737,7 @@ export class Expressions<C extends Context> implements Union {
 
   // What a closure or a generic enum's member is expected to be, from where it goes, since
   // neither can always tell its own type: a closure its parameters', an enum its type arguments.
+  /** @throws {CompileError} */
   expect(this: Mut<this>, e: Expr, t: Type) {
     e = this.keyed(this.rewrites.current(e));
     // Callers pass what a parameter list has, which may run out.
@@ -838,6 +876,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A call's type, `void` included, or any other expression's.
+  /** @throws {CompileError} */
   result(this: Mut<this>, written: Expr): Type {
     let e = this.rewrites.current(written);
     if (e.kind === "tagged" && !this.isQuote(e)) e = this.untag(e);
@@ -849,6 +888,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // Only a statement may call a function that returns nothing.
+  /** @throws {CompileError} */
   effect(this: Mut<this>, written: Expr) {
     let e = this.rewrites.current(written);
     if (e.kind === "tagged" && !this.isQuote(e)) e = this.untag(e);
@@ -877,6 +917,7 @@ export class Expressions<C extends Context> implements Union {
   // in the arm's own scope, then its guard. Every value of the subject's type must be covered.
   // Used as a statement, its arms may give nothing. Matching a value just made, the bindings own
   // its parts; matching a place, they borrow them. A block arm gives what its `return`s do.
+  /** @throws {CompileError} */
   private match(this: Mut<this>, e: Extract<Expr, { kind: "match" }>, wanted: boolean): Type {
     const subject = this.read(e.subject);
     const owning = made(e.subject);
@@ -908,6 +949,7 @@ export class Expressions<C extends Context> implements Union {
   // later stages never see a pipe. Over anything else, or a place the right side assigns, the
   // value is made once, as JavaScript reads it, and kept in a hidden read-only binding each `%`
   // names, dropped when the pipe ends unless moved out.
+  /** @throws {CompileError} */
   private pipe(this: Mut<this>, e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): Type {
     const type = this.value(e.value);
     const hidden = this.steady(e.value) ? this.hides(e.body, e.value) : undefined;
@@ -1016,20 +1058,25 @@ export class Expressions<C extends Context> implements Union {
   // Replaces a pipe's every `%` with what `replace` makes of it: in its right side, and in the
   // left side of a pipe inside it, whose own right side has a topic of its own. As in TC39, the
   // topic itself is never assigned.
+  /** @throws {CompileError} */
   private topics(body: Expr, replace: (topic: Expr) => Expr) {
-    walk("expr", body, ({ of, node }) => {
-      if (of !== "expr") return;
-      const n = this.rewrites.current(node);
-      if (n !== node) return this.topics(n, replace), false;
-      const target = n.kind === "assign" ? n.target : n.kind === "update" ? n.operand : undefined;
-      if (target?.kind === "topic") throw new CompileError("E0004", "'%' can't be assigned; it stands for the pipe's value, so assign to what you piped instead", target.start, target.end);
-      if (n.kind === "topic") return this.rewrites.replace(n, replace(n)), false;
-      if (n.kind === "pipe") return this.topics(n.value, replace), false;
-    });
+    const visit = (item: AnyNode) => {
+      if (item.of === "expr") {
+        const n = this.rewrites.current(item.node);
+        if (n !== item.node) return void this.topics(n, replace);
+        const target = n.kind === "assign" ? n.target : n.kind === "update" ? n.operand : undefined;
+        if (target?.kind === "topic") throw new CompileError("E0004", "'%' can't be assigned; it stands for the pipe's value, so assign to what you piped instead", target.start, target.end);
+        if (n.kind === "topic") return void this.rewrites.replace(n, replace(n));
+        if (n.kind === "pipe") return void this.topics(n.value, replace);
+      }
+      for (const c of childrenOf(item)) visit(c);
+    };
+    visit({ of: "expr", node: body });
   }
 
   // A pipe's right side with each `%` replaced: a copy, made once, each node of which replaces the
   // node it copies, so the checker reads the right side whole, as it does any other node.
+  /** @throws {CompileError} */
   private pipeBody(e: Extract<Expr, { kind: "pipe" }>, replace: (topic: Expr) => Expr): Expr {
     const made = this.rewrites.current(e.body);
     if (made !== e.body) return made;
@@ -1057,6 +1104,7 @@ export class Expressions<C extends Context> implements Union {
   // recording what it tests. A name is a unit member of the matched enum, or an Option's
   // `None`, before it is a binding. A borrowing binding of a part that isn't Copy is a shared
   // reference to it.
+  /** @throws {CompileError} */
   private pattern(this: Mut<this>, p: Pattern, type: Type, borrowing: boolean) {
     const record = (test: PatternTest) => this.ctx.patterns.set(p, { type, ...test });
     const whole = this.recOf(type);
@@ -1190,6 +1238,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Checks a call: what it returns, and how a message names what it calls. A method called in
   // an optional chain gives an Option.
+  /** @throws {CompileError} */
   private call(this: Mut<this>, e: Call): { type: Type; what: string } {
     e = this.spreadTuples(e);
     const variant = this.promiseVariants.get(e);
@@ -1208,6 +1257,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The call `spawnBlocking` makes of a function it was given by name or value must take no
   // arguments and give no Promise.
+  /** @throws {CompileError} */
   private blockingRun(this: Mut<this>, callee: Extract<Expr, { kind: "ident" }>): void {
     const sync = "'spawnBlocking' runs a synchronous function on a thread of its own; run async work with 'spawn' instead";
     const declared = !this.ctx.lookup(callee.name) ? this.bodyNamed(callee.name) : undefined;
@@ -1228,6 +1278,7 @@ export class Expressions<C extends Context> implements Union {
     if (wrong) throw new CompileError("E0305", wrong, callee.start, callee.end);
   }
 
+  /** @throws {CompileError} */
   private callee(this: Mut<this>, e: Call): { type: Type; what: string } {
     // `c[Symbol.iterator]()` calls the method that key names.
     const key = this.rewrites.current(e.callee);
@@ -1756,6 +1807,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `` quote`a + ${x}` ``: the Ast value of the text, an expression's or a statement's, and of
   // `quoteType`, a type's; each splice takes a node of the category its place holds.
+  /** @throws {CompileError} */
   private quote(this: Mut<this>, e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Type {
     if (e.typeArgs.length > 0) throw new CompileError("E1105", "a quote takes no type arguments", e.start, e.end);
     const q = quoted(this.ctx.tables, e, asType);
@@ -1779,6 +1831,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `` tag`a ${x} b` `` calls the tag with the template's text, known while compiling, then an
   // array of its values for the tag's rest parameter.
+  /** @throws {CompileError} */
   private untag(this: Mut<this>, e: Extract<Expr, { kind: "tagged" }>): Expr {
     const { tag, template } = e;
     if (tag.kind === "member" && tag.name === "raw" && this.isString(tag.object)) {
@@ -1809,6 +1862,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // An arrow passed where a function type is declared takes its parameter types from it.
+  /** @throws {CompileError} */
   private expectFrom(this: Mut<this>, target: Body, list: Expr[]) {
     const bounds = this.ctx.implicitOf(target);
     const generic = (target.typeParams?.length ?? 0) > 0 || (target.scope?.size ?? 0) > 0 || bounds.size > 0 || target.params.some((p) => p.comptime);
@@ -1845,6 +1899,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A call gives every parameter but the optional ones it leaves out, which come last.
+  /** @throws {CompileError} */
   private arity(given: usize, params: Param[], at: Span) {
     // A rest parameter's array is packed from what follows the others, when they are all given.
     if (params.at(-1)?.rest && given < params.length - 1) {
@@ -1859,6 +1914,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A callback given as a declared function's name becomes the closure calling it. A local
   // function given by name isn't converted yet.
+  /** @throws {CompileError} */
   private namedFunction(this: Mut<this>, callback: Expr): Expr {
     if (callback.kind !== "ident") return callback;
     const local = this.ctx.lookup(callback.name);
@@ -1874,7 +1930,8 @@ export class Expressions<C extends Context> implements Union {
   // A call through a generic function type, in a body checked before it knows the function: its
   // type parameters are inferred from the arguments, or written, and its signature resolved
   // with them.
-  private familyCall(this: Mut<this>, e: Call, type: Pick<FunctionRecord, "generic">, name: string): { type: Type; what: string } {
+  /** @throws {CompileError} */
+  private familyCall(this: Mut<this>, e: Call, type: Pick<FunctionRecord, "generic">, name: string): { type: Type; throws: Type | undefined; what: string } {
     const { names, node, scope } = type.generic!;
     const written = node as Extract<TypeNode, { kind: "function" }>;
     if (e.args.length !== written.params.length) throw new CompileError("E0501", `expected ${written.params.length} argument${written.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
@@ -1900,12 +1957,14 @@ export class Expressions<C extends Context> implements Union {
       const want = written.params[i]!.optional ? this.typing.unionType([declared, "null"]) : declared;
       this.coerce(a, argTypes[i]!, want, `argument of type '${this.typing.show(argTypes[i]!)}' is not assignable to parameter of type '${this.typing.show(want)}'`);
     });
-    return { type: this.ctx.resolveWith(written.returns, new Map([...scope, ...bindings])), what: name };
+    const full = new Map([...scope, ...bindings]);
+    return { type: this.ctx.resolveWith(written.returns, full), throws: written.throws && this.ctx.resolveWith(written.throws, full), what: name };
   }
 
   // A generic function value, or a generic arrow, rewritten as an arrow calling it with its
   // arguments: given a function type, its parameters take that type's, and the call inside
   // infers the generic function's types from them.
+  /** @throws {CompileError} */
   private instanceArrow(this: Mut<this>, e: Expr): Expr {
     if (e.kind === "arrow" && e.typeParams.some((p) => !isLifetime(p))) e = this.ctx.liftArrow(e);
     if (e.kind !== "ident") return e;
@@ -1944,6 +2003,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A generic function named as a value: its own type, each call of which instantiates it.
+  /** @throws {CompileError} */
   private genericValue(f: Body, e: Expr): Type {
     if (f.foreign) throw unsupported(`${f.rust ? "Rust" : "C"} functions used as values`, e);
     return this.typing.genericFunctionType(f.name, "a generic function");
@@ -1951,6 +2011,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The generic function a generic function value names, when the callee is a local or a field
   // holding one; read for nothing else, it is called directly, in this instance.
+  /** @throws {CompileError} */
   private genericTarget(this: Mut<this>, callee: Expr, receiver: Type | undefined): Body | undefined {
     let held: Type | undefined;
     if (callee.kind === "ident") {
@@ -1979,6 +2040,7 @@ export class Expressions<C extends Context> implements Union {
     return e.kind === "ident" || e.kind === "this" || (e.kind === "member" && !e.optional && this.pure(e.object));
   }
 
+  /** @throws {CompileError} */
   private throughGetter(this: Mut<this>, e: Expr): boolean {
     e = this.rewrites.current(e);
     if (e.kind !== "member") return false;
@@ -1990,6 +2052,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `double` named where a value is wanted becomes `(x) => double(x)`, its parameters and their
   // types its declaration's, capturing nothing, so it passes, stores and boxes as any closure.
+  /** @throws {CompileError} */
   private functionValue(this: Mut<this>, e: Extract<Expr, { kind: "ident" }>, f: Body): Expr {
     const written = e.name;
     const name = `'${written}'`;
@@ -2040,6 +2103,7 @@ export class Expressions<C extends Context> implements Union {
   // `name(...)` on a nested function builds its environment for the call from this body's
   // bindings for what it captures, so a closure calling it captures those, not the function,
   // and changes what the function changes.
+  /** @throws {CompileError} */
   private nestedCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "ident" }>, local: Local): { type: Type; what: string } {
     this.nestedEnv(e, local, callee);
     return this.closureCall(e, callee, local.type);
@@ -2047,6 +2111,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Records this body's bindings for what a nested function captures, captured if need be,
   // each changing where the function changes it.
+  /** @throws {CompileError} */
   private nestedEnv(this: Mut<this>, e: Expr, local: Local, at: Extract<Expr, { kind: "ident" }>) {
     const called = this.ctx.closureBody(this.typing.lower(local.type) as ClosureType);
     this.ctx.envOf(e, called, [...called.captures!.entries()].map(([alias, id]) => {
@@ -2059,6 +2124,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A call of a closure held by a variable runs the closure's body.
+  /** @throws {CompileError} */
   private closureCall(this: Mut<this>, e: Call, callee: Expr, known?: Type): { type: Type; what: string } {
     const held = known ?? this.value(callee);
     const name = callee.kind === "ident" ? `'${callee.name}'` : "this function";
@@ -2073,7 +2139,11 @@ export class Expressions<C extends Context> implements Union {
     if (type === undefined || (type.kind !== "closure" && type.kind !== "function")) {
       throw new CompileError("E0503", `this expression is not callable: type '${this.typing.show(this.boundFunction(held) ?? held)}' has no call signatures`, callee.start, callee.end);
     }
-    if (type.kind === "function" && type.generic) return this.familyCall(e, type, name);
+    if (type.kind === "function" && type.generic) {
+      const got = this.familyCall(e, type, name);
+      if (got.throws) this.ctx.raise(e, got.throws, name);
+      return got;
+    }
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `${name} takes no type arguments`, e.start, e.end);
     const written = type.kind === "closure" ? bodyOf(this.ctx.closureBody((this.boundFunction(held) ?? held) as ClosureType)).params : undefined;
     if (written) this.arity(e.args.length, written, e);
@@ -2101,6 +2171,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `String.fromCharCode(...units)` and `String.fromCodePoint(...points)`: the arguments, spreads
   // of arrays among them, become one array of `u16` or `u32`.
+  /** @throws {CompileError} */
   private stringStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const kinds: Record<string, ["units" | "points", Type]> = { fromCharCode: ["units", "u16"], fromCodePoint: ["points", "u32"] };
     if (callee.name === "raw") return this.rawCall(e);
@@ -2119,6 +2190,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `String.raw({ raw: ["a", "b"] }, x)`: the strings with the values between them, as the tag
   // gives them, missing values empty as in JavaScript.
+  /** @throws {CompileError} */
   private rawCall(this: Mut<this>, e: Call): { type: Type; what: string } {
     if (e.typeArgs.length > 0) throw new CompileError("E0106", "'String.raw' takes no type arguments", e.start, e.end);
     const [first, ...values] = e.args;
@@ -2138,6 +2210,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A call of one of a string's methods, which takes its arguments as the method's parameters.
+  /** @throws {CompileError} */
   private stringCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Type): { type: Type; what: string } {
     this.text(callee.object, receiver, this.linked(callee));
     // A method that may take a regex looks at its first argument to see which it was given.
@@ -2171,6 +2244,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A string method taking a regex: `g` decides whether \`replace\`, \`match\` and \`split\` use
   // every match or the first, and \`matchAll\` and \`replaceAll\` need it, as JavaScript requires.
+  /** @throws {CompileError} */
   private regexStringCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, rx: RegexType, generic: boolean): { type: Type; what: string } {
     const name = callee.name;
     const what = `'${name}'`;
@@ -2199,6 +2273,7 @@ export class Expressions<C extends Context> implements Union {
 
   // What replaces each match: a string with $ patterns, or an arrow function given the match,
   // each capture, the offset, the string and, when the pattern names them, the groups.
+  /** @throws {CompileError} */
   private replacement(this: Mut<this>, e: Call, rx: RegexType, typed: boolean, unknown: () => CompileError): Type {
     const given = e.args[1]!;
     if (given.kind !== "arrow") {
@@ -2229,6 +2304,7 @@ export class Expressions<C extends Context> implements Union {
 
   // An array's method: `push` moves a value in at the end; `pop` takes the last one out, or
   // gives an empty Option. Both change the array.
+  /** @throws {CompileError} */
   private arrayCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const typed = this.typing.typedName(array);
     if (typed && (callee.name === "subarray" || callee.name === "set")) this.ctx.exprsState.once.add(callee.object);
@@ -2308,6 +2384,7 @@ export class Expressions<C extends Context> implements Union {
   // turn, given it as a shared borrow, or a copy when it copies, and its index. `filter` and
   // `find` give clones of what they keep, and `reduce` without an initial value starts from a
   // clone of the first element.
+  /** @throws {CompileError} */
   private callbackCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
     const reducing = name === "reduce" || name === "reduceRight";
@@ -2324,6 +2401,7 @@ export class Expressions<C extends Context> implements Union {
       throw new CompileError("E0506", `'${name}' passes its callback ${acc ? "the accumulator, " : ""}the element and its index; JavaScript's last argument, the array, isn't passed, since the array is already borrowed`, callback.params[params.length]!.start, callback.params[params.length]!.end);
     }
     const signature = this.typing.functionType(acc ? ["accumulator", "value", "index"] : ["value", "index"], params, "void");
+    this.typing.openThrows.add(signature);
     this.expect(callback, signature);
     const called = this.value(callback);
     const c = this.recOf(called);
@@ -2349,6 +2427,7 @@ export class Expressions<C extends Context> implements Union {
     }
     const type = name === "map" ? this.typing.arrayType(gives) : name === "flatMap" ? many : name === "filter" ? array : name === "find" || name === "findLast" ? this.typing.unionType([this.typing.rec(array).element, "null"])
       : name === "findIndex" || name === "findLastIndex" ? "i64" : name === "forEach" ? "void" : acc ?? "boolean";
+    if (c.throws) this.ctx.raise(e, c.throws, `'${name}'`);
     return { type, what: `'${name}'` };
   }
 
@@ -2356,6 +2435,7 @@ export class Expressions<C extends Context> implements Union {
   // the sign of what the comparator gives for two elements. Stable, and in place, so it gives
   // nothing.
   // `toSorted` checks as `sort` does, and gives the sorted copy.
+  /** @throws {CompileError} */
   private sortCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
     const copying = name === "toSorted";
@@ -2396,6 +2476,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `toReversed()`, `toSpliced(start?, count?, ...items)` and `with(i, v)` give a copy of the
   // array changed as `reverse`, `splice` and a write at `i` change theirs; values given move in.
+  /** @throws {CompileError} */
   private copyingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
     const element = this.typing.rec(array).element;
@@ -2419,6 +2500,7 @@ export class Expressions<C extends Context> implements Union {
   // array in place.
   // What they give, JavaScript's new length for `unshift` and the array itself for `reverse`
   // and `fill`, they don't.
+  /** @throws {CompileError} */
   private changingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
     if (!this.place(callee.object)) throw new CompileError("E0212", `'${name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
@@ -2452,6 +2534,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `x as const`: a literal checked as its literal type, deeply, as TypeScript gives it.
+  /** @throws {CompileError} */
   private constAssertion(this: Mut<this>, x: Expr): Type {
     x = this.rewrites.current(x);
     const enumMember = x.kind === "member" && x.object.kind === "ident" && !this.ctx.lookup(x.object.name) && this.enums.has(x.object.name);
@@ -2466,6 +2549,7 @@ export class Expressions<C extends Context> implements Union {
   // The type `as const` gives an expression: a literal's own, an array of strings the array of
   // their union, a mixed array a tuple, and an object's fields readonly. Anything else is
   // checked here, once, and keeps its type.
+  /** @throws {CompileError} */
   private constType(this: Mut<this>, written: Expr): Type {
     const x = this.keyed(this.rewrites.current(written));
     if (x.kind === "string") return this.typing.literalType(x.value);
@@ -2505,6 +2589,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `[a, b]` written where a tuple is expected: each element checked against its own type, then
   // the literal becomes the object of fields `0`, `1` and on that the tuple is laid out as.
+  /** @throws {CompileError} */
   private tupleLiteral(this: Mut<this>, e: Expr, tuple: ObjectType): Type {
     const elements = this.typing.elementsOf(tuple);
     // Once a literal became an object, its rest elements are its field `...`, checked again.
@@ -2561,6 +2646,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `t[0]` on a tuple reads its field `0`: the index is a number written in place naming one of
   // its elements, and the expression becomes that field's read.
+  /** @throws {CompileError} */
   private untuple(this: Mut<this>, e: Expr): boolean {
     e = this.rewrites.current(e);
     if (e.kind !== "index") return false;
@@ -2592,6 +2678,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `o[K]` on an object or an instance, with a key known while compiling, reads the field it names.
+  /** @throws {CompileError} */
   private keyRead(this: Mut<this>, e: Extract<Expr, { kind: "index" }>, object: Type): boolean {
     const r = this.recOf(object);
     const shaped = (k: string | undefined) => k === "object" || k === "class";
@@ -2612,6 +2699,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `FixedArray.filled<T, N>(v)`: N copies of `v`, its type written or the one expected.
+  /** @throws {CompileError} */
   private filled(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     if (callee.name !== "filled") throw new CompileError("E0502", `'FixedArray' has no '${callee.name}'; make one with 'FixedArray.filled<T, N>(value)' or a literal`, callee.start, callee.end);
     const written = e.typeArgs.length > 0 ? this.ctx.resolveType({ id: nextId(this.ids), kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : this.ctx.exprsState.wanted.get(e);
@@ -2632,6 +2720,7 @@ export class Expressions<C extends Context> implements Union {
   // holds, clones of an array's elements, a string's code points or a generator's values, or of
   // `0` to `n - 1` from `{ length: n }`, mapped by f when there is one.
   // `x.toFixed(digits)` prints a number with that many digits after the point, as JavaScript does.
+  /** @throws {CompileError} */
   private toFixed(this: Mut<this>, e: Call): { type: Type; what: string } {
     if (e.args.length > 1) throw new CompileError("E0504", "'toFixed' takes how many digits to print after the point, 0 when not given", e.start, e.end);
     const digits = e.args[0];
@@ -2646,6 +2735,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `x.checkedAdd(y)` and its kin: the other operand is x's type, or a `u32` for a shift or a
   // power; checked gives an Option, overflowing a tuple with whether it overflowed.
+  /** @throws {CompileError} */
   private integerCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, type: Integer): { type: Type; what: string } {
     const [family, operation] = integerMethod(callee.name)!;
     const what = `'${callee.name}'`;
@@ -2675,6 +2765,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // Parsing a number gives an Option where JavaScript would give NaN.
+  /** @throws {CompileError} */
   private parse(this: Mut<this>, e: Call, name: "parseInt" | "parseFloat" | "Number"): { type: Type; what: string } {
     const what = `'${name}'`;
     const most = name === "parseInt" ? 2 : 1;
@@ -2696,6 +2787,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `assert(cond, message?)`, checked here so its panic can name the call's place.
+  /** @throws {CompileError} */
   private assertion(this: Mut<this>, e: Call): { type: Type; what: string } {
     if (e.typeArgs.length > 0 || e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", "'assert' takes a condition and an optional message, as in 'assert(n > 0, \"n is positive\")'", e.start, e.end);
     this.condition(e.args[0]!);
@@ -2710,6 +2802,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A regex's pattern, parsed and compiled here so its errors come while compiling.
+  /** @throws {CompileError} */
   private regexLiteral(source: string, flags: string, at: Span, shown: string = source): RegexType {
     try {
       const pattern = parsePattern(source, flags, this.regex);
@@ -2722,6 +2815,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `new RegExp(pattern, flags?)` with both known while compiling is a regex like a literal's.
+  /** @throws {CompileError} */
   private regexNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, list: Expr[]): Type {
     if (list.length < 1 || list.length > 2) throw new CompileError("E0508", "'new RegExp' takes a pattern and optional flags", e.start, e.end);
     const known = list.map((a) => (a.kind === "string" ? a.value : a.kind === "template" && a.exprs.length === 0 ? a.quasis[0]! : undefined));
@@ -2734,6 +2828,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `re.test(s)` and `re.exec(s)`. A regex keeps no `lastIndex`, so on a `g` or `y` regex they
   // would loop forever where JavaScript moves on; `matchAll` goes through every match instead.
+  /** @throws {CompileError} */
   private regexCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: RegexType, generic: boolean): { type: Type; what: string } {
     const what = `'${callee.name}'`;
     if (callee.name !== "test" && callee.name !== "exec") throw new CompileError("E0508", `'RegExp' has no method '${callee.name}' in Fish; it has 'test' and 'exec', and strings take regexes in 'replace', 'split', 'match' and 'matchAll'`, callee.start, callee.end);
@@ -2782,6 +2877,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `re.source`, `re.flags` and the flag properties, known from its type.
+  /** @throws {CompileError} */
   private regexMember(e: Extract<Expr, { kind: "member" }>, t: RegexType, generic: boolean): Type {
     if (this.typing.rec(t).any && !generic && (e.name === "source" || e.name === "flags" || e.name in REGEX_FLAGS)) {
       throw new CompileError("E0508", `'${e.name}' is known from a regex's pattern, which isn't known for a 'RegExp' kept here; read it where the regex is written, or pass the regex as a parameter`, e.start, e.end);
@@ -2795,6 +2891,7 @@ export class Expressions<C extends Context> implements Union {
   // `Date.now()` and `performance.now()`, unless a name of the program's hides `Date` or
   // `performance`; their other members aren't there yet. std's Date class, under its own name or
   // the one it takes beside a program's own Date, is the clock's owner rather than a hiding name.
+  /** @throws {CompileError} */
   private clockOf(this: Mut<this>, callee: Expr): "Date.now" | "performance.now" | undefined {
     if (callee.kind !== "member" || callee.object.kind !== "ident") return undefined;
     const std = callee.object.name === "std Date" && callee.start >= STD_BASE;
@@ -2809,6 +2906,7 @@ export class Expressions<C extends Context> implements Union {
 
   // std's Date is made from milliseconds alone: reading a string and the year, month, day form,
   // which counts in local time, aren't there yet.
+  /** @throws {CompileError} */
   private dateNew(this: Mut<this>, e: Expr, list: Expr[], argTypes: Type[]) {
     if (list.length > 1) throw new CompileError("E0801", "'new Date(year, month, ...)' isn't supported yet, as local time isn't; give 'new Date(ms)' milliseconds since the epoch", e.start, e.end);
     const t = argTypes[0];
@@ -2825,6 +2923,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `JSON.stringify(x)`: x written as JSON text, which its type decides.
+  /** @throws {CompileError} */
   private stringify(this: Mut<this>, e: Call): { type: Type; what: string } {
     if (e.typeArgs.length > 0) throw new CompileError("E0106", "'JSON.stringify' takes no type argument; the value's type decides how it is written", e.start, e.end);
     if (e.args.length > 1) throw unsupported("'JSON.stringify' replacer and indent arguments", e.args[1]!);
@@ -2836,6 +2935,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `JSON.parse<T>(s)`: s read as a T, throwing a JsonError when it isn't one.
+  /** @throws {CompileError} */
   private jsonParse(this: Mut<this>, e: Call): { type: Type; what: string } {
     // Without a type it reads the dynamic `Json` value, as TypeScript's gives `any`.
     const [written = { id: nextId(this.ids), kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
@@ -2859,6 +2959,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // Refuses a type with a part JSON can't hold, saying why.
+  /** @throws {CompileError} */
   private jsonable(t: Type, at: Span, verb: string) {
     // What an unknown holds is known once the whole program is checked, and checked then.
     if (this.typing.holdsPart(t, (u) => this.typing.isUnknown(u), true)) {
@@ -2876,6 +2977,7 @@ export class Expressions<C extends Context> implements Union {
     throw new CompileError("E0509", `values of type '${this.typing.show(part)}' can't be ${verb} JSON: ${why}`, at.start, at.end);
   }
 
+  /** @throws {CompileError} */
   private derivesJson(this: Mut<this>, t: ClassType | VariantType): boolean {
     const r = this.typing.rec(t);
     if (r.kind === "variant") return [...this.enums.values()].some((e) => e.data?.name === r.enum && e.data.json);
@@ -2889,6 +2991,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `Math.abs`, `sign`, `min` and `max` keep the numeric type they are given, a literal taking
   // the type of the numbers beside it as with an operator; the rest take and give `f64`.
+  /** @throws {CompileError} */
   private mathCall(this: Mut<this>, e: Call, name: string): { type: Type; what: string } {
     const what = `'Math.${name}'`;
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `${what} takes no type argument`, e.start, e.end);
@@ -2926,6 +3029,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `new Uint8Array(...)` and its siblings: an empty one, n zeros, a copy of an array's elements,
   // or the elements an ArrayBuffer holds, which it takes, as every typed array owns its own.
+  /** @throws {CompileError} */
   private typedNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, name: TypedName, list: Expr[]): Type {
     const typed = this.typing.typedArray(name);
     const at = { start: e.start, end: e.end };
@@ -2954,6 +3058,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `e` rewritten as `to`, which makes a typed array's elements, typed as that typed array.
+  /** @throws {CompileError} */
   private typedAs(this: Mut<this>, e: Expr, to: Expr, typed: ArrayType, mapped = false): Type {
     const made = this.become(e, to);
     this.expect(made, typed);
@@ -2970,6 +3075,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A typed array's byte length, byte offset, element size and buffer. It owns its elements from
   // the start of its own buffer, so its offset is 0 and its buffer is a copy of its bytes.
+  /** @throws {CompileError} */
   private typedMember(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, name: TypedName): Type {
     const at = { start: e.start, end: e.end };
     const size = typedSize(name);
@@ -2985,6 +3091,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A `subarray` is a copy, so a write to it would be lost where JavaScript's reaches the array
   // it views: it is read, and never bound with 'let', assigned, lent mutably or changed.
+  /** @throws {CompileError} */
   readOnlySubarray(e: Expr) {
     const from = this.ctx.exprsState.subarrays.get(this.rewrites.current(e));
     if (from === undefined) return;
@@ -3004,6 +3111,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `Uint8Array.from(xs, f?)` and `Uint8Array.of(...)`: a typed array of the elements given, or of
   // what f makes of each; `Uint8Array.BYTES_PER_ELEMENT` is its element's size.
+  /** @throws {CompileError} */
   private typedStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, name: TypedName): { type: Type; what: string } {
     const typed = this.typing.typedArray(name);
     const at = { start: e.start, end: e.end };
@@ -3021,6 +3129,7 @@ export class Expressions<C extends Context> implements Union {
     return { type: this.typedAs(e, made, typed), what: `'${name}.from'` };
   }
 
+  /** @throws {CompileError} */
   private arrayStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const at = { start: callee.start, end: callee.end };
     if (callee.name === "of") {
@@ -3069,6 +3178,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // An object literal meeting a dictionary: the Map it is, made from its entries in order.
+  /** @throws {CompileError} */
   private dictLiteral(this: Mut<this>, e: Extract<Expr, { kind: "object" }>, t: MapType) {
     const at = { start: e.start, end: e.end };
     const entries = e.props.map((p): Expr => {
@@ -3087,6 +3197,7 @@ export class Expressions<C extends Context> implements Union {
   // `Object.keys(o)`, `Object.values(o)` and `Object.entries(o)`: o's fields are known while
   // compiling, so each becomes an array literal reading them, the values cloned. A dictionary's
   // become calls of its Map's own, which give its entries in the order they were made.
+  /** @throws {CompileError} */
   private objectStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const name = callee.name;
     if (name !== "keys" && name !== "values" && name !== "entries") throw new CompileError("E0502", `'Object' has no '${name}' yet; it has 'keys', 'values' and 'entries'`, callee.start, callee.end);
@@ -3111,6 +3222,7 @@ export class Expressions<C extends Context> implements Union {
   // The fields `Object.keys`, `values` or `entries` reads from o, and the array it gives. An
   // instance gives its public fields, bases' first, in declaration order; an object type has only
   // its sorted order, which printing and JSON use too. Values are typed as the union of the fields'.
+  /** @throws {CompileError} */
   private objectRead(this: Mut<this>, name: "keys" | "values" | "entries", o: Expr): { fields: Field[]; type: ArrayType } {
     // The object is read once per field, so it has to be a place reading it again gives.
     const notPlace = () => new CompileError("E0504", `'Object.${name}' reads a variable or a field; store this value in a 'const' first`, o.start, o.end);
@@ -3146,6 +3258,7 @@ export class Expressions<C extends Context> implements Union {
   // A method calling a callback converts each value it passes to the parameter's type, so a
   // literal may widen, except a reference or, with `converted` false, an index, which it passes
   // as it is. The argument always comes, so the parameter can't be optional.
+  /** @throws {CompileError} */
   private passedExactly(name: string, given: Type, written: Type, p: Param | undefined, at: Span, converted = true) {
     if (p && (p.optional || this.defaulted.has(p)) && !this.typing.sameLowered(given, written)) throw new CompileError("E0506", `'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
     if (this.typing.sameLowered(given, written) || (converted && !this.isRefType(given) && this.typing.fits(given, written))) return;
@@ -3163,6 +3276,7 @@ export class Expressions<C extends Context> implements Union {
   // The element type of a spread, `...x`. An array spreads its elements, cloned unless it was made
   // for the spread; a string, a generator, a Map or a Set is first made into the array
   // `Array.from` would make of it.
+  /** @throws {CompileError} */
   private spreadElements(this: Mut<this>, x: Extract<Expr, { kind: "spread" }>): Type {
     const source = x.value;
     const t = this.value(source);
@@ -3195,6 +3309,7 @@ export class Expressions<C extends Context> implements Union {
   // A call's arguments after the fixed parameters fill its rest parameter, as one array literal,
   // where a spread argument spreads as in any literal. Packed once, as a generic body is
   // checked again for each instance.
+  /** @throws {CompileError} */
   private packRest<T extends Extract<Expr, { kind: "call" | "new" }>>(this: Mut<this>, e: T, list: Expr[], params: Param[]): T {
     if (this.packed.has(e)) return e;
     const fixed = params.length - 1;
@@ -3210,6 +3325,7 @@ export class Expressions<C extends Context> implements Union {
   // `f(...t)` over a tuple named by a variable passes its elements, as `f(t[0], t[1])` would,
   // a rest tuple's array spreading after them. Each element reads the variable again, so a
   // tuple made for the call has to be named first.
+  /** @throws {CompileError} */
   private spreadTuples<T extends Extract<Expr, { kind: "call" | "new" }>>(this: Mut<this>, e: T): T {
     const args = e.args ?? [];
     const tuples = args.map((a) => (a.kind === "spread" ? this.spreadTuple(a.value) : undefined));
@@ -3227,6 +3343,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // The tuple a spread argument's variable holds, if it holds one.
+  /** @throws {CompileError} */
   private spreadTuple(this: Mut<this>, source: Expr): ObjectType | undefined {
     source = this.rewrites.current(source);
     if (source.kind !== "ident") return undefined;
@@ -3237,6 +3354,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A spread argument fills only a rest parameter, since an array's length isn't known while compiling.
+  /** @throws {CompileError} */
   private refuseSpread(this: Mut<this>, list: Expr[]) {
     const spread = list.find((a) => a.kind === "spread");
     if (spread?.kind !== "spread") return;
@@ -3249,12 +3367,14 @@ export class Expressions<C extends Context> implements Union {
 
   // A closure that moves a capture out of itself can run only once, which a method calling it
   // again and again can't allow.
+  /** @throws {CompileError} */
   private runsOften(c: ClosureType, name: string, calls: string, at: Span) {
     if (this.typing.rec(c).once) throw new CompileError("E0210", `'${name}' calls ${calls}, but this closure moves '${this.typing.rec(c).once}' out, so it can run only once; clone it inside instead`, at.start, at.end);
   }
 
   // `includes` and `indexOf` compare elements by value, as `===` does; `join` writes each as
   // `String(x)` would; `slice` gives clones of a range, its positions as JavaScript reads them.
+  /** @throws {CompileError} */
   private readingCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, array: ArrayType): { type: Type; what: string } {
     const name = callee.name;
     if (name === "concat") {
@@ -3318,6 +3438,7 @@ export class Expressions<C extends Context> implements Union {
   // A raw pointer's methods, all inside `unsafe`: reading and writing what it points at, which
   // must be a plain value a raw write can't leave dangling, moving along by elements, and
   // telling whether it points anywhere.
+  /** @throws {CompileError} */
   private pointerCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, p: PointerType): { type: Type; what: string } {
     const counts: Record<string, usize> = { read: 0, write: 1, offset: 1, isNull: 0 };
     if (!(callee.name in counts)) throw new CompileError("E1006", `raw pointers have no method '${callee.name}'; they have 'read', 'write', 'offset' and 'isNull'`, callee.start, callee.end);
@@ -3342,6 +3463,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `new Atomic(v)`, `new Lock(v)`, `new Cell(v)`: one holding v, of its type argument, the type
   // expected of it, or else v's own type.
+  /** @throws {CompileError} */
   private interiorNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, which: InteriorRecord["which"], list: Expr[]): Type {
     if (list.length !== 1 || e.typeArgs.length > 1) throw new CompileError("E0504", `'${which}' takes the value it starts with, as in 'new ${which}(0)'`, e.start, e.end);
     const expected = this.ctx.exprsState.wanted.get(e);
@@ -3356,6 +3478,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `new Rc(v)`: v moved into a new block with one count. `new Weak<T>()` reaches no value, so it
   // never upgrades, for a back-reference made before what it points to.
+  /** @throws {CompileError} */
   private countedNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, which: "Rc" | "Weak", list: Expr[]): Type {
     const expected = this.ctx.exprsState.wanted.get(e);
     const r = this.recOf(expected);
@@ -3374,6 +3497,7 @@ export class Expressions<C extends Context> implements Union {
 
   // An Atomic's methods, JavaScript's `Atomics` on one value: each changes it in one step, seen
   // the same by every thread, and gives what it held before, except `store`.
+  /** @throws {CompileError} */
   private interiorCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
     this.where(callee, t);
     if (this.typing.rec(t).which === "Cell") return this.cellCall(e, callee, t);
@@ -3395,6 +3519,7 @@ export class Expressions<C extends Context> implements Union {
 
   // An Atomic's, Cell's or Lock's method changes it where it lives, so it is called on a place,
   // a reference, or a value just made; anything else would change a copy.
+  /** @throws {CompileError} */
   private where(callee: Extract<Expr, { kind: "member" }>, t: InteriorType) {
     const inPlace = (written: Expr): boolean => {
       const e = this.rewrites.current(written);
@@ -3417,6 +3542,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A Cell's methods, Rust's: `get` copies out what it holds, `set` puts a value in, dropping
   // the old one, and `replace` puts one in and gives the old one back.
+  /** @throws {CompileError} */
   private cellCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType): { type: Type; what: string } {
     const takes: Record<string, usize> = { get: 0, set: 1, replace: 1 };
     if (!(callee.name in takes)) throw new CompileError("E0502", `'Cell' has no method '${callee.name}'; it has 'get', 'set' and 'replace'`, callee.start, callee.end);
@@ -3434,6 +3560,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `new Semaphore(n)` with n slots, and `new Channel<T>(capacity)`, of its type argument or the
   // type expected of it.
+  /** @throws {CompileError} */
   private blockNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, which: "Semaphore" | "Channel", list: Expr[]): Type {
     const what = which === "Semaphore" ? "the number of slots it hands out, as in 'new Semaphore(4)'" : "how many values it holds before 'send' waits, as in 'new Channel<string>(8)'";
     if (list.length !== 1 || e.typeArgs.length > (which === "Channel" ? 1 : 0)) throw new CompileError("E0504", `'${which}' takes ${what}`, e.start, e.end);
@@ -3462,6 +3589,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A Map's and a Set's methods. Those changing it need it in a place that may change, or a
   // `Mut` borrow of it, which `set` and `add` give for chaining. What they give out are clones.
+  /** @throws {CompileError} */
   private mapCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: MapType): { type: Type; what: string } {
     const name = callee.name;
     const kind = this.typing.rec(t).set ? "Set" : "Map";
@@ -3520,7 +3648,9 @@ export class Expressions<C extends Context> implements Union {
     const { key, value: entry, set } = this.typing.rec(t);
     const params = name === "update" ? [this.typing.refType(entry, true)] : set ? [lend(key), lend(key)] : [lend(entry), lend(key)];
     const passes = name === "update" ? "the value to change" : set ? "each member" : "each value and its key";
-    this.expect(callback, this.typing.functionType(params.map((_, i) => (i === 0 ? "value" : "key")), params, "void"));
+    const signature = this.typing.functionType(params.map((_, i) => (i === 0 ? "value" : "key")), params, "void");
+    this.typing.openThrows.add(signature);
+    this.expect(callback, signature);
     const called = this.value(callback);
     const c = this.recOf(called);
     if (c?.kind !== "closure" || c.params.length > params.length) {
@@ -3532,10 +3662,12 @@ export class Expressions<C extends Context> implements Union {
       this.passedExactly(name, params[i]!, p, callback.params[i], at);
     });
     if (this.holdsFuture(c.returns)) throw new CompileError("E0801", `'${name}' with a callback giving a Promise isn't supported yet`, callback.start, callback.end);
+    if (c.throws) this.ctx.raise(e, c.throws, `'${name}'`);
     return { type: name === "update" ? "boolean" : "void", what: `'${name}'` };
   }
 
   // `new Map<K, V>()` and `new Set<T>()`, their types written or taken from where they're expected.
+  /** @throws {CompileError} */
   private mapNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, set: boolean, list: Expr[]): Type {
     const name = set ? "Set" : "Map";
     const shape = set ? "an array of members, as in 'new Set([\"a\", \"b\"])'" : "an array of key and value pairs, as in 'new Map([[\"a\", 1]])'";
@@ -3574,6 +3706,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `handle.join()`: the task's handle, awaited as giving its value or throwing a TaskPanic.
+  /** @throws {CompileError} */
   private handleCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: HandleType): { type: Type; what: string } {
     if (callee.name !== "join") throw new CompileError("E0305", `'${this.typing.show(t)}' has no method '${callee.name}'; ${this.typing.rec(t).joined ? "await it" : "it has 'join', and awaiting it gives what the task gave"}`, callee.start, callee.end);
     if (this.typing.rec(t).joined) throw new CompileError("E0305", "this is already the task's 'join()'; await it", callee.start, callee.end);
@@ -3586,6 +3719,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A Semaphore's `acquire()` and `available()`, and a Channel's `send(v)`, `receive()` and
   // `close()`. A Permit has no methods: dropping it gives its slot back.
+  /** @throws {CompileError} */
   private blockCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
     const which = this.typing.rec(t).which;
     if (which === "JsValue") return this.jsMethodCall(e, callee, t);
@@ -3644,6 +3778,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A UdpSocket's `sendTo(bytes, host, port)`, `receiveFrom()`, `connect(host, port)`, `send(bytes)`
   // and `receive()`. Each but connect, which never waits, may take an AbortSignal last.
+  /** @throws {CompileError} */
   private udpCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const methods: Record<string, usize> = { sendTo: 3, receiveFrom: 0, connect: 2, send: 1, receive: 0 };
     const what = `'${callee.name}'`;
@@ -3672,6 +3807,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `AbortSignal.timeout(ms)`: a new signal that aborts itself after ms milliseconds. And
   // `AbortSignal.any(signals)`: one that aborts with the first of them, each lent to it.
+  /** @throws {CompileError} */
   private signalStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     if (callee.name === "any") return this.signalAny(e);
     if (callee.name !== "timeout") throw new CompileError("E0502", `'AbortSignal' has no static method '${callee.name}'; it has 'timeout' and 'any'`, callee.start, callee.end);
@@ -3685,6 +3821,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A literal list lends each signal, as a wait's is, so 'req.signal' stays the request's.
+  /** @throws {CompileError} */
   private signalAny(this: Mut<this>, e: Call): { type: Type; what: string } {
     const example = "like 'AbortSignal.any([a, b])'";
     if (e.args.length !== 1) throw new CompileError("E0504", `'AbortSignal.any' takes one list of signals, ${example}`, e.start, e.end);
@@ -3706,6 +3843,7 @@ export class Expressions<C extends Context> implements Union {
   // socket path: futures the async runtime's reactor completes, throwing an `IoError` when the
   // system says no. std's own `TcpListener.unix(path)` and `TcpStream.unix(path)` give a socket on a
   // path typed as TCP's, so serve and fetch share their HTTP code.
+  /** @throws {CompileError} */
   private socketStatic(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, which: "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket"): { type: Type; what: string } {
     const listens = which === "TcpListener" || which === "UnixListener" || which === "UdpSocket";
     const internal = e.start >= STD_BASE && (which === "TcpListener" || which === "TcpStream") && callee.name === "unix";
@@ -3744,6 +3882,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A wait's AbortSignal, lent to it: the wait keeps a count on it of its own.
+  /** @throws {CompileError} */
   private signalArgument(this: Mut<this>, a: Expr, what: string) {
     const signal = this.typing.blockType("AbortSignal");
     const given = this.value(a);
@@ -3753,6 +3892,7 @@ export class Expressions<C extends Context> implements Union {
   // `new Promise<T>(executor)`, rewritten as the prelude's cell its executor settles, awaited.
   // T is written or the `Promise<T>` it meets; reject's error is its annotation's, or what the
   // function declares it throws, or `Error`.
+  /** @throws {CompileError} */
   private promiseNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, list: Expr[]) {
     const example = "as in 'new Promise<i64>((resolve, reject) => resolve(1))'";
     if (list.length !== 1 || list[0]!.kind === "spread") throw new CompileError("E0305", `'new Promise' takes one executor, ${example}`, e.start, e.end);
@@ -3811,6 +3951,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `setTimeout(callback, ms)`, `setInterval` and their clears, rewritten as the std's timers.
+  /** @throws {CompileError} */
   private timerCall(this: Mut<this>, e: Call, name: string): Call {
     const at = { start: e.start, end: e.end };
     const helper = (named: string, args: Expr[]) => this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] });
@@ -3882,6 +4023,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `Promise.withResolvers<T>()`, rewritten as the prelude's cell with its promise and the
   // closures settling it; reject's error is what the function declares it throws, or `Error`.
+  /** @throws {CompileError} */
   private promiseResolvers(this: Mut<this>, e: Call): Call {
     if (e.args.length > 0) throw new CompileError("E0305", "'Promise.withResolvers' takes no arguments", e.start, e.end);
     if (e.typeArgs.length > 1) throw new CompileError("E0305", "'Promise.withResolvers' takes one type argument, what its Promise gives", e.start, e.end);
@@ -3897,6 +4039,7 @@ export class Expressions<C extends Context> implements Union {
   // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions
   // giving v or throwing e. Each gives the T it is written with or meets; a rejected one with
   // neither gives nothing.
+  /** @throws {CompileError} */
   private promiseSettled(this: Mut<this>, e: Call, name: "resolve" | "reject"): Call {
     const at = { start: e.start, end: e.end };
     if (e.args.length > 1 || e.args[0]?.kind === "spread") throw new CompileError("E0305", `'Promise.${name}' takes ${name === "resolve" ? "the value it gives" : "the error it throws"}`, e.start, e.end);
@@ -4035,6 +4178,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A type a handle's member gives or takes, refused when it can't cross between Fish and JS.
+  /** @throws {CompileError} */
   private crossing(t: Type, what: string, at: Span): Type {
     // A generic body's definition holds placeholders, which each instance checks as what they are.
     if (this.typing.holdsPart(t, (p) => this.placeholder(p))) return t;
@@ -4044,6 +4188,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A JS handle's property, as its shape declares it, read from JS.
+  /** @throws {CompileError} */
   private jsProperty(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
     if (this.typing.rec(t).of === "void") {
       if (this.ctx.exprsState.writing === e) throw new CompileError("E1005", "writing a JS value's properties isn't supported yet; a 'JsValue' is read with 'get'", e.start, e.end);
@@ -4070,6 +4215,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `v.get(key)` and `v.at(i)` read a property or an element of a JsValue, and `v.has(key)` tests
   // for one.
+  /** @throws {CompileError} */
   private jsAccessor(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     const name = callee.name;
     const takes = ({ get: "string", has: "string", at: "i64" } as Record<string, Type>)[name];
@@ -4084,6 +4230,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A JS handle's method, called with its declared parameters.
+  /** @throws {CompileError} */
   private jsMethodCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: BlockType): { type: Type; what: string } {
     if (this.typing.rec(t).of === "void") return this.jsAccessor(e, callee);
     const shape = this.typing.jsShape(t);
@@ -4116,6 +4263,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The signature of a package's function a call takes: the first, in the order declared, whose
   // parameters the arguments pass for; a generic one is taken on the count of its arguments.
+  /** @throws {CompileError} */
   private jsOverload(this: Mut<this>, e: Call, first: Body): Body {
     const signatures = [first, ...first.js!.overloads!.map((f) => this.arenas.bodyOf(this.jsBodies.get(f)!))];
     if (e.args.some((a) => a.kind === "arrow" || a.kind === "spread")) return first;
@@ -4139,6 +4287,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The overload a call takes: the first, in the order declared, whose parameters its arguments
   // pass for, as TypeScript picks one. A generic one is taken on the count of its arguments.
+  /** @throws {CompileError} */
   private overload(this: Mut<this>, e: Call, impl: Body): Body {
     const spread = e.args.find((a) => a.kind === "spread");
     if (spread) throw new CompileError("E0801", `spreading arguments into the overloaded '${impl.name}' isn't supported yet; pass them one by one`, spread.start, spread.end);
@@ -4167,6 +4316,7 @@ export class Expressions<C extends Context> implements Union {
 
   // What an overload's body gives back: the implementation's value, as the members of its type the
   // signature's return type takes; codegen panics on any other.
+  /** @throws {CompileError} */
   private narrowedReturn(this: Mut<this>, call: Expr, node: TypeNode): Type {
     const from = this.value(call);
     const to = this.ctx.resolveType(node);
@@ -4189,6 +4339,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A signature's parameter types, unless it is generic, when each call's instance decides them.
+  /** @throws {CompileError} */
   private signatureTypes(this: Mut<this>, f: Body): Type[] | undefined {
     if ((f.typeParams ?? []).some((p) => !isLifetime(p)) || f.params.some((p) => p.comptime)) return undefined;
     const bounds = this.ctx.implicitOf(f);
@@ -4203,6 +4354,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Whether an argument passes for a parameter, as choosing an overload asks before the call
   // checks it against the one chosen.
+  /** @throws {CompileError} */
   private passes(this: Mut<this>, a: Expr, given: Type | undefined, to: Type, p: Param): boolean {
     if (a.kind === "arrow") return this.arrowPasses(a, to);
     if (given === undefined) return true;
@@ -4258,6 +4410,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A call's arguments against a JS declaration's parameters: a trailing Option may be left out,
   // as an optional parameter.
+  /** @throws {CompileError} */
   private jsArgs(this: Mut<this>, e: Call | Extract<Expr, { kind: "new" }>, params: Type[], optional: boolean[]) {
     this.jsCrossings.add(e);
     this.jsOptionalOf.set(e, optional);
@@ -4278,6 +4431,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A value given to JS, which the call or write converts: refused when it has no JS form.
+  /** @throws {CompileError} */
   private givenToJs(this: Mut<this>, a: Expr, given: Type) {
     this.jsGiven.add(a);
     // A type parameter is what it stands for in this instance.
@@ -4305,6 +4459,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A package's declared parameters as Fish types: an optional one is an Option.
+  /** @throws {CompileError} */
   private jsParams(this: Mut<this>, params: Param[]): Type[] {
     return params.map((p) => {
       const declared = this.typing.jsTakes(p.type ? this.ctx.resolveType(p.type) : this.typing.blockType("JsValue"));
@@ -4313,6 +4468,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `new C(...)` of a package's class: its constructor's parameters, giving a handle.
+  /** @throws {CompileError} */
   private jsNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, c: Interface): Type {
     if (c.typeParams.length > 0) throw unsupported("generic classes of a package", e);
     const constructor = this.jsChain(c).find((k) => k.jsClass!.constructors.length > 0)?.jsClass!.constructors[0] ?? [];
@@ -4341,6 +4497,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A package's class's static member: a property read, or a method called.
+  /** @throws {CompileError} */
   private jsStatic(this: Mut<this>, c: Interface, name: string, at: Expr): TypeMember {
     const found = this.jsChain(c).flatMap((k) => k.jsClass!.statics).find((m) => "name" in m && m.name === name);
     if (!found) throw new CompileError("E0502", `property '${name}' does not exist on '${c.name}'`, at.start, at.end);
@@ -4350,6 +4507,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `c.signal` on a controller, another handle to its signal, and `signal.aborted`, whether
   // its controller has aborted: values computed by the runtime, not fields.
+  /** @throws {CompileError} */
   private blockProperty(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, t: BlockType): Type {
     if (this.linked(e)) throw unsupported(`optional chains through '${this.typing.rec(t).which}' values`, e);
     this.computed.add(e);
@@ -4362,6 +4520,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `shared(v)`: v moved into a new counted block, of its type argument, the type expected of
   // it, or else v's own type.
+  /** @throws {CompileError} */
   private sharedNew(this: Mut<this>, e: Call): { type: Type; what: string } {
     if (e.args.length !== 1 || e.typeArgs.length > 1) throw new CompileError("E0504", "'shared' takes the value it starts with, as in 'shared({ hits: 0 })'", e.start, e.end);
     const expected = this.ctx.exprsState.wanted.get(e);
@@ -4375,6 +4534,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A shared value's `update`, a Lock's: the callback changes the value under the block's lock.
+  /** @throws {CompileError} */
   private sharedCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
     const which = this.typing.rec(t).which;
     if (which === "Weak") return this.weakCall(e, callee, t);
@@ -4394,6 +4554,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `rc.m(args)` for a method that only reads: `rc.read((v) => v.m(args))`, so its call counts as
   // a read of the value, which nested reads may share and an update may not.
+  /** @throws {CompileError} */
   private rcMethod(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, method: Body): { type: Type; what: string } {
     if (method.self?.mutable || method.self?.owned) {
       throw new CompileError("E0304", `'${callee.name}' changes its object, so on an Rc it runs inside 'update', as in '${this.placeText(this.bare(callee.object))}.update((v) => v.${callee.name}(...))'`, callee.start, callee.end);
@@ -4410,6 +4571,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `Rc.ptrEq(a, b)`: whether two Rcs share one block, which `===` doesn't ask, since it
   // compares values. Each is borrowed for the test.
+  /** @throws {CompileError} */
   private ptrEq(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>): { type: Type; what: string } {
     if (callee.name !== "ptrEq") throw new CompileError("E0502", `'Rc' has no '${callee.name}'; it has 'ptrEq', which tells whether two Rcs share one value`, callee.start, callee.end);
     if (callee.optional || e.optional) throw new CompileError("E0505", "'Rc' is always there, so 'Rc.ptrEq' is called without '?.'", e.start, e.end);
@@ -4426,6 +4588,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `w.upgrade()`: an Rc of the value a Weak reaches while any Rc of it is left, or else null.
+  /** @throws {CompileError} */
   private weakCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: SharedType): { type: Type; what: string } {
     if (callee.name !== "upgrade") throw new CompileError("E0502", `'Weak' has no method '${callee.name}'; reach its value with 'upgrade', which gives an 'Rc' or null, or copy it with 'clone'`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling 'Weak' methods", callee);
@@ -4435,6 +4598,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `s.f` on a shared value: an interior-mutable field is borrowed where it lives, unlocked,
   // since it changes only through its own methods; any other is copied out under the lock.
+  /** @throws {CompileError} */
   private sharedField(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, t: SharedType): Type {
     if (this.linked(e)) throw unsupported("optional chains through shared values", e);
     if (this.typing.rec(t).which === "Weak") throw new CompileError("E0502", `a 'Weak' reaches its value only through 'upgrade()', which gives an 'Rc' while one is left, as in 'const p = ${this.placeText(this.bare(e.object))}.upgrade()'`, e.start, e.end);
@@ -4457,6 +4621,7 @@ export class Expressions<C extends Context> implements Union {
   // gives what the callback gives; an RwLock's `read` lends it read-only, beside other readers.
   // A closure can't return a reference, so nothing it gives borrows from the value once the
   // lock is released.
+  /** @throws {CompileError} */
   private lockCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, sharing = false, counting = false): { type: Type; what: string } {
     const method = callee.name;
     const which = this.typing.rec(t).which;
@@ -4482,6 +4647,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `await p`: the future runs to completion, the async function stopping while it is pending,
   // and gives its value, or raises its error as a call would. It moves into the await.
+  /** @throws {CompileError} */
   private awaited(this: Mut<this>, e: Extract<Expr, { kind: "unary" }>): Type {
     if (this.ctx.locked && this.ctx.counting) throw new CompileError("E0304", `an Rc's '${this.ctx.locked}' callback can't 'await': the value stays marked as ${this.ctx.locked === "read" ? "read" : "changed"} until the callback returns, and code running meanwhile would find it so; finish the ${this.ctx.locked}, then await`, e.start, e.end);
     if (this.ctx.locked) throw new CompileError("E0304", `'${this.ctx.locked}' holds its lock while the callback runs, so the callback can't 'await': every task needing the lock would wait too; finish the ${this.ctx.locked}, then await`, e.start, e.end);
@@ -4506,6 +4672,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `Promise.all`, `race`, `allSettled` and `any`: one future awaiting those in the list at once,
   // in this task. It is awaited where it is made, so the futures' borrows end with the await.
+  /** @throws {CompileError} */
   private combined(this: Mut<this>, e: Call, kind: Combiner): { type: Type; what: string } {
     const name = `'Promise.${kind}'`;
     if (e.optional) throw new CompileError("E0505", `${name} is always there, so it is called without '?.'`, e.start, e.end);
@@ -4546,6 +4713,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // The prelude's `AggregateError<E>` for errors of type `E`.
+  /** @throws {CompileError} */
   private aggregateOf(this: Mut<this>, errors: Type, at: Span): ClassType {
     return this.ctx.construct("AggregateError", [], [this.typing.arrayType(errors)], at)!.type as ClassType;
   }
@@ -4572,6 +4740,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `g.next()` runs a generator to its next `yield`, changing it, so it needs a place. An async
   // generator's gives a future borrowing it, awaited where it is made so the borrow ends there.
+  /** @throws {CompileError} */
   private generatorCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, generator: Type, yields: Type, async = false): { type: Type; what: string } {
     if (!async && Object.hasOwn(GENERATOR_HELPERS, callee.name)) return this.helperCall(e, callee, yields);
     if (callee.name !== "next") throw new CompileError("E0502", `generators have no method '${callee.name}' yet${didYouMean(callee.name, async ? ["next"] : ["next", ...Object.keys(GENERATOR_HELPERS)])}`, callee.start, callee.end);
@@ -4605,6 +4774,7 @@ export class Expressions<C extends Context> implements Union {
   // over. `map`, `filter`, `take`, `drop` and `flatMap` give a generator that pulls from it only
   // when pulled; the rest run it at once. Callbacks get each value and its index, the predicates
   // a borrow of the value.
+  /** @throws {CompileError} */
   private helperCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, yields: Type): { type: Type; what: string } {
     const name = callee.name;
     const source = callee.object;
@@ -4683,6 +4853,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A string read where a string's property or method is used: a literal becomes its string,
   // and a reference is read through. In an optional chain, the chain reads the Option.
+  /** @throws {CompileError} */
   private text(this: Mut<this>, object: Expr, type: Type, chained: boolean) {
     if (chained && type !== "string") throw unsupported("optional chains on string literal types", object);
     const held = this.types.get(object);
@@ -4693,6 +4864,7 @@ export class Expressions<C extends Context> implements Union {
   // A member of a data-carrying enum: a variant, read on its own only when it holds nothing.
   // A generic enum's type arguments come from those written, then from the payload, then from
   // the type expected where the value goes.
+  /** @throws {CompileError} */
   private variant(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, named: EnumInfo, alone: boolean, given: Type[] = [], typeArgs: TypeNode[] = []): VariantType {
     const data = named.data!;
     const member = data.members.find((m) => m.name === e.name);
@@ -4721,6 +4893,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The variant of this enum the type expected here holds: of the instances it names, one whose
   // fields the payload fits, if it is given, or else the first.
+  /** @throws {CompileError} */
   private expectedVariant(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, named: EnumInfo, given?: Type[]): VariantType | undefined {
     const want = this.ctx.exprsState.wanted.get(e);
     const wr = this.recOf(want);
@@ -4743,6 +4916,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Whether `x.clone()` is the compiler's copy: for any value whose class doesn't declare a
   // `clone` method of its own. A base's `clone` makes a base, so it doesn't count.
+  /** @throws {CompileError} */
   private copies(this: Mut<this>, t: Type): boolean {
     if (typeof t === "string") return true;
     const r = this.typing.rec(t);
@@ -4755,6 +4929,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // The compiler's copy of a value, or in an instance, the concrete class's own `clone()`.
+  /** @throws {CompileError} */
   private cloned(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: Type): { type: Type; what: string } {
     if (e.args.length > 0 || e.typeArgs.length > 0) throw new CompileError("E0213", "'clone' takes no arguments", e.start, e.end);
     const stored = this.typing.lower(receiver);
@@ -4773,6 +4948,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Refuses a value that can't be cloned, for `clone()` and for the array methods that give
   // clones of elements, named by `by`; `dyns` copies Dyns one by one, as those methods do.
+  /** @throws {CompileError} */
   private clonable(this: Mut<this>, type: Type, at: Span, by?: string, dyns: boolean = by !== undefined) {
     const stored = this.typing.lower(type);
     const say = (why: string) => new CompileError("E0213", by ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
@@ -4805,6 +4981,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // The type of a member call's receiver, unless it is `super` or a class's name.
+  /** @throws {CompileError} */
   private receiverType(this: Mut<this>, callee: Extract<Expr, { kind: "member" }>): Type | undefined {
     const { object } = callee;
     if (object.kind === "super" || (object.kind === "ident" && !this.ctx.lookup(object.name) && (this.classes.has(object.name) || this.ctx.definedClass(object.name) || this.enums.has(object.name)))) return undefined;
@@ -4831,12 +5008,14 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // What a link of an optional chain gives: an Option of what it reads.
+  /** @throws {CompileError} */
   private optional(t: Type, at: Expr): Type {
     if (this.typing.holdsRef(t) && !this.isRefType(t)) throw unsupported("Options holding references", at);
     return this.typing.unionType([t, "null"]);
   }
 
   // The object a link reads, as what its Option holds.
+  /** @throws {CompileError} */
   private unwrapped(this: Mut<this>, object: Expr, written: boolean): Type {
     const option = this.value(object);
     if (!this.typing.isOption(option)) {
@@ -4851,6 +5030,7 @@ export class Expressions<C extends Context> implements Union {
   // A method of an interface, called while checking a generic body at its definition on a
   // value of a type parameter bounded by it, or of an interface a call returned. Each
   // instance resolves the call to its concrete type's method.
+  /** @throws {CompileError} */
   private traitCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, receiver: ParamType | InterfaceType): { type: Type; what: string } {
     const r = this.typing.rec(receiver);
     const trait = this.recOf(r.kind === "param" ? r.bound : receiver);
@@ -4863,8 +5043,9 @@ export class Expressions<C extends Context> implements Union {
     if (absent) (this.ctx.instance.absent ??= new NodeSet()).add(e);
     // A generic method's call infers its types, then in an instance runs the concrete method's.
     if (found.generic) {
-      const { type } = this.familyCall(e, { generic: found.generic }, `'${callee.name}'`);
-      if (!absent && typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, type), what: `'${callee.name}'` };
+      const { type, throws } = this.familyCall(e, { generic: found.generic }, `'${callee.name}'`);
+      if (!absent && typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, type, throws), what: `'${callee.name}'` };
+      if (!absent && throws) this.ctx.raise(e, throws, `'${callee.name}'`);
       return { type, what: `'${callee.name}'` };
     }
     if (e.typeArgs.length > 0) throw new CompileError("E0106", "expected 0 type arguments", e.start, e.end);
@@ -4879,18 +5060,21 @@ export class Expressions<C extends Context> implements Union {
     // `Promise<T>` describes, which in the definition is checked as one borrowing it.
     const promised = this.typing.promiseElement(found.returns);
     if (this.typing.holdsRef(found.returns) || promised !== undefined) this.borrowsFrom.set(e, [callee.object, ...e.args.filter((a) => this.lends(a))]);
-    if (!absent && typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, found.returns), what: `'${callee.name}'` };
+    if (!absent && typeof stored !== "string" && this.recOf(stored)?.kind === "class") return { type: this.concreteMethod(e, callee, stored as ClassType, found.returns, found.throws), what: `'${callee.name}'` };
+    if (!absent && found.throws && promised === undefined) this.ctx.raise(e, found.throws, `'${callee.name}'`);
     return { type: promised !== undefined ? this.typing.lentPromise(promised) : found.returns, what: `'${callee.name}'` };
   }
 
   // Whether an instance's concrete type for a type parameter leaves out a method: an object,
   // or a class without it.
+  /** @throws {CompileError} */
   private lacks(stored: Type | undefined, name: string): boolean {
     return stored !== undefined && (this.recOf(stored)?.kind !== "class" || !inherited(this.arenas, this.ctx.classOf(stored as ClassType), "methods", name));
   }
 
   // `h.m !== undefined`, `h.m === null` or `typeof h.m === "function"` on an interface's optional
   // method tests whether the value's type has it; read any other way, a method is called.
+  /** @throws {CompileError} */
   private presence(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): boolean {
     if (e.op !== "===" && e.op !== "!==") return false;
     const test = typeofTest(e);
@@ -4925,6 +5109,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `h.m?.()` calls only an optional method, which a plain call may call only where a check
   // found it there.
+  /** @throws {CompileError} */
   private omittableCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, m: Method, shown: string) {
     if (!e.optional) {
       if (m.omittable && !this.ctx.present(callee.object, m.name)) throw new CompileError("E0108", `'${m.name}' may be missing, since '${shown}' declares it optional; call it as '${this.placeText(callee)}?.()', or check '${this.placeText(callee)} !== undefined' first`, callee.start, callee.end);
@@ -4939,18 +5124,23 @@ export class Expressions<C extends Context> implements Union {
 
   // In an instance, a call through a type parameter runs its concrete class's method. An
   // interface it returns is, as for any call, the one concrete type the method returns.
-  private concreteMethod(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, c: ClassType, returns: Type): Type {
+  /** @throws {CompileError} */
+  private concreteMethod(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, c: ClassType, returns: Type, declaredThrows?: Type): Type {
     const target = inherited(this.arenas, this.ctx.classOf(c), "methods", callee.name)!;
     if (target.self!.owned) this.takesOver(callee.object, callee.name);
     else if (target.self!.mutable) this.mutates(callee.object, callee.name);
     const instance = this.ctx.instantiate(target, e.typeArgs, e.args, e.args.map((a) => this.coercions.get(a) ?? this.types.get(a)!), e);
     this.calls.set(e, instance.id);
+    if (declaredThrows && !target.async && this.typing.promiseElement(returns) === undefined) this.ctx.raise(e, declaredThrows, `'${callee.name}'`);
+    const error = this.ctx.errorOf(instance);
+    if (error && error !== declaredThrows && !target.async) this.ctx.raise(e, error, `'${callee.name}'`);
     const r = this.recOf(returns);
     if (r?.kind !== "interface") return returns;
     return this.typing.wrapped(r.name, returns as InterfaceType, this.typing.lower(this.ctx.returnOf(instance, e)));
   }
 
   // An owning method takes its object over, which can't happen through a borrow.
+  /** @throws {CompileError} */
   private takesOver(object: Expr, name: string) {
     const type = this.types.get(object);
     if (typeof type !== "string" && type !== undefined && this.typing.rec(type).kind === "ref") {
@@ -4962,6 +5152,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A mutating method's receiver must be a place that could change, or a temporary.
+  /** @throws {CompileError} */
   private mutates(this: Mut<this>, object: Expr, name: string) {
     const type = this.types.get(object);
     if (typeof type !== "string" && type !== undefined && this.typing.rec(type).kind === "ref" && !this.typing.rec(type as RefType).mutable) {
@@ -5030,6 +5221,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // The class, or the base it extends, holding the Map or Set its `extends` names.
+  /** @throws {CompileError} */
   private embeddedOf(t: Type | undefined): ClassInfo | undefined {
     if (t === undefined || this.recOf(t)?.kind !== "class") return undefined;
     for (let b: ClassInfo | undefined = this.ctx.classOf(t as ClassType); b; b = this.arenas.classOf(b.base)) if (b.embedded) return b;
@@ -5038,6 +5230,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Whether `name` on a class reaches the Map or Set it embeds: neither it nor its bases declare it.
   // Only the collection's own members are: `clone`, `equals` and the like stay the class's.
+  /** @throws {CompileError} */
   private delegated(t: Type | undefined, name: string): boolean {
     const embedding = this.embeddedOf(t);
     if (!embedding || !collectionMember(embedding, name)) return false;
@@ -5046,6 +5239,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // Whether `super.name` reaches the embedded Map or Set: no base between declares it.
+  /** @throws {CompileError} */
   private superDelegated(name: string): boolean {
     const self = this.self?.type;
     const embedding = self && this.embeddedOf(self);
@@ -5094,6 +5288,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `o[k]` or `o.k` on a dictionary, being written or deleted: its object, checked, and its key.
+  /** @throws {CompileError} */
   private dictEntry(this: Mut<this>, written: Expr): { place: Expr; object: Expr; key: Expr } | undefined {
     const place = this.bare(written);
     if ((place.kind !== "index" && place.kind !== "member") || place.optional) return undefined;
@@ -5108,6 +5303,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A dictionary's key, checked to be a string where it is written.
+  /** @throws {CompileError} */
   private dictKey(this: Mut<this>, key: Expr): Expr {
     const t = this.value(key);
     this.coerce(key, t, "string", `a dictionary's keys are strings, not '${this.typing.show(t)}'`);
@@ -5116,6 +5312,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `source[Symbol.iterator]()`, when `held` is a class with that method: what iterating it runs.
+  /** @throws {CompileError} */
   iteratorCall(this: Mut<this>, source: Expr, held: Type): Expr | undefined {
     const t = this.typing.lower(held);
     const r = this.recOf(t);
@@ -5129,6 +5326,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The Map or Set a class extending one embeds, which iterating the class iterates unless the
   // class declares its own `[Symbol.iterator]`.
+  /** @throws {CompileError} */
   embeddedIterated(source: Expr, held: Type): Expr | undefined {
     const t = this.typing.lower(held);
     if (!this.embeddedOf(t) || inherited(this.arenas, this.ctx.classOf(t as ClassType), "methods", ITERATOR)) return undefined;
@@ -5146,6 +5344,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `o[k]` on a dictionary reads the entry under k as an Option, as the Map's `get` does.
+  /** @throws {CompileError} */
   private undict(this: Mut<this>, e: Expr): boolean {
     e = this.rewrites.current(e);
     if (e.kind !== "index") return false;
@@ -5158,6 +5357,7 @@ export class Expressions<C extends Context> implements Union {
     return true;
   }
 
+  /** @throws {CompileError} */
   private staticRead(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, found: Static): Expr {
     const at = { start: e.start, end: e.end };
     if (found.field) {
@@ -5180,6 +5380,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `C.x = v`, `C.x += v` and `C.x++` on a static setter call it with the value to store. Whether
   // the write was rewritten.
+  /** @throws {CompileError} */
   private staticWrite(this: Mut<this>, e: Extract<Expr, { kind: "assign" | "update" }>): boolean {
     const target = e.kind === "assign" ? e.target : e.operand;
     const found = this.staticProperty(target);
@@ -5198,6 +5399,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The method a member call names: a static one on a class name, or an instance one, whose
   // receiver must be able to change when the method changes it.
+  /** @throws {CompileError} */
   private method(this: Mut<this>, callee: Extract<Expr, { kind: "member" }>, receiver: Type | undefined): Body {
     const { object, name } = callee;
     const named = object.kind === "ident" && !this.ctx.lookup(object.name) ? (this.arenas.classOf(this.classes.get(object.name)) ?? this.ctx.definedClass(object.name)) : undefined;
@@ -5225,6 +5427,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `super.m()` runs the base's `m` on the embedded base.
+  /** @throws {CompileError} */
   private superMethod(this: Mut<this>, callee: Extract<Expr, { kind: "member" }>): Body {
     // In a copy of a base's member, `super` is the base of the class it was written in.
     const base = this.recOf((this.owner && this.self && this.typing.derives(this.self.type, this.owner) ? this.owner : this.self?.type))?.base;
@@ -5250,6 +5453,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Inside an abstract class's code, its copies included, `this.name` naming one of its abstract
   // members is typed by the declaration, which each implementation's result is converted to.
+  /** @throws {CompileError} */
   private abstractDeclaration(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, table: "methods" | "getters"): Body | undefined {
     if (e.object.kind !== "this" || !this.recOf(this.owner)?.abstract) return undefined;
     const declared = inherited(this.arenas, this.ctx.classOf(this.owner!), table, e.name);
@@ -5258,6 +5462,7 @@ export class Expressions<C extends Context> implements Union {
 
   // TypeScript's access rules: a private member is reachable only from inside its class, and
   // a protected one also from the classes that embed it.
+  /** @throws {CompileError} */
   private visible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string, at: Span) {
     // Only delegation reads the embedded collection, from wherever the class is used.
     if (name === EMBEDDED || this.accessible(access, declaring, name)) return;
@@ -5273,6 +5478,7 @@ export class Expressions<C extends Context> implements Union {
     return a === b || (g !== undefined && g.name === this.typing.rec(b).generic?.name);
   }
 
+  /** @throws {CompileError} */
   private accessible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string): boolean {
     if (!access || access === "public" || (this.owner && this.sameClass(this.owner, declaring))) return true;
     if (access === "protected" && this.owner) for (let b: ClassType | undefined = this.typing.rec(this.owner).base; b; b = this.typing.rec(b).base) if (this.sameClass(b, declaring)) return true;
@@ -5283,6 +5489,7 @@ export class Expressions<C extends Context> implements Union {
   // The members of a type this body can reach, for suggesting one: an object's fields; a
   // class's fields, methods and accessors with its bases', those private or protected only where
   // accessible; an interface's or a Dyn's fields and methods.
+  /** @throws {CompileError} */
   private memberNames(this: Mut<this>, t: Type | undefined): string[] {
     if (t === undefined || typeof t === "string") return [];
     const r = this.typing.rec(t);
@@ -5302,6 +5509,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A class's static members, with its bases', for suggesting one.
+  /** @throws {CompileError} */
   private staticNames(this: Mut<this>, c: ClassInfo): string[] {
     const names: string[] = [];
     for (let b: ClassInfo | undefined = c; b; b = this.arenas.classOf(b.base)) {
@@ -5317,6 +5525,7 @@ export class Expressions<C extends Context> implements Union {
     return fields.some((f) => f.name === name) || !base ? t : this.declaring(base, name);
   }
 
+  /** @throws {CompileError} */
   private args(this: Mut<this>, list: Expr[], argTypes: Type[], target: Instance, at: Span) {
     // A package's function takes a callback or a Promise as its signature made it for JS, a
     // stored one JS keeps.
@@ -5334,6 +5543,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A parameter with a default takes a value of its declared type, which this gives: leaving the
   // argument out gives the default, so a null or an Option where none is declared is refused.
+  /** @throws {CompileError} */
   private defaultedArg(a: Expr, type: Type, p: Param): Type | undefined {
     const declared = this.declaredTypes.get(p);
     if (!declared || holdsNull(this.typing, declared)) return declared;
@@ -5341,6 +5551,7 @@ export class Expressions<C extends Context> implements Union {
     return declared;
   }
 
+  /** @throws {CompileError} */
   value(this: Mut<this>, written: Expr): Type {
     const e = this.keyed(this.rewrites.current(written));
     if (this.ctx.exprsState.once.delete(e)) return this.types.get(e)!;
@@ -5355,6 +5566,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // An object literal with computed keys, as the same literal with each key's name written.
+  /** @throws {CompileError} */
   private keyed(this: Mut<this>, e: Expr): Expr {
     if (e.kind !== "object" || e.props.every((p) => !("key" in p) || typeof p.key === "string")) return e;
     const props = e.props.map((p) => ("key" in p && typeof p.key !== "string" ? this.rewrites.replace(p, { ...p, key: this.knownKey(p.key) }) : p));
@@ -5363,6 +5575,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The name a computed key gives: a literal's, or one a const, an `as const` value or an enum
   // member holds, as its literal type says.
+  /** @throws {CompileError} */
   knownKey(this: Mut<this>, key: Expr): string {
     return knownKey(key, (leaf) => {
       const t = this.value(leaf);
@@ -5377,6 +5590,7 @@ export class Expressions<C extends Context> implements Union {
     });
   }
 
+  /** @throws {CompileError} */
   private typeOf(this: Mut<this>, e: Expr): Type {
     switch (e.kind) {
       // A literal is an i64 unless where it is written gives it another number type.
@@ -6053,6 +6267,7 @@ export class Expressions<C extends Context> implements Union {
     });
   }
 
+  /** @throws {CompileError} */
   private adaptFields(this: Mut<this>, e: Expr, type: Type, to: Type): Type {
     to = this.typing.unfolded(to);
     // An object literal meeting a union adapts to the member it names, then joins the union.
@@ -6096,6 +6311,7 @@ export class Expressions<C extends Context> implements Union {
   // `**` raises an integer to a `u32` power, like Rust's `pow`, and a float to a float power of
   // its own type, like `powf`. A literal base takes its type from the exponent's only when that
   // is a float.
+  /** @throws {CompileError} */
   private power(this: Mut<this>, base: Expr, left: Type, exponent: Expr, right: Type, at: Expr): Type {
     // A bigint's exponent is a bigint, as in JavaScript.
     if (left === "bigint" || right === "bigint") return binaryType(this.typing, "*", left, right, at);
@@ -6128,6 +6344,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `a ?? b` is what `a` holds, or `b` when `a` is empty, which only then runs. With an Option
   // for `b`, the result may still be empty.
+  /** @throws {CompileError} */
   private orElse(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): Type {
     // A destructuring default in a generic instance meets the Option its type parameter is.
     const option = this.unusedDefaults.has(e) ? this.typing.lower(this.read(e.left)) : this.read(e.left);
@@ -6171,6 +6388,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // An array literal takes a declared element type, each element meeting it.
+  /** @throws {CompileError} */
   private literalArray(this: Mut<this>, e: Expr, type: Type, to: Type): boolean {
     // Meeting a union, it takes the union's one array member, and then joins the union.
     const tr = this.recOf(to);
@@ -6191,6 +6409,7 @@ export class Expressions<C extends Context> implements Union {
 
   // `v === null` and `v === undefined` test a JsValue for JS's two empty values, which Fish's one
   // empty value can't tell apart.
+  /** @throws {CompileError} */
   private jsEmpty(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): Type | undefined {
     for (const [subject, other] of [[e.left, e.right], [e.right, e.left]] as const) {
       if (!isEmpty(other, this.locals as NodeMap<Expr, LocalId>)) continue;
@@ -6208,6 +6427,7 @@ export class Expressions<C extends Context> implements Union {
   // `===` between values holding objects, arrays or instances compares them by value, as Fish's
   // Eq does, where TypeScript compares objects by identity: every part has to compare, and the
   // wider value is compared as the narrower.
+  /** @throws {CompileError} */
   private equality(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): Type | undefined {
     const [left, right] = [this.value(e.left), this.value(e.right)];
     this.ctx.exprsState.once.add(e.left);
@@ -6260,6 +6480,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Whether a class or a data enum's values compare: a class through its `equals`, an enum
   // when it derives Eq.
+  /** @throws {CompileError} */
   private comparesAsValue(this: Mut<this>, t: ClassType | VariantType): boolean {
     if (rustClassOf(this.typing, t)) return false;
     const r = this.typing.rec(t);
@@ -6279,6 +6500,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `+` with a string on either side joins the two into a new string.
+  /** @throws {CompileError} */
   private join(this: Mut<this>, a: Expr, left: Type, b: Expr, right: Type): Type {
     this.joined(a, left, "'+'");
     this.joined(b, right, "'+'");
@@ -6287,6 +6509,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Values printed, or formatted as util.format does: what isn't a scalar is shown as Node's
   // util.inspect shows it.
+  /** @throws {CompileError} */
   private shown(this: Mut<this>, args: Expr[]) {
     for (const a of args) {
       const type = a.kind === "string" ? "void" : this.read(a);
@@ -6300,6 +6523,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `%j`, JSON, in a literal format, where it would take an argument.
+  /** @throws {CompileError} */
   private unformattable(args: Expr[]) {
     const [first] = args;
     if (first?.kind !== "string" || args.length < 2 || !formatPlan(first.value, args.length).specs.includes("j")) return;
@@ -6307,6 +6531,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A value written into a string: text, or a number or boolean written as JavaScript would.
+  /** @throws {CompileError} */
   private joined(this: Mut<this>, e: Expr, type: Type, into: string): void {
     e = this.rewrites.current(e);
     if (this.typing.unbranded(type) !== type) return this.joined(e, this.typing.unbranded(type), into);
@@ -6321,6 +6546,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Two operands of different number types meet as one when either is only literals. String
   // literals meet as strings, unless two different ones are compared for equality.
+  /** @throws {CompileError} */
   private sameNumbers(this: Mut<this>, a: Expr, left: Type, b: Expr, right: Type, equality = false): [Type, Type] {
     if (isText(this.typing, left) && isText(this.typing, right) && (!equality || (left !== right && (left === "string" || right === "string")))) {
       if (left !== "string") this.coerce(a, left, "string", "");
@@ -6337,6 +6563,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A value meeting a declared type must fit it. A wider one is copied down to it, except
   // that a fresh object literal may not name extra properties, as in TypeScript.
+  /** @throws {CompileError} */
   coerce(this: Mut<this>, e: Expr, type: Type, to: Type, message: string) {
     e = this.rewrites.current(e);
     const tr = this.recOf(to);
@@ -6546,6 +6773,7 @@ export class Expressions<C extends Context> implements Union {
     this.coercions.set(e, to);
   }
 
+  /** @throws {CompileError} */
   private compared(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): Type {
     const special = this.jsEmpty(e) ?? typeofComparison(e, this) ?? this.equality(e) ?? unionComparison(e, this, (v, to) => this.adapt(v, to));
     return special ?? binaryType(this.typing, e.op, ...this.sameNumbers(e.left, this.operand(e.left), e.right, this.operand(e.right), true), e);
@@ -6568,6 +6796,7 @@ export class Expressions<C extends Context> implements Union {
   // A value meeting a reference is lent rather than handed over. A place is lent where it
   // lives, so it must be exactly the type borrowed; a temporary is converted first. Lending
   // mutably needs a place that could be assigned.
+  /** @throws {CompileError} */
   private borrow(this: Mut<this>, e: Expr, type: Type, to: RefType, message: string) {
     e = this.rewrites.current(e);
     // A `?:` choosing between places lends whichever it chooses, where it lives.
@@ -6659,6 +6888,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Whether lending a place to `to` points to where it lives, rather than to a copy: it holds
   // exactly that type, and isn't a variable or field narrowed to part of a union.
+  /** @throws {CompileError} */
   private inPlace(e: Expr, to: RefType): boolean {
     const type = this.types.get(e)!;
     const local = e.kind === "ident" ? this.localAt(e) : undefined;
@@ -6677,6 +6907,7 @@ export class Expressions<C extends Context> implements Union {
   // Without lifetimes, a reference variable can only be pointed at something that lives as long
   // as it: a place lent where it lives, or another reference variable, declared in its own
   // scope or an enclosing one.
+  /** @throws {CompileError} */
   private rebind(this: Mut<this>, target: Local, e: Expr) {
     const to = target.type as RefType;
     // A `?:`, or a call's result, lives as long as what it points into.
@@ -6716,6 +6947,7 @@ export class Expressions<C extends Context> implements Union {
 
   // An object literal meeting a type with fields holding references lends each property to
   // its field, so the literal holds what it borrows.
+  /** @throws {CompileError} */
   private lendFields(this: Mut<this>, e: Extract<Expr, { kind: "object" }>, to: ObjectType, message: string): Type {
     const own = this.types.get(e) as ObjectType;
     const lent = this.typing.rec(own).fields.map((f) => {
@@ -6741,6 +6973,7 @@ export class Expressions<C extends Context> implements Union {
   // An object literal builds a class it is declared as, without its constructor, when it
   // gives every field and the class has no field hidden from it. Nested literals may build
   // the classes of nested fields.
+  /** @throws {CompileError} */
   private builds(this: Mut<this>, e: Expr, type: Type, to: Type): boolean {
     e = this.rewrites.current(e);
     const c = this.recOf(to);
@@ -6762,6 +6995,7 @@ export class Expressions<C extends Context> implements Union {
     return true;
   }
 
+  /** @throws {CompileError} */
   excess(e: Expr, to: Type) {
     e = this.rewrites.current(e);
     to = this.typing.unfold(to);
@@ -6800,6 +7034,7 @@ export class Expressions<C extends Context> implements Union {
   // Properties are checked in source order, which is the order they run in.
   // `{ ...a, x: 1, ...b }`: the fields of each part in order, a later one replacing an earlier one
   // of its name. A spread takes an object's fields, or an instance's public ones.
+  /** @throws {CompileError} */
   private objectSpread(this: Mut<this>, e: Extract<Expr, { kind: "object" }>): Type {
     const merged = new Map<string, Field>();
     const written = new Set<string>();
@@ -6872,6 +7107,7 @@ export class Expressions<C extends Context> implements Union {
     return found;
   }
 
+  /** @throws {CompileError} */
   private property(this: Mut<this>, p: ObjectProp): Field {
     const field = this.propertyField(p);
     // A generic function value is held as it is, captures nothing, and is called by name.
@@ -6903,6 +7139,7 @@ export class Expressions<C extends Context> implements Union {
     return field;
   }
 
+  /** @throws {CompileError} */
   private propertyField(this: Mut<this>, p: ObjectProp): Field {
     if (p.kind === "property") {
       // An object stores its fields, so an arrow written in one owns what it captures.
@@ -6944,6 +7181,7 @@ export class Expressions<C extends Context> implements Union {
   // `const` is deeply immutable, so no field of a constant can change.
   // The type an assignment stores. Through an accessor that is the setter's parameter, and
   // an assignment that also reads, like `+=`, needs the getter too.
+  /** @throws {CompileError} */
   private assignable(this: Mut<this>, target: Expr, reads: boolean): Type {
     const [outer, updating] = [this.ctx.exprsState.writing, this.ctx.exprsState.updating];
     const written = this.rewrites.current(target);
@@ -6971,6 +7209,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Whether a `!` is on a value that can't be empty, decided where the `!` is first checked and
   // marked there. Only `null` itself is always empty.
+  /** @throws {CompileError} */
   private redundant(this: Mut<this>, e: Extract<Expr, { kind: "nonNull" }>, given: Type): boolean {
     if ((this.rewrites.current(e) as Bang).redundant === undefined) this.ctx.asWritten();
     const bang = this.rewrites.current(e) as Bang;
@@ -6982,6 +7221,7 @@ export class Expressions<C extends Context> implements Union {
     return marked.redundant!;
   }
 
+  /** @throws {CompileError} */
   private assignableTo(this: Mut<this>, target: Expr, reads: boolean): Type {
     // Only a `!` that can't fail is a place: the place it is written on.
     if (target.kind === "nonNull") {
@@ -7078,6 +7318,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The type a write stores. Read through a type parameter, a field has its bound's type, but
   // in an instance it is stored as the concrete type's field, which may be narrower.
+  /** @throws {CompileError} */
   private stored(target: Expr): Type {
     if (target.kind !== "member") return this.types.get(target)!;
     // Through a reference, what it points to stores the field; a field a check narrowed holds
@@ -7099,6 +7340,7 @@ export class Expressions<C extends Context> implements Union {
 
   // The setter an assignment to a class member runs, if it is an accessor. A getter alone
   // makes the property read-only.
+  /** @throws {CompileError} */
   private accessor(this: Mut<this>, target: Extract<Expr, { kind: "member" }>): Body | undefined {
     const object = this.typing.lower(this.value(target.object));
     const or = this.recOf(object);
@@ -7130,6 +7372,7 @@ export class Expressions<C extends Context> implements Union {
   // of a constant can change, and `this` changes only in a constructor or a method declared
   // `this: Mut<this>`.
   // A setter changes its whole object, whatever field it is named for: `setter` says one runs.
+  /** @throws {CompileError} */
   private changeable(this: Mut<this>, target: Expr, action: string, setter = false) {
     target = this.rewrites.current(target);
     // Below a read through a Dyn, the place is part of a copy.
@@ -7181,6 +7424,7 @@ export class Expressions<C extends Context> implements Union {
   // A value moved into a new `Dyn`: its type implements the interface, and owns everything and
   // changes only under locks, since a Dyn hides what it holds from every later check and may
   // cross to another thread.
+  /** @throws {CompileError} */
   private boxing(this: Mut<this>, e: Expr, type: Type, to: DynType, message: string) {
     e = this.rewrites.current(e);
     if (this.typing.promiseElement(this.typing.rec(to).of) !== undefined) return this.boxingFuture(e, this.typing.lower(type), to, message);
@@ -7222,6 +7466,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A future stored as a `Promise<T>`: one an async function's call made, giving T, throwing
   // nothing, and owning what it holds, since it may be awaited on any thread.
+  /** @throws {CompileError} */
   private boxingFuture(this: Mut<this>, e: Expr, type: Type, to: DynType, message: string) {
     const r = this.recOf(type);
     if (r?.kind === "param") return this.coercions.set(e, to), undefined;
@@ -7239,6 +7484,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A closure stored as a callable: it fits the function type, owns what it captures, changes
   // none of it, and can run any number of times.
+  /** @throws {CompileError} */
   private storing(this: Mut<this>, e: Expr, type: Type, to: DynType, message: string) {
     e = this.rewrites.current(e);
     const fn = this.typing.callableOf.get(this.typing.rec(to).of)!;
@@ -7271,6 +7517,7 @@ export class Expressions<C extends Context> implements Union {
   // What a Dyn of this type runs for each interface member. A method may not need more of its
   // object than the interface declares, since a call through a Dyn only knows the interface,
   // and one taking an interface or function has a version per argument type, so no one slot.
+  /** @throws {CompileError} */
   private dynTable(this: Mut<this>, e: Expr, type: Type, to: DynType): DynTable {
     const r = this.recOf(type);
     const c = r?.kind === "class" ? this.ctx.classOf(type as ClassType) : undefined;
@@ -7314,6 +7561,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A slot giving a `Promise<T>` boxes the future its method or closure makes: borrowing the
   // Dyn's value for a method, owning its captures for a closure. Its vtable is made here.
+  /** @throws {CompileError} */
   private futureTable(this: Mut<this>, target: Instance, returns: Type, lent: boolean, at: Expr) {
     const gives = this.typing.promiseElement(returns);
     if (gives === undefined) return;
@@ -7326,6 +7574,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A method call through a Dyn: the interface's method, run through its slot.
+  /** @throws {CompileError} */
   private dynCall(this: Mut<this>, e: Call, callee: Extract<Expr, { kind: "member" }>, t: DynType): { type: Type; what: string } {
     if (this.typing.callableOf.has(this.typing.rec(t).of)) throw new CompileError("E0503", `a stored function is called directly, as '${this.placeText(callee.object)}(...)'`, callee.start, callee.end);
     const index = this.typing.rec(this.typing.rec(t).of).methods.findIndex((m) => m.name === callee.name);
@@ -7366,10 +7615,12 @@ export class Expressions<C extends Context> implements Union {
       this.borrowsFrom.set(e, [callee.object, ...e.args.filter((a) => this.lends(a))]);
       return { type: this.typing.lentPromise(async), what: `'${m.name}'` };
     }
+    if (m.throws) this.ctx.raise(e, m.throws, `'${m.name}'`);
     return { type: m.returns, what: `'${m.name}'` };
   }
 
   // A call of a stored callable: whatever expression gives it, run through its one slot.
+  /** @throws {CompileError} */
   private callableCall(this: Mut<this>, e: Call, callee: Expr, t: DynType): { type: Type; what: string } {
     const fn = this.typing.callableOf.get(this.typing.rec(t).of)!;
     // A field holding it is read as any field is.
@@ -7391,6 +7642,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A field read through a Dyn, through its slot: a copy of the value.
+  /** @throws {CompileError} */
   private dynField(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, t: DynType): Type {
     if (this.linked(e)) throw unsupported("optional chains through a Dyn", e);
     const f = this.typing.rec(this.typing.rec(t).of).fields.find((x) => x.name === e.name);
@@ -7411,6 +7663,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // Whether `this` may change here. A closure changing it changes it where it was made.
+  /** @throws {CompileError} */
   changesThis(this: Mut<this>, path: string, action: string, target: Expr) {
     this.ctx.changesPath("this", path, action, target);
     if (this.closing) return this.ctx.changesCapture(undefined, path, action, target, false);
@@ -7420,6 +7673,7 @@ export class Expressions<C extends Context> implements Union {
 
   // Whether a variable may change here, at `path` inside it, possibly through a mutable
   // reference. A closure changing what it captures changes the variable where it was made.
+  /** @throws {CompileError} */
   changesLocal(this: Mut<this>, local: Local, path: string, action: string, target: Expr, throughMut: boolean) {
     this.ctx.changesPath(local, path, action, target);
     if (this.ctx.captured(local)) return this.ctx.changesCapture(local, path, action, target, throughMut);
@@ -7453,6 +7707,7 @@ export class Expressions<C extends Context> implements Union {
 
   // A readonly field can't change once constructed, nor can anything inside it. Only its own
   // class's constructor may assign it, through `this`.
+  /** @throws {CompileError} */
   private readonly(e: Extract<Expr, { kind: "member" }>, target: Expr, action: string) {
     const found = this.types.get(e.object);
     const object = typeof found !== "string" && this.recOf(found)?.kind === "ref" ? this.typing.rec(found as RefType).to : found;
@@ -7520,6 +7775,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // `e as written`: a conversion between numbers or into and out of a brand, or a widening.
+  /** @throws {CompileError} */
   private converted(this: Mut<this>, e: Extract<Expr, { kind: "as" | "satisfies" }>, written: Type): Type {
     // A function type or a `Promise<T>` makes the value a stored one, as a declared variable's does.
     const to = this.typing.stored(written);
@@ -7576,6 +7832,7 @@ export class Expressions<C extends Context> implements Union {
   // An operator works on a literal's base type, so `1` adds like any i64. A type parameter
   // bounded by a union or primitive is used as its bound at its definition, and in an instance as
   // its argument.
+  /** @throws {CompileError} */
   private operand(this: Mut<this>, e: Expr): Type {
     return this.widen(e, this.plainOf(this.read(e)));
   }
@@ -7585,6 +7842,7 @@ export class Expressions<C extends Context> implements Union {
     return r?.kind === "param" && r.concrete && this.valueParam(r) ? (r.within ? r.concrete : this.typing.lowerKeepingBrands(t)) : t;
   }
 
+  /** @throws {CompileError} */
   declares(this: Mut<this>, c: ClassType, name: string): boolean {
     const info = this.ctx.classOf(c);
     return (["methods", "getters", "setters"] as const).some((table) => inherited(this.arenas, info, table, name) !== undefined);
@@ -7596,6 +7854,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A value that is only read, seen through a reference to it.
+  /** @throws {CompileError} */
   read(this: Mut<this>, e: Expr): Type {
     return this.loaded(e, this.value(e));
   }
@@ -7629,6 +7888,7 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // Fish has no truthiness: a condition is a boolean, never a number tested against zero.
+  /** @throws {CompileError} */
   condition(this: Mut<this>, e: Expr) {
     const type = this.operand(e);
     if (this.typing.isOption(type)) throw new CompileError("E0102", `condition must be a boolean, not the Option '${this.typing.show(type)}'; check it with '!== null'`, e.start, e.end);

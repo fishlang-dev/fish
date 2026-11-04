@@ -7,18 +7,22 @@ import { literalValue } from "./narrow.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { paramName, unboxedClosure } from "./resolve.ts";
+import { paramName, unboxedClosure, type InScope } from "./resolve.ts";
 import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
 import { NodeMap, NodeSet, forEachChild, type AnyNode } from "./nodes.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
 
+/** @throws {CompileError} */
+export type ResolveScoped = (t: TypeNode, scope: Map<string, Type>) => Type;
+
 // A bound is an interface or an object type, offering its members, or a type naming values, as
 // `K extends "a" | "b"` does. Classes are nominal and embed rather than subclass, so a class
 // bound could only ever mean that one class. In an instance, each parameter also holds the
 // concrete type `concrete` gives it.
-export function placeholders(typing: Typing, params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type, concrete?: (name: string) => Type): Map<string, Type> {
+/** @throws {CompileError} */
+export function placeholders(typing: Typing, params: TypeParam[], resolve: ResolveScoped, concrete?: (name: string) => Type): Map<string, Type> {
   const scope = new Map<string, Type>();
   for (const p of params) {
     if (p.modifiers.length > 0) throw new CompileError("E0801", `'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);
@@ -58,7 +62,8 @@ function literalArgument(typing: Typing, f: Body, name: string, args: Expr[]): T
 // A generic class's placeholders, one set shared by its definition check and its members,
 // since each new set would name another instance of the class. They are kept by the class's
 // first type parameter, which only its own list holds; a list of none has nothing to share.
-function classPlaceholders({ typing, classScopes }: Tables, params: TypeParam[], resolve: (t: TypeNode, scope: Map<string, Type>) => Type): Map<string, Type> {
+/** @throws {CompileError} */
+function classPlaceholders({ typing, classScopes }: Tables, params: TypeParam[], resolve: ResolveScoped): Map<string, Type> {
   const first = params[0];
   if (first === undefined) return placeholders(typing, params, resolve);
   let found = classScopes.get(first);
@@ -73,6 +78,7 @@ export function typeParamsOf(f: Body): TypeParam[] {
 
 // Binds the type parameters `node` names by matching it against an argument's type, looking
 // through the check's type aliases.
+/** @throws {CompileError} */
 export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<string>, bindings: Map<string, Type>, at: Span) {
   const { aliases, expanding, typing } = tables;
   arg = typing.unfold(arg);
@@ -248,6 +254,7 @@ function substituted(node: TypeNode, given: Map<string, TypeNode>): TypeNode {
 
 // A type argument must satisfy its parameter's bound: an interface by shape, an object type
 // by fitting it.
+/** @throws {CompileError} */
 export function checkBound(type: Type, bound: Type, members: Members, at: Span) {
   const typing = members.typing;
   const trait = typeof bound === "string" ? undefined : typing.rec(bound);
@@ -313,18 +320,24 @@ class Concreteness {
 // What instantiating needs from the checker.
 export interface InstancingHost {
   tables: Tables;
+  /** @throws {CompileError} */
   resolveType(t: TypeNode): Type;
+  /** @throws {CompileError} */
   paramType(p: Param, property?: boolean): Type;
-  withScope<T>(bindings: Map<string, Type>, f: () => T): T;
+  /** @throws {CompileError} */
+  withScope<T>(bindings: Map<string, Type>, f: InScope<T>): T;
   // Resolves a body's own signature, where its parameter names shadow top-level ones.
-  signing<T>(f: Body, run: () => T): T;
+  /** @throws {CompileError} */
+  signing<T>(f: Body, run: InScope<T>): T;
   members(this: Mut<this>): Members;
   instancingState: InstancingState;
   // The instance being checked, which new instantiations count their depth from.
   checking(): Instance | undefined;
   // The type parameters of the generic class a body belongs to, if any.
+  /** @throws {CompileError} */
   classParams(f: Body): TypeParam[];
   // A comptime parameter's argument, computed while compiling, as the literal type of its value.
+  /** @throws {CompileError} */
   comptimeArgument(arg: Expr): Type;
   // The error a body's check failed with, when it did.
   failure(f: Body): CompileError | undefined;
@@ -333,6 +346,7 @@ export interface InstancingHost {
 // The instances of every body: one for a plain function, and for a generic one, its
 // definition check plus one per set of type arguments its calls need.
 // The binding a comptime parameter's value is kept under, beside the type parameters'.
+/** @throws {CompileError} */
 export function comptimeName(p: Param): string {
   return `comptime ${paramName(p)}`;
 }
@@ -377,6 +391,7 @@ export class Instancing<H extends InstancingHost> {
   // The type an arrow given as a generic body's argument is checked against: its parameter's
   // function type, with the type parameters the other arguments, or the written type
   // arguments, have decided. What it gives decides the rest, through \`infer\`.
+  /** @throws {CompileError} */
   callbackType(this: Mut<this>, f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: usize, at: Span): FunctionType | undefined {
     const written = f.params[i]?.type;
     const params = typeParamsOf(f);
@@ -422,15 +437,18 @@ export class Instancing<H extends InstancingHost> {
   }
 
   // A generic class's constructor lent a value as `Mut<T>` keeps its read-only fields too.
+  /** @throws {CompileError} */
   constructs(f: Body, args: Expr[], argTypes: Type[]) {
     this.readOnlyKept(f.params, this.host.classParams(f), new Map(f.scope ?? []), argTypes, args, f.owner ? this.typing.rec(f.owner).name : f.name);
   }
 
   // A body's written return type. A reference to the type a reference parameter borrows is
   // to what that parameter points at, which may be wider, so a caller reads it as it is.
+  /** @throws {CompileError} */
   returnTypeOf(this: Mut<this>, f: Body, scope: Map<string, Type>): Type | undefined {
     return this.host.signing(f, () => this.writtenReturn(f, scope));
   }
+  /** @throws {CompileError} */
   private writtenReturn(this: Mut<this>, f: Body, scope: Map<string, Type>): Type | undefined {
     if (!f.returnType) return undefined;
     // `x is T` is a boolean that tells a caller's condition what x is.
@@ -470,6 +488,7 @@ export class Instancing<H extends InstancingHost> {
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
   // type, which is what an interface's method signature is compared with.
+  /** @throws {CompileError} */
   declaredParams(this: Mut<this>, f: Body): Type[] {
     const implicit = this.implicitOf(f);
     return this.host.signing(f, () => this.host.withScope(f.scope ?? new Map(), () => f.params.map((p, i) => this.implicitParam(f, i, implicit.get(i)) ?? this.host.paramType(p, f.self?.constructor))));
@@ -492,6 +511,7 @@ export class Instancing<H extends InstancingHost> {
   // A generic body is checked once at its definition, with placeholders for its type
   // parameters, whether or not anything instantiates it.
   // It is made once per body: fresh placeholders would make a new instance each time.
+  /** @throws {CompileError} */
   definition(this: Mut<this>, f: Body): Instance {
     if (!this.generic(f)) return this.instanceOf(f);
     const known = this.host.instancingState.definitions.get(f.bodyId);
@@ -516,6 +536,7 @@ export class Instancing<H extends InstancingHost> {
   }
 
   // A member of a generic class's instance runs with the class's type arguments in scope.
+  /** @throws {CompileError} */
   instanceOf(this: Mut<this>, f: Body, bindings: Map<string, Type> = f.scope ?? new Map<string, Type>()): Instance {
     const key = [...bindings.values()].map((t) => this.typing.keyOf(t)).join(",");
     let byKey = this.host.instancingState.instances.get(f.bodyId);
@@ -538,6 +559,7 @@ export class Instancing<H extends InstancingHost> {
 
   // The instance a call runs: a generic function's type arguments come from the call, or are
   // inferred from its arguments, and must satisfy their bounds.
+  /** @throws {CompileError} */
   instantiate(this: Mut<this>, f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span & Id): Instance {
     // A call of a body whose signature failed, or whose result only its body could tell, would
     // report the same mistake again in other words; one with a written signature is typed by it.
@@ -656,6 +678,7 @@ export class Instancing<H extends InstancingHost> {
 
   // A value lent as `Mut<T>`, for a type parameter `T` bounded by a type that declares one of its
   // read-only fields writable, could be changed there.
+  /** @throws {CompileError} */
   private readOnlyKept(written: Param[], params: TypeParam[], bindings: Map<string, Type>, argTypes: Type[], args: Expr[], name: string) {
     written.forEach((p, i) => {
       const node = p.type;
@@ -673,6 +696,7 @@ export class Instancing<H extends InstancingHost> {
 
   // The parameter types an instance's callers pass, or with `scopeOf(instance)`, the ones its
   // body sees.
+  /** @throws {CompileError} */
   paramTypes(this: Mut<this>, instance: Instance, scope: Map<string, Type> = instance.bindings): Type[] {
     const f = bodyOf(instance);
     const implicit = this.implicitOf(f);
@@ -701,6 +725,7 @@ export class Instancing<H extends InstancingHost> {
   // What a concrete instance's body sees: each of its type parameters, and those of a generic
   // class it belongs to, offering only its bound, as at the definition, while holding the
   // concrete type for codegen.
+  /** @throws {CompileError} */
   scopeOf(this: Mut<this>, instance: Instance): Map<string, Type> {
     const f = bodyOf(instance);
     const known = (names: string[]) => names.every((n) => instance.bindings.has(n) && this.host.instancingState.concreteness.concrete(instance.bindings.get(n)!));
@@ -726,6 +751,7 @@ export class Instancing<H extends InstancingHost> {
 
   // A function-typed parameter's bound as the body sees it: written in terms of the type
   // parameters the body itself holds, so calling it with one of them fits.
+  /** @throws {CompileError} */
   private sameParams(f: Body, i: usize, bound: Bound, scope: Map<string, Type>): Bound {
     const written = f.params[i]!.type!;
     const t = this.host.withScope(scope, () => this.host.resolveType(written));
@@ -734,12 +760,14 @@ export class Instancing<H extends InstancingHost> {
     return typeof own !== "string" && this.typing.rec(own).kind === this.typing.rec(bound).kind ? (own as Bound) : bound;
   }
 
+  /** @throws {CompileError} */
   private generic(this: Mut<this>, f: Body): boolean {
     return typeParamsOf(f).length > 0 || this.implicitOf(f).size > 0 || f.params.some((p) => p.comptime);
   }
 
   // One set of placeholders per body, so a parameter's type and the body name the same `T`;
   // callers get a copy they may add to.
+  /** @throws {CompileError} */
   private explicitPlaceholders(this: Mut<this>, f: Body): Map<string, Type> {
     let made = this.host.instancingState.explicit.get(f.bodyId);
     if (!made) {
@@ -759,6 +787,7 @@ export class Instancing<H extends InstancingHost> {
 
   // What a class argument to an `Iterable<T>` parameter, or a reference to one, gives to infer `T`
   // from: what its `[Symbol.iterator]` method gives, which inference alone can't read.
+  /** @throws {CompileError} */
   private iteratesAs(this: Mut<this>, node: TypeNode, t: Type, at: Span): Type {
     const written = node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args.length === 1 ? node.args[0]! : node;
     if (written.kind !== "ref" || written.name !== "Iterable") return t;
@@ -776,6 +805,7 @@ export class Instancing<H extends InstancingHost> {
   // each concrete argument type gets its own instance instead of being copied down. A
   // parameter property and a setter's parameter keep their type, since it is a field's, save a
   // parameter property of a function type.
+  /** @throws {CompileError} */
   implicitOf(this: Mut<this>, f: Body): Map<usize, Bound> {
     let found = this.host.instancingState.implicits.get(f.bodyId);
     if (found) return found;
@@ -819,6 +849,7 @@ export class Instancing<H extends InstancingHost> {
   // null. A call leaving it out or passing null makes an instance where it is always empty, whose
   // type only needs to satisfy the bound: an array for an `Iterable`, so loops over it check, and
   // otherwise `never`.
+  /** @throws {CompileError} */
   private presentArgument(arg: Expr | undefined, type: Type | undefined, bound: Bound): Type {
     const element = this.typing.iterableElement(bound);
     const absent = element !== undefined ? this.typing.arrayType(element) : "never";
@@ -832,6 +863,7 @@ export class Instancing<H extends InstancingHost> {
   // What an implicit type parameter stands for in a call: the argument's own type, which must
   // satisfy the parameter's. A fresh object literal takes the declared object type instead, so
   // it gets TypeScript's excess property check.
+  /** @throws {CompileError} */
   private implicitArgument(arg: Expr, type: Type, bound: Bound, lent: RefType | undefined): Type {
     const borrowed = lent !== undefined;
     // A borrowed argument stands for what it is, or what it refers to.
@@ -934,11 +966,14 @@ export interface GenericClassesHost {
   classes: Map<string, ClassId>;
   templates: Map<string, ClassNode & { name: string }>;
   register(c: ClassInfo): void;
+  /** @throws {CompileError} */
   layout(c: ClassInfo): void;
   members(this: Mut<this>): Members;
   genericClassesState: GenericClassesState;
+  /** @throws {CompileError} */
   resolveType(t: TypeNode): Type;
-  withScope<T>(bindings: Map<string, Type>, f: () => T): T;
+  /** @throws {CompileError} */
+  withScope<T>(bindings: Map<string, Type>, f: InScope<T>): T;
 }
 
 // Whether a body's signature or code writes its type parameter `name` inside a type argument, as
@@ -981,6 +1016,7 @@ export class GenericClasses<H extends GenericClassesHost> {
     return this.arenas.classOf(this.host.genericClassesState.defined.get(name));
   }
 
+  /** @throws {CompileError} */
   start(this: Mut<this>) {
     this.host.genericClassesState.ready = true;
     this.host.genericClassesState.uses.forEach(({ c }) => this.bounded(this.arenas.classOf(c)));
@@ -988,10 +1024,12 @@ export class GenericClasses<H extends GenericClassesHost> {
 
   // A generic class, like a generic body, is checked once at its definition with
   // placeholders for its type parameters, whether or not anything instantiates it.
+  /** @throws {CompileError} */
   define(this: Mut<this>) {
     this.host.templates.forEach((t) => this.host.genericClassesState.defined.set(t.name, this.classInstance(t, [...classPlaceholders(this.host.tables, t.typeParams, (n, s) => this.host.withScope(s, () => this.host.resolveType(n))).values()], t).classId));
   }
 
+  /** @throws {CompileError} */
   classNamed(this: Mut<this>, name: string, args: Type[], at: Span, derived = false): ClassType | undefined {
     const c = this.host.tables.arenas.classOf(this.host.classes.get(name));
     if (c && args.length > 0) throw new CompileError("E0106", `type '${name}' is not generic`, at.start, at.end);
@@ -1002,6 +1040,7 @@ export class GenericClasses<H extends GenericClassesHost> {
 
   // The class a generic class's type arguments make, declared on first use, checked for its
   // bounds, and named like `Box<i64>`.
+  /** @throws {CompileError} */
   private classInstance(this: Mut<this>, template: ClassNode & { name: string }, given: Type[], at: Span, derived = false): ClassInfo {
     if (given.some((a) => {
       const r = typeof a === "string" ? undefined : this.typing.rec(a);
@@ -1037,6 +1076,7 @@ export class GenericClasses<H extends GenericClassesHost> {
   // A generic class's type arguments must satisfy their bounds, checked where it is first used.
   // One made from another's arguments, as lowering makes one holding a brand's base or a member
   // views its class through its type parameters, was checked as that other.
+  /** @throws {CompileError} */
   private bounded(c: ClassInfo) {
     const { at, derived } = this.host.genericClassesState.uses.get(c.type)!;
     if (!derived) this.host.withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, this.host.resolveType(p.constraint), this.host.members(), at)));
@@ -1045,6 +1085,7 @@ export class GenericClasses<H extends GenericClassesHost> {
 
   // The class a `new` builds; a generic one's type arguments come from the expression or are
   // inferred from the constructor's arguments.
+  /** @throws {CompileError} */
   construct(this: Mut<this>, name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined {
     const c = this.host.tables.arenas.classOf(this.host.classes.get(name));
     if (c && typeArgs.length > 0) throw new CompileError("E0106", `type '${name}' is not generic`, at.start, at.end);
@@ -1062,6 +1103,7 @@ export class GenericClasses<H extends GenericClassesHost> {
 
   // A class with no constructor of its own takes its base's parameters, so its type arguments
   // are inferred through the base's, as its `extends` clause passes them on.
+  /** @throws {CompileError} */
   private inferred(template: ClassNode, argTypes: Type[], at: Span, seen: NodeSet<ClassNode> = new NodeSet<ClassNode>()): Map<string, Type> {
     const names = new Set(template.typeParams.map((p) => p.name));
     const bindings = new Map<string, Type>();

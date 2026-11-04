@@ -29,6 +29,7 @@ function usesImportMeta(tree: Expr | Stmt, expression: boolean): boolean {
   return expression ? someNode("expr", tree as Expr, found) : someNode("stmt", tree as Stmt, found);
 }
 
+/** @throws {CompileError} */
 export function quoted({ parsedQuotes: parsed, ids }: Tables, e: Extract<Expr, { kind: "tagged" }>, asType: boolean): Quote {
   const made = parsed.get(e);
   if (made) return made;
@@ -112,6 +113,7 @@ function spliceOf(node: unknown): usize | undefined {
 
 // The category each splice of a quote stands in, found by walking its tree beside the Ast type
 // it makes; a splice anywhere else, as a name, is an error.
+/** @throws {CompileError} */
 export function holesOf(typing: Typing, q: Quote, types: Record<Category, Type>, at: Span): Category[] {
   const found: (Category | undefined)[] = q.holes.map(() => undefined);
   walk(typing, q.tree, types[q.category], types, q, (i, category) => {
@@ -153,7 +155,11 @@ function memberFor(typing: Typing, node: unknown, union: UnionType): Type | unde
   });
 }
 
-function walk(typing: Typing, node: unknown, type: Type, types: Record<Category, Type>, q: Quote, hole: (i: usize, category: Category) => void) {
+/** @throws {CompileError} */
+type HoleCallback = (i: usize, category: Category) => void;
+
+/** @throws {CompileError} */
+function walk(typing: Typing, node: unknown, type: Type, types: Record<Category, Type>, q: Quote, hole: HoleCallback) {
   const t = typing.unfolded(type);
   // A splice where a name goes takes an identifier, its name put there.
   const name = nameSplice(node);
@@ -205,6 +211,7 @@ export type Builder<V> = {
   array(items: V[]): V;
   member(value: V, of: Type, member: Type): V;
   splice(i: usize, into: Type): V;
+  /** @throws {CompileError} */
   name(i: usize): V;
   int(n: bigint): V;
   none: V;
@@ -318,6 +325,7 @@ function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode
 // Without `at`, every node keeps its own span, as a declaration a macro takes does. `scope`
 // gives the bindings of the quotes spliced in, and gets this quote's, with theirs; `free` gets
 // the names it leaves free.
+/** @throws {CompileError} */
 export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Record<Category, Type>, at: Span | undefined, b: Builder<V>, scope: Map<string, string> = new Map<string, string>(), free: Free = new Map()): V {
   // `here` is the span of the node a part is in, where an error about the part is reported.
   const make = (node: unknown, type: Type, here: Span = at ?? { start: 0, end: 0 }): V => {
@@ -328,7 +336,7 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
       const splice = spliceIn(typing, node, t as UnionType, types, q.asExpressions);
       if (splice) return b.splice(splice.i, type);
       const member = memberFor(typing, node, t as UnionType);
-      if (!member) throw new Error("internal error: a quoted node fits no member of its Ast type");
+      if (!member) throw new CompileError("E1103", "internal error: a quoted node fits no member of its Ast type", here.start, here.end);
       return b.member(make(node, member, here), t, member);
     }
     if (node === null || node === undefined || t === "null") return b.none;
@@ -336,7 +344,7 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
     if (r === undefined) return t === "i64" ? b.int(inRange(BigInt(node as i64 | bigint), here)) : (node as V);
     if (r.kind === "literal") return r.value as V;
     if (r.kind === "array") return b.array((node as unknown[]).map((x) => make(x, r.element, here)));
-    if (r.kind !== "object") throw new Error(`internal error: an Ast field of type '${r.kind}'`);
+    if (r.kind !== "object") throw new CompileError("E1103", `internal error: an Ast field of type '${r.kind}'`, here.start, here.end);
     const n = node as Record<string, unknown>;
     const own = !at && typeof n.start === "number" && typeof n.end === "number" ? { start: n.start, end: n.end } : here;
     const fields = new Map<string, V>();
@@ -350,6 +358,7 @@ export function built<V>({ typing, hygiene, ids }: Tables, q: Quote, types: Reco
 }
 
 // An integer an Ast holds, as an `i64` until big integers.
+/** @throws {CompileError} */
 function inRange(n: bigint, at: Span): bigint {
   if (n < -(1n << 63n) || n >= 1n << 63n) throw new CompileError("E1105", `an Ast holds an integer as an 'i64', which can't hold ${n}`, at.start, at.end);
   return n;

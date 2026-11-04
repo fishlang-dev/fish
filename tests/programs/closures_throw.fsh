@@ -219,14 +219,29 @@ function main() {
 }
 // error: this closure throws 'string', but it is given as '(x: i64) => i64 throws boolean', which throws 'boolean'; catch it inside the closure with try/catch
 // case: closures_throw_callback
-// A built-in method's callback is given as a function type that throws nothing.
+// A comparator's callback is given as a function type that throws nothing.
 function f(x: i64): i64 throws string {
   return x > 0 ? x : throw "no"
 }
 function main() {
-  print([1, 2].map((x) => f(x)))
+  print([1, 2].toSorted((a, b) => f(a) - b))
 }
-// error: 'f' can throw 'string', but the closure is given as '(value: i64, index: i64) => void', which throws nothing
+// error: 'f' can throw 'string', but the closure is given as '(a: i64, b: i64) => void', which throws nothing
+// case: closures_throw_array_callback
+// An array or Map callback's error is raised at the method call.
+function f(x: i64): i64 throws string {
+  return x > 0 ? x * 10 : throw "no"
+}
+function main() {
+  try {
+    print([1, 2].map((x) => f(x)))
+    print([1, -1].map((x) => f(x)))
+  } catch (e) {
+    print("caught", e)
+  }
+}
+// expect: [ 10, 20 ]
+// expect: caught no
 // case: closures_throw_wrong_type
 // A closure's written error type takes only what fits it.
 function main() {

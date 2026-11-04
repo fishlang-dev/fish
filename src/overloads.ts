@@ -1,5 +1,5 @@
 import { CompileError } from "./diag.ts";
-import { nextId, renumber, Rewrites, walk, type Ids } from "./nodes.ts";
+import { nextId, nodesIn, renumber, Rewrites, type Ids } from "./nodes.ts";
 import type { ClassMember, ClassNode, Expr, Func, Param, Span, Stmt, TypeNode } from "./parser.ts";
 import { rebuiltStmts } from "./rebuild.ts";
 import { unsupported } from "./unsupported.ts";
@@ -15,6 +15,7 @@ export type Direct = { implementation?: true };
 
 type Method = Extract<ClassMember, { kind: "method" }>;
 
+/** @throws {CompileError} */
 export function lowerOverloads(ids: Ids, program: Stmt[]): Stmt[] {
   const out: Stmt[] = [];
   const rewrites = new Rewrites();
@@ -50,14 +51,16 @@ function functionOf(s: Stmt | undefined): Func | undefined {
 }
 
 // Every class, declared or written as an expression, has its method overloads lowered.
+/** @throws {CompileError} */
 function holdsClasses(ids: Ids, rewrites: Rewrites, program: Stmt[]) {
-  walk("stmt", program, ({ of, node: c }) => {
-    if ((of !== "stmt" && of !== "expr") || c.kind !== "class") return;
+  for (const { of, node: c } of nodesIn("stmt", program)) {
+    if ((of !== "stmt" && of !== "expr") || c.kind !== "class") continue;
     const members = lowerMembers(ids, rewrites, c);
     if (members.length !== c.members.length || members.some((m, i) => m !== c.members[i])) rewrites.replace(c, { ...c, members });
-  });
+  }
 }
 
+/** @throws {CompileError} */
 function lowerMembers(ids: Ids, rewrites: Rewrites, c: ClassNode): ClassMember[] {
   const out: ClassMember[] = [];
   const members = c.members;
@@ -94,6 +97,7 @@ function lowerMembers(ids: Ids, rewrites: Rewrites, c: ClassNode): ClassMember[]
 }
 
 // A signature's parameters as its function's: a destructured one named, since it is only passed on.
+/** @throws {CompileError} */
 function signatureParams(ids: Ids, sig: { params: Param[] }): Param[] {
   return sig.params.map((p, i) => {
     if (p.default) throw new CompileError("E0410", "an overload signature can't give a parameter a default; give it in the implementation", p.default.start, p.default.end);
@@ -107,6 +111,7 @@ function argument(ids: Ids, p: Param): Expr {
 }
 
 // The signature's body: the implementation's call, its value given as the signature's type.
+/** @throws {CompileError} */
 function wrapped(ids: Ids, sig: Span & { returnType: TypeNode | undefined }, call: Expr): Stmt[] {
   const returns = sig.returnType;
   if (!returns) throw new CompileError("E0410", "an overload signature needs its return type, as in 'function f(x: string): string;'", sig.start, sig.end);

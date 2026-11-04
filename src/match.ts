@@ -1,3 +1,4 @@
+import type { CompileError } from "./diag.ts";
 import { nextId, type Ids } from "./nodes.ts";
 import type { Expr, Pattern } from "./parser.ts";
 import { unsupported } from "./unsupported.ts";
@@ -35,6 +36,7 @@ export type LiteralValue = string | bigint | boolean | f64 | null;
 export type Shape = ObjectType | ClassType | ParamType | RecursiveType;
 
 // A pattern's information with each type it holds as an instance sees it.
+/** @throws {CompileError} */
 export function lowerPattern(typing: Typing, info: PatternInfo): PatternInfo {
   const type = typing.lower(info.type);
   if (info.kind === "variant") return { ...info, type, variant: typing.lower(info.variant) as VariantType };

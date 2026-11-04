@@ -2264,6 +2264,10 @@ export function dumpTypeMember_method(indent: string, label: string, n: Ref<Extr
   else {
     dumpTypeNode(indent + "  ", "returns", n.returns!);
   }
+  if (n.throws === undefined) console.log(indent + "  " + "throws" + " undefined");
+  else {
+    dumpTypeNode(indent + "  ", "throws", n.throws!);
+  }
 }
 
 export function dumpTypeMember_call(indent: string, label: string, n: Ref<Extract<TypeMember, { kind: "call" | "construct" }>>): void {

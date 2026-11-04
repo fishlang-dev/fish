@@ -413,7 +413,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   try {
     value = built<Value>(checked.tables, { tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
   } catch (e) {
-    if (e instanceof CompileError) throw e;
+    if (e instanceof CompileError && e.code !== "E1103") throw e;
     throw new CompileError("E1103", "a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
   }
   const suffix = `@m${compilation.counts.expansions++}`;
