@@ -647,8 +647,20 @@ class Interpreter {
         this.write(at, next);
         return e.prefix ? next : old;
       }
-      case "as":
+      case "as": {
+        const from = this.typing.lower(f.instance.coercions.get(e.expr) ?? this.typeOf(f, e.expr));
+        if (typeof from !== "string" && this.typing.rec(from).kind === "union" && from !== type && !this.typing.fits(from, type)) {
+          const held = this.expr(f, e.expr);
+          const r = typeof type === "string" ? undefined : this.typing.rec(type);
+          const kept = r?.kind === "union" ? r.members : [type];
+          const actual = memberType(this.typing, held, from);
+          if (actual === undefined || (!kept.includes(actual) && !kept.includes(this.typing.unfold(actual)))) {
+            this.panic(`'as ${this.typing.show(type)}' failed: union held another member`, e);
+          }
+          return retag(this.typing, held, from, type);
+        }
         return this.convert(this.unwrap(this.expr(f, e.expr)), type, e);
+      }
       case "satisfies":
         return this.expr(f, e.expr);
       case "nonNull": {

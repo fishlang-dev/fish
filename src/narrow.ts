@@ -27,6 +27,7 @@ export function category(typing: Typing, t: Type): string {
   if (t === "null") return "undefined";
   if (typeof t === "string") return t;
   const r = typing.rec(t);
+  if (r.kind === "brand") return category(typing, r.base);
   if (r.kind === "literal") return typeof r.value === "bigint" ? "number" : typeof r.value;
   if (r.kind === "pattern") return "string";
   return "object";

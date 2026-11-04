@@ -304,7 +304,7 @@ test("a type table keys primitives and types by id, in the order they were added
 // keys by its id through TypeMap and TypeSet, which give a primitive its own integer.
 test("no Map, WeakMap, Set or WeakSet in src is keyed by a type", () => {
   const typing = readFileSync(join(src, "typing.ts"), "utf8");
-  const kinds = [...typing.matchAll(/^export type (\w+Type) = TypeId<(\w+Record)>;/gm)].flatMap((m) => [m[1]!, m[2]!]);
+  const kinds = [...typing.matchAll(/^export type (\w+)Type = Brand<usize, "\w+">;/gm)].flatMap((m) => [`${m[1]!}Type`, `${m[1]!}Record`]);
   expect(kinds).toContain("ObjectType");
   expect(kinds.length).toBe(52);
   const types = ["Type", "Bound", "TypeRecord", ...kinds];

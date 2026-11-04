@@ -739,6 +739,8 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       }
       case "conditional": {
         expr(e.cond);
+        if (!types.has(e.then)) return expr(e.else, consume, discarded);
+        if (!types.has(e.else)) return expr(e.then, consume, discarded);
         const before = join(state, null);
         expr(e.then, consume, discarded);
         const then = state;
@@ -764,6 +766,11 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         outOfBorrow(e.expr, e, consume);
         return expr(e.expr, consume);
       case "as":
+        if (narrowsUnion(e)) {
+          outOfBorrow(e.expr, e, consume);
+          return expr(e.expr, consume);
+        }
+        return expr(e.expr, consume, discarded);
       case "satisfies":
       case "unsafe":
         return expr(e.expr, consume, discarded);
@@ -861,7 +868,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function lent(e: Expr): [string, Expr, boolean][] {
     const lentAs = coercionOf(e);
     e = unwrapped(e);
-    if (e.kind === "conditional") return [...lent(e.then), ...lent(e.else)];
+    if (e.kind === "conditional") return [...(types.has(e.then) ? lent(e.then) : []), ...(types.has(e.else) ? lent(e.else) : [])];
     if (choosing(e)) return [...lent(e.left), ...lent(e.right)];
     // A literal lends what each of its parts does, nested literals included.
     if (e.kind === "object") return e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
@@ -1026,9 +1033,14 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     const outer = e;
     const heldAs = coercionOf(e);
     e = unwrapped(e);
-    if (e.kind === "conditional" || choosing(e)) {
-      hold(holder, e.kind === "conditional" ? e.then : e.left);
-      hold(holder, e.kind === "conditional" ? e.else : e.right);
+    if (e.kind === "conditional") {
+      if (types.has(e.then)) hold(holder, e.then);
+      if (types.has(e.else)) hold(holder, e.else);
+      return;
+    }
+    if (choosing(e)) {
+      hold(holder, e.left);
+      hold(holder, e.right);
       return;
     }
     if (lentTemporary(outer)) throw outlived(e, `'${holder.name}'`);
@@ -1224,7 +1236,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function pointsInto(e: Expr): string[] {
     const pointsAs = coercionOf(e);
     e = unwrapped(e);
-    if (e.kind === "conditional") return [...pointsInto(e.then), ...pointsInto(e.else)];
+    if (e.kind === "conditional") return [...(types.has(e.then) ? pointsInto(e.then) : []), ...(types.has(e.else) ? pointsInto(e.else) : [])];
     if (choosing(e)) return [...pointsInto(e.left), ...pointsInto(e.right)];
     // A closure points at what it borrows, and wherever what it holds points.
     if (e.kind === "arrow" || instance.envs?.has(e)) return captured(e).flatMap(([place, , from, , held]) => (held ? (from && typing.holdsRef(from.type) ? heldBy(from) : []) : [place]));
@@ -1480,7 +1492,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // Whether an expression is a reference a call gave, or a choice between such references.
   function fromCall(e: Expr): boolean {
     e = unwrapped(e);
-    if (e.kind === "conditional") return fromCall(projected(e.then)) || fromCall(projected(e.else));
+    if (e.kind === "conditional") return (types.has(e.then) && fromCall(projected(e.then))) || (types.has(e.else) && fromCall(projected(e.else)));
     if (choosing(e)) return fromCall(projected(e.left)) || fromCall(projected(e.right));
     return borrowsFrom.has(e);
   }
@@ -1489,7 +1501,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   function projected(e: Expr): Expr {
     for (e = unwrapped(e); ; ) {
       if ((e.kind === "member" && !calls.has(e)) || e.kind === "index") e = unwrapped(e.object);
-      else if (e.kind === "nonNull") e = unwrapped(e.expr);
+      else if (e.kind === "nonNull" || e.kind === "as") e = unwrapped(e.expr);
       else return e;
     }
   }
@@ -1506,17 +1518,23 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   }
 
   function unwrapped(e: Expr): Expr {
-    return (e.kind === "nonNull" && typing.optionRef(types.get(e.expr))) || transparent(e) ? unwrapped((e as { expr: Expr }).expr) : e;
+    return (e.kind === "nonNull" && typing.optionRef(types.get(e.expr))) || (e.kind === "as" && narrowsUnion(e) && typing.holdsRef(types.get(e)!)) || transparent(e) ? unwrapped((e as { expr: Expr }).expr) : e;
+  }
+
+  function narrowsUnion(e: Named): boolean {
+    if (e.kind !== "as") return false;
+    const [from, to] = [coercions.get(e.expr) ?? types.get(e.expr), types.get(e)];
+    return from !== undefined && to !== undefined && isUnion(typing.lower(from)) && typing.lower(from) !== typing.lower(to) && !typing.fits(typing.lower(from), typing.lower(to));
   }
 
   function transparent(e: Named): e is Extract<Expr, { kind: "as" | "satisfies" | "unsafe" }> {
-    return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe";
+    return (e.kind === "as" && !narrowsUnion(e)) || e.kind === "satisfies" || e.kind === "unsafe";
   }
 
   // Forms that read the place their operand names: `x!`, whatever the Option holds, and the
   // transparent ones. `unwrapped` follows fewer, since it reads a value's own type and coercion.
   function projection(e: Named): e is Extract<Expr, { kind: "nonNull" | "as" | "satisfies" | "unsafe" }> {
-    return e.kind === "nonNull" || transparent(e);
+    return e.kind === "nonNull" || e.kind === "as" || transparent(e);
   }
 
   function through(e: Expr): Expr {
@@ -1736,8 +1754,9 @@ function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, t
         return expr(e.value);
       case "conditional":
         expr(e.cond);
-        expr(e.then, call);
-        return expr(e.else, call);
+        if (types.has(e.then)) expr(e.then, call);
+        if (types.has(e.else)) expr(e.else, call);
+        return;
       case "match":
         expr(e.subject);
         for (const arm of e.arms) {

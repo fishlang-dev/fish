@@ -2,12 +2,12 @@ import type { Instance, Local } from "./check.ts";
 import type { Body, ClassInfo } from "./classes.ts";
 
 // What names one of a compilation's instances, bodies, locals or classes: its place in that
-// compilation's arena, from 1, so no id is falsy. `__arena` is for tsc only, which keeps one kind
-// of id from passing for another.
-export type InstanceId = usize & { readonly __arena?: "instance" };
-export type BodyId = usize & { readonly __arena?: "body" };
-export type LocalId = usize & { readonly __arena?: "local" };
-export type ClassId = usize & { readonly __arena?: "class" };
+// compilation's arena, from 1, so no id is falsy. Each kind of id is branded so one can't pass for
+// another.
+export type InstanceId = Brand<usize, "instance">;
+export type BodyId = Brand<usize, "body">;
+export type LocalId = Brand<usize, "local">;
+export type ClassId = Brand<usize, "class">;
 
 // The body an instance checks, from its compilation's arena.
 export function bodyOf(instance: Instance): Body {
@@ -47,19 +47,19 @@ export class Arenas {
   }
 
   addInstance(instance: Omit<Instance, "id">): Instance {
-    const made = { id: this.instances.length + 1, ...instance } as Instance;
+    const made = { id: (this.instances.length + 1) as InstanceId, ...instance } as Instance;
     this.instances.push(made);
     return made;
   }
 
   addLocal(local: Omit<Local, "localId">): Local {
-    const made = { ...local, localId: this.locals.length + 1 } as Local;
+    const made = { ...local, localId: (this.locals.length + 1) as LocalId } as Local;
     this.locals.push(made);
     return made;
   }
 
   addClass(info: Omit<ClassInfo, "classId">): ClassInfo {
-    const made = { ...info, classId: this.classes.length + 1 } as ClassInfo;
+    const made = { ...info, classId: (this.classes.length + 1) as ClassId } as ClassInfo;
     this.classes.push(made);
     return made;
   }
@@ -71,7 +71,7 @@ export class Arenas {
     const b = body as B & Body;
     if (this.bodies[b.bodyId - 1] !== b) {
       this.bodies.push(b);
-      b.bodyId = this.bodies.length;
+      b.bodyId = this.bodies.length as BodyId;
     }
     return b;
   }

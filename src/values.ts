@@ -656,7 +656,7 @@ export class Expressions<C extends Context> implements Union {
     }
     // A `?:` or match whose every branch is a number literal gives the number type it meets.
     if (e.kind === "conditional" || e.kind === "match") {
-      const branches = e.kind === "conditional" ? [e.then, e.else] : e.arms.map((a) => a.body);
+      const branches = e.kind === "conditional" ? [e.then, e.else].filter((s) => this.types.has(s)) : e.arms.map((a) => a.body);
       if (!branches.every((b) => b.kind !== "block" && this.literalOnly(b, isFloat(to)))) return false;
       for (const b of branches) this.retype(b as Expr, to, false);
       this.types.set(e, to);
@@ -4988,10 +4988,15 @@ export class Expressions<C extends Context> implements Union {
         return this.calls.has(e) ? undefined : this.copied(e.object, through);
       case "nonNull":
         return this.copied(e.expr, redundantBang(e) ? through : "!");
+      case "as": {
+        const [from, to] = [this.coercions.get(e.expr) ?? this.types.get(e.expr), this.types.get(e)];
+        const narrows = from !== undefined && to !== undefined && this.recOf(from)?.kind === "union" && !this.typing.fits(from, to);
+        return this.copied(e.expr, narrows ? "as" : through);
+      }
       case "binary":
         return e.op === "??" ? (this.copied(e.left, "??") ?? this.copied(e.right, "??")) : undefined;
       case "conditional":
-        return this.copied(e.then, through) ?? this.copied(e.else, through);
+        return (this.types.has(e.then) ? this.copied(e.then, through) : undefined) ?? (this.types.has(e.else) ? this.copied(e.else, through) : undefined);
       case "this":
         return through;
       case "ident":
@@ -5927,6 +5932,9 @@ export class Expressions<C extends Context> implements Union {
       case "conditional": {
         this.condition(e.cond);
         const proven = this.ctx.proves(e.cond);
+        const ruledOut = (facts: Facts) => [...facts.values()].includes("never");
+        if (ruledOut(proven.yes)) return this.ctx.assume(proven.no, () => this.value(e.else));
+        if (ruledOut(proven.no)) return this.ctx.assume(proven.yes, () => this.value(e.then));
         let [then, otherwise] = [this.ctx.assume(proven.yes, () => this.value(e.then)), this.ctx.assume(proven.no, () => this.value(e.else))];
         [then, otherwise] = this.sameNumbers(e.then, then, e.else, otherwise);
         if (then === otherwise) return then;
@@ -6416,7 +6424,7 @@ export class Expressions<C extends Context> implements Union {
     // A `?:` that doesn't fit as a whole, as two string literals don't fit a union of literals
     // once joined as a 'string', fits when each side does.
     if (e.kind === "conditional" && !this.typing.fits(type, to)) {
-      for (const side of [e.then, e.else]) {
+      for (const side of [e.then, e.else].filter((s) => this.types.has(s))) {
         this.coercions.delete(side);
         this.coerce(side, this.types.get(side)!, to, message);
       }
@@ -6433,8 +6441,8 @@ export class Expressions<C extends Context> implements Union {
     // A place meeting a reference or nothing is lent, as one meeting the reference is.
     const lent = this.typing.optionRef(to);
     // A `?:` lends a place either side chooses into it, as it does into a reference.
-    if (lent && e.kind === "conditional" && this.typing.optionRef(type) === undefined && [e.then, e.else].some((x) => this.rooted(x))) {
-      for (const side of [e.then, e.else]) {
+    if (lent && e.kind === "conditional" && this.typing.optionRef(type) === undefined && [e.then, e.else].some((x) => this.types.has(x) && this.rooted(x))) {
+      for (const side of [e.then, e.else].filter((s) => this.types.has(s))) {
         this.coercions.delete(side);
         this.coerce(side, this.types.get(side)!, to, message);
       }
@@ -6563,12 +6571,12 @@ export class Expressions<C extends Context> implements Union {
   private borrow(this: Mut<this>, e: Expr, type: Type, to: RefType, message: string) {
     e = this.rewrites.current(e);
     // A `?:` choosing between places lends whichever it chooses, where it lives.
-    if (e.kind === "conditional" && (this.rooted(e.then) || this.rooted(e.else))) {
+    if (e.kind === "conditional" && [e.then, e.else].some((s) => this.types.has(s) && this.rooted(s))) {
       // A side read as its value before is lent instead.
-      this.coercions.delete(e.then);
-      this.coercions.delete(e.else);
-      this.coerce(e.then, this.types.get(e.then)!, to, message);
-      this.coerce(e.else, this.types.get(e.else)!, to, message);
+      for (const side of [e.then, e.else].filter((s) => this.types.has(s))) {
+        this.coercions.delete(side);
+        this.coerce(side, this.types.get(side)!, to, message);
+      }
       this.types.set(e, to);
       return;
     }
@@ -6622,15 +6630,18 @@ export class Expressions<C extends Context> implements Union {
   // Whether an `as` that only widens, or a `satisfies`, hands on a `?:` its operand chooses, through
   // any further such wrappers or `unsafe { }`.
   private handsOnChoice(e: Expr): boolean {
-    if (e.kind === "as" && (isConstAssertion(e) || !this.widening(this.types.get(e)))) return false;
+    if (e.kind === "as" && (isConstAssertion(e) || !this.widening(e))) return false;
     if (e.kind !== "as" && e.kind !== "satisfies") return false;
     let inner = this.rewrites.current(e.expr);
-    while (inner.kind === "unsafe" || inner.kind === "satisfies" || (inner.kind === "as" && !isConstAssertion(inner) && this.widening(this.types.get(inner)))) inner = this.rewrites.current(inner.expr);
+    while (inner.kind === "unsafe" || inner.kind === "satisfies" || (inner.kind === "as" && !isConstAssertion(inner) && this.widening(inner))) inner = this.rewrites.current(inner.expr);
     return inner.kind === "conditional";
   }
 
-  // Whether an `as` to this type widens, rather than converting a number, a bigint or a pointer.
-  private widening(to: Type | undefined): boolean {
+  // Whether an `as` widens, rather than converting a number, a bigint or a pointer or checking
+  // a union's tag.
+  private widening(e: Extract<Expr, { kind: "as" | "satisfies" }>): boolean {
+    const [from, to] = [this.coercions.get(e.expr) ?? this.types.get(e.expr), this.types.get(e)];
+    if (from !== undefined && to !== undefined && this.recOf(from)?.kind === "union" && from !== to && !this.typing.fits(from, to)) return false;
     return to !== undefined && !isNumeric(to) && to !== "bigint" && this.recOf(to)?.kind !== "pointer";
   }
 
@@ -6670,8 +6681,8 @@ export class Expressions<C extends Context> implements Union {
     const to = target.type as RefType;
     // A `?:`, or a call's result, lives as long as what it points into.
     if (e.kind === "conditional") {
-      this.rebind(target, e.then);
-      this.rebind(target, e.else);
+      if (this.types.has(e.then)) this.rebind(target, e.then);
+      if (this.types.has(e.else)) this.rebind(target, e.else);
       return;
     }
     const from = this.borrowsFrom.get(e);
@@ -6841,8 +6852,8 @@ export class Expressions<C extends Context> implements Union {
     // target's value.
     const given = this.types.get(e);
     if ((given !== undefined && this.isRefType(given)) || e.kind === "assign") return true;
-    if (e.kind === "nonNull") return this.copiesPlace(e.expr);
-    if (e.kind === "conditional") return this.copiesPlace(e.then) || this.copiesPlace(e.else);
+    if (e.kind === "nonNull" || (e.kind === "as" && this.recOf(this.coercions.get(e.expr) ?? this.types.get(e.expr))?.kind === "union" && !this.typing.fits(this.coercions.get(e.expr) ?? this.types.get(e.expr)!, given!))) return this.copiesPlace(e.expr);
+    if (e.kind === "conditional") return (this.types.has(e.then) && this.copiesPlace(e.then)) || (this.types.has(e.else) && this.copiesPlace(e.else));
     if (e.kind === "binary" && e.op === "??") return this.copiesPlace(e.left) || this.copiesPlace(e.right);
     if (e.kind === "match") return e.arms.some((a) => (a.body.kind === "block" ? this.armReturns(a.body).some((x) => this.copiesPlace(x)) : this.copiesPlace(a.body)));
     if (e.kind === "member") return !this.calls.has(e) && !this.ctx.copiesOut.has(e) && !this.computed.has(e);
@@ -7523,6 +7534,16 @@ export class Expressions<C extends Context> implements Union {
       }
       return to;
     }
+    // A reference widened or narrowed to what it points to would be a copy nobody wrote.
+    const read = this.types.get(e.expr) ?? from;
+    if ((this.isRefType(from) || this.isRefType(read)) && !this.typing.isCopy(this.typing.lower(from)) && !this.isRefType(to) && !this.typing.optionRef(to)) throw new CompileError("E0202", `'as' can't take the value out of '${this.typing.show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
+    const narrowsFromUnion = () => {
+      const fr = this.recOf(from);
+      if (fr?.kind !== "union") return false;
+      const tr = this.recOf(to);
+      const targets = tr?.kind === "union" ? tr.members : [to];
+      return targets.length > 0 && targets.every((t) => fr.members.some((m) => m === t || this.typing.unfold(m) === t || this.typing.sameLowered(m, t) || this.typing.sameLowered(this.typing.unfold(m), t)));
+    };
     // A brand is made and taken apart with 'as', between its base and what converts to it.
     const [fb, tb] = [this.typing.unbranded(from), this.typing.unbranded(to)];
     if (fb !== from || tb !== to) {
@@ -7532,22 +7553,20 @@ export class Expressions<C extends Context> implements Union {
         if (from !== tb) this.coerce(e.expr, from, tb, "");
         return to;
       }
+      if (narrowsFromUnion()) return to;
       throw new CompileError("E0111", `'${this.typing.show(from)}' can't be converted to '${this.typing.show(to)}' with 'as'`, e.start, e.end);
     }
     // A bigint becomes a number with 'as', truncated to an integer type's bits as
     // 'BigInt.asIntN' does; a number becomes a bigint only through 'BigInt(x)'.
     if (to === "bigint" && from !== "bigint") throw new CompileError("E0111", `'${this.typing.show(from)}' converts to a bigint with 'BigInt(x)', not 'as'`, e.start, e.end);
     if (from === "bigint" && (isNumeric(to) || to === "bigint")) return to;
-    // Between other types, 'as' only widens, which nothing needs to check at run time; a
-    // narrower type is reached by a check that narrows.
+    // Between other types, 'as' widens, or narrows a union by checking its tag at run time.
     if (!isNumeric(to) || !isNumeric(from)) {
-      // A reference widened to what it points to would be a copy nobody wrote.
-      const read = this.types.get(e.expr) ?? from;
-      if ((this.isRefType(from) || this.isRefType(read)) && !this.typing.isCopy(this.typing.lower(from)) && !this.isRefType(to) && !this.typing.optionRef(to)) throw new CompileError("E0202", `'as' can't take the value out of '${this.typing.show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
       if (!(from === "boolean" && isInteger(to)) && (this.typing.fits(from, to) || this.typing.fits(from, written))) {
         this.coerce(e.expr, from, to, "");
         return to;
       }
+      if (narrowsFromUnion()) return to;
       if (this.typing.fits(to, from)) throw new CompileError("E0111", `'as' can't narrow '${this.typing.show(from)}' to '${this.typing.show(to)}', since nothing would check it while the program runs; narrow it with a check, like 'typeof', 'instanceof' or '!== null'`, e.start, e.end);
       if (!(from === "boolean" && isInteger(to))) throw new CompileError("E0111", `'${this.typing.show(from)}' can't be converted to '${this.typing.show(to)}' with 'as', since neither fits the other`, e.start, e.end);
     }

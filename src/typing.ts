@@ -26,7 +26,7 @@ export type Field = { name: string; type: Type; access?: Access; readonly?: bool
 // its field `...`.
 // A tuple and a match also link `shape`, the object of their fields, and hold copies of its fields.
 export type ObjectRecord = { kind: "object"; fields: Field[]; tuple?: true; match?: true; required?: usize; rest?: Type; shape?: ObjectType };
-export type ObjectType = TypeId<ObjectRecord>;
+export type ObjectType = Brand<usize, "object">;
 
 // A class is nominal: one per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
@@ -34,7 +34,7 @@ export type ObjectType = TypeId<ObjectRecord>;
 // `rust`: the Rust type a class a Rust module declares stands for. An abstract class only ever
 // exists embedded in a concrete one, so it is never a value's type.
 export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true };
-export type ClassType = TypeId<ClassRecord>;
+export type ClassType = Brand<usize, "class">;
 
 // An interface is a trait: fields and method signatures that any value with those members
 // satisfies. It describes values but is never one, so it never reaches codegen. Its members
@@ -49,7 +49,7 @@ export type ClassType = TypeId<ClassRecord>;
 export type Method = { name: string; params: Type[]; returns: Type; throws?: Type; mutable?: boolean; owned?: boolean; generic?: Family; optional?: boolean[]; omittable?: true };
 // A generic interface's instance knows the interface and the type arguments it was made from.
 export type InterfaceRecord = { kind: "interface"; name: string; fields: Field[]; methods: Method[]; generic?: { name: string; args: Type[] } };
-export type InterfaceType = TypeId<InterfaceRecord>;
+export type InterfaceType = Brand<usize, "interface">;
 
 // A type parameter: it stands for any type satisfying its bound, and offers only the bound's
 // fields. At the definition it stands for nothing in particular. In an instance it also holds
@@ -59,7 +59,7 @@ export type InterfaceType = TypeId<InterfaceRecord>;
 // whole bound, so the definition checks as TypeScript's does against the constraint, and each
 // instance again with its own argument.
 export type ParamRecord = { kind: "param"; name: string; bound: Bound | undefined; fields: Field[]; concrete?: Type; within?: true };
-export type ParamType = TypeId<ParamRecord>;
+export type ParamType = Brand<usize, "param">;
 
 // A literal type has one value, known at compile time, so on its own it takes no space: it
 // has no fields. An integer or boolean literal fits its base type; a string literal has none yet.
@@ -69,25 +69,25 @@ export type LiteralRecord = {
   // For an enum's member: the enum, unique to its declaration, and the enum's own type.
   owner?: { enum: string; member: string; id: usize; of?: Type };
 };
-export type LiteralType = TypeId<LiteralRecord>;
+export type LiteralType = Brand<usize, "literal">;
 
 // A union holds a value of one of its members: a tag naming which, then that member's value.
 // It has no fields; reaching into one takes narrowing to a member first.
 export type UnionRecord = { kind: "union"; members: Type[]; fields: Field[]; name?: string; unknown?: true };
-export type UnionType = TypeId<UnionRecord>;
+export type UnionType = Brand<usize, "union">;
 
 // `unknown`: a value of any type the program stores in one. While checking, nothing can be done
 // with it but narrow it; once every body is checked, `closeUnknown` makes it a union over every
 // type that went in, marked `unknown`, so narrowing it is a check of its tag. It moves, whatever
 // it holds, since what it holds isn't known where it is checked.
 export type UnknownRecord = { kind: "unknown"; name: string; fields: Field[] };
-export type UnknownType = TypeId<UnknownRecord>;
+export type UnknownType = Brand<usize, "unknown">;
 
 // A borrow of a value that lives elsewhere: `Ref<T>` shared, `Mut<T>` mutable. It is a pointer
 // to the value, reads through to it, and copies like a pointer. A written lifetime names the
 // function's lifetime parameter it lives for; it is checked, then erased.
 export type RefRecord = { kind: "ref"; to: Type; mutable: boolean; fields: Field[]; life?: string };
-export type RefType = TypeId<RefRecord>;
+export type RefType = Brand<usize, "ref">;
 
 // A member of a data-carrying enum: a nominal value holding positional fields named `0`, `1`,
 // ..., laid out as an object's. One per enum instance and member, so `===` is identity. A
@@ -97,24 +97,24 @@ export type VariantRecord = {
   // The enum it belongs to, a union of its variants, once the enum is made.
   of?: Type;
 };
-export type VariantType = TypeId<VariantRecord>;
+export type VariantType = Brand<usize, "variant">;
 
 // An owned array of elements of one type, growable like Rust's Vec. One per element type, so
 // `===` is identity. It has no fields; its length and elements are reached by name and index.
 // A typed array, such as `Uint8Array`, is one of its sized element tagged with its name, which
 // lowering drops, so it is laid out as the plain array and the two fit each other.
 export type ArrayRecord = { kind: "array"; element: Type; fields: Field[]; typed?: TypedName };
-export type ArrayType = TypeId<ArrayRecord>;
+export type ArrayType = Brand<usize, "array">;
 
 // `FixedArray<T, N>`: exactly `size` elements stored inline, laid out as `[size x T]`; interned,
 // so `===` is identity.
 export type FixedRecord = { kind: "fixed"; element: Type; size: usize; fields: Field[] };
-export type FixedType = TypeId<FixedRecord>;
+export type FixedType = Brand<usize, "fixed">;
 // `Map<K, V>` and `Set<T>` (a Set's value is `void`): a pointer to an owned hash table in the
 // runtime, its entries kept in insertion order. A dictionary, `{ [k: string]: V }`, is a Map with
 // string keys that the program sees as an object: no methods, its keys read as properties.
 export type MapRecord = { kind: "map"; key: Type; value: Type; set: boolean; dict?: true; fields: Field[] };
-export type MapType = TypeId<MapRecord>;
+export type MapType = Brand<usize, "map">;
 
 // A closure: an arrow function and what it captures. Each arrow, in each instance of the body
 // it is written in, is its own type, so `===` is identity. Its value is its captures, laid out
@@ -125,7 +125,7 @@ export type MapType = TypeId<MapRecord>;
 // calls each instantiate that function, as calls of it by name do.
 // `throws` is what a call of it may throw; an async arrow's error is its future's instead.
 export type ClosureRecord = { kind: "closure"; name: string; params: Type[]; returns: Type; throws?: Type; fields: Field[]; once?: string; concrete: boolean; generic?: string };
-export type ClosureType = TypeId<ClosureRecord>;
+export type ClosureType = Brand<usize, "closure">;
 
 // A function type: the signature a closure must have to be passed where it is declared. Like an
 // interface, it describes values without being one, so it never reaches codegen.
@@ -135,7 +135,7 @@ export type ClosureType = TypeId<ClosureRecord>;
 // parameters' placeholders, in order, for comparing it with another.
 export type Family = { names: string[]; node: unknown; scope: Map<string, Type>; own: Type[] };
 export type FunctionRecord = { kind: "function"; name: string; names: string[]; params: Type[]; returns: Type; throws?: Type; fields: Field[]; generic?: Family };
-export type FunctionType = TypeId<FunctionRecord>;
+export type FunctionType = Brand<usize, "function">;
 
 // What a type parameter may be bounded by.
 export type Bound = ObjectType | InterfaceType | FunctionType | RegexType;
@@ -168,7 +168,7 @@ export const isInteger = (t: Type): t is Integer => typeof t === "string" && t i
 // A template literal type with open holes, like `${number}px`: the strings that match it. Its
 // values are strings, so it is a checker type only, which `lower` makes `string`.
 export type PatternRecord = { kind: "pattern"; quasis: string[]; holes: Hole[]; fields: Field[] };
-export type PatternType = TypeId<PatternRecord>;
+export type PatternType = Brand<usize, "pattern">;
 export type Hole = "string" | Numeric;
 
 // The powers of each base unit a unit's text writes, as `"kg*m/s^2"` does: names with integer
@@ -204,7 +204,7 @@ export function unitText(powers: Record<string, i64>): string {
 // A unit is a numeric brand whose `unit` maps each base unit to its power, which `*` and `/`
 // combine.
 export type BrandRecord = { kind: "brand"; base: Type; tag: Type; loose?: true; field?: string; unit?: Record<string, i64>; fields: Field[] };
-export type BrandType = TypeId<BrandRecord>;
+export type BrandType = Brand<usize, "brand">;
 
 // The texts a template's holes take in `s`, as TypeScript matches: each hole but the last takes
 // text up to the next piece's first occurrence (one character before another hole), the last
@@ -262,15 +262,38 @@ export function range(t: Integer): [bigint, bigint] {
 // anywhere, and a union drops it.
 export type Type = Numeric | "boolean" | "void" | "null" | "never" | "string" | "bigint" | ObjectType | ClassType | InterfaceType | ParamType | LiteralType | PatternType | BrandType | UnionType | RefType | ClosureType | FunctionType | ArrayType | FixedType | MapType | VariantType | GeneratorType | PointerType | FutureType | HandleType | InteriorType | SharedType | BlockType | DynType | RegexType | RecursiveType | UnknownType;
 
-// A type that isn't a primitive: its record's index in its program's arena, from 21 up, since
-// 1 to 20 are the primitives' ids. `R` is the record's kind, for tsc only.
-export type TypeId<R> = usize & { readonly __record?: R };
-
 // What a type's record holds.
 export type TypeRecord = ObjectRecord | ClassRecord | InterfaceRecord | ParamRecord | LiteralRecord | PatternRecord | BrandRecord | UnionRecord | RefRecord | ClosureRecord | FunctionRecord | ArrayRecord | FixedRecord | MapRecord | VariantRecord | GeneratorRecord | PointerRecord | FutureRecord | HandleRecord | InteriorRecord | SharedRecord | BlockRecord | DynRecord | RegexRecord | RecursiveRecord | UnknownRecord;
 
-// The record a type of `T` has.
-export type RecordOf<T> = T extends { readonly __record?: infer R } ? Exclude<R, undefined> : never;
+// The record a type of `T` has, from its brand's tag: a type that isn't a primitive is its
+// record's index in its program's arena, from 21 up, since 1 to 20 are the primitives' ids.
+export type RecordOf<T> = T extends ObjectType ? ObjectRecord
+  : T extends ClassType ? ClassRecord
+  : T extends InterfaceType ? InterfaceRecord
+  : T extends ParamType ? ParamRecord
+  : T extends LiteralType ? LiteralRecord
+  : T extends PatternType ? PatternRecord
+  : T extends BrandType ? BrandRecord
+  : T extends UnionType ? UnionRecord
+  : T extends RefType ? RefRecord
+  : T extends ClosureType ? ClosureRecord
+  : T extends FunctionType ? FunctionRecord
+  : T extends ArrayType ? ArrayRecord
+  : T extends FixedType ? FixedRecord
+  : T extends MapType ? MapRecord
+  : T extends VariantType ? VariantRecord
+  : T extends GeneratorType ? GeneratorRecord
+  : T extends PointerType ? PointerRecord
+  : T extends FutureType ? FutureRecord
+  : T extends HandleType ? HandleRecord
+  : T extends InteriorType ? InteriorRecord
+  : T extends SharedType ? SharedRecord
+  : T extends BlockType ? BlockRecord
+  : T extends DynType ? DynRecord
+  : T extends RegexType ? RegexRecord
+  : T extends RecursiveType ? RecursiveRecord
+  : T extends UnknownType ? UnknownRecord
+  : never;
 
 // The name a `[Symbol.iterator]` method takes, which no identifier or member read can spell.
 export const ITERATOR = "[Symbol.iterator]";
@@ -393,7 +416,7 @@ export class TypeSet<K extends Type> {
 // so a `const` or a `Ref` can still change what it holds. An Atomic and a Cell are laid out as
 // what they hold, a Lock and an RwLock as a lock word, then what they hold.
 export type InteriorRecord = { kind: "interior"; which: "Atomic" | "Lock" | "RwLock" | "Cell"; of: Type; fields: Field[] };
-export type InteriorType = TypeId<InteriorRecord>;
+export type InteriorType = Brand<usize, "interior">;
 
 // Whether an interior type is laid out as a lock word, then what it holds.
 export const isLock = (r: Ref<InteriorRecord>) => r.which === "Lock" || r.which === "RwLock";
@@ -403,14 +426,14 @@ export const isLock = (r: Ref<InteriorRecord>) => r.which === "Lock" || r.which 
 // `shared<T>` counts its owners atomically for every thread; `Rc<T>` counts them for one, and
 // `Weak<T>` reaches an Rc's value without keeping it alive.
 export type SharedRecord = { kind: "shared"; which: "shared" | "Rc" | "Weak"; of: Type; fields: Field[] };
-export type SharedType = TypeId<SharedRecord>;
+export type SharedType = Brand<usize, "shared">;
 
 // `Dyn<I>`: a value of any type implementing interface I, owned in a heap block, with a vtable
 // of what that type does: drop it, clone it, and each of I's members.
 // A stored callable written with other parameter names is its own DynType, `shown` as written,
 // for the same interface and key, which `lower` gives.
 export type DynRecord = { kind: "dyn"; of: InterfaceType; fields: Field[]; shown?: string };
-export type DynType = TypeId<DynRecord>;
+export type DynType = Brand<usize, "dyn">;
 
 // `Semaphore`, its `Permit` and `Channel<T>`: each a pointer to a counted block in the runtime,
 // which tasks wait on without holding a thread. A Permit holds a count on its Semaphore. An
@@ -419,7 +442,7 @@ export type DynType = TypeId<DynRecord>;
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
 // A FileDescriptor is an open file's descriptor, closed when its last count goes.
 export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue" | "FileDescriptor"; of: Type; fields: Field[] };
-export type BlockType = TypeId<BlockRecord>;
+export type BlockType = Brand<usize, "block">;
 
 // The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
 // the runtime: each frame holds its state, a count on the block (or a sleep's deadline), and for
@@ -433,14 +456,14 @@ export type Leaf = "acquire" | "send" | "receive" | "sleep" | "bind" | "connect"
 // `joined` marks what `handle.join()` gives: the same task, awaited so that its panic is thrown as
 // the TaskPanic `panic` rather than panicking its awaiter.
 export type HandleRecord = { kind: "handle"; gives: Type; throws?: Type; fields: Field[]; joined?: { base: HandleType; panic: Type } };
-export type HandleType = TypeId<HandleRecord>;
+export type HandleType = Brand<usize, "handle">;
 
 // An async function's future, a `Promise<T>`: what it gives once awaited, what it may throw,
 // its parameters, which say what it borrows, and the frame its state lives in, as a
 // generator's. Polled where it lives and never moved after its first poll. One per async
 // instance, so `===` is nominal identity; it has no properties.
 export type FutureRecord = { kind: "future"; name: string; gives: Type; throws?: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean };
-export type FutureType = TypeId<FutureRecord>;
+export type FutureType = Brand<usize, "future">;
 
 // `sleep(ms)`'s future: its state, then the delay, then the deadline the runtime sets.
 const SLEEP_RECORD: FutureRecord = { kind: "future", name: "sleep", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }, { name: "deadline", type: "i64" }], concrete: true };
@@ -462,14 +485,14 @@ export const YIELD_NOW = 22 as FutureType;
 // A raw pointer, `Ptr<T>` or `MutPtr<T>`: an address the borrow checker doesn't follow, used
 // only inside `unsafe`. It copies like a number and owns nothing.
 export type PointerRecord = { kind: "pointer"; to: Type; mutable: boolean; fields: Field[] };
-export type PointerType = TypeId<PointerRecord>;
+export type PointerType = Brand<usize, "pointer">;
 
 // A regex: its pattern and flags, which fix what each capture may hold. Its value points at a
 // compiled program that never changes, so it copies freely and needs no drop.
 // \`source\` is how JavaScript shows the pattern; \`pattern\` what is matched, which differ only for
 // a \`new RegExp\` whose string held a \`/\` or a line terminator.
 export type RegexRecord = { kind: "regex"; source: string; pattern: string; flags: string; captures: { name: string | undefined; optional: boolean }[]; fields: Field[]; any?: true };
-export type RegexType = TypeId<RegexRecord>;
+export type RegexType = Brand<usize, "regex">;
 
 // The \`RegExp\` annotation: any regex. A parameter of it is an implicit type parameter, so each
 // instance knows its regex; elsewhere it holds one whose pattern isn't known there.
@@ -482,7 +505,7 @@ export const ANY_REGEX = 23 as RegexType;
 // `args` are the alias's type arguments, so one made from type parameters is remade for what
 // they stand for.
 export type RecursiveRecord = { kind: "recursive"; name: string; args: Type[]; of: Type; fields: Field[] };
-export type RecursiveType = TypeId<RecursiveRecord>;
+export type RecursiveType = Brand<usize, "recursive">;
 
 // A generator: what it yields, its parameters, which say what it borrows, and the frame its
 // state lives in, filled once the body is checked. It has no properties, so `fields` stays
@@ -490,7 +513,7 @@ export type RecursiveType = TypeId<RecursiveRecord>;
 // a future, and its body may await between yields. `throws` is what advancing it may throw, and
 // `sends` what `next(x)` gives the `yield` it resumes at.
 export type GeneratorRecord = { kind: "generator"; name: string; yields: Type; fields: Field[]; params: Field[]; frame: Field[]; concrete: boolean; async?: boolean; throws?: Type; sends?: Type };
-export type GeneratorType = TypeId<GeneratorRecord>;
+export type GeneratorType = Brand<usize, "generator">;
 
 export const INTERIORS = new Set(["Atomic", "Lock", "RwLock", "Cell"]);
 
@@ -518,11 +541,11 @@ export class Typing {
 
   // The record a type that isn't a primitive stands for, which its changes are made through.
   rec<T extends Exclude<Type, string>>(t: T): RecordOf<T> {
-    return this.arena[t - 21] as RecordOf<T>;
+    return this.arena[(t as usize) - 21] as RecordOf<T>;
   }
 
   // The record of a type that isn't a primitive, or undefined for a primitive or no type.
-  recOf<T extends Type>(t: T | undefined) {
+  recOf<T extends Type>(t: T | undefined): RecordOf<T> | undefined {
     return t === undefined || typeof t === "string" ? undefined : this.rec(t as Exclude<T, string>);
   }
 

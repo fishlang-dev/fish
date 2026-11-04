@@ -666,9 +666,11 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return narrow;
   }
 
-  // Whether an 'as' widens to a type that isn't a number, rather than converting a number.
+  // Whether an 'as' widens to a type that isn't a number, rather than converting a number or
+  // checking a union's tag.
   function widens(e: Extract<Expr, { kind: "as" | "satisfies" }>): boolean {
-    const to = types.get(e)!;
+    const [from, to] = [valueType(e.expr), types.get(e)!];
+    if (recOf(from)?.kind === "union" && from !== to && !typing.fits(from, to)) return false;
     return !isNumeric(to) && to !== "bigint" && recOf(to)?.kind !== "pointer";
   }
 
@@ -9434,6 +9436,15 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         const [from, to] = [coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)!];
         // A widening 'as' is its operand, converted by the coercion the checker gave it.
         if (widens(e)) return value(e.expr, true);
+        if (recOf(from)?.kind === "union") {
+          const v = value(e.expr);
+          const declared = recOf(to);
+          const kept = declared?.kind === "union" ? declared.members : [to];
+          const union = from as UnionType;
+          const rejected = typing.rec(union).members.filter((m) => !kept.includes(m) && !kept.includes(typing.unfold(m)));
+          panicIf(holds(v, union, rejected), `'as ${typing.show(to)}' failed: union held another member`, e);
+          return convert(v, union, to);
+        }
         if (from === "bigint") return bigTo(value(e.expr), to);
         const pointer = (t: Type) => recOf(t)?.kind === "pointer";
         if (!pointer(from) && !pointer(to)) return cast(value(e.expr), from, to as Numeric);
@@ -9704,8 +9715,6 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         });
       case "conditional": {
         const cond = value(e.cond);
-        const [then, otherwise, end] = [label(), label(), label()];
-        emit(`br i1 ${cond}, label %${then}, label %${otherwise}`);
         // Each side gives a value of its own when the result owns memory.
         const side = (x: Expr) => {
           const mark = pending.length;
@@ -9713,6 +9722,10 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
           settle(mark);
           return v;
         };
+        if (!types.has(e.then)) return side(e.else);
+        if (!types.has(e.else)) return side(e.then);
+        const [then, otherwise, end] = [label(), label(), label()];
+        emit(`br i1 ${cond}, label %${then}, label %${otherwise}`);
         startBlock(then);
         const a = side(e.then);
         const thenEnd = block;

@@ -3642,10 +3642,10 @@ class BodyChecker implements Context {
 
   // Whether control never reaches the end of these statements, leaving by `return`, `break`
   // or `continue`.
-  // Whether a check made here rules out what an instance's type parameter stands for, which the
-  // narrowing marks by giving its variable the type `never`.
+  // Whether a check made here rules out what a variable or field holds, which the narrowing
+  // marks by giving it the type `never`.
   private ruledOut(): boolean {
-    return this.facts.some((m) => [...m].some(([key, t]) => t === "never" && !isPath(key) && this.cx.typing.recOf(this.cx.localOf(Number(key) as LocalId).type)?.kind === "param"));
+    return this.facts.some((m) => [...m.values()].includes("never"));
   }
 
   leaves(stmts: Stmt[]): boolean {

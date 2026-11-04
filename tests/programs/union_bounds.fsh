@@ -319,3 +319,33 @@ function main() {
   console.log(t2(5), t2(s), t3(5), t3(s), t3("abcd"))
 }
 // expect: n:10 s:zz 5 2 4
+// case: union_bounds_rec_and_rec_of
+type ObjectRecord = { kind: "object"; count: usize }
+type ClassRecord = { kind: "class"; id: usize }
+type ObjectType = Brand<usize, "object">
+type ClassType = Brand<usize, "class">
+type Type = "string" | "i64" | ObjectType | ClassType
+type TypeRecord = ObjectRecord | ClassRecord
+type RecordOf<T> = T extends ObjectType ? ObjectRecord : T extends ClassType ? ClassRecord : never
+
+class Arena {
+  items: TypeRecord[] = [
+    { kind: "object", count: 3 },
+    { kind: "class", id: 9 },
+  ]
+  rec<T extends Exclude<Type, string>>(this: Ref<this>, t: T): RecordOf<T> {
+    return this.items[(t as usize) - 21].clone() as RecordOf<T>
+  }
+  recOf<T extends Type>(this: Ref<this>, t: T | undefined): RecordOf<T> | undefined {
+    return t === undefined || typeof t === "string" ? undefined : this.rec(t as Exclude<T, string>)
+  }
+}
+
+function main() {
+  const a = new Arena()
+  const obj = 21 as ObjectType
+  const cls = 22 as ClassType
+  const any: Type = cls
+  console.log(a.rec(obj).count, a.rec(cls).id, a.recOf(obj)?.count, a.recOf("string" as Type), a.recOf(any)?.kind)
+}
+// expect: 3 9 3 null class
