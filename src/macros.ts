@@ -1,11 +1,11 @@
 import { bodyOf } from "./arenas.ts";
 import { compiledOf, type Checked } from "./check.ts";
-import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
+import { AstValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import type { Compilation, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Param, type Stmt } from "./parser.ts";
-import { built, declaredBy, freshName, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
+import { built, declaredBy, freshName, quoted, withHygiene, type Categories, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
 import type { Id } from "./ids.ts";
@@ -408,10 +408,10 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   if (typeof returns === "string" || instance.tables.typing.rec(returns).kind === "literal") throw new CompileError("E1103", `a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${instance.tables.typing.show(returns)}'`, macro.start, macro.end);
   const input = instance.tables.arenas.localOf(instance.locals.get(param)!).type;
   const { bare, restore } = stripped(ids, decl, pending);
-  const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
+  const types: Categories = { AstExpr: input, AstStmt: input, AstType: input };
   let value: Value;
   try {
-    value = built<Value>(checked.tables, { tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
+    value = built<Value>(checked.tables, { tree: { of: "stmt", node: bare }, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, new AstValues(undefined), new Map(), new Map());
   } catch (e) {
     if (e instanceof CompileError && e.code !== "E1103") throw e;
     throw new CompileError("E1103", "a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
@@ -433,7 +433,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     const t = instance.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
     if (a.none) return null;
     if (!a.syntax) return comptimeBody(compiledOf(checked).find((c) => bodyOf(c).name === `const ${a.name}`)!);
-    return built<Value>(checked.tables, { tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
+    return built<Value>(checked.tables, { tree: { of: "expr", node: original[i] ?? a.expr }, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, new AstValues(undefined), new Map(), new Map());
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
   let result: Value;

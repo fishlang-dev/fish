@@ -9,7 +9,7 @@ import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, 
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
-import { cloneExpr, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
+import { cloneExpr, cloneStmt, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots } from "./flow.ts";
@@ -649,7 +649,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           const node = { ...s, id: nextId(this.ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
           if (s.typeParams.some(isLifetime)) this.slots.set(s.name, s.typeParams.map(isLifetime));
           if (node.typeParams.length > 0) this.templates.set(s.name, node);
-          else this.classes.set(s.name, declareClass(this.tables, node).classId);
+          else this.classes.set(s.name, declareClass(this.tables, node));
           const declared = this.arenas.classOf(this.classes.get(s.name));
           const rust = rustClassNodes.get(s);
           if (rust) this.typing.rec(declared!.type).rust = rust;
@@ -1844,18 +1844,20 @@ class ClassMembers implements Members {
   }
 
   /** @throws {CompileError} */
-  returnOf(this: Mut<this>, b: Body, at: Span): Type {
-    return this.cx.returnOf(this.cx.instancing().definition(b), at);
+  returnOf(this: Mut<this>, id: BodyId, at: Span): Type {
+    return this.cx.returnOf(this.cx.instancing().definition(this.arenas.bodyOf(id)), at);
   }
 
   /** @throws {CompileError} */
-  throwsOf(this: Mut<this>, b: Body): Type | undefined {
+  throwsOf(this: Mut<this>, id: BodyId): Type | undefined {
+    const b = this.arenas.bodyOf(id);
     const instancing = this.cx.instancing();
     return b.throws ? this.cx.resolver().withScope(instancing.scopeOf(instancing.definition(b)), () => this.cx.resolver().resolveType(b.throws!)) : undefined;
   }
 
   // A generic method's, with its own type parameters standing for themselves.
-  paramTypesOf(this: Mut<this>, b: Body): Type[] {
+  paramTypesOf(this: Mut<this>, id: BodyId): Type[] {
+    const b = this.arenas.bodyOf(id);
     const instancing = this.cx.instancing();
     return (b.typeParams ?? []).some((p) => !isLifetime(p)) ? instancing.paramTypes(instancing.definition(b), instancing.scopeOf(instancing.definition(b))) : instancing.declaredParams(b);
   }
@@ -1870,7 +1872,8 @@ class ClassMembers implements Members {
   }
 
   /** @throws {CompileError} */
-  typeParamsOf(this: Mut<this>, b: Body): Type[] {
+  typeParamsOf(this: Mut<this>, id: BodyId): Type[] {
+    const b = this.arenas.bodyOf(id);
     const scope = this.cx.instancing().scopeOf(this.cx.instancing().definition(b));
     return (b.typeParams ?? []).filter((p) => !isLifetime(p)).map((p) => scope.get(p.name)!);
   }
@@ -2803,8 +2806,13 @@ class BodyChecker implements Context, GuardHost {
       while (loop.kind === "labeled") loop = this.cx.rewrites.currentStmt(loop.body);
       if (loop.kind === "for" && loop.init?.kind === "let" && loop.init.declarations.length > 1) {
         list[i] = { id: nextId(this.cx.ids), kind: "block", body: [loop.init, s], start: s.start, end: s.end };
+        this.cx.tables.wrappedIn.set(s, cloneStmt(list[i]!));
         this.cx.rewrites.replaceStmt(loop, { ...loop, init: undefined });
+        continue;
       }
+      // Inside the block it was moved into, the loop is already where it belongs.
+      const wrapped = this.cx.tables.wrappedIn.get(list[i]!);
+      if (wrapped !== undefined && wrapped.kind === "block" && list[i - 1]?.id !== wrapped.body[0]?.id) list[i] = cloneStmt(wrapped);
     }
   }
 
@@ -2819,6 +2827,8 @@ class BodyChecker implements Context, GuardHost {
     const writes = this.written.length;
     for (let i = 0; i < list.length; i++) {
       const s = list[i]!;
+      const inserted = this.cx.tables.insertedAfter.get(s);
+      if (inserted !== undefined && inserted.length > 0 && list[i + 1]?.id !== inserted[0]!.id) list.splice(i + 1, 0, ...inserted.map((x) => cloneStmt(x)));
       this.siblings = { list, at: i };
       const mark = this.changed.length;
       if (this.ruledOut()) (this.instance.unreached ??= new NodeSet()).add(s);
@@ -2993,6 +3003,7 @@ class BodyChecker implements Context, GuardHost {
     // A parameter's parts come before a derived constructor's `super(...)`, as its whole did.
     if (this.cx.prologues.has(s)) for (const l of [...hoisted, ...lets]) this.cx.prologues.add(l);
     place.list.splice(place.at + 1, 0, ...hoisted, ...lets);
+    this.cx.tables.insertedAfter.set(s, [...hoisted, ...lets].map((x) => cloneStmt(x)));
     return undefined;
   }
 

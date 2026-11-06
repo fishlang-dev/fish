@@ -800,7 +800,7 @@ export class Instancing<H extends InstancingHost> {
     const members = this.host.members();
     const method = inherited(members.arenas, members.classOf(held as ClassType), "methods", ITERATOR);
     if (!method) return t;
-    const gives = members.returnOf(method, at);
+    const gives = members.returnOf(method.bodyId, at);
     return r?.kind === "ref" ? this.typing.refType(gives, r.mutable) : gives;
   }
 
@@ -900,7 +900,7 @@ export class Instancing<H extends InstancingHost> {
       if (fam?.kind === "function" && fam.generic && fam.name === b.name) return type;
       if (h?.kind === "closure" && h.generic) {
         const f = this.host.members().bodyNamed(h.generic);
-        const reason = f && familyMismatch(f, bound as FunctionType, this.host.members(), arg);
+        const reason = f && familyMismatch(f.bodyId, bound as FunctionType, this.host.members(), arg);
         if (reason) throw new CompileError("E0101", `${message}: ${reason}`, arg.start, arg.end);
         return type;
       }
@@ -1068,7 +1068,7 @@ export class GenericClasses<H extends GenericClassesHost> {
     if (!shapes.has(shape) && shapes.size > 64) throw new CompileError("E0113", `instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
     if (args.some((a) => typeof a !== "string" && this.typing.rec(a).kind === "interface")) throw new CompileError("E0115", "an interface can't be a type argument, since it describes values without being one", at.start, at.end);
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
-    const c = declareClass(this.host.tables, template, `${template.name}<${args.map((t) => this.typing.show(t)).join(", ")}>`, scope);
+    const c = this.arenas.classOf(declareClass(this.host.tables, template, `${template.name}<${args.map((t) => this.typing.show(t)).join(", ")}>`, scope));
     byKey.set(key, c.classId);
     this.typing.noteClassInstance(template.name, key, c.type);
     shapes.add(shape);

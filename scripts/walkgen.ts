@@ -610,13 +610,15 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
     ``,
   ];
   const importsOf = (lines: string[]) => [...aliases.keys(), "Span"].filter((name) => lines.some((l) => new RegExp(`\\b${name}\\b`).test(l)));
+  const readers = fieldReaders(parserSource);
   const walk = [
     `// Generated from the parser's AST types by \`bun scripts/walkgen.ts\`; a test fails when it is stale.`,
     `// Visits each node a node holds, tagged, in the order its type lists the fields.`,
     `import assert from "node:assert";`,
-    `import type { ${importsOf(visitor).join(", ")} } from "./parser.ts";`,
+    `import type { ${importsOf([...visitor, ...readers]).join(", ")} } from "./parser.ts";`,
     ``,
     ...visitor,
+    ...readers,
   ];
   const rebuild = [
     `// Generated from the parser's AST types by \`bun scripts/walkgen.ts\`; a test fails when it is stale.`,
@@ -628,6 +630,163 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
   ];
   const text = (lines: string[]) => lines.join("\n").trimEnd() + "\n";
   return { walk: text(walk), rebuild: text(rebuild) };
+}
+
+// A tree as a value a quote can read without reading an object's fields by name, which Fish
+// can't: `quoteTree` copies a node into tagged values, each node its tag and its fields in order,
+// an optional field only when it is there.
+function fieldReaders(parserSource: string): string[] {
+  const { aliases, isNode, isWord, membersOf, ref, shapes, formOf, show } = nodeTypes(parserSource);
+  const method = (name: string) => name[0]!.toLowerCase() + name.slice(1);
+  const helpers = new Map<string, { name: string; lines: string[] }>();
+  // A function `name` taking `type`, written once per distinct type.
+  const helper = (prefix: string, type: string, body: () => string[]): string => {
+    const key = `${prefix} ${type}`;
+    if (!helpers.has(key)) {
+      const name = `${prefix}${helpers.size}`;
+      helpers.set(key, { name, lines: [] });
+      helpers.get(key)!.lines = [`function ${name}(n: Ref<${type}>): QuoteValue {`, ...body().map((l) => `  ${l}`), `}`, ``];
+    }
+    return helpers.get(key)!.name;
+  };
+  const plain = (t: TypeNode, v: string): string => {
+    if (t.kind === "literal") return typeof (t.value as { value: unknown }).value === "boolean" ? `{ kind: "boolean", value: ${v} }` : `{ kind: "int", value: ${v} as i64 }`;
+    if (ref(t, "boolean")) return `{ kind: "boolean", value: ${v} }`;
+    if (ref(t, "f64")) return `{ kind: "float", value: ${v} }`;
+    return `{ kind: "int", value: ${v} as i64 }`;
+  };
+  let loops = 0;
+  // Statements handing `push` the value of `v`, of type `t`. Lists are read in place, as a helper
+  // taking an array of a recursive node type isn't checked yet.
+  const value = (t: TypeNode, v: string, push: (value: string) => string): string[] => {
+    const f = formOf(t);
+    switch (f.form) {
+      case "json":
+        return [push(`{ kind: "text", value: ${v} }`)];
+      case "plain":
+        return [push(plain(t, v))];
+      case "bigint":
+        return [push(`{ kind: "bigint", value: ${v} }`)];
+      case "node":
+        return [push(`{ kind: "node", of: ${JSON.stringify(method(f.name))}, fields: fieldsOf${f.name}(${v}) }`)];
+      case "union":
+        return [push(`${helper("oneOf", f.members.map(show).join(" | "), () => union(f.members))}(${v})`)];
+      case "object":
+        return [push(`${helper("recordOf", show(t), () => ["let out: QuoteField[] = [];", ...fields(f.fields, "n"), "return { kind: \"record\", fields: out };"])}(${v})`)];
+      case "array": {
+        const n = ++loops;
+        const items = `items${n}`;
+        const x = `x${n}`;
+        const element = formOf(f.element);
+        const add = (e: string) => `${items}.push(${e});`;
+        const each = element.form === "option" ? optional(element.inner, x, add) : value(f.element, x, add);
+        return [`let ${items}: QuoteValue[] = [];`, `for (const ${x} of ${v}) {`, ...each.map((l) => `  ${l}`), `}`, push(`{ kind: "list", items: ${items} }`)];
+      }
+      case "option":
+        return optional(f.inner, v, push);
+    }
+  };
+  // An Option's value, or none.
+  const optional = (inner: TypeNode, v: string, push: (value: string) => string): string[] => [
+    `if (${v} === undefined) ${push(`{ kind: "none" }`)}`,
+    `else {`,
+    ...value(inner, v, push).map((l) => `  ${l}`),
+    `}`,
+  ];
+  const fields = (all: { name: string; optional: boolean; type: TypeNode }[], v: string): string[] =>
+    all.flatMap((f) => {
+      const path = `${v}.${f.name}`;
+      const form = formOf(f.type);
+      const inner = form.form === "option" ? form.inner : f.type;
+      const push = (x: string) => `out.push({ name: ${JSON.stringify(f.name)}, value: ${x} });`;
+      if (f.optional) return [`if (${path} !== undefined) {`, ...value(inner, path, push).map((l) => `  ${l}`), `}`];
+      return value(f.type, path, push);
+    });
+  // A node's fields, its kind first when it has one.
+  const kinds = new Map<string, string[]>();
+  const shapeFields = (s: ReturnType<typeof shapes>[number]): string[] => [
+    "let out: QuoteField[] = [];",
+    ...(s.kind !== undefined ? [`out.push({ name: "kind", value: { kind: "text", value: n.kind } });`] : []),
+    ...fields(s.fields, "n"),
+    "return out;",
+  ];
+  const cases = (all: ReturnType<typeof shapes>, v: string): string[] => {
+    if (all.length === 1 && all[0]!.kind === undefined) return shapeFields(all[0]!);
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const s of all) {
+      if (s.kind === undefined || seen.has(s.kind)) continue;
+      seen.add(s.kind);
+      const name = `fieldsOf${s.owner}_${s.kind}`;
+      if (!kinds.has(name)) kinds.set(name, [`function ${name}(n: Ref<Extract<${s.owner}, { kind: ${s.kindType} }>>): QuoteField[] {`, ...shapeFields(s).map((l) => `  ${l}`), `}`, ``]);
+      out.push(`  case ${JSON.stringify(s.kind)}:`, `    return ${name}(${v});`);
+    }
+    return [`switch (${v}.kind) {`, ...out, `}`, `return [];`];
+  };
+  // A union's value: a string, an array, or the node it is, told apart by kind.
+  const union = (members: TypeNode[]): string[] => {
+    const body: string[] = [];
+    let rest = members.flatMap((m) => (m.kind === "ref" && aliases.has(m.name) && !isNode(m.name) && !isWord(m) ? membersOf(aliases.get(m.name)) : [m]));
+    if (rest.some((m) => ref(m, "string"))) {
+      body.push("if (typeof n === \"string\") return { kind: \"text\", value: `${n}` };");
+      rest = rest.filter((m) => !ref(m, "string"));
+    }
+    const array = rest.find((m) => m.kind === "array");
+    if (array) {
+      body.push(`if (Array.isArray(n)) {`, ...value(array, "n", (x) => `return ${x};`).map((l) => `  ${l}`), `}`);
+      rest = rest.filter((m) => m !== array);
+    }
+    const owner = (m: TypeNode) => (m.kind === "ref" && m.name === "Extract" && m.args[0]!.kind === "ref" ? m.args[0]!.name : m.kind === "ref" ? m.name : "");
+    if (rest.length === 1 && isNode(owner(rest[0]!))) return [...body, `return { kind: "node", of: ${JSON.stringify(method(owner(rest[0]!)))}, fields: fieldsOf${owner(rest[0]!)}(n) };`];
+    const seen = new Set<string>();
+    body.push("switch (n.kind) {");
+    for (const m of rest) {
+      if (!isNode(owner(m))) throw new Error(`the field readers can't tell apart a union holding '${show(m)}'`);
+      for (const s of shapes(m)) {
+        if (s.kind === undefined || seen.has(s.kind)) continue;
+        seen.add(s.kind);
+        body.push(`  case ${JSON.stringify(s.kind)}:`, `    return { kind: "node", of: ${JSON.stringify(method(owner(m)))}, fields: fieldsOf${owner(m)}(n) };`);
+      }
+    }
+    body.push("}", `return { kind: "none" };`);
+    return body;
+  };
+  const tags: string[] = [];
+  const readers: string[] = [];
+  for (const [name, t] of aliases) {
+    if (!isNode(name)) continue;
+    tags.push(`    case ${JSON.stringify(method(name))}:`, `      return { kind: "node", of: ${JSON.stringify(method(name))}, fields: fieldsOf${name}(n.node) };`);
+    readers.push(`function fieldsOf${name}(n: Ref<${name}>): QuoteField[] {`, ...cases(shapes(t).map((s) => ({ ...s, owner: s.owner ?? name })), "n").map((l) => `  ${l}`), `}`, ``);
+  }
+  return [
+    `// What a node's field holds, for a quote to read: text, a number, a boolean, a list, a node by`,
+    `// its tag and fields, an object of fields that isn't a node, or nothing.`,
+    `export type QuoteValue =`,
+    `  | { kind: "none" }`,
+    `  | { kind: "text"; value: string }`,
+    `  | { kind: "boolean"; value: boolean }`,
+    `  | { kind: "int"; value: i64 }`,
+    `  | { kind: "bigint"; value: bigint }`,
+    `  | { kind: "float"; value: f64 }`,
+    `  | { kind: "list"; items: QuoteValue[] }`,
+    `  | { kind: "node"; of: string; fields: QuoteField[] }`,
+    `  | { kind: "record"; fields: QuoteField[] };`,
+    `export type QuoteField = { name: string; value: QuoteValue };`,
+    ``,
+    `export function quoteTree(n: AnyNode): QuoteValue {`,
+    `  switch (n.of) {`,
+    ...tags,
+    `    case "stmts": {`,
+    ...value({ kind: "array", element: { kind: "ref", name: "Stmt", args: [], start: 0, end: 0, id: 0 }, start: 0, end: 0, id: 0 } as TypeNode, "n.node", (x) => `return ${x};`).map((l) => `      ${l}`),
+    `    }`,
+    `  }`,
+    `  return { kind: "none" };`,
+    `}`,
+    ``,
+    ...readers,
+    ...[...kinds.values()].flat(),
+    ...[...helpers.values()].flatMap((h) => h.lines),
+  ];
 }
 
 export const WALK = new URL("../src/walk.ts", import.meta.url);

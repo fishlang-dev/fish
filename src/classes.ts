@@ -2,13 +2,13 @@ import assert from "node:assert";
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { RustName } from "./rust.ts";
-import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassMember, ClassNode, Expr, Id, JsName, Modifier, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { cloneClassNode, cloneExpr, cloneJsName, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltParam, rebuiltStmts, rebuiltTypeNode } from "./rebuild.ts";
 import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
-import { forEachChild, nextId, NodeSet, renumberParam, renumberStmts, renumberTypeNode, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
+import { forEachChild, nextId, NodeSet, reborrowNode, renumberParam, renumberStmts, renumberTypeNode, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
@@ -150,8 +150,8 @@ type Declaring = {
 };
 
 /** @throws {CompileError} */
-export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: string }>, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
-  if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
+export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: string }>, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassId {
+  if (node.decorators.length > 0) throw unsupported("decorators", { start: node.decorators[0]!.start, end: node.decorators[0]!.end });
   // A template is copied into each concrete class by the abstract class's one declaration, which a
   // generic class doesn't have.
   if (node.abstract && node.typeParams.length > 0) throw unsupported("generic abstract classes", { start: node.start, end: node.end });
@@ -160,9 +160,11 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
   }
   let constructors: Extract<ClassMember, { kind: "constructor" }>[] = [];
   for (const m of node.members) if (m.kind === "constructor") constructors.push({ ...m });
-  const ctor = constructors.length > 0 ? constructors[0] : undefined;
-  if (ctor !== undefined && ctor.body === undefined && constructors.length > 1) throw unsupported("constructor overloads", { start: ctor.start, end: ctor.end });
-  if (constructors.length > 1) throw new CompileError("E0703", "a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
+  const count = constructors.length;
+  const second = count > 1 ? { start: constructors[1]!.start, end: constructors[1]!.end } : undefined;
+  const ctor = constructors.shift();
+  if (ctor !== undefined && ctor.body === undefined && count > 1) throw unsupported("constructor overloads", { start: ctor.start, end: ctor.end });
+  if (second !== undefined) throw new CompileError("E0703", "a class can have only one constructor", second.start, second.end);
   if (ctor !== undefined && ctor.body === undefined) throw unsupported("constructor overloads", { start: ctor.start, end: ctor.end });
 
   const type = tables.typing.classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
@@ -173,7 +175,7 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
   }
   // A generic class's statics can't use its type parameters, so every instance shares one set.
   const shared = node.typeParams.length > 0 ? tables.genericStatics.get(node) : undefined;
-  let d: Declaring = { name, scope, type, shared: shared !== undefined, fields: [], abstracts: [], methods: new Map(), statics: shared !== undefined ? shared : new Map(), staticFields: new Map(), getters: new Map(), setters: new Map() };
+  let d: Declaring = { name, scope: copyScope(scope), type, shared: shared !== undefined, fields: [], abstracts: [], methods: new Map(), statics: shared !== undefined ? shared : new Map(), staticFields: new Map(), getters: new Map(), setters: new Map() };
   for (const m of node.members) {
     if (m.kind === "constructor") continue;
     if ("modifiers" in m && m.modifiers.includes("abstract")) {
@@ -194,21 +196,26 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
       staticField(node, d, m, m.name);
       continue;
     }
-    const access = modifiers(m.modifiers, m, m.name);
+    const access = modifiers(m.modifiers, { start: m.start, end: m.end }, m.name);
     if (m.definite) throw unsupported("definite assignment assertions", { start: m.start, end: m.end });
     if (m.type === undefined && m.init === undefined) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An optional field is an Option, empty until assigned.
-    add(d, fieldOf(tables.ids, m.name, m.type, m.optional, m.optional ? (m.init !== undefined ? cloneExpr(m.init) : { id: nextId(tables.ids), kind: "null", start: m.start, end: m.end }) : m.init !== undefined ? cloneExpr(m.init) : undefined, access, m.modifiers.includes("readonly"), m));
+    const init: Expr | undefined = m.init !== undefined ? cloneExpr(m.init) : m.optional ? { id: nextId(tables.ids), kind: "null", start: m.start, end: m.end } : undefined;
+    add(d, fieldOf(tables.ids, m.name, m.type !== undefined ? cloneTypeNode(m.type) : undefined, m.optional, init, access, m.modifiers.includes("readonly"), { start: m.start, end: m.end }));
   }
-  if (node.typeParams.length > 0 && shared === undefined) tables.genericStatics.set(cloneClassNode(node), new Map([...d.statics]));
+  if (node.typeParams.length > 0 && !d.shared) {
+    let statics = new Map<string, BodyId>();
+    for (const [n, id] of d.statics) statics.set(n, id);
+    tables.genericStatics.set(cloneClassNode(node), statics);
+  }
   let properties: FieldDecl[] = [];
   if (ctor !== undefined) {
     for (const p of ctor.params) {
       if (p.modifiers.length === 0) continue;
       if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", { start: p.pattern.start, end: p.pattern.end });
-      const access = modifiers(p.modifiers, p, p.pattern.name);
+      const access = modifiers(p.modifiers, { start: p.start, end: p.end }, p.pattern.name);
       // An optional parameter property is an Option, as the parameter is.
-      const f = fieldOf(tables.ids, p.pattern.name, p.type, p.optional, undefined, access, p.modifiers.includes("readonly"), p);
+      const f = fieldOf(tables.ids, p.pattern.name, p.type !== undefined ? cloneTypeNode(p.type) : undefined, p.optional, undefined, access, p.modifiers.includes("readonly"), { start: p.start, end: p.end });
       add(d, cloneFieldDecl(f));
       properties.push(f);
     }
@@ -242,41 +249,50 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
   let initializers: Stmt[] = [];
   for (const f of d.fields) if (f.init !== undefined) initializers.push(assignField(tables.ids, f.name, cloneExpr(f.init), f));
   let prelude: Stmt[] = [];
-  for (const f of properties) prelude.push(assignField(tables.ids, f.name, { id: nextId(tables.ids), kind: "ident", name: f.name, start: f.start, end: f.end }, f));
+  for (const f of properties) {
+    const value: Expr = { id: nextId(tables.ids), kind: "ident", name: f.name, start: f.start, end: f.end };
+    prelude.push(assignField(tables.ids, f.name, value, f));
+  }
   for (const s of initializers) prelude.push(cloneStmt(s));
   let body: Stmt[] = prelude.map((s) => cloneStmt(s));
   if (ctor !== undefined && ctor.body !== undefined) for (const s of ctor.body) body.push(cloneStmt(s));
   const at = ctor !== undefined ? { start: ctor.start, end: ctor.end } : { start: node.start, end: node.end };
   const rustName = ctor !== undefined ? tables.rust.names.get(ctor) : undefined;
-  const constructor = tables.arenas.addBody({
+  let ctorParams: Param[] = [];
+  if (ctor !== undefined) for (const p of ctor.params) ctorParams.push(cloneParam(p));
+  let ctorBody = tables.arenas.addBody({
     id: nextId(tables.ids),
     name: `${name}.constructor`,
-    scope,
-    params: ctor !== undefined ? ctor.params : [],
+    scope: copyScope(scope),
+    params: ctorParams,
     body,
     returnType: undefined,
     self: { type, constructor: true, mutable: true },
     owner: type,
     start: at.start,
     end: at.end,
-    ...(rustName !== undefined && { foreign: true as const, rust: rustName }),
-    ...(ctor !== undefined && ctor.throws !== undefined && { throws: ctor.throws }),
-  }).bodyId;
+  });
+  if (rustName !== undefined) {
+    ctorBody.foreign = true;
+    ctorBody.rust = rustName;
+  }
+  if (ctor !== undefined && ctor.throws !== undefined) ctorBody.throws = cloneTypeNode(ctor.throws);
+  const constructor = ctorBody.bodyId;
   const required = new Set(d.fields.map((f) => f.name));
   let overrides: Overridden[] = [];
   for (const m of node.members) {
-    if ("name" in m && m.modifiers.includes("override") && typeof m.name === "string") overrides.push({ name: m.name, static: m.modifiers.includes("static"), start: m.start, end: m.end });
+    const written = plainName(m);
+    if (written !== undefined && m.modifiers.includes("override")) overrides.push({ name: written, static: m.modifiers.includes("static"), start: m.start, end: m.end });
   }
   if (ctor !== undefined) {
     for (const p of ctor.params) if (p.modifiers.includes("override") && p.pattern.kind === "ident") overrides.push({ name: p.pattern.name, static: false, start: p.start, end: p.end });
   }
-  const named = node.extends !== undefined && node.extends.kind === "instantiation" ? node.extends.expr : node.extends;
-  const baseName = named !== undefined && named.kind === "ident" ? named.name : undefined;
-  return tables.arenas.addClass({ type, abstracts: d.abstracts, copies: new Map(), fields: d.fields, constructor, required, initializers: new NodeSet(initializers), scope, overrides, methods: d.methods, statics: d.statics, staticFields: d.staticFields, getters: d.getters, setters: d.setters, baseName, prelude, node: cloneClassNode(node), wraps: [] });
+  const baseName = node.extends !== undefined ? extendedName(node.extends) : undefined;
+  return tables.arenas.addClass({ type, abstracts: d.abstracts, copies: new Map<BodyId, BodyId>(), fields: d.fields, constructor, required, initializers: new NodeSet(initializers), scope, overrides, methods: d.methods, statics: d.statics, staticFields: d.staticFields, getters: d.getters, setters: d.setters, baseName, prelude, node: cloneClassNode(node), wraps: [] }).classId;
 }
 
 // A field as declared, from a field or a parameter property: an optional one is an Option.
-function fieldOf(ids: Mut<Ids>, name: string, written: Ref<TypeNode> | undefined, optional: boolean, init: Expr | undefined, access: Access, readonly: boolean, at: Ref<Span>): FieldDecl {
+function fieldOf(ids: Mut<Ids>, name: string, written: TypeNode | undefined, optional: boolean, init: Expr | undefined, access: Access, readonly: boolean, at: Ref<Span>): FieldDecl {
   const span = { start: at.start, end: at.end };
   const type: TypeNode | undefined = written === undefined ? undefined : optional ? { id: nextId(ids), kind: "union", types: [cloneTypeNode(written), { id: nextId(ids), kind: "ref", name: "null", args: [], ...span }], ...span } : cloneTypeNode(written);
   let f: FieldDecl = { name, type, init, access, readonly, start: span.start, end: span.end };
@@ -314,19 +330,21 @@ function abstractMember(tables: Mut<Tables>, node: Ref<ClassNode>, d: Mut<Declar
   if (!node.abstract) throw new CompileError("E0701", "abstract members can only appear in an abstract class", m.start, m.end);
   if (m.kind === "field") throw unsupported("abstract fields", at);
   if (m.kind !== "method" && m.kind !== "get" && m.kind !== "set") throw unsupported(m.kind === "index" || m.kind === "staticBlock" ? memberForm(m.kind) : "abstract members", at);
-  if (typeof m.name !== "string") throw symbolKey(m.name);
-  const name = m.name;
+  const name = spelledName(m);
   if (m.modifiers.includes("static")) throw new CompileError("E0701", "'static' can't be used with 'abstract'", m.start, m.end);
   if (m.modifiers.includes("private") || name.startsWith("#")) throw new CompileError("E0701", "an abstract member can't be private, since subclasses must implement it", m.start, m.end);
-  if (m.body !== undefined) throw new CompileError("E0701", `'${name}' can't have a body because it is marked abstract`, m.start, m.end);
+  if (hasBody(m)) throw new CompileError("E0701", `'${name}' can't have a body because it is marked abstract`, m.start, m.end);
   if (m.kind === "method" && m.optional) throw unsupported("optional methods", at);
   if (m.kind === "method" && m.typeParams.length > 0) throw unsupported("generic abstract methods", at);
   if (m.kind !== "set" && m.returnType === undefined) throw new CompileError("E0701", `'${name}' needs its return type written, since it is abstract and has no body to infer it from`, m.start, m.end);
-  const access = modifiers(m.modifiers.filter((x) => x !== "abstract" && x !== "async"), m, name);
-  const table = m.kind === "method" ? "methods" : m.kind === "get" ? "getters" : "setters";
+  const access = modifiers(m.modifiers.filter((x) => x !== "abstract" && x !== "async"), { start: m.start, end: m.end }, name);
+  const table: Table = m.kind === "method" ? "methods" : m.kind === "get" ? "getters" : "setters";
   const kept = m.modifiers.filter((x) => x !== "abstract");
   const made = m.kind === "method" ? method(tables, node, d, { ...m, modifiers: kept, body: [] }) : accessor(tables, node, d, { ...m, modifiers: kept, body: [] });
-  if (made !== undefined) tables.arenas.bodyMut(made).abstract = true;
+  if (made !== undefined) {
+    let signature = tables.arenas.bodyMut(made);
+    signature.abstract = true;
+  }
   d.abstracts.push({ name, table, access, start: m.start, end: m.end });
 }
 
@@ -347,22 +365,25 @@ function accessor(tables: Mut<Tables>, node: Ref<ClassNode>, d: Mut<Declaring>, 
   if (taken) throw new CompileError("E0705", `duplicate ${m.kind === "get" ? "getter" : "setter"} '${name}'`, m.start, m.end);
   if (m.kind === "set" && m.params.length !== 1) throw new CompileError("E0705", "a setter takes exactly one parameter", m.start, m.end);
   if (m.kind === "set" && m.returnType !== undefined) throw new CompileError("E0705", "a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
-  const first = m.params.length > 0 ? m.params[0] : undefined;
+  const first = firstParam(m.params);
   if (isStatic && first !== undefined && first.pattern.kind === "ident" && first.pattern.name === "this") throw new CompileError("E0706", "a static accessor has no 'this'", first.start, first.end);
   const made = tables.arenas.addBody({
     id: nextId(tables.ids),
     name: `${d.name}.${isStatic ? "static " : ""}${m.kind} ${name}`,
-    scope: new Map([...d.scope]),
+    scope: copyScope(d.scope),
     params: m.params.map((p) => cloneParam(p)),
     body: m.body.map((s) => cloneStmt(s)),
     returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : undefined,
-    ...(!isStatic && { self: { type: d.type, constructor: false, mutable: m.kind === "set" } }),
     accessor: true,
     owner: d.type,
     access,
     start: m.start,
     end: m.end,
   }).bodyId;
+  if (!isStatic) {
+    let added = tables.arenas.bodyMut(made);
+    added.self = { type: d.type, constructor: false, mutable: m.kind === "set" };
+  }
   if (isStatic) d.statics.set(key, made);
   else if (m.kind === "get") d.getters.set(key, made);
   else d.setters.set(key, made);
@@ -380,7 +401,7 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
   if (m.body === undefined) throw new CompileError("E0410", `'${name}' has no implementation; follow its overload signatures with a '${name}' method that has a body`, m.start, m.end);
   if (name === "constructor") throw new CompileError("E0407", "'constructor' can't be the name of a method", m.start, m.end);
   if (isStatic ? d.statics.has(name) : d.methods.has(name)) throw new CompileError("E0402", `duplicate method '${name}'`, m.start, m.end);
-  const first = m.params.length > 0 ? m.params[0] : undefined;
+  const first = firstParam(m.params);
   const receiver = first !== undefined && first.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
   if (receiver !== undefined && isStatic) throw new CompileError("E0706", "a static method has no 'this'", receiver.start, receiver.end);
   let params: Param[] = [];
@@ -390,7 +411,7 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
     let rewrites = new Rewrites();
     for (const p of params) if (p.type !== undefined) namesClass(tables.ids, rewrites, node, p);
     let rebuilt: Param[] = [];
-    for (let p = params.shift(); p !== undefined; p = params.shift()) rebuilt.push(rebuiltParam(p, rewrites));
+    while (params.length > 0) rebuilt.push(rebuiltParam(params.shift()!, rewrites));
     params = rebuilt;
   }
   if (isStatic) classParamIn(node, m);
@@ -399,22 +420,25 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
     id: nextId(tables.ids),
     // A static method has its own symbol, since an instance method may share its name.
     name: `${isStatic ? node.name! : d.name}.${isStatic ? "static " : ""}${name}`,
-    scope: isStatic ? new Map() : new Map([...d.scope]),
+    scope: isStatic ? new Map<string, Type>() : copyScope(d.scope),
     params,
     body: m.body.map((s) => cloneStmt(s)),
     returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : undefined,
-    ...(m.throws !== undefined && { throws: cloneTypeNode(m.throws) }),
-    ...(m.modifiers.includes("async") && { async: true }),
-    ...(m.generator && { generator: true }),
     typeParams: m.typeParams.map((p) => cloneTypeParam(p)),
     self: isStatic ? undefined : { type: d.type, constructor: false, mutable: receiver !== undefined ? mutates(receiver) : false, owned: receiver !== undefined ? owns(receiver) : false },
     owner: d.type,
     access,
     start: m.start,
     end: m.end,
-    ...(rustName !== undefined && { foreign: true as const, rust: rustName }),
-    ...(m.signature !== undefined && { signature: true as const }),
   });
+  if (m.throws !== undefined) body.throws = cloneTypeNode(m.throws);
+  if (m.modifiers.includes("async")) body.async = true;
+  if (m.generator) body.generator = true;
+  if (rustName !== undefined) {
+    body.foreign = true;
+    body.rust = rustName;
+  }
+  if (m.signature !== undefined) body.signature = true;
   const made = body.bodyId;
   // The implementation comes right after its signatures.
   if (m.overloadNames !== undefined) {
@@ -441,7 +465,7 @@ function classParamIn(node: Ref<ClassNode>, m: Ref<Extract<ClassMember, { kind: 
 function classParamUse(n: AnyNode, outer: Ref<Set<string>>, hidden: Ref<Set<string>>): { name: string; start: usize; end: usize } | undefined {
   if (n.of === "typeNode" && n.node.kind === "ref" && n.node.args.length === 0 && outer.has(n.node.name) && !hidden.has(n.node.name)) return { name: n.node.name, start: n.node.start, end: n.node.end };
   let inner = new Set<string>([...hidden]);
-  for (const name of typeParamNames(n)) inner.add(name);
+  for (const name of typeParamNames(reborrowNode(n))) inner.add(name);
   let hit: { name: string; start: usize; end: usize } | undefined = undefined;
   forEachChild(n, (c) => {
     if (hit === undefined) hit = classParamUse(c, outer, inner);
@@ -490,8 +514,8 @@ export function separatePrivateNames(program: Mut<Stmt[]>): void {
   let declared = new Map<string, string[]>();
   for (const s of program) {
     if (s.kind !== "class" || s.name === undefined) continue;
-    const named = s.extends !== undefined && s.extends.kind === "instantiation" ? s.extends.expr : s.extends;
-    if (named !== undefined && named.kind === "ident") bases.set(s.name, named.name);
+    const base = s.extends !== undefined ? extendedName(s.extends) : undefined;
+    if (base !== undefined) bases.set(s.name, base);
     else bases.delete(s.name);
     declared.set(s.name, privateNames(s.members));
   }
@@ -500,19 +524,39 @@ export function separatePrivateNames(program: Mut<Stmt[]>): void {
     if (s.kind !== "class" || s.name === undefined) continue;
     let inherited = new Set<string>();
     let seen = new Set<string>();
-    for (let b = bases.get(s.name); b !== undefined && declared.has(b) && !seen.has(b); b = bases.get(b)) {
-      seen.add(b);
-      for (const n of declared.get(b)!) inherited.add(n);
+    let b = bases.get(s.name);
+    while (b !== undefined) {
+      const at = b;
+      if (!declared.has(at) || seen.has(at)) break;
+      seen.add(at);
+      const names = declared.get(at)!;
+      for (const n of names) inherited.add(n);
+      b = bases.get(at);
     }
-    for (const name of declared.get(s.name)!) if (inherited.has(name)) renamePrivate(rewrites, s.members, name, `${name}@${s.name}`);
+    const own = declared.get(s.name)!;
+    for (const name of own) if (inherited.has(name)) renamePrivate(rewrites, s.members, name, `${name}@${s.name}`);
   }
   rebuiltStmts(program, rewrites);
+}
+
+// The class an `extends` names, with or without type arguments.
+function extendedName(e: Ref<Expr>): string | undefined {
+  if (e.kind === "ident") return e.name;
+  if (e.kind === "instantiation" && e.expr.kind === "ident") return e.expr.name;
+  return undefined;
+}
+
+function copyScope(scope: Ref<Map<string, Type>>): Map<string, Type> {
+  let out = new Map<string, Type>();
+  for (const [n, t] of scope) out.set(n, t);
+  return out;
 }
 
 function privateNames(members: Ref<ClassMember[]>): string[] {
   let names: string[] = [];
   for (const m of members) {
-    if ((m.kind === "field" || m.kind === "method" || m.kind === "get" || m.kind === "set") && typeof m.name === "string" && m.name.startsWith("#")) names.push(m.name);
+    const name = plainName(m);
+    if (name !== undefined && name.startsWith("#")) names.push(name);
   }
   return names;
 }
@@ -523,7 +567,9 @@ function renamePrivate(rewrites: Mut<Rewrites>, members: Ref<ClassMember[]>, fro
     walk({ of: "classMember", node: m }, (n) => {
       if (n.of === "classMember") {
         const c = n.node;
-        if ((c.kind === "field" || c.kind === "method" || c.kind === "get" || c.kind === "set") && c.name === from) rewrites.replaceClassMember(c, { ...c, name: to });
+        if (c.kind === "field" && c.name === from) rewrites.replaceClassMember(c, { ...c, name: to });
+        else if (c.kind === "method" && c.name === from) rewrites.replaceClassMember(c, { ...c, name: to });
+        else if ((c.kind === "get" || c.kind === "set") && c.name === from) rewrites.replaceClassMember(c, { ...c, name: to });
       } else if (n.of === "expr") {
         const e = n.node;
         if (e.kind === "member" && e.name === from) rewrites.replace(e, { ...e, name: to });
@@ -545,23 +591,30 @@ export type GlobalType = (name: string) => Type;
 
 /** @throws {CompileError} */
 export function extend(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, global: GlobalType): void {
-  tables.arenas.classMut(classId).base = baseId;
-  const c = tables.arenas.classOf(classId);
-  const base = tables.arenas.classOf(baseId);
-  let record = tables.typing.rec(c.type);
-  record.base = base.type;
-  tables.typing.setRec(c.type, record);
+  let linked = tables.arenas.classMut(classId);
+  linked.base = baseId;
+  const classType = tables.arenas.classOf(classId).type;
+  let record = tables.typing.rec(classType);
+  record.base = tables.arenas.classOf(baseId).type;
+  tables.typing.setRec(classType, record);
   // A name that isn't one of the program's types hides nothing.
   let globals = new Map<string, Type>();
-  for (const n of c.scope.keys()) {
+  let names: string[] = [];
+  for (const n of tables.arenas.classOf(classId).scope.keys()) names.push(n);
+  for (const n of names) {
+    let t: Type;
     try {
-      globals.set(n, global(n));
+      t = global(n);
     } catch {
       continue;
     }
+    globals.set(n, t);
   }
-  tables.arenas.classMut(classId).globals = globals;
-  for (let b: ClassId | undefined = baseId; b !== undefined; b = tables.arenas.classOf(b).base) {
+  let named = tables.arenas.classMut(classId);
+  named.globals = globals;
+  const c = tables.arenas.classOf(classId);
+  const base = tables.arenas.classOf(baseId);
+  for (const b of chainFrom(tables.arenas, baseId)) {
     const of = tables.arenas.classOf(b);
     for (const f of c.fields) {
       if (of.fields.some((g) => g.name === f.name)) {
@@ -575,15 +628,24 @@ export function extend(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, g
     // Its parameters' defaults are bound first, since `super(...)` may read them.
     const defaults = superAt(tables, ctorId, preludeLength);
     let ctor = tables.arenas.bodyMut(ctorId);
-    let tail = ctor.body.splice(preludeLength);
+    let tail = ctor.body.splice(preludeLength as i64);
     let prelude = ctor.body.splice(0);
-    let body = tail.splice(0, defaults);
+    let body = tail.splice(0, defaults as i64);
     body.push(tail.shift()!);
-    for (const st of prelude) body.push(st);
-    for (const st of tail) body.push(st);
+    append(body, prelude);
+    append(body, tail);
     ctor.body = body;
     return;
   }
+  inheritConstructor(tables, classId, baseId, global);
+}
+
+// A derived class without a constructor of its own passes its arguments on to the base's.
+/** @throws {CompileError} */
+function inheritConstructor(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, global: GlobalType): void {
+  const c = tables.arenas.classOf(classId);
+  const base = tables.arenas.classOf(baseId);
+  const ctorId = c.constructor;
   // The base's parameters are typed in its scope, where a name may mean something other than it
   // does here: one of its own type parameters, or a type this class's type parameter hides. Each
   // such name is renamed apart into this constructor's own scope, standing for what it means there.
@@ -616,7 +678,10 @@ export function extend(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, g
     if (declared !== undefined) defaulted.push([cloneParam(copy), declared]);
     params.push(copy);
   }
-  for (const [p, d] of defaulted) tables.defaulted.set(p, d);
+  while (defaulted.length > 0) {
+    const entry = defaulted.shift()!;
+    tables.defaulted.set(cloneParam(entry[0]), { name: entry[1].name, empty: entry[1].empty });
+  }
   // A rest parameter is passed on spread, to be packed into the base's again.
   let args: Expr[] = [];
   for (const p of params) {
@@ -640,11 +705,14 @@ function superAt(tables: Ref<Tables>, ctorId: BodyId, preludeLength: usize): usi
   const ctor = tables.arenas.bodyOf(ctorId);
   let at = preludeLength;
   while (at < ctor.body.length && tables.prologues.has(ctor.body[at]!)) at++;
-  const first = ctor.body[at];
-  if (first === undefined || first.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
+  if (at >= ctor.body.length || !callsSuper(ctor.body[at]!)) {
     throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", ctor.start, ctor.end);
   }
   return at - preludeLength;
+}
+
+function callsSuper(st: Ref<Stmt>): boolean {
+  return st.kind === "expr" && st.expr.kind === "call" && st.expr.callee.kind === "super";
 }
 
 // Links a class to the Map or Set it extends, held in the field `EMBEDDED`. Its constructor's
@@ -653,11 +721,10 @@ function superAt(tables: Ref<Tables>, ctorId: BodyId, preludeLength: usize): usi
 /** @throws {CompileError} */
 export function embed(tables: Mut<Tables>, classId: ClassId, kind: "Map" | "Set"): void {
   const c = tables.arenas.classOf(classId);
-  const named = c.node.extends;
-  assert(named !== undefined, "internal error: embedding a class that extends nothing");
-  const at = { start: named.start, end: named.end };
+  assert(c.node.extends !== undefined, "internal error: embedding a class that extends nothing");
+  const at = { start: c.node.extends.start, end: c.node.extends.end };
   let typeArgs: TypeNode[] = [];
-  if (named.kind === "instantiation") for (const t of named.typeArgs) typeArgs.push(cloneTypeNode(t));
+  if (c.node.extends.kind === "instantiation") for (const t of c.node.extends.typeArgs) typeArgs.push(cloneTypeNode(t));
   const ctorId = c.constructor;
   const preludeLength = c.prelude.length;
   const explicit = c.node.members.some((m) => m.kind === "constructor");
@@ -674,46 +741,64 @@ export function embed(tables: Mut<Tables>, classId: ClassId, kind: "Map" | "Set"
   if (!explicit) {
     let body: Stmt[] = [made(tables.ids, kind, typeArgs, [], at, at)];
     let ctor = tables.arenas.bodyMut(ctorId);
-    for (const st of ctor.body.splice(0, preludeLength)) body.push(st);
+    append(body, ctor.body.splice(0, preludeLength as i64));
     ctor.body = body;
     return;
   }
   let ctor = tables.arenas.bodyMut(ctorId);
-  let tail = ctor.body.splice(preludeLength);
+  let tail = ctor.body.splice(preludeLength as i64);
   let prelude = ctor.body.splice(0);
-  let body = tail.splice(0, defaults);
+  let body = tail.splice(0, defaults as i64);
   let first = tail.shift()!;
   const s = { start: first.start, end: first.end };
   let args: Expr[] = first.kind === "expr" && first.expr.kind === "call" ? first.expr.args.splice(0) : [];
   if (!overridden || args.length === 0) {
     body.push(made(tables.ids, kind, typeArgs, args, at, s));
-    for (const st of prelude) body.push(st);
-    for (const st of tail) body.push(st);
-    tables.arenas.bodyMut(ctorId).body = body;
+    append(body, prelude);
+    append(body, tail);
+    let done = tables.arenas.bodyMut(ctorId);
+    done.body = body;
     return;
   }
-  const given = args.shift()!;
-  const ids = tables.ids;
-  let names: string[] = kind === "Set" ? ["member"] : ["key", "value"];
-  let elements: Pattern[] = [];
-  for (const name of names) elements.push({ id: nextId(ids), kind: "ident", name, ...s });
-  const target: Pattern = kind === "Set" ? { id: nextId(ids), kind: "ident", name: "member", ...s } : { id: nextId(ids), kind: "array", elements, rest: undefined, ...s };
-  const left: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target, type: undefined, init: undefined, ...s }], ...s };
-  let callArgs: Expr[] = [];
-  for (const name of names) callArgs.push({ id: nextId(ids), kind: "ident", name, ...s });
-  const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "this", ...s }, name: adder, optional: false, ...s }, typeArgs: [], args: callArgs, optional: false, ...s };
-  const loop: Stmt = { id: nextId(ids), kind: "forOf", await: false, left, right: given, body: [{ id: nextId(ids), kind: "expr", expr: call, ...s }], ...s };
-  body.push(made(ids, kind, typeArgs, [], at, s));
-  for (const st of prelude) body.push(st);
+  const loop = entriesLoop(tables.ids, kind, args.shift()!, s);
+  body.push(made(tables.ids, kind, typeArgs, [], at, s));
+  append(body, prelude);
   body.push(loop);
-  for (const st of tail) body.push(st);
-  tables.arenas.bodyMut(ctorId).body = body;
+  append(body, tail);
+  let done = tables.arenas.bodyMut(ctorId);
+  done.body = body;
+}
+
+// `for (const [key, value] of given) this.set(key, value)`, or `this.add(member)` for a Set.
+function entriesLoop(ids: Mut<Ids>, kind: "Map" | "Set", given: Expr, s: Ref<Span>): Stmt {
+  const at = { start: s.start, end: s.end };
+  const adder = kind === "Set" ? "add" : "set";
+  let names: string[] = kind === "Set" ? ["member"] : ["key", "value"];
+  const target = entriesTarget(ids, kind, at);
+  const left: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target, type: undefined, init: undefined, ...at }], ...at };
+  let callArgs: Expr[] = [];
+  for (const name of names) callArgs.push({ id: nextId(ids), kind: "ident", name, ...at });
+  const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "this", ...at }, name: adder, optional: false, ...at }, typeArgs: [], args: callArgs, optional: false, ...at };
+  return { id: nextId(ids), kind: "forOf", await: false, left, right: given, body: [{ id: nextId(ids), kind: "expr", expr: call, ...at }], ...at };
+}
+
+// What each entry is bound to: `member`, or `[key, value]`.
+function entriesTarget(ids: Mut<Ids>, kind: "Map" | "Set", at: Ref<Span>): Pattern {
+  if (kind === "Set") return { id: nextId(ids), kind: "ident", name: "member", start: at.start, end: at.end };
+  const id = nextId(ids);
+  const key = nextId(ids);
+  const value = nextId(ids);
+  return { id, kind: "array", elements: [{ id: key, kind: "ident", name: "key", start: at.start, end: at.end }, { id: value, kind: "ident", name: "value", start: at.start, end: at.end }], rest: undefined, start: at.start, end: at.end };
 }
 
 // `this[EMBEDDED] = new Map<K, V>(args)`, at the span `s`.
 function made(ids: Mut<Ids>, kind: "Map" | "Set", typeArgs: Ref<TypeNode[]>, args: Expr[], at: Ref<Span>, s: Ref<Span>): Stmt {
   const value: Expr = { id: nextId(ids), kind: "new", callee: { id: nextId(ids), kind: "ident", name: kind, start: at.start, end: at.end }, typeArgs: cloneTypeNodes(typeArgs), args, start: s.start, end: s.end };
   return assignField(ids, EMBEDDED, value, { start: s.start, end: s.end });
+}
+
+function append(into: Mut<Stmt[]>, from: Stmt[]): void {
+  while (from.length > 0) into.push(from.shift()!);
 }
 
 function cloneTypeNodes(ts: Ref<TypeNode[]>): TypeNode[] {
@@ -779,12 +864,17 @@ const apartName = (name: string, base: string) => `${name}${APART}${base}`;
 export const isApart = (name: string) => name.includes(APART);
 
 // A member of a class or of the bases it embeds, nearest first.
-export function inherited(arenas: Ref<Arenas>, c: Ref<ClassInfo>, table: "methods" | "statics" | "getters" | "setters", name: string): Ref<Body> | undefined {
+export function inherited<A extends Lifetime>(arenas: Ref<Arenas, A>, c: Ref<ClassInfo>, table: "methods" | "statics" | "getters" | "setters", name: string): Ref<Body, A> | undefined {
+  const found = inheritedId(arenas, c, table, name);
+  return found !== undefined ? arenas.bodyOf(found) : undefined;
+}
+
+export function inheritedId(arenas: Ref<Arenas>, c: Ref<ClassInfo>, table: "methods" | "statics" | "getters" | "setters", name: string): BodyId | undefined {
   let at: ClassId | undefined = c.classId;
   while (at !== undefined) {
     const b: Ref<ClassInfo> = arenas.classOf(at);
     const found = table === "methods" ? b.methods.get(name) : table === "statics" ? b.statics.get(name) : table === "getters" ? b.getters.get(name) : b.setters.get(name);
-    if (found !== undefined) return arenas.bodyOf(found);
+    if (found !== undefined) return found;
     at = b.base;
   }
   return undefined;
@@ -794,31 +884,57 @@ export function inherited(arenas: Ref<Arenas>, c: Ref<ClassInfo>, table: "method
 // TypeScript would reach an override. Overriding such a member is an error rather than a
 // silent change in meaning; overriding one the base never reaches through `this` is fine.
 /** @throws {CompileError} */
-export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
+export function checkOverrides(arenas: Ref<Arenas>, typing: Ref<Typing>, c: Ref<ClassInfo>): void {
   // A copied template is this class's only because a base declared it; the user wrote none of it.
-  const own = [...c.methods, ...c.getters, ...c.setters].map(([name, m]): [string, Body] => [name, arenas.bodyOf(m)]).filter(([, m]) => m.copyOf === undefined);
-  const templates: [string, Body][] = [];
-  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) for (const table of TABLES) for (const [name, f] of b[table]) if (arenas.bodyOf(f).template) templates.push([name, arenas.bodyOf(f)]);
-  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
-    const base = typing.rec(b.type).name;
-    for (const [name, m] of own) {
-      if (b.fields.some((f) => f.name === name)) throw new CompileError("E0704", `'${name}' is already a field of '${base}'`, m.start, m.end);
-      if (!b.methods.has(name) && !b.getters.has(name) && !b.setters.has(name)) continue;
+  let own: [string, BodyId][] = [];
+  for (const table of TABLES) for (const [name, m] of tableOf(c, table)) if (arenas.bodyOf(m).copyOf === undefined) own.push([name, m]);
+  let templates: [string, BodyId][] = [];
+  for (const b of chainFrom(arenas, c.base)) {
+    const info = arenas.classOf(b);
+    for (const table of TABLES) for (const [name, f] of tableOf(info, table)) if (arenas.bodyOf(f).template === true) templates.push([name, f]);
+  }
+  for (const b of chainFrom(arenas, c.base)) {
+    const info = arenas.classOf(b);
+    const base = typing.rec(info.type).name;
+    for (const entry of own) {
+      const name = entry[0];
+      const m = arenas.bodyOf(entry[1]);
+      if (info.fields.some((f) => f.name === name)) throw new CompileError("E0704", `'${name}' is already a field of '${base}'`, m.start, m.end);
+      if (!info.methods.has(name) && !info.getters.has(name) && !info.setters.has(name)) continue;
       // A template reaches the override, through the copy this class gets. A base's own code
       // calling one reaches its own copy, and through it the base's member.
-      const through = new Set([name]);
+      let through = new Set<string>([name]);
       for (let grew = true; grew;) {
         grew = false;
-        for (const [t, f] of templates) {
-          if (through.has(t) || ![...through].some((n) => usesOnThis(f.body, n))) continue;
-          through.add(t);
+        for (const t of templates) {
+          if (through.has(t[0])) continue;
+          const f = arenas.bodyOf(t[1]);
+          let reaches = false;
+          for (const n of through) if (usesOnThis(f.body, n, false)) reaches = true;
+          if (!reaches) continue;
+          through.add(t[0]);
           grew = true;
         }
       }
       // A template is known by its member's span, which its body keeps.
-      const bodies = new Set([...b.methods.values(), ...b.getters.values(), ...b.setters.values()].map((f) => arenas.bodyOf(f)).filter((f) => f.template).map((f) => `${f.start}:${f.end}`));
-      const members = b.node.members.filter((m) => !("body" in m && m.body && bodies.has(`${m.start}:${m.end}`)));
-      const via = [...through].find((n) => members.some((m) => usesOnThisIn({ of: "classMember", node: m }, n, false)));
+      let bodies = new Set<string>();
+      for (const table of TABLES) {
+        for (const f of tableOf(info, table).values()) {
+          const fb = arenas.bodyOf(f);
+          if (fb.template === true) bodies.add(`${fb.start}:${fb.end}`);
+        }
+      }
+      let via: string | undefined = undefined;
+      for (const n of through) {
+        if (via !== undefined) break;
+        for (const member of info.node.members) {
+          if (hasBody(member) && bodies.has(`${member.start}:${member.end}`)) continue;
+          if (usesOnThisIn({ of: "classMember", node: member }, n, false)) {
+            via = n;
+            break;
+          }
+        }
+      }
       if (via === name) {
         throw new CompileError(
           "E0704", `overriding '${name}' is an error here: '${base}' reaches it through 'this', and with 'extends' as embedding that would still run '${base}.${name}'; extract an interface instead`,
@@ -835,20 +951,21 @@ export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
 
 // TypeScript's rule: a member written `override` must replace one of its bases'.
 /** @throws {CompileError} */
-export function checkOverrideModifiers(arenas: Arenas, typing: Typing, c: ClassInfo) {
+export function checkOverrideModifiers(arenas: Ref<Arenas>, typing: Ref<Typing>, c: Ref<ClassInfo>): void {
   const name = typing.rec(c.type).name;
   for (const o of c.overrides) {
-    if (c.baseName === undefined && !c.embedded) throw new CompileError("E0704", `'${o.name}' can't be marked 'override': class '${name}' doesn't extend another class`, o.start, o.end);
+    if (c.baseName === undefined && c.embedded === undefined) throw new CompileError("E0704", `'${o.name}' can't be marked 'override': class '${name}' doesn't extend another class`, o.start, o.end);
     if (!hasMember(arenas, c, o)) {
-      throw new CompileError("E0704", `'${o.name}' can't be marked 'override': '${c.embedded ?? c.baseName}' has no ${o.static ? "static " : ""}member '${o.name}' for it to replace`, o.start, o.end);
+      throw new CompileError("E0704", `'${o.name}' can't be marked 'override': '${c.embedded !== undefined ? c.embedded : (c.baseName ?? "")}' has no ${o.static ? "static " : ""}member '${o.name}' for it to replace`, o.start, o.end);
     }
   }
 }
 
-function hasMember(arenas: Arenas, c: ClassInfo, o: Overridden): boolean {
-  for (let b = c.embedded ? c : arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
-    if (b.embedded && !o.static && (o.name === "size" || (b.embedded === "Set" ? SET_METHODS : MAP_METHODS).has(o.name))) return true;
-    if (b === c) continue;
+function hasMember(arenas: Ref<Arenas>, c: Ref<ClassInfo>, o: Ref<Overridden>): boolean {
+  for (const at of chainFrom(arenas, c.embedded !== undefined ? c.classId : c.base)) {
+    const b = arenas.classOf(at);
+    if (b.embedded !== undefined && !o.static && (o.name === "size" || (b.embedded === "Set" ? SET_METHODS.has(o.name) : MAP_METHODS.has(o.name)))) return true;
+    if (at === c.classId) continue;
     const found = o.static
       ? b.statics.has(o.name) || b.statics.has(`get ${o.name}`) || b.statics.has(`set ${o.name}`) || b.staticFields.has(o.name)
       : b.methods.has(o.name) || b.getters.has(o.name) || b.setters.has(o.name) || b.fields.some((f) => f.name === o.name);
@@ -858,36 +975,47 @@ function hasMember(arenas: Arenas, c: ClassInfo, o: Overridden): boolean {
 }
 
 const TABLES = ["methods", "getters", "setters"] as const;
-const MEMBER_KINDS = { methods: "method", getters: "getter", setters: "setter" };
+function memberKind(table: Table): string {
+  return table === "methods" ? "method" : table === "getters" ? "getter" : "setter";
+}
 
 // An abstract base's members that reach one of its abstract members through `this`, directly or
 // through another such member, become templates. A concrete class must implement every abstract
 // member, and gets its own copy of each template, which sees `this` as the concrete class, so
 // `this.area()` there runs the concrete class's `area`.
 /** @throws {CompileError} */
-export function implementAbstracts(tables: Tables, c: ClassInfo) {
-  const { arenas, typing } = tables;
-  const bases: ClassInfo[] = [];
-  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) bases.push(b);
-  for (const b of [c, ...bases].filter((b) => b.node.abstract).reverse()) markTemplates(arenas, tables.typing, b);
-  if (c.node.abstract) return;
-  const abstracts = bases.flatMap((b) => b.abstracts.map((a) => ({ ...a, owner: b })));
-  const missing = abstracts.filter((a) => inherited(arenas, c, a.table, a.name)!.abstract && !(a.table !== "methods" && [c, ...bases].some((b) => b.fields.some((f) => f.name === a.name))));
-  if (missing.length > 0) {
-    const named = [...new Set(missing.map((a) => `${MEMBER_KINDS[a.table]} '${a.name}' of '${typing.rec(a.owner.type).name}'`))];
-    throw new CompileError("E0701", `class '${typing.rec(c.type).name}' must implement the abstract ${named.join(", ")}`, c.node.start, c.node.end);
-  }
-  for (const a of abstracts) {
-    const f = inherited(arenas, c, a.table, a.name)!;
-    if (!f.abstract && (f.access === "private" || (f.access === "protected" && a.access === "public"))) {
-      throw new CompileError("E0701", `'${a.name}' implements a ${a.access} abstract member of '${typing.rec(a.owner.type).name}', so it must be ${a.access === "public" ? "public" : "public or protected"}`, f.start, f.end);
+export function implementAbstracts(tables: Mut<Tables>, classId: ClassId): void {
+  const chain = chainFrom(tables.arenas, classId);
+  for (let i = chain.length; i > 0; i--) if (tables.arenas.classOf(chain[i - 1]!).node.abstract) markTemplates(tables, chain[i - 1]!);
+  if (tables.arenas.classOf(classId).node.abstract) return;
+  checkAbstracts(tables.arenas, tables.typing, classId, chain);
+  copyInherited(tables, classId, chain, true);
+}
+
+// A concrete class implements every abstract member of its bases, as visibly as declared.
+/** @throws {CompileError} */
+function checkAbstracts(arenas: Ref<Arenas>, typing: Ref<Typing>, classId: ClassId, chain: Ref<ClassId[]>): void {
+  const c = arenas.classOf(classId);
+  let missing: string[] = [];
+  for (let i: usize = 1; i < chain.length; i++) {
+    const b = arenas.classOf(chain[i]!);
+    for (const a of b.abstracts) {
+      const found = inherited(arenas, c, a.table, a.name)!;
+      if (found.abstract !== true) continue;
+      let field = false;
+      if (a.table !== "methods") for (const at of chain) if (arenas.classOf(at).fields.some((f) => f.name === a.name)) field = true;
+      if (field) continue;
+      const named = `${memberKind(a.table)} '${a.name}' of '${typing.rec(b.type).name}'`;
+      if (!missing.includes(named)) missing.push(named);
     }
   }
-  for (const b of bases.filter((b) => b.node.abstract)) {
-    for (const table of TABLES) {
-      for (const [name, f] of b[table]) {
-        const nearest = inherited(arenas, c, table, name)!;
-        if (arenas.bodyOf(f).template && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c.classId, f));
+  if (missing.length > 0) throw new CompileError("E0701", `class '${typing.rec(c.type).name}' must implement the abstract ${missing.join(", ")}`, c.node.start, c.node.end);
+  for (let i: usize = 1; i < chain.length; i++) {
+    const b = arenas.classOf(chain[i]!);
+    for (const a of b.abstracts) {
+      const f = inherited(arenas, c, a.table, a.name)!;
+      if (f.abstract !== true && (f.access === "private" || (f.access === "protected" && a.access === "public"))) {
+        throw new CompileError("E0701", `'${a.name}' implements a ${a.access} abstract member of '${typing.rec(b.type).name}', so it must be ${a.access === "public" ? "public" : "public or protected"}`, f.start, f.end);
       }
     }
   }
@@ -895,27 +1023,45 @@ export function implementAbstracts(tables: Tables, c: ClassInfo) {
 
 // A member whose return type names `this` gives the receiver's own class, so a subclass that
 // doesn't override it gets its own copy, checked with `this` as the subclass.
-export function copySelfTyped(tables: Tables, c: ClassInfo) {
-  const { arenas } = tables;
-  if (c.node.abstract) return;
-  for (let b = arenas.classOf(c.base); b; b = arenas.classOf(b.base)) {
+export function copySelfTyped(tables: Mut<Tables>, classId: ClassId): void {
+  if (tables.arenas.classOf(classId).node.abstract) return;
+  const chain = chainFrom(tables.arenas, classId);
+  copyInherited(tables, classId, chain, false);
+}
+
+// Gives a class its own copy of each member its bases in `chain` declare that it doesn't
+// override: their templates, or their members typed with `this`.
+function copyInherited(tables: Mut<Tables>, classId: ClassId, chain: Ref<ClassId[]>, templates: boolean): void {
+  let wanted: [Table, string, BodyId][] = [];
+  for (let i: usize = 1; i < chain.length; i++) {
+    const b = tables.arenas.classOf(chain[i]!);
+    if (templates && !b.node.abstract) continue;
     for (const table of TABLES) {
-      for (const [name, f] of b[table]) {
-        const nearest = inherited(arenas, c, table, name)!;
-        if (selfTyped(arenas.bodyOf(f)) && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c.classId, f));
+      for (const [name, f] of tableOf(b, table)) {
+        const nearest = inherited(tables.arenas, tables.arenas.classOf(classId), table, name)!;
+        const body = tables.arenas.bodyOf(f);
+        const copied = templates ? body.template === true : selfTyped(body);
+        if (copied && (nearest.copyOf ?? nearest.bodyId) === f) wanted.push([table, name, f]);
       }
     }
   }
+  for (const w of wanted) {
+    const nearest = inherited(tables.arenas, tables.arenas.classOf(classId), w[0], w[1])!;
+    if ((nearest.copyOf ?? nearest.bodyId) !== w[2]) continue;
+    const copy = copyFor(tables, classId, w[2]);
+    setIn(tables.arenas.classMut(classId), w[0], w[1], copy);
+  }
 }
 
-export function selfTyped(f: Body): boolean {
+export function selfTyped(f: Ref<Body>): boolean {
+  if (f.self === undefined || f.self.constructor || f.returnType === undefined) return false;
   let found = false;
-  const ret = f.self && !f.self.constructor ? f.returnType : undefined;
-  if (ret) {
-    walk({ of: "typeNode", node: ret }, ({ of, node }) => {
-      if (of === "typeNode" && node.kind === "ref" && node.name === "this" && node.args.length === 0) found = true;
-    });
-  }
+  walk({ of: "typeNode", node: f.returnType }, (n) => {
+    if (n.of === "typeNode") {
+      const t = n.node;
+      if (t.kind === "ref" && t.name === "this" && t.args.length === 0) found = true;
+    }
+  });
   return found;
 }
 
@@ -946,8 +1092,11 @@ export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): 
     const there = f.scope !== undefined ? f.scope.get(n) : undefined;
     scope.set(to, there !== undefined ? there : c.globals!.get(n)!);
   }
-  let defaults: ({ name: string; empty: boolean } | undefined)[] = [];
-  for (const p of f.params) defaults.push(tables.defaulted.get(p));
+  let defaults: [usize, { name: string; empty: boolean }][] = [];
+  for (let i: usize = 0; i < f.params.length; i++) {
+    const declared = tables.defaulted.get(f.params[i]!);
+    if (declared !== undefined) defaults.push([i, declared]);
+  }
   let prologue: boolean[] = [];
   for (const st of f.body) prologue.push(tables.prologues.has(st));
   let copy = cloneBody(f);
@@ -965,14 +1114,12 @@ export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): 
     for (const p of f.params) params.push(apartParam(tables.ids, p, names));
     copy.params = params;
     if (f.returnType !== undefined) copy.returnType = apartTypeNode(tables.ids, f.returnType, names);
-    for (let i: usize = 0; i < copy.params.length; i++) {
-      const declared = defaults[i];
-      if (declared !== undefined) tables.defaulted.set(copy.params[i]!, declared);
-    }
-    for (let i: usize = 0; i < copy.body.length; i++) if (prologue[i] === true) tables.prologues.add(copy.body[i]!);
+    for (const d of defaults) tables.defaulted.set(cloneParam(copy.params[d[0]]!), { name: d[1].name, empty: d[1].empty });
+    for (let i: usize = 0; i < copy.body.length; i++) if (prologue[i] === true) tables.prologues.add(cloneStmt(copy.body[i]!));
   }
   const added = tables.arenas.addBody(copy).bodyId;
-  tables.arenas.classMut(classId).copies.set(bodyId, added);
+  let info = tables.arenas.classMut(classId);
+  info.copies.set(bodyId, added);
   return added;
 }
 
@@ -1013,13 +1160,12 @@ function cloneBody(f: Ref<Body>): Body {
   if (f.copyOf !== undefined) out.copyOf = f.copyOf;
   if (f.declared !== undefined) out.declared = f.declared;
   if (f.closure !== undefined) {
-    const k = f.closure;
-    let closure: NonNullable<Body["closure"]> = { parent: k.parent, move: k.move };
-    if (k.value !== undefined) closure.value = cloneExpr(k.value);
-    if (k.expected !== undefined) closure.expected = k.expected;
-    if (k.unsafe !== undefined) closure.unsafe = k.unsafe;
-    if (k.self !== undefined) closure.self = k.self;
-    if (k.made !== undefined) closure.made = true;
+    let closure: NonNullable<Body["closure"]> = { parent: f.closure.parent, move: f.closure.move };
+    if (f.closure.value !== undefined) closure.value = cloneExpr(f.closure.value);
+    if (f.closure.expected !== undefined) closure.expected = f.closure.expected;
+    if (f.closure.unsafe !== undefined) closure.unsafe = f.closure.unsafe;
+    if (f.closure.self !== undefined) closure.self = f.closure.self;
+    if (f.closure.made !== undefined) closure.made = true;
     out.closure = closure;
   }
   return out;
@@ -1027,72 +1173,85 @@ function cloneBody(f: Ref<Body>): Body {
 
 // Marks an abstract class's templates, once its bases' are marked.
 /** @throws {CompileError} */
-function markTemplates(arenas: Arenas, typing: Typing, c: ClassInfo) {
-  const names = new Set<string>();
-  for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) {
-    b.abstracts.forEach((a) => names.add(a.name));
-    for (const table of TABLES) for (const [name, f] of b[table]) if (arenas.bodyOf(f).template) names.add(name);
+function markTemplates(tables: Mut<Tables>, classId: ClassId): void {
+  let names = new Set<string>();
+  for (const at of chainFrom(tables.arenas, classId)) {
+    const b = tables.arenas.classOf(at);
+    for (const a of b.abstracts) names.add(a.name);
+    for (const table of TABLES) for (const [name, f] of tableOf(b, table)) if (tables.arenas.bodyOf(f).template === true) names.add(name);
   }
   for (let grew = true; grew;) {
     grew = false;
     for (const table of TABLES) {
-      for (const [name, id] of c[table]) {
-        const f = arenas.bodyOf(id);
+      let marked: [string, BodyId][] = [];
+      for (const [name, id] of tableOf(tables.arenas.classOf(classId), table)) {
+        const f = tables.arenas.bodyOf(id);
         // `this` handed on as a value has the abstract class's type, which only a template's own
         // check may ever give a value: every instance made for an abstract class comes from
         // checking a template or a signature, and none is compiled.
-        if (f.template || !([...names].some((n) => usesOnThis(f.body, n, true)) || thisEscapes(f.body))) continue;
+        if (f.template === true) continue;
+        let reaches = false;
+        for (const n of names) if (usesOnThis(f.body, n, true)) reaches = true;
+        if (!reaches && !thisEscapes(f.body)) continue;
+        marked.push([name, id]);
+      }
+      for (const m of marked) {
+        let f = tables.arenas.bodyMut(m[1]);
         f.template = true;
-        names.add(name);
+        names.add(m[0]);
         grew = true;
       }
     }
   }
   // While the base is built, the subclass that implements its abstract members isn't yet. A
   // constructor has no copies, so `this` there would be the abstract class's own value.
-  const constructor = arenas.bodyOf(c.constructor);
-  const early = [...names].find((n) => usesOnThis(constructor.body, n, true));
+  const c = tables.arenas.classOf(classId);
+  const constructor = tables.arenas.bodyOf(c.constructor);
+  let early: string | undefined = undefined;
+  for (const n of names) if (early === undefined && usesOnThis(constructor.body, n, true)) early = n;
   if (early !== undefined) {
-    throw new CompileError("E0701", `'${typing.rec(c.type).name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, constructor.start, constructor.end);
+    throw new CompileError("E0701", `'${tables.typing.rec(c.type).name}' can't reach its abstract member '${early}' while it is being constructed, since the subclass that implements it isn't built yet`, constructor.start, constructor.end);
   }
   if (thisEscapes(constructor.body)) {
-    throw new CompileError("E0701", `'${typing.rec(c.type).name}' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet`, constructor.start, constructor.end);
+    throw new CompileError("E0701", `'${tables.typing.rec(c.type).name}' is abstract, so its constructor can't hand 'this' on as a value: the subclass being built isn't finished yet`, constructor.start, constructor.end);
   }
 }
 
 // Whether a class embeds an abstract class declaring `name` abstract, or is one.
-export function abstractIn(arenas: Arenas, c: ClassInfo, name: string): boolean {
-  for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) if (b.abstracts.some((a) => a.name === name)) return true;
+export function abstractIn(arenas: Ref<Arenas>, c: Ref<ClassInfo>, name: string): boolean {
+  for (const at of chainFrom(arenas, c.classId)) if (arenas.classOf(at).abstracts.some((a) => a.name === name)) return true;
   return false;
 }
 
 // Whether `this` appears as a value rather than only as the object of `this.member`.
-function thisEscapes(body: Stmt[] | undefined): boolean {
-  if (!body) return false;
+function thisEscapes(body: Ref<Stmt[]>): boolean {
   let escapes = false;
-  walkWhile({ of: "stmts", node: body }, ({ of, node }) => {
-    if (escapes || (of === "expr" && node.kind === "member" && node.object.kind === "this")) return false;
-    if (of === "expr" && node.kind === "this") escapes = true;
+  walkWhile({ of: "stmts", node: body }, (n) => {
+    if (escapes) return false;
+    if (n.of !== "expr") return true;
+    const e = n.node;
+    if (e.kind === "member" && e.object.kind === "this") return false;
+    if (e.kind === "this") escapes = true;
     return true;
   });
   return escapes;
 }
 
 // Whether any node under `stmts` is `this.name`, or with `viaSuper`, `super.name` too.
-function usesOnThis(stmts: Stmt[] | undefined, name: string, viaSuper = false): boolean {
-  if (!stmts) return false;
+function usesOnThis(stmts: Ref<Stmt[]>, name: string, viaSuper: boolean): boolean {
   return usesOnThisIn({ of: "stmts", node: stmts }, name, viaSuper);
 }
 
 function usesOnThisIn(root: AnyNode, name: string, viaSuper: boolean): boolean {
   let used = false;
-  walkWhile(root, ({ of, node }) => {
+  walkWhile(root, (n) => {
     if (used) return false;
-    if (of !== "expr") return true;
+    if (n.of !== "expr") return true;
+    const node = n.node;
     // An overload signature's call of its own class's implementation is the signature's, which an
     // override replaces along with it.
-    if (node.kind === "call" && (node as { implementation?: true }).implementation) {
-      used = node.args.some((a) => usesOnThisIn({ of: "expr", node: a }, name, viaSuper));
+    if (node.kind === "call" && node.implementation === true) {
+      for (const a of node.args) if (usesOnThisIn({ of: "expr", node: a }, name, viaSuper)) used = true;
       return false;
     }
     if (node.kind === "member" && (node.object.kind === "this" || (viaSuper && node.object.kind === "super")) && node.name === name) used = true;
@@ -1103,22 +1262,27 @@ function usesOnThisIn(root: AnyNode, name: string, viaSuper: boolean): boolean {
 
 // `this: Mut<this>` mutates the instance; `this: Ref<this>` only reads it, as the default does.
 /** @throws {CompileError} */
-export function mutates(p: Param): boolean {
+export function mutates(p: Ref<Param>): boolean {
   if (wraps(p, "Mut") || wraps(p, "Own")) return true;
   if (wraps(p, "Ref")) return false;
-  throw unsupported("receivers other than 'this: Ref<this>', 'this: Mut<this>' and 'this: Own<this>'", p);
+  throw unsupported("receivers other than 'this: Ref<this>', 'this: Mut<this>' and 'this: Own<this>'", { start: p.start, end: p.end });
 }
 
 // `this: Own<this>` takes the object over: an owner may change it too.
-export const owns = (p: Param) => wraps(p, "Own");
+export function owns(p: Ref<Param>): boolean {
+  return wraps(p, "Own");
+}
 
-function wraps(p: Param, name: string): boolean {
-  const t = p.type;
-  return t?.kind === "ref" && t.name === name && t.args.length === 1 && t.args[0]!.kind === "ref" && t.args[0]!.name === "this";
+function wraps(p: Ref<Param>, name: string): boolean {
+  return p.type !== undefined && p.type.kind === "ref" && p.type.name === name && p.type.args.length === 1 && namesThis(p.type.args[0]!);
+}
+
+function namesThis(t: Ref<TypeNode>): boolean {
+  return t.kind === "ref" && t.name === "this";
 }
 
 // `this.name = value`, as a constructor statement at the span of what it came from.
-function assignField(ids: Ids, name: string, value: Expr, at: Span): Stmt {
+function assignField(ids: Mut<Ids>, name: string, value: Expr, at: Ref<Span>): Stmt {
   const s = { start: at.start, end: at.end };
   const target: Expr = { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "this", ...s }, name, optional: false, ...s };
   return { id: nextId(ids), kind: "expr", expr: { id: nextId(ids), kind: "assign", op: "=", target, value, ...s }, ...s };
@@ -1126,23 +1290,76 @@ function assignField(ids: Ids, name: string, value: Expr, at: Span): Stmt {
 
 // A member's access, from its modifiers or a `#` name. `readonly` is read by the caller.
 /** @throws {CompileError} */
-function modifiers(list: string[], at: Span, name: string): Access {
-  const other = list.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly" && m !== "override");
-  if (other) throw unsupported(`'${other}' modifiers`, at);
-  list = list.filter((m) => m !== "readonly" && m !== "override");
+function modifiers(written: Ref<Modifier[]>, at: Span, name: string): Access {
+  const other = written.find((m) => m !== "public" && m !== "private" && m !== "protected" && m !== "readonly" && m !== "override");
+  if (other !== undefined) throw unsupported(`'${other}' modifiers`, at);
+  const list = written.filter((m) => m !== "readonly" && m !== "override");
   if (list.length > 1) throw new CompileError("E0709", "a member can have only one accessibility modifier", at.start, at.end);
   if (name.startsWith("#") && list.length > 0) {
     throw new CompileError("E0709", "an accessibility modifier can't be used with a private identifier", at.start, at.end);
   }
-  return name.startsWith("#") ? "private" : (list[0] as Access | undefined) ?? "public";
+  if (name.startsWith("#")) return "private";
+  const first = list[0];
+  return first === "private" ? "private" : first === "protected" ? "protected" : "public";
 }
 
 function span(nodes: Span[]): Span {
   return { start: nodes[0]!.start, end: nodes.at(-1)!.end };
 }
 
+function firstParam(params: Ref<Param[]>): Ref<Param> | undefined {
+  return params.length > 0 ? params[0] : undefined;
+}
+
+// A member's name when it is written as one rather than computed.
+function plainName(m: Ref<ClassMember>): string | undefined {
+  if (m.kind === "field") return typeof m.name === "string" ? m.name : undefined;
+  if (m.kind === "method") return typeof m.name === "string" ? m.name : undefined;
+  if (m.kind === "get" || m.kind === "set") return typeof m.name === "string" ? m.name : undefined;
+  return undefined;
+}
+
+// A method's or accessor's name, refusing a computed one.
+/** @throws {CompileError} */
+function spelledName(m: Ref<ClassMember>): string {
+  if (m.kind === "method" && typeof m.name !== "string") throw symbolKey(m.name);
+  if ((m.kind === "get" || m.kind === "set") && typeof m.name !== "string") throw symbolKey(m.name);
+  return plainName(m) ?? "";
+}
+
+// Whether a member is written with a body.
+function hasBody(m: Ref<ClassMember>): boolean {
+  if (m.kind === "method") return m.body !== undefined;
+  if (m.kind === "constructor") return m.body !== undefined;
+  if (m.kind === "get" || m.kind === "set") return m.body !== undefined;
+  return m.kind === "staticBlock";
+}
+
+// A class and the bases it embeds, nearest first, starting from `from`.
+function chainFrom(arenas: Ref<Arenas>, from: ClassId | undefined): ClassId[] {
+  let out: ClassId[] = [];
+  let at = from;
+  while (at !== undefined) {
+    out.push(at);
+    at = arenas.classOf(at).base;
+  }
+  return out;
+}
+
+type Table = "methods" | "getters" | "setters";
+
+function tableOf(c: Ref<ClassInfo>, table: Table): Ref<Map<string, BodyId>> {
+  return table === "methods" ? c.methods : table === "getters" ? c.getters : c.setters;
+}
+
+function setIn(c: Mut<ClassInfo>, table: Table, name: string, id: BodyId): void {
+  if (table === "methods") c.methods.set(name, id);
+  else if (table === "getters") c.getters.set(name, id);
+  else c.setters.set(name, id);
+}
+
 // What each kind of class member besides a field and the constructor is called when rejected.
-function memberForm(kind: "index" | "staticBlock"): string {
+function memberForm(kind: ClassMember["kind"]): string {
   return kind === "index" ? "index signatures" : "static blocks";
 }
 

@@ -4347,7 +4347,7 @@ export class Expressions<C extends Context> implements Union {
     const bounds = this.ctx.implicitOf(f);
     // With an implicit parameter, an instance would check the signature's body against bounds,
     // so the others are read as declared.
-    const known = bounds.size > 0 ? this.ctx.members().paramTypesOf(f) : this.ctx.paramTypes(this.ctx.instanceOf(f));
+    const known = bounds.size > 0 ? this.ctx.members().paramTypesOf(f.bodyId) : this.ctx.paramTypes(this.ctx.instanceOf(f));
     return f.params.map((p, i) => {
       const t = bounds.get(i) ?? known[i]!;
       return p.optional ? this.typing.unionType([t, "null"]) : p.rest && this.isArray(this.typing.lower(t)) ? this.typing.rec(this.typing.lower(t) as ArrayType).element : t;

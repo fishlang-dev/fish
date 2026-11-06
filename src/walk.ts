@@ -1,7 +1,7 @@
 // Generated from the parser's AST types by `bun scripts/walkgen.ts`; a test fails when it is stale.
 // Visits each node a node holds, tagged, in the order its type lists the fields.
 import assert from "node:assert";
-import type { TypeNode, Expr, Stmt, TupleElement, TypeMember, ObjectProp, ClassNode, ClassMember, Param, Pattern, MatchArm, PatternProp, Specifier, EnumMember, SwitchCase, Declarator, TypeParam, TypeAlias, Interface, JsName, Func } from "./parser.ts";
+import type { TypeNode, Expr, Stmt, TupleElement, PropertyName, TypeMember, ObjectProp, ClassNode, ClassMember, Param, Pattern, MatchArm, PatternProp, Specifier, EnumMember, SwitchCase, Declarator, TypeParam, TypeAlias, Interface, JsName, Func } from "./parser.ts";
 
 // A node of any of the parser's types, tagged with which it is, since kinds repeat across them,
 // or a list of statements, `stmts`, which is a scope of its own.
@@ -5054,4 +5054,3025 @@ export function collectIdsNode(n: AnyNode, seen: Mut<Map<usize, usize>>, order: 
       }
       break;
   }
+}
+
+// What a node's field holds, for a quote to read: text, a number, a boolean, a list, a node by
+// its tag and fields, an object of fields that isn't a node, or nothing.
+export type QuoteValue =
+  | { kind: "none" }
+  | { kind: "text"; value: string }
+  | { kind: "boolean"; value: boolean }
+  | { kind: "int"; value: i64 }
+  | { kind: "bigint"; value: bigint }
+  | { kind: "float"; value: f64 }
+  | { kind: "list"; items: QuoteValue[] }
+  | { kind: "node"; of: string; fields: QuoteField[] }
+  | { kind: "record"; fields: QuoteField[] };
+export type QuoteField = { name: string; value: QuoteValue };
+
+export function quoteTree(n: AnyNode): QuoteValue {
+  switch (n.of) {
+    case "typeNode":
+      return { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.node) };
+    case "expr":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n.node) };
+    case "stmt":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n.node) };
+    case "tupleElement":
+      return { kind: "node", of: "tupleElement", fields: fieldsOfTupleElement(n.node) };
+    case "typeMember":
+      return { kind: "node", of: "typeMember", fields: fieldsOfTypeMember(n.node) };
+    case "objectProp":
+      return { kind: "node", of: "objectProp", fields: fieldsOfObjectProp(n.node) };
+    case "classNode":
+      return { kind: "node", of: "classNode", fields: fieldsOfClassNode(n.node) };
+    case "classMember":
+      return { kind: "node", of: "classMember", fields: fieldsOfClassMember(n.node) };
+    case "param":
+      return { kind: "node", of: "param", fields: fieldsOfParam(n.node) };
+    case "pattern":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n.node) };
+    case "matchArm":
+      return { kind: "node", of: "matchArm", fields: fieldsOfMatchArm(n.node) };
+    case "patternProp":
+      return { kind: "node", of: "patternProp", fields: fieldsOfPatternProp(n.node) };
+    case "specifier":
+      return { kind: "node", of: "specifier", fields: fieldsOfSpecifier(n.node) };
+    case "enumMember":
+      return { kind: "node", of: "enumMember", fields: fieldsOfEnumMember(n.node) };
+    case "switchCase":
+      return { kind: "node", of: "switchCase", fields: fieldsOfSwitchCase(n.node) };
+    case "declarator":
+      return { kind: "node", of: "declarator", fields: fieldsOfDeclarator(n.node) };
+    case "typeParam":
+      return { kind: "node", of: "typeParam", fields: fieldsOfTypeParam(n.node) };
+    case "typeAlias":
+      return { kind: "node", of: "typeAlias", fields: fieldsOfTypeAlias(n.node) };
+    case "interface":
+      return { kind: "node", of: "interface", fields: fieldsOfInterface(n.node) };
+    case "jsName":
+      return { kind: "node", of: "jsName", fields: fieldsOfJsName(n.node) };
+    case "func":
+      return { kind: "node", of: "func", fields: fieldsOfFunc(n.node) };
+    case "stmts": {
+      let items134: QuoteValue[] = [];
+      for (const x134 of n.node) {
+        items134.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x134) });
+      }
+      return { kind: "list", items: items134 };
+    }
+  }
+  return { kind: "none" };
+}
+
+function fieldsOfTypeNode(n: Ref<TypeNode>): QuoteField[] {
+  switch (n.kind) {
+    case "ref":
+      return fieldsOfTypeNode_ref(n);
+    case "literal":
+      return fieldsOfTypeNode_literal(n);
+    case "array":
+      return fieldsOfTypeNode_array(n);
+    case "tuple":
+      return fieldsOfTypeNode_tuple(n);
+    case "object":
+      return fieldsOfTypeNode_object(n);
+    case "function":
+      return fieldsOfTypeNode_function(n);
+    case "union":
+      return fieldsOfTypeNode_union(n);
+    case "intersection":
+      return fieldsOfTypeNode_intersection(n);
+    case "operator":
+      return fieldsOfTypeNode_operator(n);
+    case "indexed":
+      return fieldsOfTypeNode_indexed(n);
+    case "query":
+      return fieldsOfTypeNode_query(n);
+    case "import":
+      return fieldsOfTypeNode_import(n);
+    case "conditional":
+      return fieldsOfTypeNode_conditional(n);
+    case "infer":
+      return fieldsOfTypeNode_infer(n);
+    case "template":
+      return fieldsOfTypeNode_template(n);
+    case "mapped":
+      return fieldsOfTypeNode_mapped(n);
+    case "predicate":
+      return fieldsOfTypeNode_predicate(n);
+  }
+  return [];
+}
+
+function fieldsOfExpr(n: Ref<Expr>): QuoteField[] {
+  switch (n.kind) {
+    case "int":
+      return fieldsOfExpr_int(n);
+    case "float":
+      return fieldsOfExpr_float(n);
+    case "bigint":
+      return fieldsOfExpr_bigint(n);
+    case "null":
+      return fieldsOfExpr_null(n);
+    case "this":
+      return fieldsOfExpr_this(n);
+    case "super":
+      return fieldsOfExpr_super(n);
+    case "regex":
+      return fieldsOfExpr_regex(n);
+    case "template":
+      return fieldsOfExpr_template(n);
+    case "tagged":
+      return fieldsOfExpr_tagged(n);
+    case "bool":
+      return fieldsOfExpr_bool(n);
+    case "string":
+      return fieldsOfExpr_string(n);
+    case "ident":
+      return fieldsOfExpr_ident(n);
+    case "spread":
+      return fieldsOfExpr_spread(n);
+    case "array":
+      return fieldsOfExpr_array(n);
+    case "object":
+      return fieldsOfExpr_object(n);
+    case "function":
+      return fieldsOfExpr_function(n);
+    case "arrow":
+      return fieldsOfExpr_arrow(n);
+    case "member":
+      return fieldsOfExpr_member(n);
+    case "index":
+      return fieldsOfExpr_index(n);
+    case "call":
+      return fieldsOfExpr_call(n);
+    case "new":
+      return fieldsOfExpr_new(n);
+    case "instantiation":
+      return fieldsOfExpr_instantiation(n);
+    case "meta":
+      return fieldsOfExpr_meta(n);
+    case "import":
+      return fieldsOfExpr_import(n);
+    case "nonNull":
+      return fieldsOfExpr_nonNull(n);
+    case "throw":
+      return fieldsOfExpr_throw(n);
+    case "class":
+      return fieldsOfExpr_class(n);
+    case "privateName":
+      return fieldsOfExpr_privateName(n);
+    case "unary":
+      return fieldsOfExpr_unary(n);
+    case "update":
+      return fieldsOfExpr_update(n);
+    case "binary":
+      return fieldsOfExpr_binary(n);
+    case "conditional":
+      return fieldsOfExpr_conditional(n);
+    case "assign":
+      return fieldsOfExpr_assign(n);
+    case "pipe":
+      return fieldsOfExpr_pipe(n);
+    case "topic":
+      return fieldsOfExpr_topic(n);
+    case "match":
+      return fieldsOfExpr_match(n);
+    case "comptime":
+      return fieldsOfExpr_comptime(n);
+    case "unsafe":
+      return fieldsOfExpr_unsafe(n);
+    case "destructure":
+      return fieldsOfExpr_destructure(n);
+    case "sequence":
+      return fieldsOfExpr_sequence(n);
+    case "yield":
+      return fieldsOfExpr_yield(n);
+    case "as":
+      return fieldsOfExpr_as(n);
+    case "satisfies":
+      return fieldsOfExpr_satisfies(n);
+    case "assertion":
+      return fieldsOfExpr_assertion(n);
+  }
+  return [];
+}
+
+function fieldsOfStmt(n: Ref<Stmt>): QuoteField[] {
+  switch (n.kind) {
+    case "expr":
+      return fieldsOfStmt_expr(n);
+    case "let":
+      return fieldsOfStmt_let(n);
+    case "return":
+      return fieldsOfStmt_return(n);
+    case "if":
+      return fieldsOfStmt_if(n);
+    case "while":
+      return fieldsOfStmt_while(n);
+    case "doWhile":
+      return fieldsOfStmt_doWhile(n);
+    case "switch":
+      return fieldsOfStmt_switch(n);
+    case "labeled":
+      return fieldsOfStmt_labeled(n);
+    case "break":
+      return fieldsOfStmt_break(n);
+    case "continue":
+      return fieldsOfStmt_continue(n);
+    case "throw":
+      return fieldsOfStmt_throw(n);
+    case "try":
+      return fieldsOfStmt_try(n);
+    case "for":
+      return fieldsOfStmt_for(n);
+    case "forIn":
+      return fieldsOfStmt_forIn(n);
+    case "forOf":
+      return fieldsOfStmt_forOf(n);
+    case "block":
+      return fieldsOfStmt_block(n);
+    case "empty":
+      return fieldsOfStmt_empty(n);
+    case "debugger":
+      return fieldsOfStmt_debugger(n);
+    case "enum":
+      return fieldsOfStmt_enum(n);
+    case "namespace":
+      return fieldsOfStmt_namespace(n);
+    case "declare":
+      return fieldsOfStmt_declare(n);
+    case "comptime":
+      return fieldsOfStmt_comptime(n);
+    case "unsafe":
+      return fieldsOfStmt_unsafe(n);
+    case "import":
+      return fieldsOfStmt_import(n);
+    case "importEquals":
+      return fieldsOfStmt_importEquals(n);
+    case "export":
+      return fieldsOfStmt_export(n);
+    case "exportDefault":
+      return fieldsOfStmt_exportDefault(n);
+    case "exportNamed":
+      return fieldsOfStmt_exportNamed(n);
+    case "exportAll":
+      return fieldsOfStmt_exportAll(n);
+    case "exportAssign":
+      return fieldsOfStmt_exportAssign(n);
+    case "exportAsNamespace":
+      return fieldsOfStmt_exportAsNamespace(n);
+    case "typeAlias":
+      return fieldsOfTypeAlias_typeAlias(n);
+    case "interface":
+      return fieldsOfInterface_interface(n);
+    case "function":
+      return fieldsOfFunc_function(n);
+    case "class":
+      return fieldsOfStmt_class(n);
+  }
+  return [];
+}
+
+function fieldsOfTupleElement(n: Ref<TupleElement>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.name === undefined) out.push({ name: "name", value: { kind: "none" } });
+  else {
+    out.push({ name: "name", value: { kind: "text", value: n.name } });
+  }
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  out.push({ name: "rest", value: { kind: "boolean", value: n.rest } });
+  out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  return out;
+}
+
+function fieldsOfTypeMember(n: Ref<TypeMember>): QuoteField[] {
+  switch (n.kind) {
+    case "property":
+      return fieldsOfTypeMember_property(n);
+    case "method":
+      return fieldsOfTypeMember_method(n);
+    case "call":
+      return fieldsOfTypeMember_call(n);
+    case "construct":
+      return fieldsOfTypeMember_construct(n);
+    case "index":
+      return fieldsOfTypeMember_index(n);
+    case "get":
+      return fieldsOfTypeMember_get(n);
+    case "set":
+      return fieldsOfTypeMember_set(n);
+  }
+  return [];
+}
+
+function fieldsOfObjectProp(n: Ref<ObjectProp>): QuoteField[] {
+  switch (n.kind) {
+    case "property":
+      return fieldsOfObjectProp_property(n);
+    case "shorthand":
+      return fieldsOfObjectProp_shorthand(n);
+    case "spread":
+      return fieldsOfObjectProp_spread(n);
+    case "method":
+      return fieldsOfObjectProp_method(n);
+    case "get":
+      return fieldsOfObjectProp_get(n);
+    case "set":
+      return fieldsOfObjectProp_set(n);
+  }
+  return [];
+}
+
+function fieldsOfClassNode(n: Ref<ClassNode>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.name === undefined) out.push({ name: "name", value: { kind: "none" } });
+  else {
+    out.push({ name: "name", value: { kind: "text", value: n.name } });
+  }
+  out.push({ name: "abstract", value: { kind: "boolean", value: n.abstract } });
+  let items93: QuoteValue[] = [];
+  for (const x93 of n.decorators) {
+    items93.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x93) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items93 } });
+  let items94: QuoteValue[] = [];
+  for (const x94 of n.typeParams) {
+    items94.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x94) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items94 } });
+  if (n.extends === undefined) out.push({ name: "extends", value: { kind: "none" } });
+  else {
+    out.push({ name: "extends", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.extends) } });
+  }
+  let items95: QuoteValue[] = [];
+  for (const x95 of n.implements) {
+    items95.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x95) });
+  }
+  out.push({ name: "implements", value: { kind: "list", items: items95 } });
+  let items96: QuoteValue[] = [];
+  for (const x96 of n.members) {
+    items96.push({ kind: "node", of: "classMember", fields: fieldsOfClassMember(x96) });
+  }
+  out.push({ name: "members", value: { kind: "list", items: items96 } });
+  if (n.derives !== undefined) {
+    let items97: QuoteValue[] = [];
+    for (const x97 of n.derives) {
+      items97.push({ kind: "text", value: x97 });
+    }
+    out.push({ name: "derives", value: { kind: "list", items: items97 } });
+  }
+  return out;
+}
+
+function fieldsOfClassMember(n: Ref<ClassMember>): QuoteField[] {
+  switch (n.kind) {
+    case "field":
+      return fieldsOfClassMember_field(n);
+    case "method":
+      return fieldsOfClassMember_method(n);
+    case "constructor":
+      return fieldsOfClassMember_constructor(n);
+    case "get":
+      return fieldsOfClassMember_get(n);
+    case "set":
+      return fieldsOfClassMember_set(n);
+    case "index":
+      return fieldsOfClassMember_index(n);
+    case "staticBlock":
+      return fieldsOfClassMember_staticBlock(n);
+  }
+  return [];
+}
+
+function fieldsOfParam(n: Ref<Param>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "pattern", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.pattern) } });
+  if (n.type === undefined) out.push({ name: "type", value: { kind: "none" } });
+  else {
+    out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  }
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  out.push({ name: "rest", value: { kind: "boolean", value: n.rest } });
+  if (n.default === undefined) out.push({ name: "default", value: { kind: "none" } });
+  else {
+    out.push({ name: "default", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.default) } });
+  }
+  let items124: QuoteValue[] = [];
+  for (const x124 of n.modifiers) {
+    items124.push({ kind: "text", value: x124 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items124 } });
+  let items125: QuoteValue[] = [];
+  for (const x125 of n.decorators) {
+    items125.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x125) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items125 } });
+  out.push({ name: "comptime", value: { kind: "boolean", value: n.comptime } });
+  return out;
+}
+
+function fieldsOfPattern(n: Ref<Pattern>): QuoteField[] {
+  switch (n.kind) {
+    case "ident":
+      return fieldsOfPattern_ident(n);
+    case "object":
+      return fieldsOfPattern_object(n);
+    case "array":
+      return fieldsOfPattern_array(n);
+    case "default":
+      return fieldsOfPattern_default(n);
+    case "expr":
+      return fieldsOfPattern_expr(n);
+    case "wildcard":
+      return fieldsOfPattern_wildcard(n);
+    case "literal":
+      return fieldsOfPattern_literal(n);
+    case "variant":
+      return fieldsOfPattern_variant(n);
+    case "or":
+      return fieldsOfPattern_or(n);
+  }
+  return [];
+}
+
+function fieldsOfMatchArm(n: Ref<MatchArm>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "pattern", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.pattern) } });
+  if (n.guard === undefined) out.push({ name: "guard", value: { kind: "none" } });
+  else {
+    out.push({ name: "guard", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.guard) } });
+  }
+  out.push({ name: "body", value: oneOf4(n.body) });
+  return out;
+}
+
+function fieldsOfPatternProp(n: Ref<PatternProp>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "key", value: oneOf3(n.key) });
+  out.push({ name: "value", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.value) } });
+  return out;
+}
+
+function fieldsOfSpecifier(n: Ref<Specifier>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.alias === undefined) out.push({ name: "alias", value: { kind: "none" } });
+  else {
+    out.push({ name: "alias", value: { kind: "text", value: n.alias } });
+  }
+  out.push({ name: "typeOnly", value: { kind: "boolean", value: n.typeOnly } });
+  return out;
+}
+
+function fieldsOfEnumMember(n: Ref<EnumMember>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.init === undefined) out.push({ name: "init", value: { kind: "none" } });
+  else {
+    out.push({ name: "init", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.init) } });
+  }
+  if (n.payload === undefined) out.push({ name: "payload", value: { kind: "none" } });
+  else {
+    let items130: QuoteValue[] = [];
+    for (const x130 of n.payload) {
+      items130.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x130) });
+    }
+    out.push({ name: "payload", value: { kind: "list", items: items130 } });
+  }
+  return out;
+}
+
+function fieldsOfSwitchCase(n: Ref<SwitchCase>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.test === undefined) out.push({ name: "test", value: { kind: "none" } });
+  else {
+    out.push({ name: "test", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.test) } });
+  }
+  let items131: QuoteValue[] = [];
+  for (const x131 of n.body) {
+    items131.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x131) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items131 } });
+  return out;
+}
+
+function fieldsOfDeclarator(n: Ref<Declarator>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "target", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.target) } });
+  if (n.type === undefined) out.push({ name: "type", value: { kind: "none" } });
+  else {
+    out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  }
+  if (n.init === undefined) out.push({ name: "init", value: { kind: "none" } });
+  else {
+    out.push({ name: "init", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.init) } });
+  }
+  return out;
+}
+
+function fieldsOfTypeParam(n: Ref<TypeParam>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.constraint === undefined) out.push({ name: "constraint", value: { kind: "none" } });
+  else {
+    out.push({ name: "constraint", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.constraint) } });
+  }
+  if (n.default === undefined) out.push({ name: "default", value: { kind: "none" } });
+  else {
+    out.push({ name: "default", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.default) } });
+  }
+  let items132: QuoteValue[] = [];
+  for (const x132 of n.modifiers) {
+    items132.push({ kind: "text", value: x132 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items132 } });
+  return out;
+}
+
+function fieldsOfTypeAlias(n: Ref<TypeAlias>): QuoteField[] {
+  switch (n.kind) {
+    case "typeAlias":
+      return fieldsOfTypeAlias_typeAlias(n);
+  }
+  return [];
+}
+
+function fieldsOfInterface(n: Ref<Interface>): QuoteField[] {
+  switch (n.kind) {
+    case "interface":
+      return fieldsOfInterface_interface(n);
+  }
+  return [];
+}
+
+function fieldsOfJsName(n: Ref<JsName>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "module", value: { kind: "text", value: n.module } });
+  out.push({ name: "package", value: { kind: "int", value: n.package as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.const !== undefined) {
+    out.push({ name: "const", value: { kind: "boolean", value: n.const } });
+  }
+  if (n.overloads !== undefined) {
+    let items133: QuoteValue[] = [];
+    for (const x133 of n.overloads) {
+      items133.push({ kind: "node", of: "func", fields: fieldsOfFunc(x133) });
+    }
+    out.push({ name: "overloads", value: { kind: "list", items: items133 } });
+  }
+  return out;
+}
+
+function fieldsOfFunc(n: Ref<Func>): QuoteField[] {
+  switch (n.kind) {
+    case "function":
+      return fieldsOfFunc_function(n);
+  }
+  return [];
+}
+
+function fieldsOfTypeNode_ref(n: Ref<Extract<TypeNode, { kind: "ref" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  let items1: QuoteValue[] = [];
+  for (const x1 of n.args) {
+    items1.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x1) });
+  }
+  out.push({ name: "args", value: { kind: "list", items: items1 } });
+  return out;
+}
+
+function fieldsOfTypeNode_literal(n: Ref<Extract<TypeNode, { kind: "literal" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfTypeNode_array(n: Ref<Extract<TypeNode, { kind: "array" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "element", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.element) } });
+  return out;
+}
+
+function fieldsOfTypeNode_tuple(n: Ref<Extract<TypeNode, { kind: "tuple" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items2: QuoteValue[] = [];
+  for (const x2 of n.elements) {
+    items2.push({ kind: "node", of: "tupleElement", fields: fieldsOfTupleElement(x2) });
+  }
+  out.push({ name: "elements", value: { kind: "list", items: items2 } });
+  return out;
+}
+
+function fieldsOfTypeNode_object(n: Ref<Extract<TypeNode, { kind: "object" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items3: QuoteValue[] = [];
+  for (const x3 of n.members) {
+    items3.push({ kind: "node", of: "typeMember", fields: fieldsOfTypeMember(x3) });
+  }
+  out.push({ name: "members", value: { kind: "list", items: items3 } });
+  return out;
+}
+
+function fieldsOfTypeNode_function(n: Ref<Extract<TypeNode, { kind: "function" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items4: QuoteValue[] = [];
+  for (const x4 of n.typeParams) {
+    items4.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x4) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items4 } });
+  let items5: QuoteValue[] = [];
+  for (const x5 of n.params) {
+    items5.push({ kind: "node", of: "param", fields: fieldsOfParam(x5) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items5 } });
+  out.push({ name: "returns", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returns) } });
+  if (n.throws !== undefined) {
+    out.push({ name: "throws", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.throws) } });
+  }
+  out.push({ name: "construct", value: { kind: "boolean", value: n.construct } });
+  out.push({ name: "abstract", value: { kind: "boolean", value: n.abstract } });
+  return out;
+}
+
+function fieldsOfTypeNode_union(n: Ref<Extract<TypeNode, { kind: "union" | "intersection" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items6: QuoteValue[] = [];
+  for (const x6 of n.types) {
+    items6.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x6) });
+  }
+  out.push({ name: "types", value: { kind: "list", items: items6 } });
+  return out;
+}
+
+function fieldsOfTypeNode_intersection(n: Ref<Extract<TypeNode, { kind: "union" | "intersection" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items7: QuoteValue[] = [];
+  for (const x7 of n.types) {
+    items7.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x7) });
+  }
+  out.push({ name: "types", value: { kind: "list", items: items7 } });
+  return out;
+}
+
+function fieldsOfTypeNode_operator(n: Ref<Extract<TypeNode, { kind: "operator" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "op", value: { kind: "text", value: n.op } });
+  out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  return out;
+}
+
+function fieldsOfTypeNode_indexed(n: Ref<Extract<TypeNode, { kind: "indexed" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "object", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.object) } });
+  out.push({ name: "index", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.index) } });
+  return out;
+}
+
+function fieldsOfTypeNode_query(n: Ref<Extract<TypeNode, { kind: "query" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "target", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.target) } });
+  return out;
+}
+
+function fieldsOfTypeNode_import(n: Ref<Extract<TypeNode, { kind: "import" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "module", value: { kind: "text", value: n.module } });
+  if (n.name === undefined) out.push({ name: "name", value: { kind: "none" } });
+  else {
+    out.push({ name: "name", value: { kind: "text", value: n.name } });
+  }
+  let items8: QuoteValue[] = [];
+  for (const x8 of n.args) {
+    items8.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x8) });
+  }
+  out.push({ name: "args", value: { kind: "list", items: items8 } });
+  return out;
+}
+
+function fieldsOfTypeNode_conditional(n: Ref<Extract<TypeNode, { kind: "conditional" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "check", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.check) } });
+  out.push({ name: "extends", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.extends) } });
+  out.push({ name: "then", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.then) } });
+  out.push({ name: "else", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.else) } });
+  return out;
+}
+
+function fieldsOfTypeNode_infer(n: Ref<Extract<TypeNode, { kind: "infer" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.constraint === undefined) out.push({ name: "constraint", value: { kind: "none" } });
+  else {
+    out.push({ name: "constraint", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.constraint) } });
+  }
+  return out;
+}
+
+function fieldsOfTypeNode_template(n: Ref<Extract<TypeNode, { kind: "template" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items9: QuoteValue[] = [];
+  for (const x9 of n.quasis) {
+    items9.push({ kind: "text", value: x9 });
+  }
+  out.push({ name: "quasis", value: { kind: "list", items: items9 } });
+  let items10: QuoteValue[] = [];
+  for (const x10 of n.types) {
+    items10.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x10) });
+  }
+  out.push({ name: "types", value: { kind: "list", items: items10 } });
+  return out;
+}
+
+function fieldsOfTypeNode_mapped(n: Ref<Extract<TypeNode, { kind: "mapped" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  out.push({ name: "constraint", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.constraint) } });
+  if (n.as === undefined) out.push({ name: "as", value: { kind: "none" } });
+  else {
+    out.push({ name: "as", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.as) } });
+  }
+  if (n.type === undefined) out.push({ name: "type", value: { kind: "none" } });
+  else {
+    out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  }
+  if (n.readonly === undefined) out.push({ name: "readonly", value: { kind: "none" } });
+  else {
+    out.push({ name: "readonly", value: { kind: "text", value: n.readonly } });
+  }
+  if (n.optional === undefined) out.push({ name: "optional", value: { kind: "none" } });
+  else {
+    out.push({ name: "optional", value: { kind: "text", value: n.optional } });
+  }
+  return out;
+}
+
+function fieldsOfTypeNode_predicate(n: Ref<Extract<TypeNode, { kind: "predicate" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "asserts", value: { kind: "boolean", value: n.asserts } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.type === undefined) out.push({ name: "type", value: { kind: "none" } });
+  else {
+    out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  }
+  return out;
+}
+
+function fieldsOfExpr_int(n: Ref<Extract<Expr, { kind: "int" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "bigint", value: n.value } });
+  return out;
+}
+
+function fieldsOfExpr_float(n: Ref<Extract<Expr, { kind: "float" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "float", value: n.value } });
+  return out;
+}
+
+function fieldsOfExpr_bigint(n: Ref<Extract<Expr, { kind: "bigint" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "bigint", value: n.value } });
+  return out;
+}
+
+function fieldsOfExpr_null(n: Ref<Extract<Expr, { kind: "null" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  return out;
+}
+
+function fieldsOfExpr_this(n: Ref<Extract<Expr, { kind: "this" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  return out;
+}
+
+function fieldsOfExpr_super(n: Ref<Extract<Expr, { kind: "super" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  return out;
+}
+
+function fieldsOfExpr_regex(n: Ref<Extract<Expr, { kind: "regex" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "pattern", value: { kind: "text", value: n.pattern } });
+  out.push({ name: "flags", value: { kind: "text", value: n.flags } });
+  return out;
+}
+
+function fieldsOfExpr_template(n: Ref<Extract<Expr, { kind: "template" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items11: QuoteValue[] = [];
+  for (const x11 of n.quasis) {
+    items11.push({ kind: "text", value: x11 });
+  }
+  out.push({ name: "quasis", value: { kind: "list", items: items11 } });
+  let items12: QuoteValue[] = [];
+  for (const x12 of n.raw) {
+    items12.push({ kind: "text", value: x12 });
+  }
+  out.push({ name: "raw", value: { kind: "list", items: items12 } });
+  let items13: QuoteValue[] = [];
+  for (const x13 of n.exprs) {
+    items13.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x13) });
+  }
+  out.push({ name: "exprs", value: { kind: "list", items: items13 } });
+  return out;
+}
+
+function fieldsOfExpr_tagged(n: Ref<Extract<Expr, { kind: "tagged" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "tag", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.tag) } });
+  let items14: QuoteValue[] = [];
+  for (const x14 of n.typeArgs) {
+    items14.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x14) });
+  }
+  out.push({ name: "typeArgs", value: { kind: "list", items: items14 } });
+  out.push({ name: "template", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.template) } });
+  return out;
+}
+
+function fieldsOfExpr_bool(n: Ref<Extract<Expr, { kind: "bool" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "boolean", value: n.value } });
+  return out;
+}
+
+function fieldsOfExpr_string(n: Ref<Extract<Expr, { kind: "string" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "text", value: n.value } });
+  return out;
+}
+
+function fieldsOfExpr_ident(n: Ref<Extract<Expr, { kind: "ident" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  return out;
+}
+
+function fieldsOfExpr_spread(n: Ref<Extract<Expr, { kind: "spread" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfExpr_array(n: Ref<Extract<Expr, { kind: "array" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items15: QuoteValue[] = [];
+  for (const x15 of n.elements) {
+    if (x15 === undefined) items15.push({ kind: "none" });
+    else {
+      items15.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x15) });
+    }
+  }
+  out.push({ name: "elements", value: { kind: "list", items: items15 } });
+  return out;
+}
+
+function fieldsOfExpr_object(n: Ref<Extract<Expr, { kind: "object" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items16: QuoteValue[] = [];
+  for (const x16 of n.props) {
+    items16.push({ kind: "node", of: "objectProp", fields: fieldsOfObjectProp(x16) });
+  }
+  out.push({ name: "props", value: { kind: "list", items: items16 } });
+  return out;
+}
+
+function fieldsOfExpr_function(n: Ref<Extract<Expr, { kind: "function" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.name === undefined) out.push({ name: "name", value: { kind: "none" } });
+  else {
+    out.push({ name: "name", value: { kind: "text", value: n.name } });
+  }
+  out.push({ name: "async", value: { kind: "boolean", value: n.async } });
+  out.push({ name: "generator", value: { kind: "boolean", value: n.generator } });
+  let items17: QuoteValue[] = [];
+  for (const x17 of n.typeParams) {
+    items17.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x17) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items17 } });
+  let items18: QuoteValue[] = [];
+  for (const x18 of n.params) {
+    items18.push({ kind: "node", of: "param", fields: fieldsOfParam(x18) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items18 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  let items19: QuoteValue[] = [];
+  for (const x19 of n.body) {
+    items19.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x19) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items19 } });
+  return out;
+}
+
+function fieldsOfExpr_arrow(n: Ref<Extract<Expr, { kind: "arrow" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "move", value: { kind: "boolean", value: n.move } });
+  out.push({ name: "async", value: { kind: "boolean", value: n.async } });
+  let items20: QuoteValue[] = [];
+  for (const x20 of n.typeParams) {
+    items20.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x20) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items20 } });
+  let items21: QuoteValue[] = [];
+  for (const x21 of n.params) {
+    items21.push({ kind: "node", of: "param", fields: fieldsOfParam(x21) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items21 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  if (n.throws !== undefined) {
+    out.push({ name: "throws", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.throws) } });
+  }
+  out.push({ name: "body", value: oneOf0(n.body) });
+  return out;
+}
+
+function fieldsOfExpr_member(n: Ref<Extract<Expr, { kind: "member" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "object", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.object) } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  return out;
+}
+
+function fieldsOfExpr_index(n: Ref<Extract<Expr, { kind: "index" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "object", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.object) } });
+  out.push({ name: "index", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.index) } });
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  return out;
+}
+
+function fieldsOfExpr_call(n: Ref<Extract<Expr, { kind: "call" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "callee", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.callee) } });
+  let items23: QuoteValue[] = [];
+  for (const x23 of n.typeArgs) {
+    items23.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x23) });
+  }
+  out.push({ name: "typeArgs", value: { kind: "list", items: items23 } });
+  let items24: QuoteValue[] = [];
+  for (const x24 of n.args) {
+    items24.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x24) });
+  }
+  out.push({ name: "args", value: { kind: "list", items: items24 } });
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  if (n.implementation !== undefined) {
+    out.push({ name: "implementation", value: { kind: "boolean", value: n.implementation } });
+  }
+  if (n.shown !== undefined) {
+    out.push({ name: "shown", value: { kind: "text", value: n.shown } });
+  }
+  return out;
+}
+
+function fieldsOfExpr_new(n: Ref<Extract<Expr, { kind: "new" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "callee", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.callee) } });
+  let items25: QuoteValue[] = [];
+  for (const x25 of n.typeArgs) {
+    items25.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x25) });
+  }
+  out.push({ name: "typeArgs", value: { kind: "list", items: items25 } });
+  if (n.args === undefined) out.push({ name: "args", value: { kind: "none" } });
+  else {
+    let items26: QuoteValue[] = [];
+    for (const x26 of n.args) {
+      items26.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x26) });
+    }
+    out.push({ name: "args", value: { kind: "list", items: items26 } });
+  }
+  return out;
+}
+
+function fieldsOfExpr_instantiation(n: Ref<Extract<Expr, { kind: "instantiation" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  let items27: QuoteValue[] = [];
+  for (const x27 of n.typeArgs) {
+    items27.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x27) });
+  }
+  out.push({ name: "typeArgs", value: { kind: "list", items: items27 } });
+  return out;
+}
+
+function fieldsOfExpr_meta(n: Ref<Extract<Expr, { kind: "meta" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  return out;
+}
+
+function fieldsOfExpr_import(n: Ref<Extract<Expr, { kind: "import" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items28: QuoteValue[] = [];
+  for (const x28 of n.args) {
+    items28.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x28) });
+  }
+  out.push({ name: "args", value: { kind: "list", items: items28 } });
+  return out;
+}
+
+function fieldsOfExpr_nonNull(n: Ref<Extract<Expr, { kind: "nonNull" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  if (n.narrows !== undefined) {
+    out.push({ name: "narrows", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.narrows) } });
+  }
+  if (n.reason !== undefined) {
+    out.push({ name: "reason", value: { kind: "text", value: n.reason } });
+  }
+  if (n.redundant !== undefined) {
+    out.push({ name: "redundant", value: { kind: "boolean", value: n.redundant } });
+  }
+  return out;
+}
+
+function fieldsOfExpr_throw(n: Ref<Extract<Expr, { kind: "throw" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfExpr_class(n: Ref<Extract<Expr, { kind: "class" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.name === undefined) out.push({ name: "name", value: { kind: "none" } });
+  else {
+    out.push({ name: "name", value: { kind: "text", value: n.name } });
+  }
+  out.push({ name: "abstract", value: { kind: "boolean", value: n.abstract } });
+  let items29: QuoteValue[] = [];
+  for (const x29 of n.decorators) {
+    items29.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x29) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items29 } });
+  let items30: QuoteValue[] = [];
+  for (const x30 of n.typeParams) {
+    items30.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x30) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items30 } });
+  if (n.extends === undefined) out.push({ name: "extends", value: { kind: "none" } });
+  else {
+    out.push({ name: "extends", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.extends) } });
+  }
+  let items31: QuoteValue[] = [];
+  for (const x31 of n.implements) {
+    items31.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x31) });
+  }
+  out.push({ name: "implements", value: { kind: "list", items: items31 } });
+  let items32: QuoteValue[] = [];
+  for (const x32 of n.members) {
+    items32.push({ kind: "node", of: "classMember", fields: fieldsOfClassMember(x32) });
+  }
+  out.push({ name: "members", value: { kind: "list", items: items32 } });
+  if (n.derives !== undefined) {
+    let items33: QuoteValue[] = [];
+    for (const x33 of n.derives) {
+      items33.push({ kind: "text", value: x33 });
+    }
+    out.push({ name: "derives", value: { kind: "list", items: items33 } });
+  }
+  return out;
+}
+
+function fieldsOfExpr_privateName(n: Ref<Extract<Expr, { kind: "privateName" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  return out;
+}
+
+function fieldsOfExpr_unary(n: Ref<Extract<Expr, { kind: "unary" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "op", value: { kind: "text", value: n.op } });
+  out.push({ name: "operand", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.operand) } });
+  return out;
+}
+
+function fieldsOfExpr_update(n: Ref<Extract<Expr, { kind: "update" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "op", value: { kind: "text", value: n.op } });
+  out.push({ name: "prefix", value: { kind: "boolean", value: n.prefix } });
+  out.push({ name: "operand", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.operand) } });
+  return out;
+}
+
+function fieldsOfExpr_binary(n: Ref<Extract<Expr, { kind: "binary" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "op", value: { kind: "text", value: n.op } });
+  out.push({ name: "left", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.left) } });
+  out.push({ name: "right", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.right) } });
+  return out;
+}
+
+function fieldsOfExpr_conditional(n: Ref<Extract<Expr, { kind: "conditional" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "cond", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.cond) } });
+  out.push({ name: "then", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.then) } });
+  out.push({ name: "else", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.else) } });
+  return out;
+}
+
+function fieldsOfExpr_assign(n: Ref<Extract<Expr, { kind: "assign" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "op", value: { kind: "text", value: n.op } });
+  out.push({ name: "target", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.target) } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfExpr_pipe(n: Ref<Extract<Expr, { kind: "pipe" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  out.push({ name: "body", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.body) } });
+  return out;
+}
+
+function fieldsOfExpr_topic(n: Ref<Extract<Expr, { kind: "topic" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  return out;
+}
+
+function fieldsOfExpr_match(n: Ref<Extract<Expr, { kind: "match" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "subject", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.subject) } });
+  let items34: QuoteValue[] = [];
+  for (const x34 of n.arms) {
+    items34.push({ kind: "node", of: "matchArm", fields: fieldsOfMatchArm(x34) });
+  }
+  out.push({ name: "arms", value: { kind: "list", items: items34 } });
+  return out;
+}
+
+function fieldsOfExpr_comptime(n: Ref<Extract<Expr, { kind: "comptime" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  return out;
+}
+
+function fieldsOfExpr_unsafe(n: Ref<Extract<Expr, { kind: "unsafe" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  return out;
+}
+
+function fieldsOfExpr_destructure(n: Ref<Extract<Expr, { kind: "destructure" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "pattern", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.pattern) } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfExpr_sequence(n: Ref<Extract<Expr, { kind: "sequence" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items35: QuoteValue[] = [];
+  for (const x35 of n.exprs) {
+    items35.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x35) });
+  }
+  out.push({ name: "exprs", value: { kind: "list", items: items35 } });
+  return out;
+}
+
+function fieldsOfExpr_yield(n: Ref<Extract<Expr, { kind: "yield" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.value === undefined) out.push({ name: "value", value: { kind: "none" } });
+  else {
+    out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  }
+  out.push({ name: "delegate", value: { kind: "boolean", value: n.delegate } });
+  return out;
+}
+
+function fieldsOfExpr_as(n: Ref<Extract<Expr, { kind: "as" | "satisfies" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  return out;
+}
+
+function fieldsOfExpr_satisfies(n: Ref<Extract<Expr, { kind: "as" | "satisfies" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  return out;
+}
+
+function fieldsOfExpr_assertion(n: Ref<Extract<Expr, { kind: "assertion" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  return out;
+}
+
+function fieldsOfStmt_expr(n: Ref<Extract<Stmt, { kind: "expr" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  return out;
+}
+
+function fieldsOfStmt_let(n: Ref<Extract<Stmt, { kind: "let" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "keyword", value: { kind: "text", value: n.keyword } });
+  let items36: QuoteValue[] = [];
+  for (const x36 of n.declarations) {
+    items36.push({ kind: "node", of: "declarator", fields: fieldsOfDeclarator(x36) });
+  }
+  out.push({ name: "declarations", value: { kind: "list", items: items36 } });
+  return out;
+}
+
+function fieldsOfStmt_return(n: Ref<Extract<Stmt, { kind: "return" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.value === undefined) out.push({ name: "value", value: { kind: "none" } });
+  else {
+    out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_if(n: Ref<Extract<Stmt, { kind: "if" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "cond", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.cond) } });
+  let items37: QuoteValue[] = [];
+  for (const x37 of n.then) {
+    items37.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x37) });
+  }
+  out.push({ name: "then", value: { kind: "list", items: items37 } });
+  if (n.else === undefined) out.push({ name: "else", value: { kind: "none" } });
+  else {
+    let items38: QuoteValue[] = [];
+    for (const x38 of n.else) {
+      items38.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x38) });
+    }
+    out.push({ name: "else", value: { kind: "list", items: items38 } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_while(n: Ref<Extract<Stmt, { kind: "while" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "cond", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.cond) } });
+  let items39: QuoteValue[] = [];
+  for (const x39 of n.body) {
+    items39.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x39) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items39 } });
+  return out;
+}
+
+function fieldsOfStmt_doWhile(n: Ref<Extract<Stmt, { kind: "doWhile" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items40: QuoteValue[] = [];
+  for (const x40 of n.body) {
+    items40.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x40) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items40 } });
+  out.push({ name: "cond", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.cond) } });
+  return out;
+}
+
+function fieldsOfStmt_switch(n: Ref<Extract<Stmt, { kind: "switch" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "discriminant", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.discriminant) } });
+  let items41: QuoteValue[] = [];
+  for (const x41 of n.cases) {
+    items41.push({ kind: "node", of: "switchCase", fields: fieldsOfSwitchCase(x41) });
+  }
+  out.push({ name: "cases", value: { kind: "list", items: items41 } });
+  return out;
+}
+
+function fieldsOfStmt_labeled(n: Ref<Extract<Stmt, { kind: "labeled" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "label", value: { kind: "text", value: n.label } });
+  out.push({ name: "body", value: { kind: "node", of: "stmt", fields: fieldsOfStmt(n.body) } });
+  return out;
+}
+
+function fieldsOfStmt_break(n: Ref<Extract<Stmt, { kind: "break" | "continue" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.label === undefined) out.push({ name: "label", value: { kind: "none" } });
+  else {
+    out.push({ name: "label", value: { kind: "text", value: n.label } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_continue(n: Ref<Extract<Stmt, { kind: "break" | "continue" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.label === undefined) out.push({ name: "label", value: { kind: "none" } });
+  else {
+    out.push({ name: "label", value: { kind: "text", value: n.label } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_throw(n: Ref<Extract<Stmt, { kind: "throw" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfStmt_try(n: Ref<Extract<Stmt, { kind: "try" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items42: QuoteValue[] = [];
+  for (const x42 of n.block) {
+    items42.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x42) });
+  }
+  out.push({ name: "block", value: { kind: "list", items: items42 } });
+  if (n.param === undefined) out.push({ name: "param", value: { kind: "none" } });
+  else {
+    out.push({ name: "param", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.param) } });
+  }
+  if (n.paramType === undefined) out.push({ name: "paramType", value: { kind: "none" } });
+  else {
+    out.push({ name: "paramType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.paramType) } });
+  }
+  if (n.handler === undefined) out.push({ name: "handler", value: { kind: "none" } });
+  else {
+    let items43: QuoteValue[] = [];
+    for (const x43 of n.handler) {
+      items43.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x43) });
+    }
+    out.push({ name: "handler", value: { kind: "list", items: items43 } });
+  }
+  if (n.finalizer === undefined) out.push({ name: "finalizer", value: { kind: "none" } });
+  else {
+    let items44: QuoteValue[] = [];
+    for (const x44 of n.finalizer) {
+      items44.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x44) });
+    }
+    out.push({ name: "finalizer", value: { kind: "list", items: items44 } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_for(n: Ref<Extract<Stmt, { kind: "for" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.init === undefined) out.push({ name: "init", value: { kind: "none" } });
+  else {
+    out.push({ name: "init", value: { kind: "node", of: "stmt", fields: fieldsOfStmt(n.init) } });
+  }
+  if (n.test === undefined) out.push({ name: "test", value: { kind: "none" } });
+  else {
+    out.push({ name: "test", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.test) } });
+  }
+  if (n.update === undefined) out.push({ name: "update", value: { kind: "none" } });
+  else {
+    out.push({ name: "update", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.update) } });
+  }
+  let items45: QuoteValue[] = [];
+  for (const x45 of n.body) {
+    items45.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x45) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items45 } });
+  return out;
+}
+
+function fieldsOfStmt_forIn(n: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "await", value: { kind: "boolean", value: n.await } });
+  out.push({ name: "left", value: oneOf1(n.left) });
+  out.push({ name: "right", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.right) } });
+  let items46: QuoteValue[] = [];
+  for (const x46 of n.body) {
+    items46.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x46) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items46 } });
+  return out;
+}
+
+function fieldsOfStmt_forOf(n: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "await", value: { kind: "boolean", value: n.await } });
+  out.push({ name: "left", value: oneOf1(n.left) });
+  out.push({ name: "right", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.right) } });
+  let items47: QuoteValue[] = [];
+  for (const x47 of n.body) {
+    items47.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x47) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items47 } });
+  return out;
+}
+
+function fieldsOfStmt_block(n: Ref<Extract<Stmt, { kind: "block" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items48: QuoteValue[] = [];
+  for (const x48 of n.body) {
+    items48.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x48) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items48 } });
+  return out;
+}
+
+function fieldsOfStmt_empty(n: Ref<Extract<Stmt, { kind: "empty" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  return out;
+}
+
+function fieldsOfStmt_debugger(n: Ref<Extract<Stmt, { kind: "debugger" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  return out;
+}
+
+function fieldsOfStmt_enum(n: Ref<Extract<Stmt, { kind: "enum" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  out.push({ name: "const", value: { kind: "boolean", value: n.const } });
+  let items49: QuoteValue[] = [];
+  for (const x49 of n.typeParams) {
+    items49.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x49) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items49 } });
+  let items50: QuoteValue[] = [];
+  for (const x50 of n.members) {
+    items50.push({ kind: "node", of: "enumMember", fields: fieldsOfEnumMember(x50) });
+  }
+  out.push({ name: "members", value: { kind: "list", items: items50 } });
+  if (n.decorators !== undefined) {
+    let items51: QuoteValue[] = [];
+    for (const x51 of n.decorators) {
+      items51.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x51) });
+    }
+    out.push({ name: "decorators", value: { kind: "list", items: items51 } });
+  }
+  if (n.derives !== undefined) {
+    let items52: QuoteValue[] = [];
+    for (const x52 of n.derives) {
+      items52.push({ kind: "text", value: x52 });
+    }
+    out.push({ name: "derives", value: { kind: "list", items: items52 } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_namespace(n: Ref<Extract<Stmt, { kind: "namespace" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  out.push({ name: "quoted", value: { kind: "boolean", value: n.quoted } });
+  out.push({ name: "global", value: { kind: "boolean", value: n.global } });
+  if (n.body === undefined) out.push({ name: "body", value: { kind: "none" } });
+  else {
+    let items53: QuoteValue[] = [];
+    for (const x53 of n.body) {
+      items53.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x53) });
+    }
+    out.push({ name: "body", value: { kind: "list", items: items53 } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_declare(n: Ref<Extract<Stmt, { kind: "declare" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "body", value: { kind: "node", of: "stmt", fields: fieldsOfStmt(n.body) } });
+  return out;
+}
+
+function fieldsOfStmt_comptime(n: Ref<Extract<Stmt, { kind: "comptime" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items54: QuoteValue[] = [];
+  for (const x54 of n.body) {
+    items54.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x54) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items54 } });
+  return out;
+}
+
+function fieldsOfStmt_unsafe(n: Ref<Extract<Stmt, { kind: "unsafe" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items55: QuoteValue[] = [];
+  for (const x55 of n.body) {
+    items55.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x55) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items55 } });
+  return out;
+}
+
+function fieldsOfStmt_import(n: Ref<Extract<Stmt, { kind: "import" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "typeOnly", value: { kind: "boolean", value: n.typeOnly } });
+  out.push({ name: "defer", value: { kind: "boolean", value: n.defer } });
+  if (n.default === undefined) out.push({ name: "default", value: { kind: "none" } });
+  else {
+    out.push({ name: "default", value: { kind: "text", value: n.default } });
+  }
+  if (n.namespace === undefined) out.push({ name: "namespace", value: { kind: "none" } });
+  else {
+    out.push({ name: "namespace", value: { kind: "text", value: n.namespace } });
+  }
+  if (n.named === undefined) out.push({ name: "named", value: { kind: "none" } });
+  else {
+    let items56: QuoteValue[] = [];
+    for (const x56 of n.named) {
+      items56.push({ kind: "node", of: "specifier", fields: fieldsOfSpecifier(x56) });
+    }
+    out.push({ name: "named", value: { kind: "list", items: items56 } });
+  }
+  out.push({ name: "module", value: { kind: "text", value: n.module } });
+  if (n.attributes === undefined) out.push({ name: "attributes", value: { kind: "none" } });
+  else {
+    out.push({ name: "attributes", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.attributes) } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_importEquals(n: Ref<Extract<Stmt, { kind: "importEquals" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "typeOnly", value: { kind: "boolean", value: n.typeOnly } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.require === undefined) out.push({ name: "require", value: { kind: "none" } });
+  else {
+    out.push({ name: "require", value: { kind: "text", value: n.require } });
+  }
+  if (n.entity === undefined) out.push({ name: "entity", value: { kind: "none" } });
+  else {
+    out.push({ name: "entity", value: { kind: "text", value: n.entity } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_export(n: Ref<Extract<Stmt, { kind: "export" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "body", value: { kind: "node", of: "stmt", fields: fieldsOfStmt(n.body) } });
+  return out;
+}
+
+function fieldsOfStmt_exportDefault(n: Ref<Extract<Stmt, { kind: "exportDefault" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.declaration === undefined) out.push({ name: "declaration", value: { kind: "none" } });
+  else {
+    out.push({ name: "declaration", value: { kind: "node", of: "stmt", fields: fieldsOfStmt(n.declaration) } });
+  }
+  if (n.value === undefined) out.push({ name: "value", value: { kind: "none" } });
+  else {
+    out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_exportNamed(n: Ref<Extract<Stmt, { kind: "exportNamed" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "typeOnly", value: { kind: "boolean", value: n.typeOnly } });
+  let items57: QuoteValue[] = [];
+  for (const x57 of n.specifiers) {
+    items57.push({ kind: "node", of: "specifier", fields: fieldsOfSpecifier(x57) });
+  }
+  out.push({ name: "specifiers", value: { kind: "list", items: items57 } });
+  if (n.module === undefined) out.push({ name: "module", value: { kind: "none" } });
+  else {
+    out.push({ name: "module", value: { kind: "text", value: n.module } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_exportAll(n: Ref<Extract<Stmt, { kind: "exportAll" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "typeOnly", value: { kind: "boolean", value: n.typeOnly } });
+  if (n.alias === undefined) out.push({ name: "alias", value: { kind: "none" } });
+  else {
+    out.push({ name: "alias", value: { kind: "text", value: n.alias } });
+  }
+  out.push({ name: "module", value: { kind: "text", value: n.module } });
+  return out;
+}
+
+function fieldsOfStmt_exportAssign(n: Ref<Extract<Stmt, { kind: "exportAssign" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfStmt_exportAsNamespace(n: Ref<Extract<Stmt, { kind: "exportAsNamespace" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  return out;
+}
+
+function fieldsOfTypeAlias_typeAlias(n: Ref<Extract<TypeAlias, { kind: "typeAlias" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  let items58: QuoteValue[] = [];
+  for (const x58 of n.typeParams) {
+    items58.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x58) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items58 } });
+  out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  if (n.decorators !== undefined) {
+    let items59: QuoteValue[] = [];
+    for (const x59 of n.decorators) {
+      items59.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x59) });
+    }
+    out.push({ name: "decorators", value: { kind: "list", items: items59 } });
+  }
+  if (n.js !== undefined) {
+    out.push({ name: "js", value: { kind: "node", of: "jsName", fields: fieldsOfJsName(n.js) } });
+  }
+  if (n.shown !== undefined) {
+    out.push({ name: "shown", value: { kind: "text", value: n.shown } });
+  }
+  return out;
+}
+
+function fieldsOfInterface_interface(n: Ref<Extract<Interface, { kind: "interface" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  let items60: QuoteValue[] = [];
+  for (const x60 of n.typeParams) {
+    items60.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x60) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items60 } });
+  let items61: QuoteValue[] = [];
+  for (const x61 of n.extends) {
+    items61.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x61) });
+  }
+  out.push({ name: "extends", value: { kind: "list", items: items61 } });
+  let items62: QuoteValue[] = [];
+  for (const x62 of n.members) {
+    items62.push({ kind: "node", of: "typeMember", fields: fieldsOfTypeMember(x62) });
+  }
+  out.push({ name: "members", value: { kind: "list", items: items62 } });
+  if (n.decorators !== undefined) {
+    let items63: QuoteValue[] = [];
+    for (const x63 of n.decorators) {
+      items63.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x63) });
+    }
+    out.push({ name: "decorators", value: { kind: "list", items: items63 } });
+  }
+  if (n.js !== undefined) {
+    out.push({ name: "js", value: { kind: "node", of: "jsName", fields: fieldsOfJsName(n.js) } });
+  }
+  if (n.jsClass !== undefined) {
+    out.push({ name: "jsClass", value: recordOf2(n.jsClass) });
+  }
+  if (n.jsSource !== undefined) {
+    out.push({ name: "jsSource", value: { kind: "node", of: "stmt", fields: fieldsOfStmt(n.jsSource) } });
+  }
+  return out;
+}
+
+function fieldsOfFunc_function(n: Ref<Extract<Func, { kind: "function" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  out.push({ name: "async", value: { kind: "boolean", value: n.async } });
+  out.push({ name: "generator", value: { kind: "boolean", value: n.generator } });
+  out.push({ name: "macro", value: { kind: "boolean", value: n.macro } });
+  let items67: QuoteValue[] = [];
+  for (const x67 of n.typeParams) {
+    items67.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x67) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items67 } });
+  let items68: QuoteValue[] = [];
+  for (const x68 of n.params) {
+    items68.push({ kind: "node", of: "param", fields: fieldsOfParam(x68) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items68 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  if (n.throws !== undefined) {
+    out.push({ name: "throws", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.throws) } });
+  }
+  if (n.body === undefined) out.push({ name: "body", value: { kind: "none" } });
+  else {
+    let items69: QuoteValue[] = [];
+    for (const x69 of n.body) {
+      items69.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x69) });
+    }
+    out.push({ name: "body", value: { kind: "list", items: items69 } });
+  }
+  if (n.decorators !== undefined) {
+    let items70: QuoteValue[] = [];
+    for (const x70 of n.decorators) {
+      items70.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x70) });
+    }
+    out.push({ name: "decorators", value: { kind: "list", items: items70 } });
+  }
+  if (n.js !== undefined) {
+    out.push({ name: "js", value: { kind: "node", of: "jsName", fields: fieldsOfJsName(n.js) } });
+  }
+  if (n.overloadNames !== undefined) {
+    let items71: QuoteValue[] = [];
+    for (const x71 of n.overloadNames) {
+      items71.push({ kind: "text", value: x71 });
+    }
+    out.push({ name: "overloadNames", value: { kind: "list", items: items71 } });
+  }
+  if (n.signature !== undefined) {
+    out.push({ name: "signature", value: { kind: "boolean", value: n.signature } });
+  }
+  return out;
+}
+
+function fieldsOfStmt_class(n: Ref<Extract<Stmt, { kind: "class" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  if (n.name === undefined) out.push({ name: "name", value: { kind: "none" } });
+  else {
+    out.push({ name: "name", value: { kind: "text", value: n.name } });
+  }
+  out.push({ name: "abstract", value: { kind: "boolean", value: n.abstract } });
+  let items72: QuoteValue[] = [];
+  for (const x72 of n.decorators) {
+    items72.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x72) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items72 } });
+  let items73: QuoteValue[] = [];
+  for (const x73 of n.typeParams) {
+    items73.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x73) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items73 } });
+  if (n.extends === undefined) out.push({ name: "extends", value: { kind: "none" } });
+  else {
+    out.push({ name: "extends", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.extends) } });
+  }
+  let items74: QuoteValue[] = [];
+  for (const x74 of n.implements) {
+    items74.push({ kind: "node", of: "typeNode", fields: fieldsOfTypeNode(x74) });
+  }
+  out.push({ name: "implements", value: { kind: "list", items: items74 } });
+  let items75: QuoteValue[] = [];
+  for (const x75 of n.members) {
+    items75.push({ kind: "node", of: "classMember", fields: fieldsOfClassMember(x75) });
+  }
+  out.push({ name: "members", value: { kind: "list", items: items75 } });
+  if (n.derives !== undefined) {
+    let items76: QuoteValue[] = [];
+    for (const x76 of n.derives) {
+      items76.push({ kind: "text", value: x76 });
+    }
+    out.push({ name: "derives", value: { kind: "list", items: items76 } });
+  }
+  return out;
+}
+
+function fieldsOfTypeMember_property(n: Ref<Extract<TypeMember, { kind: "property" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: oneOf3(n.name) });
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  out.push({ name: "readonly", value: { kind: "boolean", value: n.readonly } });
+  if (n.type === undefined) out.push({ name: "type", value: { kind: "none" } });
+  else {
+    out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  }
+  return out;
+}
+
+function fieldsOfTypeMember_method(n: Ref<Extract<TypeMember, { kind: "method" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: oneOf3(n.name) });
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  let items77: QuoteValue[] = [];
+  for (const x77 of n.typeParams) {
+    items77.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x77) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items77 } });
+  let items78: QuoteValue[] = [];
+  for (const x78 of n.params) {
+    items78.push({ kind: "node", of: "param", fields: fieldsOfParam(x78) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items78 } });
+  if (n.returns === undefined) out.push({ name: "returns", value: { kind: "none" } });
+  else {
+    out.push({ name: "returns", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returns) } });
+  }
+  if (n.throws !== undefined) {
+    out.push({ name: "throws", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.throws) } });
+  }
+  return out;
+}
+
+function fieldsOfTypeMember_call(n: Ref<Extract<TypeMember, { kind: "call" | "construct" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items79: QuoteValue[] = [];
+  for (const x79 of n.typeParams) {
+    items79.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x79) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items79 } });
+  let items80: QuoteValue[] = [];
+  for (const x80 of n.params) {
+    items80.push({ kind: "node", of: "param", fields: fieldsOfParam(x80) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items80 } });
+  if (n.returns === undefined) out.push({ name: "returns", value: { kind: "none" } });
+  else {
+    out.push({ name: "returns", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returns) } });
+  }
+  return out;
+}
+
+function fieldsOfTypeMember_construct(n: Ref<Extract<TypeMember, { kind: "call" | "construct" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items81: QuoteValue[] = [];
+  for (const x81 of n.typeParams) {
+    items81.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x81) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items81 } });
+  let items82: QuoteValue[] = [];
+  for (const x82 of n.params) {
+    items82.push({ kind: "node", of: "param", fields: fieldsOfParam(x82) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items82 } });
+  if (n.returns === undefined) out.push({ name: "returns", value: { kind: "none" } });
+  else {
+    out.push({ name: "returns", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returns) } });
+  }
+  return out;
+}
+
+function fieldsOfTypeMember_index(n: Ref<Extract<TypeMember, { kind: "index" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "readonly", value: { kind: "boolean", value: n.readonly } });
+  let items83: QuoteValue[] = [];
+  for (const x83 of n.params) {
+    items83.push({ kind: "node", of: "param", fields: fieldsOfParam(x83) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items83 } });
+  out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  return out;
+}
+
+function fieldsOfTypeMember_get(n: Ref<Extract<TypeMember, { kind: "get" | "set" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: oneOf3(n.name) });
+  let items84: QuoteValue[] = [];
+  for (const x84 of n.params) {
+    items84.push({ kind: "node", of: "param", fields: fieldsOfParam(x84) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items84 } });
+  if (n.returns === undefined) out.push({ name: "returns", value: { kind: "none" } });
+  else {
+    out.push({ name: "returns", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returns) } });
+  }
+  return out;
+}
+
+function fieldsOfTypeMember_set(n: Ref<Extract<TypeMember, { kind: "get" | "set" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: oneOf3(n.name) });
+  let items85: QuoteValue[] = [];
+  for (const x85 of n.params) {
+    items85.push({ kind: "node", of: "param", fields: fieldsOfParam(x85) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items85 } });
+  if (n.returns === undefined) out.push({ name: "returns", value: { kind: "none" } });
+  else {
+    out.push({ name: "returns", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returns) } });
+  }
+  return out;
+}
+
+function fieldsOfObjectProp_property(n: Ref<Extract<ObjectProp, { kind: "property" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "key", value: oneOf3(n.key) });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfObjectProp_shorthand(n: Ref<Extract<ObjectProp, { kind: "shorthand" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.default === undefined) out.push({ name: "default", value: { kind: "none" } });
+  else {
+    out.push({ name: "default", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.default) } });
+  }
+  return out;
+}
+
+function fieldsOfObjectProp_spread(n: Ref<Extract<ObjectProp, { kind: "spread" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfObjectProp_method(n: Ref<Extract<ObjectProp, { kind: "method" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "key", value: oneOf3(n.key) });
+  out.push({ name: "async", value: { kind: "boolean", value: n.async } });
+  out.push({ name: "generator", value: { kind: "boolean", value: n.generator } });
+  let items86: QuoteValue[] = [];
+  for (const x86 of n.typeParams) {
+    items86.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x86) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items86 } });
+  let items87: QuoteValue[] = [];
+  for (const x87 of n.params) {
+    items87.push({ kind: "node", of: "param", fields: fieldsOfParam(x87) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items87 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  let items88: QuoteValue[] = [];
+  for (const x88 of n.body) {
+    items88.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x88) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items88 } });
+  return out;
+}
+
+function fieldsOfObjectProp_get(n: Ref<Extract<ObjectProp, { kind: "get" | "set" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "key", value: oneOf3(n.key) });
+  let items89: QuoteValue[] = [];
+  for (const x89 of n.params) {
+    items89.push({ kind: "node", of: "param", fields: fieldsOfParam(x89) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items89 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  let items90: QuoteValue[] = [];
+  for (const x90 of n.body) {
+    items90.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x90) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items90 } });
+  return out;
+}
+
+function fieldsOfObjectProp_set(n: Ref<Extract<ObjectProp, { kind: "get" | "set" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "key", value: oneOf3(n.key) });
+  let items91: QuoteValue[] = [];
+  for (const x91 of n.params) {
+    items91.push({ kind: "node", of: "param", fields: fieldsOfParam(x91) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items91 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  let items92: QuoteValue[] = [];
+  for (const x92 of n.body) {
+    items92.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x92) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items92 } });
+  return out;
+}
+
+function fieldsOfClassMember_field(n: Ref<Extract<ClassMember, { kind: "field" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items98: QuoteValue[] = [];
+  for (const x98 of n.modifiers) {
+    items98.push({ kind: "text", value: x98 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items98 } });
+  let items99: QuoteValue[] = [];
+  for (const x99 of n.decorators) {
+    items99.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x99) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items99 } });
+  out.push({ name: "name", value: oneOf3(n.name) });
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  out.push({ name: "definite", value: { kind: "boolean", value: n.definite } });
+  if (n.type === undefined) out.push({ name: "type", value: { kind: "none" } });
+  else {
+    out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  }
+  if (n.init === undefined) out.push({ name: "init", value: { kind: "none" } });
+  else {
+    out.push({ name: "init", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.init) } });
+  }
+  return out;
+}
+
+function fieldsOfClassMember_method(n: Ref<Extract<ClassMember, { kind: "method" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items100: QuoteValue[] = [];
+  for (const x100 of n.modifiers) {
+    items100.push({ kind: "text", value: x100 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items100 } });
+  let items101: QuoteValue[] = [];
+  for (const x101 of n.decorators) {
+    items101.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x101) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items101 } });
+  out.push({ name: "name", value: oneOf3(n.name) });
+  out.push({ name: "optional", value: { kind: "boolean", value: n.optional } });
+  out.push({ name: "generator", value: { kind: "boolean", value: n.generator } });
+  let items102: QuoteValue[] = [];
+  for (const x102 of n.typeParams) {
+    items102.push({ kind: "node", of: "typeParam", fields: fieldsOfTypeParam(x102) });
+  }
+  out.push({ name: "typeParams", value: { kind: "list", items: items102 } });
+  let items103: QuoteValue[] = [];
+  for (const x103 of n.params) {
+    items103.push({ kind: "node", of: "param", fields: fieldsOfParam(x103) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items103 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  if (n.throws !== undefined) {
+    out.push({ name: "throws", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.throws) } });
+  }
+  if (n.body === undefined) out.push({ name: "body", value: { kind: "none" } });
+  else {
+    let items104: QuoteValue[] = [];
+    for (const x104 of n.body) {
+      items104.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x104) });
+    }
+    out.push({ name: "body", value: { kind: "list", items: items104 } });
+  }
+  if (n.overloadNames !== undefined) {
+    let items105: QuoteValue[] = [];
+    for (const x105 of n.overloadNames) {
+      items105.push({ kind: "text", value: x105 });
+    }
+    out.push({ name: "overloadNames", value: { kind: "list", items: items105 } });
+  }
+  if (n.signature !== undefined) {
+    out.push({ name: "signature", value: { kind: "boolean", value: n.signature } });
+  }
+  return out;
+}
+
+function fieldsOfClassMember_constructor(n: Ref<Extract<ClassMember, { kind: "constructor" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items106: QuoteValue[] = [];
+  for (const x106 of n.modifiers) {
+    items106.push({ kind: "text", value: x106 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items106 } });
+  let items107: QuoteValue[] = [];
+  for (const x107 of n.decorators) {
+    items107.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x107) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items107 } });
+  let items108: QuoteValue[] = [];
+  for (const x108 of n.params) {
+    items108.push({ kind: "node", of: "param", fields: fieldsOfParam(x108) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items108 } });
+  if (n.throws !== undefined) {
+    out.push({ name: "throws", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.throws) } });
+  }
+  if (n.body === undefined) out.push({ name: "body", value: { kind: "none" } });
+  else {
+    let items109: QuoteValue[] = [];
+    for (const x109 of n.body) {
+      items109.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x109) });
+    }
+    out.push({ name: "body", value: { kind: "list", items: items109 } });
+  }
+  return out;
+}
+
+function fieldsOfClassMember_get(n: Ref<Extract<ClassMember, { kind: "get" | "set" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items110: QuoteValue[] = [];
+  for (const x110 of n.modifiers) {
+    items110.push({ kind: "text", value: x110 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items110 } });
+  let items111: QuoteValue[] = [];
+  for (const x111 of n.decorators) {
+    items111.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x111) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items111 } });
+  out.push({ name: "name", value: oneOf3(n.name) });
+  let items112: QuoteValue[] = [];
+  for (const x112 of n.params) {
+    items112.push({ kind: "node", of: "param", fields: fieldsOfParam(x112) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items112 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  if (n.throws !== undefined) {
+    out.push({ name: "throws", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.throws) } });
+  }
+  if (n.body === undefined) out.push({ name: "body", value: { kind: "none" } });
+  else {
+    let items113: QuoteValue[] = [];
+    for (const x113 of n.body) {
+      items113.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x113) });
+    }
+    out.push({ name: "body", value: { kind: "list", items: items113 } });
+  }
+  return out;
+}
+
+function fieldsOfClassMember_set(n: Ref<Extract<ClassMember, { kind: "get" | "set" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items114: QuoteValue[] = [];
+  for (const x114 of n.modifiers) {
+    items114.push({ kind: "text", value: x114 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items114 } });
+  let items115: QuoteValue[] = [];
+  for (const x115 of n.decorators) {
+    items115.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x115) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items115 } });
+  out.push({ name: "name", value: oneOf3(n.name) });
+  let items116: QuoteValue[] = [];
+  for (const x116 of n.params) {
+    items116.push({ kind: "node", of: "param", fields: fieldsOfParam(x116) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items116 } });
+  if (n.returnType === undefined) out.push({ name: "returnType", value: { kind: "none" } });
+  else {
+    out.push({ name: "returnType", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.returnType) } });
+  }
+  if (n.throws !== undefined) {
+    out.push({ name: "throws", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.throws) } });
+  }
+  if (n.body === undefined) out.push({ name: "body", value: { kind: "none" } });
+  else {
+    let items117: QuoteValue[] = [];
+    for (const x117 of n.body) {
+      items117.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x117) });
+    }
+    out.push({ name: "body", value: { kind: "list", items: items117 } });
+  }
+  return out;
+}
+
+function fieldsOfClassMember_index(n: Ref<Extract<ClassMember, { kind: "index" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items118: QuoteValue[] = [];
+  for (const x118 of n.modifiers) {
+    items118.push({ kind: "text", value: x118 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items118 } });
+  let items119: QuoteValue[] = [];
+  for (const x119 of n.decorators) {
+    items119.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x119) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items119 } });
+  let items120: QuoteValue[] = [];
+  for (const x120 of n.params) {
+    items120.push({ kind: "node", of: "param", fields: fieldsOfParam(x120) });
+  }
+  out.push({ name: "params", value: { kind: "list", items: items120 } });
+  out.push({ name: "type", value: { kind: "node", of: "typeNode", fields: fieldsOfTypeNode(n.type) } });
+  return out;
+}
+
+function fieldsOfClassMember_staticBlock(n: Ref<Extract<ClassMember, { kind: "staticBlock" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items121: QuoteValue[] = [];
+  for (const x121 of n.modifiers) {
+    items121.push({ kind: "text", value: x121 });
+  }
+  out.push({ name: "modifiers", value: { kind: "list", items: items121 } });
+  let items122: QuoteValue[] = [];
+  for (const x122 of n.decorators) {
+    items122.push({ kind: "node", of: "expr", fields: fieldsOfExpr(x122) });
+  }
+  out.push({ name: "decorators", value: { kind: "list", items: items122 } });
+  let items123: QuoteValue[] = [];
+  for (const x123 of n.body) {
+    items123.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x123) });
+  }
+  out.push({ name: "body", value: { kind: "list", items: items123 } });
+  return out;
+}
+
+function fieldsOfPattern_ident(n: Ref<Extract<Pattern, { kind: "ident" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  return out;
+}
+
+function fieldsOfPattern_object(n: Ref<Extract<Pattern, { kind: "object" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items126: QuoteValue[] = [];
+  for (const x126 of n.props) {
+    items126.push({ kind: "node", of: "patternProp", fields: fieldsOfPatternProp(x126) });
+  }
+  out.push({ name: "props", value: { kind: "list", items: items126 } });
+  if (n.rest === undefined) out.push({ name: "rest", value: { kind: "none" } });
+  else {
+    out.push({ name: "rest", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.rest) } });
+  }
+  return out;
+}
+
+function fieldsOfPattern_array(n: Ref<Extract<Pattern, { kind: "array" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items127: QuoteValue[] = [];
+  for (const x127 of n.elements) {
+    if (x127 === undefined) items127.push({ kind: "none" });
+    else {
+      items127.push({ kind: "node", of: "pattern", fields: fieldsOfPattern(x127) });
+    }
+  }
+  out.push({ name: "elements", value: { kind: "list", items: items127 } });
+  if (n.rest === undefined) out.push({ name: "rest", value: { kind: "none" } });
+  else {
+    out.push({ name: "rest", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.rest) } });
+  }
+  return out;
+}
+
+function fieldsOfPattern_default(n: Ref<Extract<Pattern, { kind: "default" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "target", value: { kind: "node", of: "pattern", fields: fieldsOfPattern(n.target) } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfPattern_expr(n: Ref<Extract<Pattern, { kind: "expr" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "expr", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.expr) } });
+  return out;
+}
+
+function fieldsOfPattern_wildcard(n: Ref<Extract<Pattern, { kind: "wildcard" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  return out;
+}
+
+function fieldsOfPattern_literal(n: Ref<Extract<Pattern, { kind: "literal" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "value", value: { kind: "node", of: "expr", fields: fieldsOfExpr(n.value) } });
+  return out;
+}
+
+function fieldsOfPattern_variant(n: Ref<Extract<Pattern, { kind: "variant" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  out.push({ name: "name", value: { kind: "text", value: n.name } });
+  if (n.args === undefined) out.push({ name: "args", value: { kind: "none" } });
+  else {
+    let items128: QuoteValue[] = [];
+    for (const x128 of n.args) {
+      items128.push({ kind: "node", of: "pattern", fields: fieldsOfPattern(x128) });
+    }
+    out.push({ name: "args", value: { kind: "list", items: items128 } });
+  }
+  return out;
+}
+
+function fieldsOfPattern_or(n: Ref<Extract<Pattern, { kind: "or" }>>): QuoteField[] {
+  let out: QuoteField[] = [];
+  out.push({ name: "kind", value: { kind: "text", value: n.kind } });
+  out.push({ name: "start", value: { kind: "int", value: n.start as i64 } });
+  out.push({ name: "end", value: { kind: "int", value: n.end as i64 } });
+  out.push({ name: "id", value: { kind: "int", value: n.id as i64 } });
+  let items129: QuoteValue[] = [];
+  for (const x129 of n.patterns) {
+    items129.push({ kind: "node", of: "pattern", fields: fieldsOfPattern(x129) });
+  }
+  out.push({ name: "patterns", value: { kind: "list", items: items129 } });
+  return out;
+}
+
+function oneOf0(n: Ref<Expr | Stmt[]>): QuoteValue {
+  if (Array.isArray(n)) {
+    let items22: QuoteValue[] = [];
+    for (const x22 of n) {
+      items22.push({ kind: "node", of: "stmt", fields: fieldsOfStmt(x22) });
+    }
+    return { kind: "list", items: items22 };
+  }
+  return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+}
+
+function oneOf1(n: Ref<Stmt | Pattern>): QuoteValue {
+  switch (n.kind) {
+    case "expr":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "let":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "return":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "if":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "while":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "doWhile":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "switch":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "labeled":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "break":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "continue":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "throw":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "try":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "for":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "forIn":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "forOf":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "block":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "empty":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "debugger":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "enum":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "namespace":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "declare":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "comptime":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "unsafe":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "import":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "importEquals":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "export":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "exportDefault":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "exportNamed":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "exportAll":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "exportAssign":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "exportAsNamespace":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "typeAlias":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "interface":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "function":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "class":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+    case "ident":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n) };
+    case "object":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n) };
+    case "array":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n) };
+    case "default":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n) };
+    case "wildcard":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n) };
+    case "literal":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n) };
+    case "variant":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n) };
+    case "or":
+      return { kind: "node", of: "pattern", fields: fieldsOfPattern(n) };
+  }
+  return { kind: "none" };
+}
+
+function recordOf2(n: Ref<{ constructors: Param[][]; statics: TypeMember[] }>): QuoteValue {
+  let out: QuoteField[] = [];
+  let items64: QuoteValue[] = [];
+  for (const x64 of n.constructors) {
+    let items65: QuoteValue[] = [];
+    for (const x65 of x64) {
+      items65.push({ kind: "node", of: "param", fields: fieldsOfParam(x65) });
+    }
+    items64.push({ kind: "list", items: items65 });
+  }
+  out.push({ name: "constructors", value: { kind: "list", items: items64 } });
+  let items66: QuoteValue[] = [];
+  for (const x66 of n.statics) {
+    items66.push({ kind: "node", of: "typeMember", fields: fieldsOfTypeMember(x66) });
+  }
+  out.push({ name: "statics", value: { kind: "list", items: items66 } });
+  return { kind: "record", fields: out };
+}
+
+function oneOf3(n: Ref<PropertyName>): QuoteValue {
+  if (typeof n === "string") return { kind: "text", value: `${n}` };
+  return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+}
+
+function oneOf4(n: Ref<Expr | Extract<Stmt, { kind: "block" }>>): QuoteValue {
+  switch (n.kind) {
+    case "int":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "float":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "bigint":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "null":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "this":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "super":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "regex":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "template":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "tagged":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "bool":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "string":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "ident":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "spread":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "array":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "object":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "function":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "arrow":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "member":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "index":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "call":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "new":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "instantiation":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "meta":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "import":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "nonNull":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "throw":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "class":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "privateName":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "unary":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "update":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "binary":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "conditional":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "assign":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "pipe":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "topic":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "match":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "comptime":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "unsafe":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "destructure":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "sequence":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "yield":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "as":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "satisfies":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "assertion":
+      return { kind: "node", of: "expr", fields: fieldsOfExpr(n) };
+    case "block":
+      return { kind: "node", of: "stmt", fields: fieldsOfStmt(n) };
+  }
+  return { kind: "none" };
 }

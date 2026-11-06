@@ -380,3 +380,34 @@ class Box<T> {
 }
 function main() { console.log(Box.f(3)) }
 // expect: 3
+// case: generic_class_constructor_destructures
+// expect: 2 3
+// A pattern in a generic class's constructor binds its names in every instance's copy.
+class Table<K, V> {
+  count: i64 = 0;
+  constructor(entries: [K, V][]) {
+    let a = entries;
+    while (a.length > 0) {
+      const [k, v] = a.shift()!;
+      this.put(k, v);
+    }
+  }
+  put(this: Mut<this>, _k: K, _v: V): void { this.count += 1 }
+}
+function main() {
+  const xs: [string, i64][] = [["a", 1], ["b", 2]];
+  const ys: [i64, boolean][] = [[1, true], [2, false], [3, true]];
+  print(new Table<string, i64>(xs).count, new Table<i64, boolean>(ys).count)
+}
+// case: generic_class_for_head_declarations
+// expect: 3 3
+// A `for` head declaring several names, in a generic class's constructor, scopes them in every instance.
+class Counter<T> {
+  n: i64 = 0;
+  constructor(_x: T) {
+    for (let i = 0, j = 3; i < j; i++) this.n += 1;
+  }
+}
+function main() {
+  print(new Counter<i64>(1).n, new Counter<string>("s").n)
+}

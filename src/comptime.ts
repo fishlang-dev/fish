@@ -150,22 +150,68 @@ export function comptimeCall(instance: Instance, args: Value[], site: Span): Val
   return guarded(instance.tables, site, (run) => run.call(instance, args, undefined, site));
 }
 
-// How a quoted tree, or a declaration a macro takes, becomes a value while compiling.
-/** @throws {CompileError} */
-export const astValues = (splice: (i: usize, into: Type) => Value, holes: Value[] = [], at: Span = { start: 0, end: 0 }): Builder<Value> => ({
-  record: (t, fields) => ({ kind: "record", type: t, fields }),
-  array: (items) => ({ kind: "array", items }),
-  member: (v, _, m) => ({ kind: "member", type: m, value: v }),
-  splice,
+// How a quoted tree, or a declaration a macro takes, becomes a value while compiling. Each
+// splice's value comes from `spliced`, or is nothing without it.
+export class AstValues implements Builder<Value> {
+  spliced: ((i: usize, into: Type) => Value) | undefined;
+  holes: Value[];
+  at: Span;
+
+  constructor(spliced: ((i: usize, into: Type) => Value) | undefined, holes: Value[] = [], at: Span = { start: 0, end: 0 }) {
+    this.spliced = spliced;
+    this.holes = holes;
+    this.at = at;
+  }
+
+  record(type: ObjectType, fields: Map<string, Value>): Value {
+    return { kind: "record", type, fields };
+  }
+
+  array(items: Value[]): Value {
+    return { kind: "array", items };
+  }
+
+  member(value: Value, _of: Type, member: Type): Value {
+    return { kind: "member", type: member, value };
+  }
+
+  /** @throws {CompileError} */
+  splice(i: usize, into: Type): Value {
+    return this.spliced !== undefined ? this.spliced(i, into) : null;
+  }
+
   // A splice where a name goes: the name of the identifier it is.
-  name: (i) => {
-    const v = untagged(holes[i]);
+  /** @throws {CompileError} */
+  name(i: usize): Value {
+    const v = untagged(this.holes[i]);
     if (v && typeof v === "object" && v.kind === "record" && v.fields.get("kind") === "ident") return v.fields.get("name");
-    throw new CompileError("E1101", "a splice where a name goes takes an identifier, as 'ident(\"name\")' makes", at.start, at.end);
-  },
-  int: (n) => n,
-  none: null,
-});
+    throw new CompileError("E1101", "a splice where a name goes takes an identifier, as 'ident(\"name\")' makes", this.at.start, this.at.end);
+  }
+
+  int(n: bigint): Value {
+    return n;
+  }
+
+  text(s: string): Value {
+    return s;
+  }
+
+  boolean(b: boolean): Value {
+    return b;
+  }
+
+  float(f: f64): Value {
+    return f;
+  }
+
+  literal(value: string | bigint | boolean): Value {
+    return value;
+  }
+
+  none(): Value {
+    return null;
+  }
+}
 
 // A comptime string array's binding: a literal type standing for exactly that array, so equal
 // arrays share an instance. It is never the interned literal of an ordinary string, which a
@@ -639,7 +685,7 @@ class Interpreter {
         };
         let made: Value;
         try {
-          made = built<Value>(this.tables, q, types, e, astValues(splice, holes.map((h) => h.value), e), scope, free);
+          made = built<Value>(this.tables, q, types, e, new AstValues(splice, holes.map((h) => h.value), e), scope, free);
         } catch (err) {
           if (err instanceof CompileError && err.code === "E1101") throw new Stop(err.message, e, false);
           throw err;

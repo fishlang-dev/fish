@@ -4,7 +4,7 @@ import type { CompileError, Names } from "./diag.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 import { Rewrites, NodeMap, NodeSet, type Id, type Ids } from "./nodes.ts";
 import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
-import type { Category, Free, Hygiene, Quote } from "./quote.ts";
+import type { Categories, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
 import type { RustClass, RustName, RustTables } from "./rust.ts";
 import type { Locking } from "./program.ts";
@@ -110,6 +110,12 @@ export type Tables = {
   // type it takes; and the defaults it adds, which an Option's absence takes and anything else
   // never needs.
   destructuredParts: NodeMap<Stmt, Expr>;
+  // What checking put into a statement list beside a statement, by the statement: the parts a
+  // destructuring declaration became after it, and the block a `for` head's declarations moved
+  // into around it. A generic class's instances check copies of one body, with its nodes' ids, so
+  // a copy checked after the first is given the same statements where the first was edited.
+  insertedAfter: NodeMap<Stmt, Stmt[]>;
+  wrappedIn: NodeMap<Stmt, Stmt>;
   unusedDefaults: NodeSet<Expr>;
   timerMains: NodeSet<Declared>;
   // A nested function's calls of itself, which run with the calling closure's own captures.
@@ -204,7 +210,7 @@ export type Tables = {
   // The `equals` each class's `===` calls.
   equalities: TypeMap<ClassType, InstanceId>;
   // Each quote, by the Ast types it was checked with, for comptime to build its value from.
-  quotes: NodeMap<Expr, Record<Category, Type>>;
+  quotes: NodeMap<Expr, Categories>;
   // The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
   // body's next instance checks again as tuples.
   tupleLiterals: NodeSet<Expr>;
@@ -299,8 +305,9 @@ export type Tables = {
   presetTypes: NodeMap<TypeNode, Type>;
   // Each quote parsed, by the quote, so its holes are the same nodes wherever it is read.
   parsedQuotes: NodeMap<Expr, Quote>;
-  // While a macro runs, the hygiene its quotes are built with.
-  hygiene: Hygiene | undefined;
+  // While a macro runs, the hygiene its quotes are built with, last, after any of the macros
+  // whose run it is in.
+  hygienes: Hygiene[];
   // The bindings each quote made while a macro runs, for a quote it is spliced into; the names it
   // left free, for that quote to bind; and the spans of the quotes its nodes came from, the only
   // nodes those names are renamed in, never the program's own, spliced in as input. Each is kept
@@ -351,6 +358,8 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     liftedFunctions: new NodeMap<Stmt | Expr, { name: string; fn: Declared & { body: Stmt[] } }>(),
     getterNames: new Set<string>(),
     destructuredParts: new NodeMap<Stmt, Expr>(),
+    insertedAfter: new NodeMap<Stmt, Stmt[]>(),
+    wrappedIn: new NodeMap<Stmt, Stmt>(),
     unusedDefaults: new NodeSet<Expr>(),
     timerMains: new NodeSet<Declared>(),
     selfCalls: new NodeSet<Expr>(),
@@ -395,7 +404,7 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     integerCalls: new NodeSet<Expr>(),
     tagCalls: new NodeSet<Expr>(),
     equalities: new TypeMap<ClassType, InstanceId>(),
-    quotes: new NodeMap<Expr, Record<Category, Type>>(),
+    quotes: new NodeMap<Expr, Categories>(),
     tupleLiterals: new NodeSet<Expr>(),
     restStarts: new NodeMap<Expr, usize>(),
     computed: new NodeSet<Expr>(),
@@ -436,7 +445,7 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     prologues: new NodeSet<Stmt>(),
     presetTypes: new NodeMap<TypeNode, Type>(),
     parsedQuotes: new NodeMap<Expr, Quote>(),
-    hygiene: undefined,
+    hygienes: [],
     quoteScopes: new Map<usize, Map<string, string>>(),
     quoteFrees: new Map<usize, Free>(),
     quotedSpans: new Map<usize, Set<string>>(),

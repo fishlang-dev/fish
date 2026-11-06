@@ -97,7 +97,7 @@ export class Registry<H extends RegistryHost> {
     if (this.host.registryState.linked.has(c.type)) return;
     if (c.baseName === undefined) {
       checkOverrideModifiers(this.arenas, this.typing, c);
-      implementAbstracts(this.host.tables, c);
+      implementAbstracts(this.host.tables, c.classId);
       this.host.registryState.linked.add(c.type);
       return;
     }
@@ -105,7 +105,7 @@ export class Registry<H extends RegistryHost> {
     if ((c.baseName === "Map" || c.baseName === "Set") && !this.host.classes.has(c.baseName) && !this.host.templates.has(c.baseName)) {
       embed(this.host.tables, c.classId, c.baseName);
       checkOverrideModifiers(this.arenas, this.typing, c);
-      implementAbstracts(this.host.tables, c);
+      implementAbstracts(this.host.tables, c.classId);
       this.host.registryState.linked.add(c.type);
       return;
     }
@@ -116,8 +116,8 @@ export class Registry<H extends RegistryHost> {
     this.link(base, path.add(c.type));
     const at = c.node.extends!;
     extend(this.host.tables, c.classId, base.classId, (name) => this.host.withScope(new Map(), () => this.host.resolveType({ id: nextId(this.ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
-    implementAbstracts(this.host.tables, c);
-    copySelfTyped(this.host.tables, c);
+    implementAbstracts(this.host.tables, c.classId);
+    copySelfTyped(this.host.tables, c.classId);
     checkOverrides(this.arenas, this.typing, c);
     checkOverrideModifiers(this.arenas, this.typing, c);
     this.host.registryState.linked.add(c.type);

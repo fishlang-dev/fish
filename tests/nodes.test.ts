@@ -472,8 +472,9 @@ const IN_PLACE = [
   "check.ts: for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam",
   // lists of statements, which have no id to key a replacement by: a statement that becomes
   // several, nested functions hoisted, a local declaration hoisted out, and an export a library
-  // lists, each where the list is read next.
+  // lists, each where the list is read next, and the same edits given to a later copy of a list;
   "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(this.cx.ids), kind: \"block\"", "check.ts: place.list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
+  "check.ts: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.ts: if (inserted !== undefined && inserted.length > 0",
   "modules.ts: l.body[at] =", "macros.ts: statements.splice(",
 ];
 
