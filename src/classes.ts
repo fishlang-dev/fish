@@ -7,7 +7,7 @@ import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type F
 import { unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
-import { forEachChild, nextId, NodeSet, renumberParam, renumberStmts, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
+import { forEachChild, nextId, NodeSet, renumberParam, renumberStmts, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
@@ -385,9 +385,11 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
   let params: Param[] = [];
   for (let i: usize = receiver !== undefined ? 1 : 0; i < m.params.length; i++) params.push(cloneParam(m.params[i]!));
   if (!isStatic) {
-    for (const p of params) if (p.type !== undefined) namesClass(tables, node, p);
+    // Each instance renames its own copy, leaving the written parameters as they are.
+    let rewrites = new Rewrites();
+    for (const p of params) if (p.type !== undefined) namesClass(tables.ids, rewrites, node, p);
     let rebuilt: Param[] = [];
-    for (let p = params.shift(); p !== undefined; p = params.shift()) rebuilt.push(rebuiltParam(p, tables.rewrites));
+    for (let p = params.shift(); p !== undefined; p = params.shift()) rebuilt.push(rebuiltParam(p, rewrites));
     params = rebuilt;
   }
   if (isStatic) classParamIn(node, m);
@@ -459,13 +461,13 @@ function typeParamNames(n: Ref<AnyNode>): string[] {
 }
 
 // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
-function namesClass(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, p: Ref<Param>): void {
+function namesClass(ids: Mut<Ids>, rewrites: Mut<Rewrites>, node: Ref<ClassNode & { name?: string }>, p: Ref<Param>): void {
   if (p.type === undefined) return;
   walkWhile({ of: "typeNode", node: p.type }, (n) => {
     if (n.of !== "typeNode" || n.node.kind !== "ref" || n.node.name !== "this" || n.node.args.length !== 0) return true;
     const t = n.node;
-    const args = node.typeParams.map((q): TypeNode => ({ id: nextId(tables.ids), kind: "ref", name: q.name, args: [], start: q.start, end: q.end }));
-    tables.rewrites.replaceTypeNode(t, { ...t, name: node.name!, args });
+    const args = node.typeParams.map((q): TypeNode => ({ id: nextId(ids), kind: "ref", name: q.name, args: [], start: q.start, end: q.end }));
+    rewrites.replaceTypeNode(t, { ...t, name: node.name!, args });
     return false;
   });
 }
