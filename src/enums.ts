@@ -20,7 +20,7 @@ export type PendingEnum = { node: EnumNode; id: usize; names: Set<string>; settl
 // arguments, since its payload types may name its type parameters.
 // `eq` marks one that `@derive(Eq)` lets `===` compare, and `json` one `@derive(Json)` lets
 // `JSON` write and read.
-export type DataEnum = { name: string; id: usize; params: string[]; members: EnumMember[]; instances: Map<string, EnumInstance>; at: Span; eq: boolean; json: boolean };
+export type DataEnum = { name: string; id: usize; params: string[]; members: EnumMember[]; at: Span; eq: boolean; json: boolean };
 export type EnumInstance = { type: Type; variants: Map<string, VariantType> };
 
 type EnumNode = Span & { name: string; const: boolean; typeParams: TypeParam[]; members: EnumMember[]; derives?: string[] };
@@ -201,7 +201,7 @@ function dataEnum(node: Ref<EnumNode>, id: usize): EnumInfo {
   }
   const params = node.typeParams.map((p) => p.name);
   const derives: string[] = node.derives !== undefined ? [...node.derives] : [];
-  return { type: "never", members: new Map(), data: { name: node.name, id, params, members: node.members.map((m) => cloneEnumMember(m)), instances: new Map(), at: { start: node.start, end: node.end }, eq: derives.includes("Eq"), json: derives.includes("Json") } };
+  return { type: "never", members: new Map(), data: { name: node.name, id, params, members: node.members.map((m) => cloneEnumMember(m)), at: { start: node.start, end: node.end }, eq: derives.includes("Eq"), json: derives.includes("Json") } };
 }
 
 const I64_MAX = (1n << 63n) - 1n;

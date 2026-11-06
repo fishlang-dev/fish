@@ -2,7 +2,7 @@ import type { Declarations, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { holdsNull } from "./defaults.ts";
-import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import type { Expr, Interface, Param, PropertyName, Span, Stmt, TypeAlias, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
@@ -120,7 +120,7 @@ export class ResolverState {
   // Where an alias instance leads back to itself, by its key, and the alias each is made from.
   recursives = new Map<string, RecursiveType>();
   recursiveAliases = new TypeMap<RecursiveType, string>();
-  traits = new NodeMap<Stmt, Map<string, InterfaceType>>();
+  traits = new Map<usize, Map<string, InterfaceType>>();
   // Each combined interface `A & B`, by its sides.
   combined = new Map<string, InterfaceType>();
   // Each object type with a method written in place, as the interface it stands for.
@@ -141,6 +141,8 @@ export class ResolverState {
   signatures = new Map<BodyId, usize>();
   // The data-carrying enums being made, to catch one that holds itself.
   making = new NodeMap<DataEnum, string>();
+  // Each data-carrying enum's instances, by enum and type arguments.
+  enumInstances = new Map<string, EnumInstance>();
   // Where a data-carrying enum instance holds itself, by enum and type arguments.
   enumBlocks = new Map<string, RecursiveType>();
 }
@@ -327,8 +329,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       throw new CompileError("E0707", `enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, at.start, at.end);
     }
     const key = args.map((t) => this.host.tables.typing.keyOf(t)).join(",");
-    const made = data.instances.get(key);
-    if (made !== undefined) return made;
+    const made = this.host.resolverState.enumInstances.get(`${data.id} ${key}`);
+    if (made !== undefined) return copyInstance(made);
     const shown = args.length > 0 ? `${data.name}<${args.map((t) => this.host.tables.typing.show(t)).join(", ")}>` : data.name;
     // Met again while its members are made, it holds itself there, in a block.
     if (this.host.resolverState.making.get(data) === key) {
@@ -362,12 +364,12 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       }
       const back = this.host.resolverState.enumBlocks.get(`${data.id} ${key}`);
       const union = this.recOf(type);
-      if (back && union?.kind === "union") {
+      if (back !== undefined && union?.kind === "union") {
         this.host.tables.typing.standsFor(back, type);
         this.host.tables.typing.holdsBlock(type as UnionType, back);
       }
       instance = { type, variants };
-      data.instances.set(key, instance);
+      this.host.resolverState.enumInstances.set(`${data.id} ${key}`, copyInstance(instance));
     } finally {
       this.host.resolverState.making.delete(data);
     }
@@ -477,11 +479,11 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const declared = this.resolveType(p.type);
       const low = this.host.tables.typing.lower(declared);
       const kind = this.recOf(low)?.kind;
-      if (kind && ["function", "closure", "dyn", "interface", "param", "ref", "future", "generator", "handle"].includes(kind)) {
+      if (kind !== undefined && ["function", "closure", "dyn", "interface", "param", "ref", "future", "generator", "handle"].includes(kind)) {
         throw new CompileError("E0801", `defaults on parameters of type '${this.host.tables.typing.show(declared)}' are not supported yet`, p.start, p.end);
       }
       if (holdsNull(this.host.tables.typing, declared) && !lowered.empty) throw new CompileError("E0801", `a parameter that may be null can have only 'null' as its default so far, since a passed null and a missing argument would look the same; write '${lowered.name}?: ...' and give the default in the body`, p.start, p.end);
-      this.host.tables.declaredTypes.set(p, declared);
+      this.host.tables.declaredTypes.set(cloneParam(p), declared);
     }
     // A call may leave out an optional parameter, which is then empty.
     let type: Type;
@@ -557,7 +559,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (n.kind === "literal" && n.value.kind === "unary" && n.value.op === "-") throw new CompileError("E0116", "a FixedArray's length can't be negative", n.start, n.end);
     const size = n.kind === "literal" && n.value.kind === "int" ? n.value.value : undefined;
     if (size === undefined) throw new CompileError("E0116", "a FixedArray's length is a number written in place, like 'FixedArray<i64, 4>'", n.start, n.end);
-    const element = storable(this.host.tables.typing, this.resolveType(of), spanOf(of));
+    const resolved = this.resolveType(of);
+    const element = storable(this.host.tables.typing, resolved, spanOf(of));
     if (this.host.tables.typing.holdsRef(element)) throw unsupported("fixed arrays of references", spanOf(of));
     // Its elements live where it does, often the stack, so all of them together are limited.
     if (size * BigInt(byteSize(this.host.tables.typing, element)) > 65536n) throw new CompileError("E0116", "a FixedArray holds at most 64 KiB inline, whatever its elements hold inline counted; use an array, 'T[]', for more", n.start, n.end);
@@ -606,14 +609,21 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (t.kind === "conditional") return this.conditional(t);
     if (t.kind === "mapped") return this.mapped(t);
     if (t.kind === "template") {
-      const holes = t.types.map((t) => this.resolveType(t));
-      return standIn(this.host.tables.typing, holes, "a template literal type", t, false, this.host.resolverState.deferring > 0) ?? this.typeFns().templateType(t.quasis, holes, t, t.types);
+      let holes: Type[] = [];
+      let holeAt: Span[] = [];
+      for (const hole of t.types) {
+        holes.push(this.resolveType(hole));
+        holeAt.push(spanOf(hole));
+      }
+      const held = standIn(this.host.tables.typing, holes, "a template literal type", spanOf(t), false, this.host.resolverState.deferring > 0);
+      if (held !== undefined) return held;
+      return this.typeFns().templateType(t.quasis, holes, spanOf(t), holeAt);
     }
     if (t.kind === "infer") throw new CompileError("E0114", `'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
       if (t.construct) throw unsupported("constructor types", t);
       const rest = t.params.find((p) => p.rest);
-      if (rest) throw unsupported("rest parameters in function types", rest);
+      if (rest !== undefined) throw unsupported("rest parameters in function types", rest);
       // A generic one is shown and compared with its own parameters standing for themselves.
       if (t.typeParams.length > 0) {
         if (t.throws) throw unsupported("generic function types that throw", t.throws);
@@ -878,7 +888,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const other = sides[1 - at]!;
     const r = this.recOf(other);
     if (typeof base !== "string" || r?.kind !== "object" || r.tuple === true || r.fields.length !== 1) return undefined;
-    const field = r.fields[0]!;
+    const field = copyField(r.fields[0]!);
     const tag = field.optional === "added" ? this.host.tables.typing.withoutNull(field.type) : field.type;
     // A property of a plain type, as in `i64 & { a: i64 }`, describes a value rather than naming one.
     if (typeof tag === "string") return undefined;
@@ -947,10 +957,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   /** @throws {CompileError} */
   private literal(this: Mut<this>, e: Ref<Expr>): Type {
     if (e.kind === "string" || e.kind === "bool") return this.host.tables.typing.literalType(e.value);
-    const negative = e.kind === "unary" && e.op === "-";
-    const digits = negative ? e.operand : e;
-    if (digits.kind !== "int") throw unsupported("literal types of this kind", e);
-    const value = negative ? -digits.value : digits.value;
+    let value: bigint;
+    if (e.kind === "unary" && e.op === "-" && e.operand.kind === "int") value = -e.operand.value;
+    else if (e.kind === "int") value = e.value;
+    else throw unsupported("literal types of this kind", e);
     if (value > I64_MAX || value < -I64_MAX - 1n) throw new CompileError("E0110", "integer literal does not fit in i64", e.start, e.end);
     return this.host.tables.typing.literalType(value);
   }
@@ -1027,7 +1037,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     let objects: ObjectType[] = [];
     for (const s of sides) {
       let copied: Field[] = [];
-      for (const f of this.host.tables.typing.rec(s as Exclude<Type, string>).fields) copied.push(copyField(f));
+      const record1 = this.host.tables.typing.rec(s as Exclude<Type, string>);
+      for (const f of record1.fields) copied.push(copyField(f));
       objects.push(this.host.tables.typing.objectType(copied));
     }
     let fields = objects[0]!;
@@ -1045,7 +1056,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const found = this.host.tables.typing.interfaceType(shown.join(" & "));
     this.host.resolverState.combined.set(key, found);
     let r = this.host.tables.typing.rec(found);
-    for (const f of this.host.tables.typing.rec(fields).fields) r.fields.push(copyField(f));
+    const record2 = this.host.tables.typing.rec(fields);
+    for (const f of record2.fields) r.fields.push(copyField(f));
     this.host.tables.typing.setRec(found, r);
     let methods: Method[] = [];
     for (const s of sides) {
@@ -1110,9 +1122,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const name = `{} ${t.id} ${names.join(",")}`;
     let seen: string[] = [];
     for (const m of t.members) {
-      if (!("name" in m) || typeof m.name !== "string") continue;
-      if (seen.includes(m.name)) throw new CompileError("E0402", `duplicate member '${m.name}'`, m.start, m.end);
-      seen.push(m.name);
+      const name = memberName(m);
+      if (name === undefined) continue;
+      if (seen.includes(name)) throw new CompileError("E0402", `duplicate member '${name}'`, m.start, m.end);
+      seen.push(name);
     }
     if (!this.host.resolverState.inline.has(name)) {
       let typeParams: TypeParam[] = [];
@@ -1153,7 +1166,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     const methodCount = this.host.tables.typing.rec(made).methods.length;
     for (let k: usize = 0; k < methodCount; k++) {
-      const m: Ref<Method> = this.host.tables.typing.rec(made).methods[k]!;
+      const record = this.host.tables.typing.rec(made);
+      const m: Ref<Method> = record.methods[k]!;
       const name = m.name;
       const omittable = m.omittable === true ? "?" : "";
       let params: Type[] = [];
@@ -1182,7 +1196,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       throw new CompileError("E0106", `interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
     // Every copy of a package's interface, one per import of it, is one type.
-    const owner = i.jsSource ?? i;
+    const owner = i.jsSource !== undefined ? i.jsSource.id : i.id;
     if (!this.host.resolverState.traits.has(owner)) this.host.resolverState.traits.set(owner, new Map<string, InterfaceType>());
     let keys: string[] = [];
     for (const a of args) keys.push(this.host.tables.typing.keyOf(a));
@@ -1196,7 +1210,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       r.generic = { name: i.name, args };
       this.host.tables.typing.setRec(t, r);
     }
-    this.host.resolverState.traits.get(owner)!.set(key, t);
+    let byArgs = this.host.resolverState.traits.get(owner)!;
+    byArgs.set(key, t);
     const isInline = this.host.resolverState.inline.has(i.name);
     if (args.length > 0 && !isInline) this.host.tables.typing.noteInterfaceInstance(i.name, key, t);
     // Its members are written where it is declared, with its parameters standing for the arguments.
@@ -1227,7 +1242,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     for (const node of i.extends) {
       // A package's interface or class extends another's shape, which a JS handle holds.
       const resolved = this.resolveType(node);
-      const base = this.host.tables.typing.jsShape(resolved) ?? resolved;
+      const shape = this.host.tables.typing.jsShape(resolved);
+      const base: Type = shape !== undefined ? shape : resolved;
       const b = this.recOf(base);
       if (b === undefined || (b.kind !== "interface" && !(i.js !== undefined && b.kind === "object"))) throw new CompileError("E0702", "an interface can only extend interfaces", node.start, node.end);
       let fields: Field[] = [];
@@ -1264,11 +1280,16 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         // still comes only with a value JS made.
         const key = "name" in m && typeof m.name === "string" ? m.name : `[${m.kind}]`;
         if (!this.host.tables.typing.jsUntyped.has(t)) this.host.tables.typing.jsUntyped.set(t, new Map<string, CompileError>());
-        this.host.tables.typing.jsUntyped.get(t)!.set(key, e);
+        let untyped = this.host.tables.typing.jsUntyped.get(t)!;
+        untyped.set(key, e);
         if ("optional" in m && m.optional) {
           if (!this.host.tables.typing.jsOptional.has(t)) this.host.tables.typing.jsOptional.set(t, new Set<string>());
-          this.host.tables.typing.jsOptional.get(t)!.add(key);
-        } else if (this.host.tables.typing.jsOptional.has(t)) this.host.tables.typing.jsOptional.get(t)!.delete(key);
+          let optional = this.host.tables.typing.jsOptional.get(t)!;
+          optional.add(key);
+        } else if (this.host.tables.typing.jsOptional.has(t)) {
+          let optional = this.host.tables.typing.jsOptional.get(t)!;
+          optional.delete(key);
+        }
       }
     }
     return t;
@@ -1278,9 +1299,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // require a method its base leaves optional, as TypeScript lets it, and a package's may
   // narrow what it inherits; otherwise each name is declared once.
   /** @throws {CompileError} */
-  private noteMember(this: Mut<this>, i: Ref<Interface>, t: InterfaceType, inherited: Mut<Set<string>>, name: string, at: Ref<Span>, method: boolean, optional: boolean) {
+  private noteMember<S extends Span>(this: Mut<this>, i: Ref<Interface>, t: InterfaceType, inherited: Mut<Set<string>>, name: string, at: Ref<S>, method: boolean, optional: boolean) {
     let omittable = false;
-    for (const m of this.host.tables.typing.rec(t).methods) if (m.name === name && m.omittable === true) omittable = true;
+    const record3 = this.host.tables.typing.rec(t);
+    for (const m of record3.methods) if (m.name === name && m.omittable === true) omittable = true;
     const requires = method && !optional && omittable;
     if ((i.js !== undefined || requires) && inherited.delete(name)) {
       let r = this.host.tables.typing.rec(t);
@@ -1294,9 +1316,11 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       return;
     }
     let field = false;
-    for (const f of this.host.tables.typing.rec(t).fields) if (f.name === name) field = true;
+    const record4 = this.host.tables.typing.rec(t);
+    for (const f of record4.fields) if (f.name === name) field = true;
     let declared = false;
-    for (const m of this.host.tables.typing.rec(t).methods) if (m.name === name) declared = true;
+    const record5 = this.host.tables.typing.rec(t);
+    for (const m of record5.methods) if (m.name === name) declared = true;
     if (field || declared) {
       if (method && declared) throw new CompileError("E0402", `'${name}' is declared twice in interface '${i.name}'; method overloads in interfaces aren't supported yet, so give each signature its own name`, at.start, at.end);
       throw new CompileError("E0402", `duplicate member '${name}' in interface '${i.name}'`, at.start, at.end);
@@ -1662,6 +1686,28 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
 
 // Thrown inside a conditional whose extends side holds a placeholder of the generic alias being
 // checked, and caught by that conditional, which then can't pick a branch.
+// A run of decimal digits, with an optional leading '-', as the integer it writes.
+function digitsOf(text: string): bigint {
+  let n = 0n;
+  const negative = text.startsWith("-");
+  for (let i: usize = negative ? 1 : 0; i < text.length; i++) n = n * 10n + BigInt(text.charCodeAt(i) - 48);
+  return negative ? -n : n;
+}
+
+function copyInstance(made: Ref<EnumInstance>): EnumInstance {
+  let variants = new Map<string, VariantType>();
+  for (const [name, v] of made.variants) variants.set(name, v);
+  return { type: made.type, variants };
+}
+
+// The name a member is written with, when it is a string.
+function memberName(m: Ref<TypeMember>): string | undefined {
+  if (m.kind !== "property" && m.kind !== "method" && m.kind !== "get" && m.kind !== "set") return undefined;
+  const name: Ref<PropertyName> = m.name;
+  if (typeof name === "string") return name;
+  return undefined;
+}
+
 // Where a node is, as a span of its own.
 function spanOf(n: Ref<TypeNode>): Span {
   return { start: n.start, end: n.end };
@@ -1669,7 +1715,8 @@ function spanOf(n: Ref<TypeNode>): Span {
 
 function cloneInterface(i: Ref<Interface>): Interface {
   const copy = cloneStmt(i);
-  return copy.kind === "interface" ? copy : i;
+  if (copy.kind === "interface") return copy;
+  return cloneInterface(i);
 }
 
 // The bindings of `a`, then of `b` over them.
@@ -1704,7 +1751,7 @@ function inferredText(typing: Typing, text: string, bound: Type): Type | undefin
   if (members.includes("string")) return typing.literalType(text);
   let candidates: Type[] = [];
   for (const m of members) {
-    if (m === "i64" && typing.textFits(text, m)) candidates.push(typing.literalType(BigInt(text)));
+    if (m === "i64" && typing.textFits(text, m)) candidates.push(typing.literalType(digitsOf(text)));
     else if ((isInteger(m) || isFloat(m)) && typing.textFits(text, m)) candidates.push(m);
     else if (m === "boolean" && typing.textFits(text, m)) candidates.push(typing.literalType(text === "true"));
   }
@@ -1714,7 +1761,7 @@ function inferredText(typing: Typing, text: string, bound: Type): Type | undefin
 
 // The names a type pattern declares with `infer`.
 function inferNames(t: Ref<TypeNode>): Set<string> {
-  const names = new Set<string>();
+  let names = new Set<string>();
   walkWhile({ of: "typeNode", node: t }, (n) => {
     if (n.of !== "typeNode" || n.node.kind !== "infer") return true;
     names.add(n.node.name);
@@ -1729,7 +1776,8 @@ function inferNames(t: Ref<TypeNode>): Set<string> {
 /** @throws {CompileError} */
 function merged(typing: Mut<Typing>, a: ObjectType, b: ObjectType, from: Ref<Span>, to: Ref<Span>): ObjectType {
   let fields: Field[] = [];
-  for (const f of typing.rec(a).fields) fields.push(copyField(f));
+  const ours = typing.rec(a);
+  for (const f of ours.fields) fields.push(copyField(f));
   const theirs = typing.rec(b).fields.length;
   for (let k: usize = 0; k < theirs; k++) {
     const f = copyField(typing.rec(b).fields[k]!);
@@ -1813,7 +1861,7 @@ export function interior(typing: Typing, which: InteriorRecord["which"], given: 
   unboxedClosure(typing, given, at);
   const of = typing.heldArgument(given);
   const held = typing.lower(of);
-  if (which === "Atomic" && isInteger(held) && INTEGERS[held].bits === 128) {
+  if (which === "Atomic" && (held === "i128" || held === "u128")) {
     throw new CompileError("E0116", `'Atomic' holds integers of up to 64 bits, not '${typing.show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
   }
   if (which === "Atomic" && held !== "boolean" && !isInteger(held) && !(typeof held !== "string" && typing.rec(held).kind === "param")) {
@@ -1908,13 +1956,13 @@ function unlocked(typing: Typing, u: Type): boolean {
 
 // A key a Map or a Set hashes: a string or a sized integer, or a union of literals of one of
 // them, such as an enum's members. A type parameter is checked again in each instance.
-function keyable(typing: Typing, t: Type): boolean {
+function keyable(typing: Mut<Typing>, t: Type): boolean {
   const lowered = typing.lower(t);
   // A key is hashed as 64 bits, which a 128-bit integer doesn't fit.
   if (lowered === "string" || isFloat(lowered) || (isInteger(lowered) && lowered !== "i128" && lowered !== "u128")) return true;
   if (typeof lowered === "string") return false;
   const k = typing.rec(lowered);
-  if (k.kind === "param") return !k.concrete;
+  if (k.kind === "param") return k.concrete === undefined;
   if (k.kind === "literal") return typeof k.value !== "boolean";
   if (k.kind !== "union") return false;
   const bases = new Set(k.members.map((m) => {
@@ -1940,7 +1988,7 @@ export function collection(typing: Mut<Typing>, key: Type, value: Type, set: boo
 
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
-const INTEGER_NAMES = Object.keys(INTEGERS);
+const INTEGER_NAMES = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"];
 const BUILT_IN_TYPES = new Set(["Map", "Set", ...INTEGER_NAMES, "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined", "unknown"]);
 
 // What each kind of object type member besides a property is called when rejected.
