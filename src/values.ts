@@ -112,7 +112,7 @@ export type Context = {
   enumMemberNames(name: string): string[];
   // A data-carrying enum made with these type arguments.
   /** @throws {CompileError} */
-  enumInstance(info: EnumInfo, args: Type[], at: Span): EnumInstance;
+  enumInstance(name: string, args: Type[], at: Span): EnumInstance;
   /** @throws {CompileError} */
   construct(name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined;
   // A generic class's constructor parameters as written.
@@ -4894,7 +4894,7 @@ export class Expressions<C extends Context> implements Union {
     if (missing) {
       throw new CompileError("E0104", `can't tell what '${missing}' is for '${data.name}.${e.name}'; give it a declared type, like 'const x: ${data.name}<${data.params.join(", ")}> = ...' with real types`, e.start, e.end);
     }
-    const found = this.ctx.enumInstance(named, data.params.map((p) => bindings.get(p)!), e).variants.get(e.name)!;
+    const found = this.ctx.enumInstance(named.data!.name, data.params.map((p) => bindings.get(p)!), e).variants.get(e.name)!;
     if (alone && this.typing.rec(found).fields.length > 0) throw new CompileError("E0503", `'${this.typing.rec(found).name}' holds ${this.typing.rec(found).fields.length === 1 ? "a value" : "values"}; build it with '${this.typing.rec(found).name}(...)'`, e.start, e.end);
     if (!alone && this.typing.rec(found).fields.length === 0) throw new CompileError("E0503", `'${this.typing.rec(found).name}' holds nothing, so it isn't called; write '${this.typing.rec(found).name}'`, e.start, e.end);
     return found;
@@ -4910,7 +4910,7 @@ export class Expressions<C extends Context> implements Union {
     const candidates = members.flatMap((t) => {
       const m = this.recOf(t);
       if (m?.kind !== "variant" || m.enum !== named.data!.name) return [];
-      const v = this.ctx.enumInstance(named, m.args, e).variants.get(e.name);
+      const v = this.ctx.enumInstance(named.data!.name, m.args, e).variants.get(e.name);
       return v ? [v] : [];
     });
     // A payload that fits exactly decides first; then a number takes a number type of its own

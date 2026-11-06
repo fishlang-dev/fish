@@ -967,7 +967,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   /** @throws {CompileError} */
   variantInstance(this: Mut<this>, v: VariantType, args: Type[]): VariantType {
     const r = this.typing.rec(v);
-    return this.resolver().enumInstance(this.enums.get(r.enum)!, args, (this.beingChecked && bodyOf(this.arenas, this.beingChecked)) ?? { start: 0, end: 0 }).variants.get(r.member)!;
+    return this.resolver().enumInstance(r.enum, args, (this.beingChecked && bodyOf(this.arenas, this.beingChecked)) ?? { start: 0, end: 0 }).variants.get(r.member)!;
   }
 
   /** @throws {CompileError} */
@@ -1034,7 +1034,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // function's inferred result, and so is an enum with no type parameters, made now so a
     // payload naming no type is caught unused.
     this.resolver().validate();
-    for (const [name, e] of [...this.enums]) if (e.data && e.data.params.length === 0) this.enums.set(name, { ...e, type: this.resolver().enumInstance(e, [], e.data.at).type });
+    for (const [name, e] of [...this.enums]) if (e.data && e.data.params.length === 0) this.enums.set(name, { ...e, type: this.resolver().enumInstance(name, [], e.data.at).type });
     this.classes.forEach((c) => this.implementsSignatures(this.arenas.classOf(c)));
     // An enum with computed members is settled when first read; one nothing reads still reports
     // a bad initializer.
@@ -2189,8 +2189,8 @@ class BodyChecker implements Context, GuardHost {
 
 
   /** @throws {CompileError} */
-  enumInstance(this: Mut<this>, info: EnumInfo, args: Type[], at: Span): EnumInstance {
-    return this.cx.resolver().enumInstance(info, args, at);
+  enumInstance(this: Mut<this>, name: string, args: Type[], at: Span): EnumInstance {
+    return this.cx.resolver().enumInstance(name, args, at);
   }
 
   /** @throws {CompileError} */

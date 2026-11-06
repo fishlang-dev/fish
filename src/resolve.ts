@@ -2,11 +2,11 @@ import type { Declarations, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { holdsNull } from "./defaults.ts";
-import type { Expr, Interface, Param, PropertyName, Span, Stmt, TupleElement, TypeAlias, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import type { EnumMember, Expr, Interface, Param, PropertyName, Span, Stmt, TupleElement, TypeAlias, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { cloneParam, cloneStmt, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.ts";
+import { cloneEnumMember, cloneParam, cloneStmt, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.ts";
 import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type BlockRecord, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.ts";
 import { typeForm, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
@@ -321,19 +321,24 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // types resolved with the type parameters bound, and the enum as their union. An enum
   // holding itself would be infinitely large.
   /** @throws {CompileError} */
-  enumInstance(this: Mut<this>, info: EnumInfo, given: Type[], at: Ref<Span>): EnumInstance {
+  enumInstance(this: Mut<this>, enumName: string, given: Ref<Type[]>, at: Ref<Span>): EnumInstance {
     for (const a of given) unboxedClosure(this.host.tables.typing, a, at);
     let args: Type[] = [];
     for (const t of given) args.push(this.host.tables.typing.heldArgument(t));
-    const data = info.data!;
+    const declared = this.host.enums.get(enumName)!.data!;
+    const data = { id: declared.id, name: declared.name, params: copyStrings(declared.params) };
     if (args.length !== data.params.length) {
       const n = data.params.length;
       throw new CompileError("E0707", `enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, at.start, at.end);
     }
-    const key = args.map((t) => this.host.tables.typing.keyOf(t)).join(",");
+    let keys: string[] = [];
+    for (const t of args) keys.push(this.host.tables.typing.keyOf(t));
+    const key = keys.join(",");
     const made = this.host.resolverState.enumInstances.get(`${data.id} ${key}`);
     if (made !== undefined) return copyInstance(made);
-    const shown = args.length > 0 ? `${data.name}<${args.map((t) => this.host.tables.typing.show(t)).join(", ")}>` : data.name;
+    let shownArgs: string[] = [];
+    for (const t of args) shownArgs.push(this.host.tables.typing.show(t));
+    const shown = args.length > 0 ? `${data.name}<${shownArgs.join(", ")}>` : data.name;
     // Met again while its members are made, it holds itself there, in a block.
     if (this.host.resolverState.making.get(data.id) === key) {
       const known = this.host.resolverState.enumBlocks.get(`${data.id} ${key}`);
@@ -351,14 +356,18 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       let variants = new Map<string, VariantType>();
       const outer = this.enterScope(bindings);
       try {
-        for (const m of data.members) {
+        let members: EnumMember[] = [];
+        for (const m of this.host.enums.get(enumName)!.data!.members) members.push(cloneEnumMember(m));
+        for (const m of members) {
           const payload = this.payloadOf(m, args, at);
           variants.set(m.name, this.host.tables.typing.variantType(data.name, data.id, m.name, args, payload));
         }
       } finally {
         this.host.resolverState.scope = outer;
       }
-      const type = this.host.tables.typing.unionType([...variants.values()], shown);
+      let made: Type[] = [];
+      for (const v of variants.values()) made.push(v);
+      const type = this.host.tables.typing.unionType(made, shown);
       for (const v of variants.values()) {
         let r = this.host.tables.typing.rec(v);
         r.of = type;
@@ -383,7 +392,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (l !== a) changed = true;
       lowered.push(l);
     }
-    if (changed) this.enumInstance(info, lowered, at);
+    if (changed) this.enumInstance(enumName, lowered, at);
     return instance;
   }
 
@@ -796,9 +805,11 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     // `next(x)` sends it.
     if (t.name === "Generator" || t.name === "AsyncGenerator") {
       if (t.args.length < 1 || t.args.length > 3) throw new CompileError("E0116", `'${t.name}' takes the type it yields, like '${t.name}<i64>', then optionally 'void' and the type 'next' sends`, t.start, t.end);
-      const returned = t.args[1];
-      if (returned && this.resolveType(returned) !== "void" && !(returned.kind === "ref" && returned.name === "undefined")) throw unsupported("generator return values", returned);
-      const sends = t.args[2] && this.resolveType(t.args[2]);
+      if (t.args.length > 1) {
+        const returned: Ref<TypeNode> = t.args[1]!;
+        if (this.resolveType(returned) !== "void" && !(returned.kind === "ref" && returned.name === "undefined")) throw unsupported("generator return values", returned);
+      }
+      const sends = t.args.length > 2 ? this.resolveType(t.args[2]!) : undefined;
       if (sends !== undefined && t.name === "AsyncGenerator") throw unsupported("values sent into an async generator's 'next'", t.args[2]!);
       if (sends !== undefined && this.host.tables.typing.holdsRef(sends)) throw unsupported("references sent into generators", t.args[2]!);
       const yields = this.resolveType(t.args[0]!);
@@ -810,37 +821,48 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       return this.host.tables.typing.unionType([member, "null"]);
     }
     // A class's lifetimes, written or left out, are no type arguments.
-    const lifetime = this.host.decls.slots.get(t.name);
-    const args = (lifetime && t.args.length === lifetime.length ? t.args.filter((_, i) => !lifetime[i]) : t.args).map((t) => this.resolveType(t));
-    const alias = this.host.decls.aliases.get(t.name);
+    const decls = this.host.decls;
+    const lifetime = decls.slots.get(t.name);
+    const skipping = lifetime !== undefined && t.args.length === lifetime.length;
+    let args: Type[] = [];
+    for (let i: usize = 0; i < t.args.length; i++) if (!skipping || !lifetime![i]!) args.push(this.resolveType(t.args[i]!));
+    const alias = decls.aliases.get(t.name);
     // A package's object type is a JS handle of that shape; its other aliases are what they say.
-    if (alias?.js) {
+    if (alias !== undefined && alias.js !== undefined) {
       const aliased = this.aliasType(alias, args, t);
       const r = this.recOf(aliased);
-      return r?.kind === "object" && !r.tuple ? this.host.tables.typing.blockType("JsValue", aliased) : aliased;
+      if (r?.kind === "object" && r.tuple !== true) return this.host.tables.typing.blockType("JsValue", aliased);
+      return aliased;
     }
-    if (alias) return this.aliasType(alias, args, t);
-    const named = this.host.classNamed(t.name, args, t);
+    if (alias !== undefined) return this.aliasType(alias, args, t);
+    const named = this.host.classNamed(t.name, args, spanOf(t));
     if (named !== undefined && this.host.tables.typing.rec(named).abstract) throw new CompileError("E0701", `'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
-    if (named) return named;
-    const [owner, name] = t.name.split(".");
-    const e = this.host.enums.get(owner!);
-    if (e?.data) {
-      const instance = this.enumInstance(e, args, t);
+    if (named !== undefined) return named;
+    const parts = t.name.split(".");
+    const owner = parts[0]!;
+    const name = parts.length > 1 ? parts[1] : undefined;
+    const isEnum = this.host.enums.has(owner);
+    const data = isEnum && this.host.enums.get(owner)!.data !== undefined;
+    if (data) {
+      const instance = this.enumInstance(owner, args, t);
       if (name === undefined) return instance.type;
       const variant = instance.variants.get(name);
-      if (variant) return variant;
+      if (variant !== undefined) return variant;
     }
-    if (e && name === undefined) return this.host.enumType(owner!);
-    const found = e && this.host.enumMember(owner!, name!);
-    if (found) return found;
-    const trait = this.host.decls.interfaces.get(t.name);
+    if (isEnum && name === undefined) return this.host.enumType(owner);
+    const found = isEnum ? this.host.enumMember(owner, name!) : undefined;
+    if (found !== undefined) return found;
+    const trait = decls.interfaces.get(t.name);
     // A package's interface or class is a JS handle of its shape.
-    if (trait?.js !== undefined) {
+    if (trait !== undefined && trait.js !== undefined) {
       const viewed = this.interfaceOf(trait, args, t);
       return this.host.tables.typing.blockType("JsValue", viewed);
     }
-    if (trait) return this.interfaceOf(trait, args.map((t) => this.host.tables.typing.heldArgument(t)), t);
+    if (trait !== undefined) {
+      let held: Type[] = [];
+      for (const a of args) held.push(this.host.tables.typing.heldArgument(a));
+      return this.interfaceOf(trait, held, t);
+    }
     // JavaScript's typed arrays, unless the program declares its own of the name.
     if (isTypedName(t.name)) {
       if (t.args.length > 0) throw new CompileError("E0106", `'${t.name}' takes no type arguments`, t.start, t.end);
@@ -1804,6 +1826,12 @@ function digitsOf(text: string): bigint {
   const negative = text.startsWith("-");
   for (let i: usize = negative ? 1 : 0; i < text.length; i++) n = n * 10n + BigInt(text.charCodeAt(i) - 48);
   return negative ? -n : n;
+}
+
+function copyStrings(list: Ref<string[]>): string[] {
+  let out: string[] = [];
+  for (const x of list) out.push(x);
+  return out;
 }
 
 function copyInstance(made: Ref<EnumInstance>): EnumInstance {
