@@ -627,7 +627,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         // A `declare const enum` writes its values, so it is an enum like any other.
         const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
         if (e.kind === "enum") {
-          typeName(e.name, e, aliases, this.classes, this.templates, this.interfaces, this.enums);
+          typeName(e.name, e, aliases.has(e.name) || this.typeNamed(e.name));
           this.enums.set(e.name, declareEnum(this.compilation, e));
           continue;
         }
@@ -635,22 +635,22 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         if (s.kind === "typeAlias" && !trait) {
           // An alias's lifetimes, like a class's, are checked and erased.
           if (s.typeParams.some(isLifetime)) this.slots.set(s.name, s.typeParams.map(isLifetime));
-          addAlias(aliases, s.typeParams.some(isLifetime) ? { ...s, typeParams: s.typeParams.filter((p) => !isLifetime(p)) } : s, this.classes, this.templates, this.interfaces, this.enums);
+          addAlias(aliases, s.typeParams.some(isLifetime) ? { ...s, typeParams: s.typeParams.filter((p) => !isLifetime(p)) } : s, this.typeNamed(s.name));
           continue;
         }
         if (trait) {
-          typeName(trait.name, s, aliases, this.classes, this.templates, this.interfaces, this.enums);
+          typeName(trait.name, s, aliases.has(trait.name) || this.typeNamed(trait.name));
           this.interfaces.set(trait.name, trait);
           continue;
         }
         if (s.kind === "interface") {
-          typeName(s.name, s, aliases, this.classes, this.templates, this.interfaces, this.enums);
+          typeName(s.name, s, aliases.has(s.name) || this.typeNamed(s.name));
           this.interfaces.set(s.name, s);
           if (s.jsClass) jsClasses.set(s.name, s);
           continue;
         }
         if (s.kind === "class" && s.name !== undefined) {
-          typeName(s.name, s, aliases, this.classes, this.templates, this.interfaces, this.enums);
+          typeName(s.name, s, aliases.has(s.name) || this.typeNamed(s.name));
           // A class's lifetimes are checked and erased, never instanced, so they are set aside.
           const node = { ...s, id: nextId(this.ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
           if (s.typeParams.some(isLifetime)) this.slots.set(s.name, s.typeParams.map(isLifetime));
@@ -788,6 +788,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.nextLocal = 0;
     this.closures = [];
     this.closureBodies = new TypeMap<ClosureType, InstanceId>();
+  }
+
+  // Whether a class, class template, interface or enum has a name.
+  typeNamed(name: string): boolean {
+    return this.classes.has(name) || this.templates.has(name) || this.interfaces.has(name) || this.enums.has(name);
   }
 
   /** @throws {CompileError} */
