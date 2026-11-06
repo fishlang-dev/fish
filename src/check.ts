@@ -948,7 +948,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
-  valueType(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type {
+  valueType(this: Mut<this>, name: string, at: Ref<Span>, shadowed: boolean): Type {
     return this.valueTypeOf(name, at, shadowed);
   }
 

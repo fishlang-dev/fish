@@ -2,7 +2,7 @@ import type { Declarations, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { holdsNull } from "./defaults.ts";
-import type { Expr, Interface, Param, PropertyName, Span, Stmt, TypeAlias, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import type { Expr, Interface, Param, PropertyName, Span, Stmt, TupleElement, TypeAlias, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
@@ -94,7 +94,7 @@ export interface ResolverHost {
   /** @throws {CompileError} */
   fieldsLaid(this: Mut<this>, c: ClassType): boolean;
   /** @throws {CompileError} */
-  valueType(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type;
+  valueType(this: Mut<this>, name: string, at: Ref<Span>, shadowed: boolean): Type;
   /** @throws {CompileError} */
   conforms(this: Mut<this>, from: Type, to: Type, at: Ref<Span>): boolean;
   typeNames(at: usize): string[];
@@ -679,35 +679,42 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (t.kind === "intersection") return this.intersection(t.types);
     if (t.kind === "array") return this.array(this.resolveType(t.element), t);
     if (t.kind === "tuple") {
-      const rest = t.elements.findIndex((e) => e.rest);
-      if (rest >= 0 && rest < t.elements.length - 1) throw unsupported("rest elements before the end of a tuple type", t.elements[rest]!);
-      const fixed = rest < 0 ? t.elements : t.elements.slice(0, rest);
-      const required = fixed.findIndex((e) => e.optional);
-      const late = required < 0 ? undefined : fixed.slice(required).find((e) => !e.optional);
-      if (late) throw new CompileError("E0117", "a required element can't follow an optional one; move it before the optional elements", late.start, late.end);
-      if (rest >= 0 && required >= 0) throw unsupported("tuple types with both optional and rest elements", t.elements[rest]!);
-      const many = rest < 0 ? undefined : this.resolveType(t.elements[rest]!.type);
+      let rest: usize | undefined = undefined;
+      for (let k: usize = 0; k < t.elements.length; k++) if (rest === undefined && t.elements[k]!.rest) rest = k;
+      if (rest !== undefined && rest < t.elements.length - 1) throw unsupported("rest elements before the end of a tuple type", t.elements[rest]!);
+      const fixed: usize = rest === undefined ? t.elements.length : rest;
+      let required: usize | undefined = undefined;
+      for (let k: usize = 0; k < fixed; k++) if (required === undefined && t.elements[k]!.optional) required = k;
+      if (required !== undefined) {
+        for (let k: usize = required; k < fixed; k++) {
+          const late: Ref<TupleElement> = t.elements[k]!;
+          if (!late.optional) throw new CompileError("E0117", "a required element can't follow an optional one; move it before the optional elements", late.start, late.end);
+        }
+      }
+      if (rest !== undefined && required !== undefined) throw unsupported("tuple types with both optional and rest elements", t.elements[rest]!);
+      const many = rest === undefined ? undefined : this.resolveType(t.elements[rest]!.type);
       const m = this.recOf(many);
-      if (many !== undefined && m?.kind !== "array") throw new CompileError("E0117", `a tuple's rest element is an array type, like '...${this.host.tables.typing.show(many)}[]'`, t.elements[rest]!.start, t.elements[rest]!.end);
+      if (many !== undefined && m?.kind !== "array") throw new CompileError("E0117", `a tuple's rest element is an array type, like '...${this.host.tables.typing.show(many)}[]'`, t.elements[rest!]!.start, t.elements[rest!]!.end);
+      const restOf = m?.kind === "array" ? m.element : undefined;
       let elements: Type[] = [];
-      for (const e of fixed) {
+      for (let k: usize = 0; k < fixed; k++) {
+        const e: Ref<TupleElement> = t.elements[k]!;
         const element = this.resolveType(e.type);
         const held = storable(this.host.tables.typing, element, e);
         elements.push(e.optional ? this.host.tables.typing.unionType([held, "null"]) : held);
       }
-      const restOf = m?.kind === "array" ? m.element : undefined;
-      if (required < 0) return this.host.tables.typing.tupleType(elements, elements.length, restOf);
-      return this.host.tables.typing.tupleType(elements, required as usize, restOf);
+      return this.host.tables.typing.tupleType(elements, required ?? elements.length, restOf);
     }
     // `typeof f` or `typeof X`: a top-level function's or const's type.
     if (t.kind === "query") {
       if (t.target.kind !== "ref" || t.target.args.length > 0 || t.target.name.includes(".")) throw unsupported("'typeof' types other than of a top-level function or const", t);
-      return this.host.valueType(t.target.name, t, this.inSight(t.target.name, t));
+      const shadowed = this.inSight(t.target.name, t);
+      return this.host.valueType(t.target.name, spanOf(t), shadowed);
     }
     if (t.kind !== "ref") throw unsupported(typeForm(t.kind)!, t);
     const bound = this.host.resolverState.scope.get(t.name);
-    if (bound && t.args.length === 0) return bound;
-    if (Object.hasOwn(INTEGERS, t.name) || ["boolean", "void", "number", "f32", "f64", "string", "bigint"].includes(t.name)) {
+    if (bound !== undefined && t.args.length === 0) return bound;
+    if (INTEGER_NAMES.includes(t.name) || ["boolean", "void", "number", "f32", "f64", "string", "bigint"].includes(t.name)) {
       if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
       // `number` is JavaScript's 64-bit float.
       return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string" | "bigint");
@@ -1429,14 +1436,20 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       }
     }
     if (open !== undefined) return open;
-    if (this.host.resolverState.layouts.some((s) => s.has(key))) {
+    let laying = false;
+    for (const layout of this.host.resolverState.layouts) if (layout.has(key)) laying = true;
+    if (laying) {
       throw new CompileError("E0113", `type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
     }
     if (this.host.resolverState.resolving.has(key)) {
-      let back = this.host.resolverState.recursives.get(key);
+      const known = this.host.resolverState.recursives.get(key);
+      if (known !== undefined) return known;
       // A std alias may be shown by another name than the one it is linked under.
-      const name = (a as { shown?: string }).shown ?? a.name;
-      if (!back) this.host.resolverState.recursives.set(key, back = this.host.tables.typing.recursiveType(args.length > 0 ? `${name}<${args.map((t) => this.host.tables.typing.show(t)).join(", ")}>` : name, args));
+      const name = a.shown ?? a.name;
+      let shown: string[] = [];
+      for (const x of args) shown.push(this.host.tables.typing.show(x));
+      const back = this.host.tables.typing.recursiveType(args.length > 0 ? `${name}<${shown.join(", ")}>` : name, args);
+      this.host.resolverState.recursives.set(key, back);
       return back;
     }
     // A type that branches as it recurses grows exponentially, so the whole program's type
@@ -1456,7 +1469,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     // Only a structure can hold a type again: `type A = B | null` with `type B = A` would be a
     // name for nothing but itself.
     const r = this.recOf(type);
-    if (back && (type === back || (r?.kind === "union" && r.members.includes(back)))) {
+    if (back !== undefined && (type === back || (r?.kind === "union" && r.members.includes(back)))) {
       throw new CompileError("E0113", `type '${a.name}' circularly references itself; a type can hold itself only inside an object, a tuple or an array`, a.start, a.end);
     }
     if (back) {
@@ -1487,7 +1500,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     const source = homomorphic !== undefined ? this.typeFns().fieldsOf(homomorphic, "a mapped type", spanOf(t.constraint)) : [];
     const fields: Field[] = [];
-    for (const key of keys === "never" ? [] : this.typeFns().keysOf(keys, "a mapped type", t.constraint)) {
+    const names: string[] = keys === "never" ? [] : this.typeFns().keysOf(keys, "a mapped type", spanOf(t.constraint));
+    for (const key of names) {
       let bound = this.scopeCopy();
       bound.set(t.name, this.host.tables.typing.literalType(key));
       const renamed = t.as !== undefined ? this.resolveIn(bound, t.as) : this.host.tables.typing.literalType(key);
@@ -1581,7 +1595,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (this.conforms(check, against, spanOf(t.extends))) return this.resolveType(t.then);
       return this.resolveType(t.else);
     }
-    const found = new Map<string, Type>();
+    let found = new Map<string, Type>();
     if (!this.matches(t.extends, check, found)) return this.resolveType(t.else);
     for (const name of names) {
       if (!found.has(name)) throw new CompileError("E0114", `'infer ${name}' matched nothing in '${this.host.tables.typing.show(check)}', since the optional field holding it is missing; TypeScript would give 'unknown' for it`, t.extends.start, t.extends.end);
