@@ -474,8 +474,6 @@ function now(timings: Ref<Timings>): f64 {
   return timings.manual !== undefined ? timings.manual : performance.now();
 }
 
-// Runs `run`, adding its own time to stage `name` when timing.
-/** @throws {CompileError} */
 // The program's type aliases and interfaces, by name, and the lifetimes each class and alias
 // declares, which nothing changes once they are declared, so the checker reads them while
 // changing its own state.
@@ -485,6 +483,8 @@ export function newDeclarations(): Declarations {
   return { aliases: new Map<string, TypeAlias>(), interfaces: new Map<string, Interface>(), slots: new Map<string, boolean[]>() };
 }
 
+// Runs `run`, adding its own time to stage `name` when timing.
+/** @throws {CompileError} */
 export function timed<T>(timings: Timings | undefined, name: string, run: Timed<T>): T {
   if (timings === undefined) return run();
   const outer = timings.inner;
