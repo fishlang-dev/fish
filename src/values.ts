@@ -5441,7 +5441,7 @@ export class Expressions<C extends Context> implements Union {
     // A template runs as this class's own copy of it, on this class's `this`.
     const original = this.arenas.bodyOf(found.copyOf) ?? found;
     const copied = (original.template === true || selfTyped(original)) && !this.typing.rec(this.self!.type).abstract;
-    if (copied) found = copyFor(this.ctx.tables, this.ctx.classOf(this.self!.type), original);
+    if (copied) found = this.arenas.bodyOf(copyFor(this.ctx.tables, this.ctx.classOf(this.self!.type).classId, original.bodyId));
     this.visible(found.access, found.declared ?? found.owner!, callee.name, callee);
     if (found.self!.mutable && !this.self!.mutable) {
       throw new CompileError("E0206", `cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);

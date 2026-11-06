@@ -11,7 +11,7 @@ import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
 import { openParam, standIn, TypeFunctions, UTILITIES, type TypeFunctionsHost } from "./typefns.ts";
-import { mutates, owns, withoutUndefined } from "./classes.ts";
+import { mutates, owns, spellsUndefined } from "./classes.ts";
 import type { BodyId, LocalId } from "./arenas.ts";
 
 // Type annotations and the top-level type aliases they name, resolved to the checker's types.
@@ -1225,7 +1225,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (!m.type) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An object may leave out an optional property, which is then empty; one spelled
     // `T | undefined` may be left out too, and printing and JSON leave it out while empty.
-    const f: Field = m.optional ? this.typing.optionalField(m.name, this.unionMember(m.type)) : withoutUndefined(this.ids, m.type) ? { name: m.name, type: this.resolveType(m.type), optional: "undefined" } : { name: m.name, type: this.resolveType(m.type) };
+    const f: Field = m.optional ? this.typing.optionalField(m.name, this.unionMember(m.type)) : spellsUndefined(m.type) ? { name: m.name, type: this.resolveType(m.type), optional: "undefined" } : { name: m.name, type: this.resolveType(m.type) };
     return { ...f, type: storable(this.typing, f.type, m), ...(m.readonly && { readonly: true }) };
   }
 }

@@ -103,7 +103,7 @@ export class Registry<H extends RegistryHost> {
     }
     if (path.has(c.type)) throw new CompileError("E0704", `class '${this.typing.rec(c.type).name}' embeds itself through 'extends'`, c.node.start, c.node.end);
     if ((c.baseName === "Map" || c.baseName === "Set") && !this.host.classes.has(c.baseName) && !this.host.templates.has(c.baseName)) {
-      embed(this.host.tables, c, c.baseName);
+      embed(this.host.tables, c.classId, c.baseName);
       checkOverrideModifiers(this.arenas, this.typing, c);
       implementAbstracts(this.host.tables, c);
       this.host.registryState.linked.add(c.type);
@@ -115,7 +115,7 @@ export class Registry<H extends RegistryHost> {
     if (rust) throw new CompileError("E1004", `a class can't extend the Rust type '${rust.name}'; hold one in a field instead`, c.node.extends!.start, c.node.extends!.end);
     this.link(base, path.add(c.type));
     const at = c.node.extends!;
-    extend(this.host.tables, c, base, (name) => this.host.withScope(new Map(), () => this.host.resolveType({ id: nextId(this.ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
+    extend(this.host.tables, c.classId, base.classId, (name) => this.host.withScope(new Map(), () => this.host.resolveType({ id: nextId(this.ids), kind: "ref", name, args: [], start: at.start, end: at.end })));
     implementAbstracts(this.host.tables, c);
     copySelfTyped(this.host.tables, c);
     checkOverrides(this.arenas, this.typing, c);

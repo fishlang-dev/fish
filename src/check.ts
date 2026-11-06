@@ -615,7 +615,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.interfaces = new Map<string, Interface>();
     this.enums = new Map<string, EnumInfo>();
     this.slots = new Map<string, boolean[]>();
-    separatePrivateNames(this.program.flatMap((s) => (s.kind === "class" && s.name !== undefined ? [{ ...s, name: s.name }] : [])));
+    separatePrivateNames(this.program);
     for (const s of this.program) {
       try {
         // A `declare const enum` writes its values, so it is an enum like any other.

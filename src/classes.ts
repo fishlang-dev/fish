@@ -1,13 +1,14 @@
+import assert from "node:assert";
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { RustName } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { cloneClassNode, cloneExpr, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltParam } from "./rebuild.ts";
+import { cloneClassNode, cloneExpr, cloneJsName, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltParam, rebuiltStmts, rebuiltTypeNode } from "./rebuild.ts";
 import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.ts";
-import { forEachChild, nextId, NodeSet, renumberParam, renumberStmts, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
+import { forEachChild, nextId, NodeSet, renumberParam, renumberStmts, renumberTypeNode, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
 
 // A function to compile: a top-level function, a static method, or a class's constructor or
 // instance method, which gets its instance as `this` through a pointer. Only a constructor
@@ -187,7 +188,7 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
       accessor(tables, node, d, m);
       continue;
     }
-    if (m.kind !== "field") throw unsupported(MEMBER_FORMS[m.kind], { start: m.start, end: m.end });
+    if (m.kind !== "field") throw unsupported(memberForm(m.kind), { start: m.start, end: m.end });
     if (typeof m.name !== "string") throw symbolKey(m.name);
     if (m.modifiers.includes("static")) {
       staticField(node, d, m, m.name);
@@ -280,7 +281,7 @@ function fieldOf(ids: Mut<Ids>, name: string, written: Ref<TypeNode> | undefined
   const type: TypeNode | undefined = written === undefined ? undefined : optional ? { id: nextId(ids), kind: "union", types: [cloneTypeNode(written), { id: nextId(ids), kind: "ref", name: "null", args: [], ...span }], ...span } : cloneTypeNode(written);
   let f: FieldDecl = { name, type, init, access, readonly, start: span.start, end: span.end };
   if (optional && written !== undefined) f.written = cloneTypeNode(written);
-  if (!optional && written !== undefined && withoutUndefined(ids, written) !== undefined) f.undefinedSpelled = true;
+  if (!optional && written !== undefined && spellsUndefined(written)) f.undefinedSpelled = true;
   return f;
 }
 
@@ -300,7 +301,7 @@ function staticField(node: Ref<ClassNode>, d: Mut<Declaring>, m: Ref<Extract<Cla
   if (m.optional) throw unsupported("optional static fields", at);
   if (m.definite) throw unsupported("definite assignment assertions", at);
   if (m.init === undefined) throw new CompileError("E0706", `a 'static readonly' field needs its value where it is declared, as in 'static readonly ${field} = ...'`, m.start, m.end);
-  const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, field);
+  const access = modifiers(m.modifiers.filter((x) => x !== "static"), { start: m.start, end: m.end }, field);
   if (d.staticFields.has(field)) throw new CompileError("E0402", `duplicate property '${field}'`, m.start, m.end);
   d.staticFields.set(field, { name: field, type: m.type !== undefined ? cloneTypeNode(m.type) : undefined, init: cloneExpr(m.init), access, readonly: true, start: m.start, end: m.end });
 }
@@ -312,7 +313,7 @@ function abstractMember(tables: Mut<Tables>, node: Ref<ClassNode>, d: Mut<Declar
   const at = { start: m.start, end: m.end };
   if (!node.abstract) throw new CompileError("E0701", "abstract members can only appear in an abstract class", m.start, m.end);
   if (m.kind === "field") throw unsupported("abstract fields", at);
-  if (m.kind !== "method" && m.kind !== "get" && m.kind !== "set") throw unsupported(m.kind === "index" || m.kind === "staticBlock" ? MEMBER_FORMS[m.kind] : "abstract members", at);
+  if (m.kind !== "method" && m.kind !== "get" && m.kind !== "set") throw unsupported(m.kind === "index" || m.kind === "staticBlock" ? memberForm(m.kind) : "abstract members", at);
   if (typeof m.name !== "string") throw symbolKey(m.name);
   const name = m.name;
   if (m.modifiers.includes("static")) throw new CompileError("E0701", "'static' can't be used with 'abstract'", m.start, m.end);
@@ -336,7 +337,7 @@ function accessor(tables: Mut<Tables>, node: Ref<ClassNode>, d: Mut<Declaring>, 
   if (isStatic && node.typeParams.length > 0) throw unsupported("static accessors in generic classes", at);
   if (typeof m.name !== "string") throw symbolKey(m.name);
   const name = m.name;
-  const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, name);
+  const access = modifiers(m.modifiers.filter((x) => x !== "static"), { start: m.start, end: m.end }, name);
   if (name === "constructor") throw new CompileError("E0705", "'constructor' can't be the name of an accessor", m.start, m.end);
   if (m.body === undefined) throw unsupported("accessors without a body", at);
   // Only a JSDoc `@throws` gives an accessor an error type: reading a property can't fail yet.
@@ -374,7 +375,7 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
   if (isStatic && d.shared) return undefined;
   if (typeof m.name !== "string") throw symbolKey(m.name);
   const name = m.name;
-  const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, name);
+  const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), { start: m.start, end: m.end }, name);
   if (m.optional) throw unsupported("optional methods", { start: m.start, end: m.end });
   if (m.body === undefined) throw new CompileError("E0410", `'${name}' has no implementation; follow its overload signatures with a '${name}' method that has a body`, m.start, m.end);
   if (name === "constructor") throw new CompileError("E0407", "'constructor' can't be the name of a method", m.start, m.end);
@@ -437,7 +438,7 @@ function classParamIn(node: Ref<ClassNode>, m: Ref<Extract<ClassMember, { kind: 
 
 // Where a node names one of `outer` that isn't `hidden`. A function inside declaring its own type
 // parameter of that name hides the class's.
-function classParamUse(n: Ref<AnyNode>, outer: Ref<Set<string>>, hidden: Ref<Set<string>>): { name: string; start: usize; end: usize } | undefined {
+function classParamUse(n: AnyNode, outer: Ref<Set<string>>, hidden: Ref<Set<string>>): { name: string; start: usize; end: usize } | undefined {
   if (n.of === "typeNode" && n.node.kind === "ref" && n.node.args.length === 0 && outer.has(n.node.name) && !hidden.has(n.node.name)) return { name: n.node.name, start: n.node.start, end: n.node.end };
   let inner = new Set<string>([...hidden]);
   for (const name of typeParamNames(n)) inner.add(name);
@@ -449,14 +450,17 @@ function classParamUse(n: Ref<AnyNode>, outer: Ref<Set<string>>, hidden: Ref<Set
 }
 
 // The type parameters a node declares.
-function typeParamNames(n: Ref<AnyNode>): string[] {
+function typeParamNames(n: AnyNode): string[] {
   if (n.of === "stmt" && (n.node.kind === "function" || n.node.kind === "class" || n.node.kind === "typeAlias" || n.node.kind === "interface")) return n.node.typeParams.map((p) => p.name);
   if (n.of === "expr" && (n.node.kind === "arrow" || n.node.kind === "function" || n.node.kind === "class")) return n.node.typeParams.map((p) => p.name);
   if (n.of === "classMember" && n.node.kind === "method") return n.node.typeParams.map((p) => p.name);
   if (n.of === "objectProp" && n.node.kind === "method") return n.node.typeParams.map((p) => p.name);
   if (n.of === "typeNode" && n.node.kind === "function") return n.node.typeParams.map((p) => p.name);
   if (n.of === "typeMember" && (n.node.kind === "method" || n.node.kind === "call" || n.node.kind === "construct")) return n.node.typeParams.map((p) => p.name);
-  if (n.of === "func" || n.of === "typeAlias" || n.of === "interface" || n.of === "classNode") return n.node.typeParams.map((p) => p.name);
+  if (n.of === "func") return n.node.typeParams.map((p) => p.name);
+  if (n.of === "typeAlias") return n.node.typeParams.map((p) => p.name);
+  if (n.of === "interface") return n.node.typeParams.map((p) => p.name);
+  if (n.of === "classNode") return n.node.typeParams.map((p) => p.name);
   return [];
 }
 
@@ -481,30 +485,50 @@ function add(d: Mut<Declaring>, f: FieldDecl): void {
 // A `#name` belongs to the class whose body declares it, so a subclass declaring a `#name` its
 // base also declares gets a separate member: inside its body the name is renamed `#name@Class`,
 // and the base's code, its copies included, keeps reaching the base's own.
-export function separatePrivateNames(nodes: (ClassNode & { name: string })[]) {
-  const byName = new Map(nodes.map((n) => [n.name, n]));
-  const baseOf = (n: ClassNode) => {
-    const named = n.extends?.kind === "instantiation" ? n.extends.expr : n.extends;
-    return named?.kind === "ident" ? byName.get(named.name) : undefined;
-  };
-  const declared = (n: ClassNode) => n.members.flatMap((m) => ("name" in m && typeof m.name === "string" && m.name.startsWith("#") ? [m.name] : []));
-  for (const node of nodes) {
-    const inherited = new Set<string>();
-    const seen = new NodeSet<ClassNode>();
-    for (let b = baseOf(node); b && !seen.has(b); b = baseOf(b)) {
-      seen.add(b);
-      declared(b).forEach((n) => inherited.add(n));
-    }
-    for (const name of declared(node).filter((n) => inherited.has(n))) renamePrivate(node.members, name, `${name}@${node.name}`);
+export function separatePrivateNames(program: Mut<Stmt[]>): void {
+  let bases = new Map<string, string>();
+  let declared = new Map<string, string[]>();
+  for (const s of program) {
+    if (s.kind !== "class" || s.name === undefined) continue;
+    const named = s.extends !== undefined && s.extends.kind === "instantiation" ? s.extends.expr : s.extends;
+    if (named !== undefined && named.kind === "ident") bases.set(s.name, named.name);
+    else bases.delete(s.name);
+    declared.set(s.name, privateNames(s.members));
   }
+  let rewrites = new Rewrites();
+  for (const s of program) {
+    if (s.kind !== "class" || s.name === undefined) continue;
+    let inherited = new Set<string>();
+    let seen = new Set<string>();
+    for (let b = bases.get(s.name); b !== undefined && declared.has(b) && !seen.has(b); b = bases.get(b)) {
+      seen.add(b);
+      for (const n of declared.get(b)!) inherited.add(n);
+    }
+    for (const name of declared.get(s.name)!) if (inherited.has(name)) renamePrivate(rewrites, s.members, name, `${name}@${s.name}`);
+  }
+  rebuiltStmts(program, rewrites);
+}
+
+function privateNames(members: Ref<ClassMember[]>): string[] {
+  let names: string[] = [];
+  for (const m of members) {
+    if ((m.kind === "field" || m.kind === "method" || m.kind === "get" || m.kind === "set") && typeof m.name === "string" && m.name.startsWith("#")) names.push(m.name);
+  }
+  return names;
 }
 
 // Any name spelled `from` is the private member's: a member's, or one reached through `.`.
-function renamePrivate(members: ClassMember[], from: string, to: string) {
+function renamePrivate(rewrites: Mut<Rewrites>, members: Ref<ClassMember[]>, from: string, to: string): void {
   for (const m of members) {
-    walk({ of: "classMember", node: m }, ({ node }) => {
-      const n = node as { name?: unknown };
-      if (n.name === from) n.name = to;
+    walk({ of: "classMember", node: m }, (n) => {
+      if (n.of === "classMember") {
+        const c = n.node;
+        if ((c.kind === "field" || c.kind === "method" || c.kind === "get" || c.kind === "set") && c.name === from) rewrites.replaceClassMember(c, { ...c, name: to });
+      } else if (n.of === "expr") {
+        const e = n.node;
+        if (e.kind === "member" && e.name === from) rewrites.replace(e, { ...e, name: to });
+        else if (e.kind === "privateName" && e.name === from) rewrites.replace(e, { ...e, name: to });
+      }
     });
   }
 }
@@ -520,115 +544,231 @@ export const shownName = (name: string) => (name.startsWith("#") ? name.replace(
 export type GlobalType = (name: string) => Type;
 
 /** @throws {CompileError} */
-export function extend(tables: Tables, c: ClassInfo, base: ClassInfo, global: GlobalType) {
-  const { arenas, defaulted, prologues, ids, typing } = tables;
-  c.base = base.classId;
-  typing.rec(c.type).base = base.type;
+export function extend(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, global: GlobalType): void {
+  tables.arenas.classMut(classId).base = baseId;
+  const c = tables.arenas.classOf(classId);
+  const base = tables.arenas.classOf(baseId);
+  let record = tables.typing.rec(c.type);
+  record.base = base.type;
+  tables.typing.setRec(c.type, record);
   // A name that isn't one of the program's types hides nothing.
-  c.globals = new Map([...c.scope.keys()].flatMap((n): [string, Type][] => {
+  let globals = new Map<string, Type>();
+  for (const n of c.scope.keys()) {
     try {
-      return [[n, global(n)]];
+      globals.set(n, global(n));
     } catch {
-      return [];
-    }
-  }));
-  const constructor = arenas.bodyOf(c.constructor);
-  const baseConstructor = arenas.bodyOf(base.constructor);
-  for (let b: ClassInfo | undefined = base; b; b = arenas.classOf(b.base)) {
-    const redeclared = c.fields.find((f) => b.fields.some((g) => g.name === f.name));
-    if (redeclared) {
-      throw new CompileError("E0704", `'${redeclared.name}' is already a field of '${typing.rec(b.type).name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${redeclared.name} = ...'`, redeclared.start, redeclared.end);
+      continue;
     }
   }
-  const explicit = c.node.members.find((m) => m.kind === "constructor");
-  const at = { start: constructor.start, end: constructor.end };
-  if (explicit) {
-    // Its parameters' defaults are bound first, since `super(...)` may read them.
-    const written = constructor.body.slice(c.prelude.length);
-    const defaults = written.filter((s) => prologues.has(s));
-    const [first, ...rest] = written.slice(defaults.length);
-    if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
-      throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", at.start, at.end);
+  tables.arenas.classMut(classId).globals = globals;
+  for (let b: ClassId | undefined = baseId; b !== undefined; b = tables.arenas.classOf(b).base) {
+    const of = tables.arenas.classOf(b);
+    for (const f of c.fields) {
+      if (of.fields.some((g) => g.name === f.name)) {
+        throw new CompileError("E0704", `'${f.name}' is already a field of '${tables.typing.rec(of.type).name}'; with 'extends' as embedding it would be a second, separate field, so set it in the constructor after 'super(...)' instead, as in 'this.${f.name} = ...'`, f.start, f.end);
+      }
     }
-    constructor.body = [...defaults, first, ...c.prelude, ...rest];
+  }
+  const ctorId = c.constructor;
+  const preludeLength = c.prelude.length;
+  if (c.node.members.some((m) => m.kind === "constructor")) {
+    // Its parameters' defaults are bound first, since `super(...)` may read them.
+    const defaults = superAt(tables, ctorId, preludeLength);
+    let ctor = tables.arenas.bodyMut(ctorId);
+    let tail = ctor.body.splice(preludeLength);
+    let prelude = ctor.body.splice(0);
+    let body = tail.splice(0, defaults);
+    body.push(tail.shift()!);
+    for (const st of prelude) body.push(st);
+    for (const st of tail) body.push(st);
+    ctor.body = body;
     return;
   }
   // The base's parameters are typed in its scope, where a name may mean something other than it
   // does here: one of its own type parameters, or a type this class's type parameter hides. Each
   // such name is renamed apart into this constructor's own scope, standing for what it means there.
-  const outer = baseConstructor.scope ?? new Map<string, Type>();
-  const names = new Map([...new Set(baseConstructor.params.flatMap((p) => refNames(p.type)))]
-    .filter((n) => outer.has(n) || c.scope.has(n)).map((n) => [n, apartName(n, typing.rec(base.type).name)]));
-  if (names.size > 0) constructor.scope = new Map([...c.scope, ...[...names].map(([n, to]): [string, Type] => [to, outer.get(n) ?? global(n)])]);
+  const baseCtor = tables.arenas.bodyOf(base.constructor);
+  const ownCtor = tables.arenas.bodyOf(ctorId);
+  const span = { start: ownCtor.start, end: ownCtor.end };
+  const baseName = tables.typing.rec(base.type).name;
+  let used = new Set<string>();
+  for (const p of baseCtor.params) if (p.type !== undefined) refNames({ of: "typeNode", node: p.type }, used);
+  let names = new Map<string, string>();
+  for (const n of used) if ((baseCtor.scope !== undefined && baseCtor.scope.has(n)) || c.scope.has(n)) names.set(n, apartName(n, baseName));
+  let scope: Map<string, Type> | undefined = undefined;
+  if (names.size > 0) {
+    let s = new Map<string, Type>();
+    for (const [n, t] of c.scope) s.set(n, t);
+    for (const [n, to] of names) {
+      const there = baseCtor.scope !== undefined ? baseCtor.scope.get(n) : undefined;
+      s.set(to, there !== undefined ? there : global(n));
+    }
+    scope = s;
+  }
   // Copies, so each constructor has its own parameters, and none of them is a property here.
-  const params = baseConstructor.params.map((p) => {
-    const copy = { ...p, id: nextId(ids), modifiers: [], ...(p.type && names.size > 0 && { type: renamed(p.type, names) }) };
-    const declared = defaulted.get(p);
-    if (declared) defaulted.set(copy, declared);
-    return copy;
-  });
+  let params: Param[] = [];
+  let defaulted: [Param, { name: string; empty: boolean }][] = [];
+  for (const p of baseCtor.params) {
+    let copy = names.size > 0 && p.type !== undefined ? apartParam(tables.ids, p, names) : cloneParam(p);
+    copy.id = nextId(tables.ids);
+    copy.modifiers = [];
+    const declared = tables.defaulted.get(p);
+    if (declared !== undefined) defaulted.push([cloneParam(copy), declared]);
+    params.push(copy);
+  }
+  for (const [p, d] of defaulted) tables.defaulted.set(p, d);
   // A rest parameter is passed on spread, to be packed into the base's again.
-  const args: Expr[] = params.map((p) => {
-    const name: Expr = { id: nextId(ids), kind: "ident", name: (p.pattern as { name: string }).name, start: p.start, end: p.end };
-    return p.rest ? { id: nextId(ids), kind: "spread", value: name, start: p.start, end: p.end } : name;
-  });
-  const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "super", ...at }, typeArgs: [], args, optional: false, ...at };
-  constructor.params = params;
-  constructor.body = [{ id: nextId(ids), kind: "expr", expr: call, ...at }, ...c.prelude];
+  let args: Expr[] = [];
+  for (const p of params) {
+    assert(p.pattern.kind === "ident", "internal error: a base constructor's parameter is not a name");
+    const name: Expr = { id: nextId(tables.ids), kind: "ident", name: p.pattern.name, start: p.start, end: p.end };
+    args.push(p.rest ? { id: nextId(tables.ids), kind: "spread", value: name, start: p.start, end: p.end } : name);
+  }
+  const call: Expr = { id: nextId(tables.ids), kind: "call", callee: { id: nextId(tables.ids), kind: "super", ...span }, typeArgs: [], args, optional: false, ...span };
+  let body: Stmt[] = [{ id: nextId(tables.ids), kind: "expr", expr: call, ...span }];
+  for (const st of c.prelude) body.push(cloneStmt(st));
+  let ctor = tables.arenas.bodyMut(ctorId);
+  if (scope !== undefined) ctor.scope = scope;
+  ctor.params = params;
+  ctor.body = body;
+}
+
+// Where a derived constructor's `super(...)` is, after the prelude and the parameters' defaults:
+// how many defaults come before it.
+/** @throws {CompileError} */
+function superAt(tables: Ref<Tables>, ctorId: BodyId, preludeLength: usize): usize {
+  const ctor = tables.arenas.bodyOf(ctorId);
+  let at = preludeLength;
+  while (at < ctor.body.length && tables.prologues.has(ctor.body[at]!)) at++;
+  const first = ctor.body[at];
+  if (first === undefined || first.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
+    throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", ctor.start, ctor.end);
+  }
+  return at - preludeLength;
 }
 
 // Links a class to the Map or Set it extends, held in the field `EMBEDDED`. Its constructor's
 // `super(...)` makes the collection, as `new Map<K, V>(...)` would; without a constructor of
 // its own it makes an empty one.
 /** @throws {CompileError} */
-export function embed(tables: Tables, c: ClassInfo, kind: "Map" | "Set") {
-  const { arenas, ids, prologues } = tables;
-  const named = c.node.extends!;
+export function embed(tables: Mut<Tables>, classId: ClassId, kind: "Map" | "Set"): void {
+  const c = tables.arenas.classOf(classId);
+  const named = c.node.extends;
+  assert(named !== undefined, "internal error: embedding a class that extends nothing");
   const at = { start: named.start, end: named.end };
-  const typeArgs = named.kind === "instantiation" ? named.typeArgs : [];
-  c.embedded = kind;
-  c.fields.unshift({ name: EMBEDDED, type: { id: nextId(ids), kind: "ref", name: kind, args: typeArgs, ...at }, init: undefined, access: "private", readonly: false, ...at });
-  c.required.add(EMBEDDED);
-  const made = (args: Expr[], s: Span): Stmt => assignField(ids, EMBEDDED, { id: nextId(ids), kind: "new", callee: { id: nextId(ids), kind: "ident", name: kind, ...at }, typeArgs, args, start: s.start, end: s.end }, s);
-  const constructor = arenas.bodyOf(c.constructor);
-  if (!c.node.members.some((m) => m.kind === "constructor")) {
-    constructor.body = [made([], at), ...c.prelude];
-    return;
-  }
-  const written = constructor.body.slice(c.prelude.length);
-  const defaults = written.filter((s) => prologues.has(s));
-  const [first, ...rest] = written.slice(defaults.length);
-  if (first?.kind !== "expr" || first.expr.kind !== "call" || first.expr.callee.kind !== "super") {
-    throw new CompileError("E0703", "a derived class's constructor must start with 'super(...)'", constructor.start, constructor.end);
-  }
+  let typeArgs: TypeNode[] = [];
+  if (named.kind === "instantiation") for (const t of named.typeArgs) typeArgs.push(cloneTypeNode(t));
+  const ctorId = c.constructor;
+  const preludeLength = c.prelude.length;
+  const explicit = c.node.members.some((m) => m.kind === "constructor");
   // JavaScript's constructor adds each entry through `this.set` or `this.add`, so an override of
   // it sees them; that runs once the fields are assigned, before the rest of the constructor.
   const adder = kind === "Set" ? "add" : "set";
-  const [given] = first.expr.args;
-  if (!c.methods.has(adder) || !given) {
-    constructor.body = [...defaults, made(first.expr.args, first), ...c.prelude, ...rest];
+  const overridden = c.methods.has(adder);
+  const defaults = explicit ? superAt(tables, ctorId, preludeLength) : 0;
+  const field: FieldDecl = { name: EMBEDDED, type: { id: nextId(tables.ids), kind: "ref", name: kind, args: cloneTypeNodes(typeArgs), ...at }, init: undefined, access: "private", readonly: false, ...at };
+  let info = tables.arenas.classMut(classId);
+  info.embedded = kind;
+  info.fields.unshift(field);
+  info.required.add(EMBEDDED);
+  if (!explicit) {
+    let body: Stmt[] = [made(tables.ids, kind, typeArgs, [], at, at)];
+    let ctor = tables.arenas.bodyMut(ctorId);
+    for (const st of ctor.body.splice(0, preludeLength)) body.push(st);
+    ctor.body = body;
     return;
   }
+  let ctor = tables.arenas.bodyMut(ctorId);
+  let tail = ctor.body.splice(preludeLength);
+  let prelude = ctor.body.splice(0);
+  let body = tail.splice(0, defaults);
+  let first = tail.shift()!;
   const s = { start: first.start, end: first.end };
-  const names = kind === "Set" ? ["member"] : ["key", "value"];
-  const target: Pattern = kind === "Set" ? { id: nextId(ids), kind: "ident", name: "member", ...s } : { id: nextId(ids), kind: "array", elements: names.map((name): Pattern => ({ id: nextId(ids), kind: "ident", name, ...s })), rest: undefined, ...s };
+  let args: Expr[] = first.kind === "expr" && first.expr.kind === "call" ? first.expr.args.splice(0) : [];
+  if (!overridden || args.length === 0) {
+    body.push(made(tables.ids, kind, typeArgs, args, at, s));
+    for (const st of prelude) body.push(st);
+    for (const st of tail) body.push(st);
+    tables.arenas.bodyMut(ctorId).body = body;
+    return;
+  }
+  const given = args.shift()!;
+  const ids = tables.ids;
+  let names: string[] = kind === "Set" ? ["member"] : ["key", "value"];
+  let elements: Pattern[] = [];
+  for (const name of names) elements.push({ id: nextId(ids), kind: "ident", name, ...s });
+  const target: Pattern = kind === "Set" ? { id: nextId(ids), kind: "ident", name: "member", ...s } : { id: nextId(ids), kind: "array", elements, rest: undefined, ...s };
   const left: Stmt = { id: nextId(ids), kind: "let", keyword: "const", declarations: [{ id: nextId(ids), target, type: undefined, init: undefined, ...s }], ...s };
-  const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "this", ...s }, name: adder, optional: false, ...s }, typeArgs: [], args: names.map((name): Expr => ({ id: nextId(ids), kind: "ident", name, ...s })), optional: false, ...s };
+  let callArgs: Expr[] = [];
+  for (const name of names) callArgs.push({ id: nextId(ids), kind: "ident", name, ...s });
+  const call: Expr = { id: nextId(ids), kind: "call", callee: { id: nextId(ids), kind: "member", object: { id: nextId(ids), kind: "this", ...s }, name: adder, optional: false, ...s }, typeArgs: [], args: callArgs, optional: false, ...s };
   const loop: Stmt = { id: nextId(ids), kind: "forOf", await: false, left, right: given, body: [{ id: nextId(ids), kind: "expr", expr: call, ...s }], ...s };
-  constructor.body = [...defaults, made([], first), ...c.prelude, loop, ...rest];
+  body.push(made(ids, kind, typeArgs, [], at, s));
+  for (const st of prelude) body.push(st);
+  body.push(loop);
+  for (const st of tail) body.push(st);
+  tables.arenas.bodyMut(ctorId).body = body;
 }
 
-// The names a type, or the types inside a parameter or statements, refer to without type arguments.
-function refNames(t: TypeNode | Param | Stmt[] | undefined): string[] {
-  if (!t) return [];
-  const found: string[] = [];
-  const each = ({ of, node }: AnyNode) => {
-    if (of === "typeNode" && node.kind === "ref" && node.args.length === 0) found.push(node.name);
-  };
-  if (Array.isArray(t)) walk({ of: "stmts", node: t }, each);
-  else if ("pattern" in t) walk({ of: "param", node: t }, each);
-  else walk({ of: "typeNode", node: t }, each);
-  return found;
+// `this[EMBEDDED] = new Map<K, V>(args)`, at the span `s`.
+function made(ids: Mut<Ids>, kind: "Map" | "Set", typeArgs: Ref<TypeNode[]>, args: Expr[], at: Ref<Span>, s: Ref<Span>): Stmt {
+  const value: Expr = { id: nextId(ids), kind: "new", callee: { id: nextId(ids), kind: "ident", name: kind, start: at.start, end: at.end }, typeArgs: cloneTypeNodes(typeArgs), args, start: s.start, end: s.end };
+  return assignField(ids, EMBEDDED, value, { start: s.start, end: s.end });
+}
+
+function cloneTypeNodes(ts: Ref<TypeNode[]>): TypeNode[] {
+  let out: TypeNode[] = [];
+  for (const t of ts) out.push(cloneTypeNode(t));
+  return out;
+}
+
+// The names the types under `n` refer to without type arguments, added to `out`.
+function refNames(n: AnyNode, out: Mut<Set<string>>): void {
+  walk(n, (x) => {
+    if (x.of === "typeNode") {
+      const t = x.node;
+      if (t.kind === "ref" && t.args.length === 0) out.add(t.name);
+    }
+  });
+}
+
+// Records renaming every type under `n` that `names` maps.
+function renameRefs(rewrites: Mut<Rewrites>, n: AnyNode, names: Ref<Map<string, string>>): void {
+  walk(n, (x) => {
+    if (x.of === "typeNode") {
+      const t = x.node;
+      if (t.kind === "ref") {
+        const to = names.get(t.name);
+        if (to !== undefined) rewrites.replaceTypeNode(t, { ...t, name: to });
+      }
+    }
+  });
+}
+
+// Copies with fresh ids, each type `names` maps renamed. The copy is renumbered before it is
+// renamed, so what the renaming replaces is the copy's, never the original's.
+function apartParam(ids: Mut<Ids>, p: Ref<Param>, names: Ref<Map<string, string>>): Param {
+  const copy = renumberParam(cloneParam(p), () => nextId(ids));
+  let rewrites = new Rewrites();
+  renameRefs(rewrites, { of: "param", node: copy }, names);
+  return rebuiltParam(copy, rewrites);
+}
+
+function apartStmts(ids: Mut<Ids>, body: Ref<Stmt[]>, names: Ref<Map<string, string>>): Stmt[] {
+  let copy: Stmt[] = [];
+  for (const st of body) copy.push(cloneStmt(st));
+  copy = renumberStmts(copy, () => nextId(ids));
+  let rewrites = new Rewrites();
+  renameRefs(rewrites, { of: "stmts", node: copy }, names);
+  rebuiltStmts(copy, rewrites);
+  return copy;
+}
+
+function apartTypeNode(ids: Mut<Ids>, t: Ref<TypeNode>, names: Ref<Map<string, string>>): TypeNode {
+  const copy = renumberTypeNode(cloneTypeNode(t), () => nextId(ids));
+  let rewrites = new Rewrites();
+  renameRefs(rewrites, { of: "typeNode", node: copy }, names);
+  return rebuiltTypeNode(copy, rewrites);
 }
 
 // A name a base's member is renamed to in a derived class, apart from that class's own type
@@ -637,15 +777,6 @@ function refNames(t: TypeNode | Param | Stmt[] | undefined): string[] {
 const APART = " of ";
 const apartName = (name: string, base: string) => `${name}${APART}${base}`;
 export const isApart = (name: string) => name.includes(APART);
-
-// A copy of a type with the type parameters `names` maps renamed.
-function renamed<T>(t: T, names: Map<string, string>): T {
-  if (Array.isArray(t)) return t.map((x) => renamed(x, names)) as T;
-  if (!t || typeof t !== "object") return t;
-  const copy = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, renamed(v, names)])) as { kind?: string; name?: string };
-  if (copy.kind === "ref" && names.has(copy.name!)) copy.name = names.get(copy.name!);
-  return copy as T;
-}
 
 // A member of a class or of the bases it embeds, nearest first.
 export function inherited(arenas: Ref<Arenas>, c: Ref<ClassInfo>, table: "methods" | "statics" | "getters" | "setters", name: string): Ref<Body> | undefined {
@@ -756,7 +887,7 @@ export function implementAbstracts(tables: Tables, c: ClassInfo) {
     for (const table of TABLES) {
       for (const [name, f] of b[table]) {
         const nearest = inherited(arenas, c, table, name)!;
-        if (arenas.bodyOf(f).template && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c, arenas.bodyOf(f)).bodyId);
+        if (arenas.bodyOf(f).template && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c.classId, f));
       }
     }
   }
@@ -771,7 +902,7 @@ export function copySelfTyped(tables: Tables, c: ClassInfo) {
     for (const table of TABLES) {
       for (const [name, f] of b[table]) {
         const nearest = inherited(arenas, c, table, name)!;
-        if (selfTyped(arenas.bodyOf(f)) && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c, arenas.bodyOf(f)).bodyId);
+        if (selfTyped(arenas.bodyOf(f)) && (nearest.copyOf ?? nearest.bodyId) === f) c[table].set(name, copyFor(tables, c.classId, f));
       }
     }
   }
@@ -793,30 +924,105 @@ export function selfTyped(f: Body): boolean {
 // type name there that this class's own type parameter would hide, one of the base's type
 // parameters or a type of the program, is renamed apart in a copy of the body, standing for what
 // it means in the base. Only `this`, through `self`, means this class.
-export function copyFor({ arenas, ids, typing, defaulted, prologues }: Tables, c: ClassInfo, f: Body): Body {
-  const made = c.copies.get(f.bodyId);
-  if (made !== undefined) return arenas.bodyOf(made);
-  const outer = f.scope ?? new Map<string, Type>();
-  const used = new Set([...refNames(f.returnType), ...f.params.flatMap((p) => refNames(p)), ...refNames(f.body)]);
-  const names = new Map([...used].filter((n) => c.scope.has(n) && (outer.has(n) || c.globals?.has(n))).map((n) => [n, apartName(n, typing.rec(f.owner!).name)]));
-  const scope = new Map([...outer].filter(([n]) => !c.scope.has(n)));
-  for (const [n, to] of names) scope.set(to, outer.get(n) ?? c.globals!.get(n)!);
-  const apart = names.size > 0 ? renumberStmts(renamed(f.body, names), () => nextId(ids)) : f.body;
-  const params = names.size > 0 ? f.params.map((p) => renumberParam(renamed(p, names), () => nextId(ids))) : f.params;
-  f.params.forEach((p, i) => {
-    const declared = defaulted.get(p);
-    if (declared && params[i] !== p) defaulted.set(params[i]!, declared);
-  });
-  f.body.forEach((st, i) => {
-    if (apart[i] !== st && prologues.has(st)) prologues.add(apart[i]!);
-  });
-  const copy = arenas.addBody({
-    ...f, id: nextId(ids), name: `${typing.rec(c.type).name}.${f.name}`, self: { ...f.self!, type: c.type }, owner: c.type,
-    params, body: apart, ...(f.returnType && names.size > 0 && { returnType: renamed(f.returnType, names) }),
-    scope: new Map([...c.scope, ...scope]), template: undefined, copyOf: f.bodyId, declared: f.owner!,
-  });
-  c.copies.set(f.bodyId, copy.bodyId);
-  return copy;
+export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): BodyId {
+  const c = tables.arenas.classOf(classId);
+  const made = c.copies.get(bodyId);
+  if (made !== undefined) return made;
+  const f = tables.arenas.bodyOf(bodyId);
+  assert(f.owner !== undefined && f.self !== undefined, "internal error: copying a member of no class");
+  let used = new Set<string>();
+  if (f.returnType !== undefined) refNames({ of: "typeNode", node: f.returnType }, used);
+  for (const p of f.params) refNames({ of: "param", node: p }, used);
+  refNames({ of: "stmts", node: f.body }, used);
+  const ownerName = tables.typing.rec(f.owner).name;
+  let names = new Map<string, string>();
+  for (const n of used) {
+    if (c.scope.has(n) && ((f.scope !== undefined && f.scope.has(n)) || (c.globals !== undefined && c.globals.has(n)))) names.set(n, apartName(n, ownerName));
+  }
+  let scope = new Map<string, Type>();
+  for (const [n, t] of c.scope) scope.set(n, t);
+  if (f.scope !== undefined) for (const [n, t] of f.scope) if (!c.scope.has(n)) scope.set(n, t);
+  for (const [n, to] of names) {
+    const there = f.scope !== undefined ? f.scope.get(n) : undefined;
+    scope.set(to, there !== undefined ? there : c.globals!.get(n)!);
+  }
+  let defaults: ({ name: string; empty: boolean } | undefined)[] = [];
+  for (const p of f.params) defaults.push(tables.defaulted.get(p));
+  let prologue: boolean[] = [];
+  for (const st of f.body) prologue.push(tables.prologues.has(st));
+  let copy = cloneBody(f);
+  copy.name = `${tables.typing.rec(c.type).name}.${f.name}`;
+  copy.self = f.self.owned !== undefined ? { type: c.type, constructor: f.self.constructor, mutable: f.self.mutable, owned: f.self.owned } : { type: c.type, constructor: f.self.constructor, mutable: f.self.mutable };
+  copy.owner = c.type;
+  copy.declared = f.owner;
+  copy.scope = scope;
+  copy.template = undefined;
+  copy.copyOf = bodyId;
+  copy.id = nextId(tables.ids);
+  if (names.size > 0) {
+    copy.body = apartStmts(tables.ids, f.body, names);
+    let params: Param[] = [];
+    for (const p of f.params) params.push(apartParam(tables.ids, p, names));
+    copy.params = params;
+    if (f.returnType !== undefined) copy.returnType = apartTypeNode(tables.ids, f.returnType, names);
+    for (let i: usize = 0; i < copy.params.length; i++) {
+      const declared = defaults[i];
+      if (declared !== undefined) tables.defaulted.set(copy.params[i]!, declared);
+    }
+    for (let i: usize = 0; i < copy.body.length; i++) if (prologue[i] === true) tables.prologues.add(copy.body[i]!);
+  }
+  const added = tables.arenas.addBody(copy).bodyId;
+  tables.arenas.classMut(classId).copies.set(bodyId, added);
+  return added;
+}
+
+// A copy of a body as written, keeping its nodes' ids.
+function cloneBody(f: Ref<Body>): Body {
+  let params: Param[] = [];
+  for (const p of f.params) params.push(cloneParam(p));
+  let body: Stmt[] = [];
+  for (const st of f.body) body.push(cloneStmt(st));
+  let out: Body = { id: f.id, start: f.start, end: f.end, bodyId: f.bodyId, name: f.name, params, body, returnType: f.returnType !== undefined ? cloneTypeNode(f.returnType) : undefined };
+  if (f.throws !== undefined) out.throws = cloneTypeNode(f.throws);
+  if (f.generator !== undefined) out.generator = f.generator;
+  if (f.async !== undefined) out.async = f.async;
+  if (f.foreign !== undefined) out.foreign = f.foreign;
+  if (f.js !== undefined) out.js = cloneJsName(f.js);
+  if (f.rust !== undefined) out.rust = { crate: f.rust.crate, path: f.rust.path, symbol: f.rust.symbol };
+  if (f.exported !== undefined) out.exported = f.exported;
+  if (f.comptime !== undefined) out.comptime = f.comptime;
+  if (f.typeParams !== undefined) {
+    let typeParams: TypeParam[] = [];
+    for (const p of f.typeParams) typeParams.push(cloneTypeParam(p));
+    out.typeParams = typeParams;
+  }
+  if (f.accessor !== undefined) out.accessor = f.accessor;
+  if (f.scope !== undefined) {
+    let scope = new Map<string, Type>();
+    for (const [n, t] of f.scope) scope.set(n, t);
+    out.scope = scope;
+  }
+  if (f.self !== undefined) out.self = f.self.owned !== undefined ? { type: f.self.type, constructor: f.self.constructor, mutable: f.self.mutable, owned: f.self.owned } : { type: f.self.type, constructor: f.self.constructor, mutable: f.self.mutable };
+  if (f.overloads !== undefined) out.overloads = [...f.overloads];
+  if (f.overloadNames !== undefined) out.overloadNames = [...f.overloadNames];
+  if (f.signature !== undefined) out.signature = true;
+  if (f.owner !== undefined) out.owner = f.owner;
+  if (f.access !== undefined) out.access = f.access;
+  if (f.abstract !== undefined) out.abstract = true;
+  if (f.template !== undefined) out.template = true;
+  if (f.copyOf !== undefined) out.copyOf = f.copyOf;
+  if (f.declared !== undefined) out.declared = f.declared;
+  if (f.closure !== undefined) {
+    const k = f.closure;
+    let closure: NonNullable<Body["closure"]> = { parent: k.parent, move: k.move };
+    if (k.value !== undefined) closure.value = cloneExpr(k.value);
+    if (k.expected !== undefined) closure.expected = k.expected;
+    if (k.unsafe !== undefined) closure.unsafe = k.unsafe;
+    if (k.self !== undefined) closure.self = k.self;
+    if (k.made !== undefined) closure.made = true;
+    out.closure = closure;
+  }
+  return out;
 }
 
 // Marks an abstract class's templates, once its bases' are marked.
@@ -936,15 +1142,14 @@ function span(nodes: Span[]): Span {
 }
 
 // What each kind of class member besides a field and the constructor is called when rejected.
-const MEMBER_FORMS: Record<Exclude<ClassMember["kind"], "field" | "constructor" | "method" | "get" | "set">, string> = {
-  index: "index signatures",
-  staticBlock: "static blocks",
-};
+function memberForm(kind: "index" | "staticBlock"): string {
+  return kind === "index" ? "index signatures" : "static blocks";
+}
 
-// A type written `T | undefined` without its `undefined`, or nothing when it has none.
-export function withoutUndefined(ids: Ids, t: TypeNode): TypeNode | undefined {
-  if (t.kind !== "union") return undefined;
-  const rest = t.types.filter((u) => !(u.kind === "ref" && u.name === "undefined" && u.args.length === 0));
-  if (rest.length === t.types.length || rest.length === 0) return undefined;
-  return rest.length === 1 ? rest[0]! : { ...t, id: nextId(ids), types: rest };
+// Whether a type is written `T | undefined`, spelling out its `undefined` beside other members.
+export function spellsUndefined(t: Ref<TypeNode>): boolean {
+  if (t.kind !== "union") return false;
+  let undefineds: usize = 0;
+  for (const u of t.types) if (u.kind === "ref" && u.name === "undefined" && u.args.length === 0) undefineds++;
+  return undefineds > 0 && undefineds < t.types.length;
 }
