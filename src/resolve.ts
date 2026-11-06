@@ -7,7 +7,7 @@ import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { cloneParam, cloneStmt, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.ts";
-import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.ts";
+import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type BlockRecord, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.ts";
 import { typeForm, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
@@ -257,7 +257,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (back === undefined) {
       let shown: string[] = [];
       for (const x of args) shown.push(this.host.tables.typing.show(x));
-      const made = this.host.tables.typing.recursiveType(`${name}<${shown.join(", ")}>`, args);
+      let given: Type[] = [];
+      for (const x of args) given.push(x);
+      const made = this.host.tables.typing.recursiveType(`${name}<${shown.join(", ")}>`, given);
       this.host.resolverState.recursives.set(key, made);
       this.host.tables.typing.standsFor(made, of);
       this.host.resolverState.recursiveAliases.set(made, name);
@@ -751,9 +753,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (t.args.length !== 0) throw new CompileError("E0106", "'RegExp' takes no type arguments", t.start, t.end);
       return ANY_REGEX;
     }
-    if (t.name === "Semaphore" || t.name === "Permit" || t.name === "AbortController" || t.name === "AbortSignal" || t.name === "TcpListener" || t.name === "TcpStream" || t.name === "UnixListener" || t.name === "UnixStream" || t.name === "UdpSocket" || t.name === "JsValue") {
+    const block = blockNamed(t.name);
+    if (block !== undefined) {
       if (t.args.length !== 0) throw new CompileError("E0106", `'${t.name}' takes no type arguments`, t.start, t.end);
-      return this.host.tables.typing.blockType(t.name);
+      return this.host.tables.typing.blockType(block);
     }
     // std's FileHandle's counted descriptor, which closes its file when the last count goes.
     if (t.name === "__FileDescriptor" && t.args.length === 0) return this.host.tables.typing.blockType("FileDescriptor");
@@ -772,7 +775,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     if (t.name === "Rc" || t.name === "Weak") {
       if (t.args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it holds, like '${t.name}<Node>'`, t.start, t.end);
-      return counted(this.host.tables.typing, this.resolveType(t.args[0]!), t.name, t);
+      const held = this.resolveType(t.args[0]!);
+      return counted(this.host.tables.typing, held, t.name === "Rc" ? "Rc" : "Weak", spanOf(t));
     }
     // A `JoinHandle<T>` written out is one whose task can't throw.
     if (t.name === "JoinHandle") {
@@ -1451,7 +1455,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const name = a.shown ?? a.name;
       let shown: string[] = [];
       for (const x of args) shown.push(this.host.tables.typing.show(x));
-      const back = this.host.tables.typing.recursiveType(args.length > 0 ? `${name}<${shown.join(", ")}>` : name, args);
+      let given: Type[] = [];
+      for (const x of args) given.push(x);
+      const back = this.host.tables.typing.recursiveType(args.length > 0 ? `${name}<${shown.join(", ")}>` : name, given);
       this.host.resolverState.recursives.set(key, back);
       return back;
     }
@@ -1502,7 +1508,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       this.resolveIn(bound, t.type);
       return held;
     }
-    const source = homomorphic !== undefined ? this.typeFns().fieldsOf(homomorphic, "a mapped type", spanOf(t.constraint)) : [];
+    const source: Field[] = homomorphic !== undefined ? this.typeFns().fieldsOf(homomorphic, "a mapped type", spanOf(t.constraint)) : [];
     const fields: Field[] = [];
     const names: string[] = keys === "never" ? [] : this.typeFns().keysOf(keys, "a mapped type", spanOf(t.constraint));
     for (const key of names) {
@@ -1514,7 +1520,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const resolved = this.resolveIn(bound, t.type);
       const value = storable(this.host.tables.typing, resolved, spanOf(t.type));
       const from = source.find((f) => f.name === key);
-      const readonly = t.readonly ? t.readonly === "+" : from?.readonly === true;
+      const readonly = t.readonly !== undefined ? t.readonly === "+" : from?.readonly === true;
       for (const name of names) {
         if (fields.some((f) => f.name === name)) throw new CompileError("E0114", `two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
         const field = t.optional === "+" ? this.host.tables.typing.optionalField(name, value)
@@ -1823,6 +1829,21 @@ function anyArgs(p: Ref<Param>): boolean {
   return p.rest && p.type !== undefined && p.type.kind === "array" && p.type.element.kind === "ref" && ["any", "unknown"].includes(p.type.element.name);
 }
 
+// The handle type a built-in name taking no type arguments is.
+function blockNamed(name: string): BlockRecord["which"] | undefined {
+  if (name === "Semaphore") return "Semaphore";
+  if (name === "Permit") return "Permit";
+  if (name === "AbortController") return "AbortController";
+  if (name === "AbortSignal") return "AbortSignal";
+  if (name === "TcpListener") return "TcpListener";
+  if (name === "TcpStream") return "TcpStream";
+  if (name === "UnixListener") return "UnixListener";
+  if (name === "UnixStream") return "UnixStream";
+  if (name === "UdpSocket") return "UdpSocket";
+  if (name === "JsValue") return "JsValue";
+  return undefined;
+}
+
 // The kind of interior a built-in name makes.
 function interiorNamed(name: string): InteriorRecord["which"] {
   if (name === "Atomic") return "Atomic";
@@ -1888,7 +1909,7 @@ class Open {
 // The literal an `infer` hole's text stands for under its bound: an i64 literal or another
 // integer type for an integer's text, a boolean literal, a float type, or the text itself, the
 // first of these the bound takes; or nothing when the bound takes none.
-function inferredText(typing: Typing, text: string, bound: Type): Type | undefined {
+function inferredText(typing: Mut<Typing>, text: string, bound: Type): Type | undefined {
   const b = typeof bound === "string" ? undefined : typing.rec(bound);
   const members = b?.kind === "union" ? b.members : [bound];
   // A bound taking any string keeps the text as written, as TypeScript does.
@@ -2057,7 +2078,7 @@ export function shareable(typing: Mut<Typing>, given: Type, at: Ref<Span>): Shar
 // An `Rc<T>` or `Weak<T>`: one thread's counted handle, whose T every clone reads in place, so
 // it can't borrow from one of them or hold a task's result one of them could await.
 /** @throws {CompileError} */
-export function counted(typing: Typing, given: Type, which: "Rc" | "Weak", at: Span): SharedType {
+export function counted(typing: Mut<Typing>, given: Type, which: "Rc" | "Weak", at: Ref<Span>): SharedType {
   unboxedClosure(typing, given, at);
   const of = typing.heldArgument(given);
   abstractless(typing, of, `an '${which}'`, at);
@@ -2154,7 +2175,7 @@ const MEMBER_FORMS = new Map<string, string>([
 
 // Fields with their source spans, checked for a name given twice.
 /** @throws {CompileError} */
-export function fields(list: Field[], at: Span[]): Field[] {
+export function fields(list: Field[], at: Ref<Span>[]): Field[] {
   for (let i: usize = 0; i < list.length; i++) {
     for (let k: usize = 0; k < i; k++) if (list[k]!.name === list[i]!.name) throw new CompileError("E0402", `duplicate property '${list[i]!.name}'`, at[i]!.start, at[i]!.end);
   }
