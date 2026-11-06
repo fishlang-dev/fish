@@ -54,6 +54,16 @@ export type Local = { name: string; type: Type; mutable: boolean; param: boolean
 export type Checked = { instances: InstanceId[]; tables: Tables; compilation: Compilation; warnings: CompileError[] };
 
 // The instances a checked program compiles, read from its arena.
+// The tables a new instance starts with, each empty.
+export function emptyTables(): Pick<Instance, "types" | "locals" | "calls" | "setters" | "coercions" | "jumps" | "borrowsFrom" | "raises" | "caught" | "consumes" | "patterns" | "copiesOut"> {
+  return {
+    types: new NodeMap<Expr, Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new NodeMap<Expr, InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
+    coercions: new NodeMap<Expr, Type>(), jumps: new NodeMap<Stmt, Stmt>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
+    raises: new NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>(), caught: new NodeMap<Stmt, Type>(),
+    consumes: new NodeSet<Expr | ObjectProp>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
+  };
+}
+
 export const compiledOf = ({ instances, tables }: Checked): Instance[] => instances.map((i) => tables.arenas.instanceOf(i));
 
 // One compiled function: a body checked with concrete types, and the tables codegen reads
@@ -893,8 +903,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
-  layout(this: Mut<this>, c: ClassInfo) {
-    this.registry().layout(c.classId);
+  layout(this: Mut<this>, c: ClassId) {
+    this.registry().layout(c);
   }
 
   /** @throws {CompileError} */
@@ -1079,7 +1089,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const compiled = new NodeSet([...this.funcs.filter((f) => !f.macro || this.macros), ...[...this.registryState.infoOf.values()].flatMap((c) => this.registry().bodiesOf(c).map((b) => this.arenas.bodyOf(b))).filter((f) => !f.abstract && !f.template)]);
     // So is an instance made for an abstract class, which only a template's check makes.
     const checkedOnly = (i: Instance): boolean => bodyOf(i).template === true || [...i.bindings.values()].some((t) => abstractPart(this.typing, t)) || (bodyOf(i).closure !== undefined && checkedOnly(this.arenas.instanceOf(bodyOf(i).closure!.parent)));
-    const compiledInstances = [...this.instancing().all().filter((i) => i.concrete && compiled.has(bodyOf(i)) && !bodyOf(i).js && !checkedOnly(i)), ...this.closures.map((c) => this.arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
+    const compiledInstances = [...this.instancing().all().map((i) => this.arenas.instanceOf(i)).filter((i) => i.concrete && compiled.has(bodyOf(i)) && !bodyOf(i).js && !checkedOnly(i)), ...this.closures.map((c) => this.arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
     unreached(this.typing, this.equalities, this.arenas, compiledInstances.map((i) => i.id), (i) => bodyOf(i).abstract === true || checkedOnly(i));
     // A package's const whose value has no JS form yet stops the program where it is read.
     const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);

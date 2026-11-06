@@ -39,8 +39,8 @@ export function tagStrings(p: Param | undefined): boolean {
 }
 
 /** @throws {CompileError} */
-export function paramName(p: Param): string {
-  if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
+export function paramName(p: Ref<Param>): string {
+  if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", { start: p.pattern.start, end: p.pattern.end });
   return p.pattern.name;
 }
 

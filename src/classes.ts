@@ -1121,7 +1121,7 @@ export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): 
 }
 
 // A copy of a body as written, keeping its nodes' ids.
-function cloneBody(f: Ref<Body>): Body {
+export function cloneBody(f: Ref<Body>): Body {
   let params: Param[] = [];
   for (const p of f.params) params.push(cloneParam(p));
   let body: Stmt[] = [];
