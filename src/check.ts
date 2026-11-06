@@ -116,6 +116,8 @@ export type Instance = {
   // Whether the body stores a value holding references into `this`, set by its move check; a
   // call of a method that doesn't can't keep what it lends, so its arguments may be anything.
   keeps?: boolean;
+  // The bodies whose calls of this one, made while it was being checked, took it to keep nothing.
+  keepsAssumedBy?: Set<InstanceId>;
   // What each match pattern tests, and the type of the value it meets.
   patterns: NodeMap<Pattern, PatternInfo>;
   // Each read of a shared value's plain field: a copy made under its lock, not a place.
@@ -796,12 +798,20 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // its check failed, so whether its body keeps what it is lent is known; a failed check is
   // reported where the method itself is checked.
   /** @throws {CompileError} */
-  keepsKnown(this: Mut<this>, target: InstanceId) {
+  keepsKnown(this: Mut<this>, target: InstanceId, caller: InstanceId) {
     const callee = this.arenas.instanceOf(target);
-    if (callee.keeps !== undefined || this.inProgress.has(callee.id) || this.done.has(callee.id)) return;
+    if (callee.keeps !== undefined || this.done.has(callee.id)) return;
     const f = bodyOf(this.arenas, callee);
     if (f.self === undefined || !f.self.mutable || f.self.constructor || !this.typing.holdsRef(f.self.type)) return;
     if (this.failed.has(f.bodyId)) return;
+    // One still being checked, as a body calling itself is, is taken to keep nothing, which its
+    // own move check then holds it to.
+    if (this.inProgress.has(callee.id)) {
+      callee.keeps = false;
+      if (callee.keepsAssumedBy === undefined) callee.keepsAssumedBy = new Set<InstanceId>();
+      callee.keepsAssumedBy.add(caller);
+      return;
+    }
     try {
       this.checkBody(callee);
     } catch (e) {
@@ -2450,8 +2460,20 @@ class BodyChecker implements Context, GuardHost {
     rebuiltStmts(this.f.body, this.cx.rewrites);
     // A method this body calls on an object holding references is checked first, so the move
     // check knows whether it keeps what it is lent.
-    for (const target of this.instance.calls.values()) this.cx.keepsKnown(target);
-    const moved = timed(this.cx.tables.timings, "moves", () => checkMoves(this.cx.tables, this.f, this.instance, origins));
+    for (const target of this.instance.calls.values()) this.cx.keepsKnown(target, this.instance.id);
+    let moved = timed(this.cx.tables.timings, "moves", () => checkMoves(this.cx.tables, this.f, this.instance, origins));
+    const assumed = this.instance.keepsAssumedBy;
+    if (moved.keeps && assumed !== undefined) {
+      // A body calling itself took itself to keep nothing; since it keeps, its calls are checked
+      // again as calls that keep.
+      if (assumed.size === 1 && assumed.has(this.instance.id)) {
+        this.instance.keeps = true;
+        this.instance.keepsAssumedBy = undefined;
+        moved = timed(this.cx.tables.timings, "moves", () => checkMoves(this.cx.tables, this.f, this.instance, origins));
+      } else {
+        throw new CompileError("E0209", `'${this.f.name}' keeps what it is lent in 'this', but a call of it made while it was still being checked was taken not to; store an owned value instead, or don't lend it a value of the caller's own`, this.f.start, this.f.end);
+      }
+    }
     for (const id of moved.captures) this.instance.moved!.add(id);
     for (const id of moved.consumes) this.instance.consumes.add(id);
     this.instance.keeps = moved.keeps;

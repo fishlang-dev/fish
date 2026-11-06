@@ -21,6 +21,14 @@ export type TypePred = (t: ClassType | VariantType) => boolean;
 // and which printing and JSON leave out while it is empty.
 export type Field = { name: string; type: Type; access?: Access; readonly?: boolean; optional?: "added" | "held" | "undefined" };
 
+export function copyField(f: Ref<Field>): Field {
+  let out: Field = { name: f.name, type: f.type };
+  if (f.access !== undefined) out.access = f.access;
+  if (f.readonly !== undefined) out.readonly = f.readonly;
+  if (f.optional !== undefined) out.optional = f.optional;
+  return out;
+}
+
 // Fields are sorted by name, which is also their order in memory.
 // A tuple is an object whose fields are its positions, `0`, `1` and on, marked `tuple`.
 // A regex match is a tuple of its captures with `index`, `input` and `groups` beside them.

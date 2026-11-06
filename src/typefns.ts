@@ -65,7 +65,7 @@ export interface TypeFunctionsHost {
   fieldsKnown(this: Mut<this>, c: ClassType): boolean;
   isDeferring(): boolean;
   /** @throws {CompileError} */
-  conforms(this: Mut<this>, from: Type, to: Type, at: Span): boolean;
+  conforms(this: Mut<this>, from: Type, to: Type, at: Ref<Span>): boolean;
 }
 
 // The utility types by name: how many type arguments each takes, an example, which arguments it

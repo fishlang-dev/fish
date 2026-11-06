@@ -6,7 +6,8 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType } from "./typing.ts";
+import { cloneStmt } from "./rebuild.ts";
+import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, copyField } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
@@ -95,7 +96,7 @@ export interface ResolverHost {
   /** @throws {CompileError} */
   valueType(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type;
   /** @throws {CompileError} */
-  conforms(this: Mut<this>, from: Type, to: Type, at: Span): boolean;
+  conforms(this: Mut<this>, from: Type, to: Type, at: Ref<Span>): boolean;
   typeNames(at: usize): string[];
   /** @throws {CompileError} */
   replaced(this: Mut<this>, t: Type, swap: TypeMap<Type, Type>): Type;
@@ -118,7 +119,7 @@ export class ResolverState {
   resolving = new Set<string>();
   // Where an alias instance leads back to itself, by its key, and the alias each is made from.
   recursives = new Map<string, RecursiveType>();
-  recursiveAliases = new TypeMap<RecursiveType, TypeAlias>();
+  recursiveAliases = new TypeMap<RecursiveType, string>();
   traits = new NodeMap<Stmt, Map<string, InterfaceType>>();
   // Each combined interface `A & B`, by its sides.
   combined = new Map<string, InterfaceType>();
@@ -173,7 +174,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     return this.host.resolverState.deferring > 0;
   }
   /** @throws {CompileError} */
-  conforms(from: Type, to: Type, at: Ref<Span>): boolean {
+  conforms(this: Mut<this>, from: Type, to: Type, at: Ref<Span>): boolean {
     return this.host.conforms(from, to, at);
   }
   typingOf(this: Mut<this>): Mut<Typing> {
@@ -231,49 +232,85 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   /** @throws {CompileError} */
   interfaceInstance(this: Mut<this>, t: InterfaceType, args: Type[]) {
     const name = this.host.tables.typing.rec(t).generic!.name;
-    const named = this.host.decls.interfaces.get(name);
-    if (named !== undefined) return this.interfaceOf(named, args);
-    const inline = this.interfaceOf(this.host.resolverState.inline.get(name)!, args);
+    const decls = this.host.decls;
+    const named = decls.interfaces.get(name);
+    if (named !== undefined) return this.interfaceOf(named, args, named);
+    // An inline interface is made while resolving, so it is read from a copy.
+    const written = cloneInterface(this.host.resolverState.inline.get(name)!);
+    const inline = this.interfaceOf(written, args, written);
     return this.sameShape(inline);
   }
   // A recursive alias's type made again with other type arguments.
   /** @throws {CompileError} */
   remakeRecursive(this: Mut<this>, t: RecursiveType, args: Type[]): RecursiveType {
-    const a = this.host.resolverState.recursiveAliases.get(t);
-    if (a === undefined) return t;
-    const key = `${a.name}<${args.map((t) => this.host.tables.typing.keyOf(t)).join(",")}>`;
+    const name = this.host.resolverState.recursiveAliases.get(t);
+    if (name === undefined) return t;
+    const decls = this.host.decls;
+    const a = decls.aliases.get(name)!;
+    let keys: string[] = [];
+    for (const x of args) keys.push(this.host.tables.typing.keyOf(x));
+    const key = `${name}<${keys.join(",")}>`;
     const of = this.aliasType(a, args, a);
     let back = this.host.resolverState.recursives.get(key);
-    if (!back) {
-      this.host.resolverState.recursives.set(key, back = this.host.tables.typing.recursiveType(`${a.name}<${args.map((t) => this.host.tables.typing.show(t)).join(", ")}>`, args));
-      this.host.tables.typing.standsFor(back, of);
-      this.host.resolverState.recursiveAliases.set(back, a);
+    if (back === undefined) {
+      let shown: string[] = [];
+      for (const x of args) shown.push(this.host.tables.typing.show(x));
+      const made = this.host.tables.typing.recursiveType(`${name}<${shown.join(", ")}>`, args);
+      this.host.resolverState.recursives.set(key, made);
+      this.host.tables.typing.standsFor(made, of);
+      this.host.resolverState.recursiveAliases.set(made, name);
+      back = made;
     }
-    this.host.tables.typing.noteRecursiveInstance(a.name, key, back);
-    if (args.some((x) => this.host.tables.typing.lowerKeepingBrands(x) !== x)) {
-      this.remakeRecursive(back, args.map((x) => this.host.tables.typing.lowerKeepingBrands(x)));
-    }
-    if (args.some((x) => this.host.tables.typing.lower(x) !== x)) {
-      this.remakeRecursive(back, args.map((x) => this.host.tables.typing.lower(x)));
-    }
+    this.host.tables.typing.noteRecursiveInstance(name, key, back);
+    this.remakeLowered(back, args);
     return back;
+  }
+
+  // A recursive type remade from type arguments with their brands lowered, and fully lowered,
+  // when either differs, so lowering finds those instances made.
+  /** @throws {CompileError} */
+  remakeLowered(this: Mut<this>, back: RecursiveType, args: Ref<Type[]>) {
+    let branded: Type[] = [];
+    let changed = false;
+    for (const x of args) {
+      const lowered = this.host.tables.typing.lowerKeepingBrands(x);
+      if (lowered !== x) changed = true;
+      branded.push(lowered);
+    }
+    if (changed) this.remakeRecursive(back, branded);
+    let lowered: Type[] = [];
+    changed = false;
+    for (const x of args) {
+      const l = this.host.tables.typing.lower(x);
+      if (l !== x) changed = true;
+      lowered.push(l);
+    }
+    if (changed) this.remakeRecursive(back, lowered);
   }
 
   // Resolves every alias and interface once, so a mistake in one is reported even when nothing
   // uses it. Run once classes are linked, since an alias may read a class's fields.
   /** @throws {CompileError} */
   validate(this: Mut<this>) {
-    this.host.decls.aliases.forEach((a) => {
+    const decls = this.host.decls;
+    for (const a of decls.aliases.values()) {
       const scope = placeholders(this.host, a.typeParams, undefined, undefined);
+      let args: Type[] = [];
+      for (const t of scope.values()) args.push(t);
       if (a.typeParams.length > 0) this.host.resolverState.deferring++;
       try {
-        this.aliasType(a, [...scope.values()], a);
+        this.aliasType(a, args, a);
       } finally {
         if (a.typeParams.length > 0) this.host.resolverState.deferring--;
       }
-    });
+    }
     // A generic interface is checked once with placeholders for its parameters.
-    this.host.decls.interfaces.forEach((i) => this.interfaceOf(i, [...placeholders(this.host, i.typeParams, undefined, undefined).values()]));
+    for (const i of decls.interfaces.values()) {
+      let args: Type[] = [];
+      const scope = placeholders(this.host, i.typeParams, undefined, undefined);
+      for (const t of scope.values()) args.push(t);
+      this.interfaceOf(i, args, i);
+    }
   }
 
   // A data-carrying enum made with these type arguments: a variant per member, its payload
@@ -281,8 +318,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // holding itself would be infinitely large.
   /** @throws {CompileError} */
   enumInstance(this: Mut<this>, info: EnumInfo, given: Type[], at: Ref<Span>): EnumInstance {
-    given.forEach((a) => unboxedClosure(this.host.tables.typing, a, at));
-    const args = given.map((t) => this.host.tables.typing.heldArgument(t));
+    for (const a of given) unboxedClosure(this.host.tables.typing, a, at);
+    let args: Type[] = [];
+    for (const t of given) args.push(this.host.tables.typing.heldArgument(t));
     const data = info.data!;
     if (args.length !== data.params.length) {
       const n = data.params.length;
@@ -908,7 +946,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // The interface is registered before its members resolve, so a member may name it. A generic
   // interface is one interface per list of type arguments, its members seeing them.
   /** @throws {CompileError} */
-  private interfaceOf(this: Mut<this>, i: Ref<Interface>, args: Type[] = [], at: Ref<Span> = i): InterfaceType {
+  private interfaceOf(this: Mut<this>, i: Ref<Interface>, args: Type[], at: Ref<Span>): InterfaceType {
     if (args.length !== i.typeParams.length) {
       throw new CompileError("E0106", `interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
@@ -1099,14 +1137,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     if (back) {
       this.host.tables.typing.standsFor(back, type);
-      this.host.resolverState.recursiveAliases.set(back, a);
+      this.host.resolverState.recursiveAliases.set(back, a.name);
       this.host.tables.typing.noteRecursiveInstance(a.name, key, back);
-      if (args.some((x) => this.host.tables.typing.lowerKeepingBrands(x) !== x)) {
-        this.remakeRecursive(back, args.map((x) => this.host.tables.typing.lowerKeepingBrands(x)));
-      }
-      if (args.some((x) => this.host.tables.typing.lower(x) !== x)) {
-        this.remakeRecursive(back, args.map((x) => this.host.tables.typing.lower(x)));
-      }
+      this.remakeLowered(back, args);
     }
     this.host.resolverState.resolved.set(key, type);
     return type;
@@ -1328,6 +1361,12 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
 
 // Thrown inside a conditional whose extends side holds a placeholder of the generic alias being
 // checked, and caught by that conditional, which then can't pick a branch.
+function cloneInterface(i: Ref<Interface>): Interface {
+  const copy = cloneStmt(i);
+  if (copy.kind !== "interface") throw new Error("internal error: an interface copied as another statement");
+  return copy;
+}
+
 // The bindings of `a`, then of `b` over them.
 function scopes(a: Ref<Map<string, Type>>, b: Ref<Map<string, Type>>): Map<string, Type> {
   let out = new Map<string, Type>();
@@ -1358,7 +1397,7 @@ function inferredText(typing: Typing, text: string, bound: Type): Type | undefin
   const members = b?.kind === "union" ? b.members : [bound];
   // A bound taking any string keeps the text as written, as TypeScript does.
   if (members.includes("string")) return typing.literalType(text);
-  const candidates: Type[] = [];
+  let candidates: Type[] = [];
   for (const m of members) {
     if (m === "i64" && typing.textFits(text, m)) candidates.push(typing.literalType(BigInt(text)));
     else if ((isInteger(m) || isFloat(m)) && typing.textFits(text, m)) candidates.push(m);
@@ -1371,9 +1410,9 @@ function inferredText(typing: Typing, text: string, bound: Type): Type | undefin
 // The names a type pattern declares with `infer`.
 function inferNames(t: Ref<TypeNode>): Set<string> {
   const names = new Set<string>();
-  walkWhile({ of: "typeNode", node: t }, ({ of, node }) => {
-    if (of !== "typeNode" || node.kind !== "infer") return true;
-    names.add(node.name);
+  walkWhile({ of: "typeNode", node: t }, (n) => {
+    if (n.of !== "typeNode" || n.node.kind !== "infer") return true;
+    names.add(n.node.name);
     return false;
   });
   return names;
@@ -1383,39 +1422,57 @@ function inferNames(t: Ref<TypeNode>): Set<string> {
 // conflict, since no value could have both. It is readonly only when both sides say so, as in
 // TypeScript.
 /** @throws {CompileError} */
-function merged(typing: Typing, a: ObjectType, b: ObjectType, from: Span, to: Span): ObjectType {
-  const object = (t: Type) => {
-    const r = typeof t === "string" ? undefined : typing.rec(t);
-    return r?.kind === "object" ? (t as ObjectType) : undefined;
-  };
-  const fields = [...typing.rec(a).fields];
-  for (const f of typing.rec(b).fields) {
-    const i = fields.findIndex((g) => g.name === f.name);
-    const g = fields[i];
-    if (!g) {
+function merged(typing: Mut<Typing>, a: ObjectType, b: ObjectType, from: Ref<Span>, to: Ref<Span>): ObjectType {
+  let fields: Field[] = [];
+  for (const f of typing.rec(a).fields) fields.push(copyField(f));
+  const theirs = typing.rec(b).fields.length;
+  for (let k: usize = 0; k < theirs; k++) {
+    const f = copyField(typing.rec(b).fields[k]!);
+    let i: usize | undefined = undefined;
+    for (let j: usize = 0; j < fields.length; j++) if (i === undefined && fields[j]!.name === f.name) i = j;
+    if (i === undefined) {
       fields.push(f);
       continue;
     }
-    const [x, y] = [object(g.type), object(f.type)];
+    const g = copyField(fields[i]!);
+    const x = objectTypeOf(typing, g.type);
+    const y = objectTypeOf(typing, f.type);
+    const both = g.readonly === true && f.readonly === true;
     // A side where the field is optional gives way to one where it's required, as in
     // `Partial<T> & Pick<T, "id">`.
-    const required = g.optional && !f.optional ? f : f.optional && !g.optional ? g : undefined;
-    const other = required === f ? g : f;
-    if (required && typing.fits(required.type, other.type)) {
-      const { readonly: _, ...kept } = required;
-      fields[i] = { ...kept, ...(g.readonly && f.readonly && { readonly: true }) };
-      continue;
+    const gRequired = g.optional !== undefined && f.optional === undefined;
+    const fRequired = f.optional !== undefined && g.optional === undefined;
+    if (gRequired || fRequired) {
+      const required = gRequired ? f : g;
+      const other = gRequired ? g : f;
+      if (typing.fits(required.type, other.type)) {
+        let kept: Field = { name: required.name, type: required.type };
+        if (required.access !== undefined) kept.access = required.access;
+        if (required.optional !== undefined) kept.optional = required.optional;
+        if (both) kept.readonly = true;
+        fields[i] = kept;
+        continue;
+      }
     }
     // A side met while an alias it reaches was still being made holds that alias as a recursive
     // type, where the other holds the finished type: one type either way, kept as the finished one.
     const finished = g.type !== f.type && settled(typing, g.type) && settled(typing, f.type) && typing.unfolded(g.type) === typing.unfolded(f.type) ? typing.unfolded(f.type) : undefined;
-    if (g.type !== f.type && !finished && !(x && y)) {
+    if (g.type !== f.type && finished === undefined && !(x !== undefined && y !== undefined)) {
       throw new CompileError("E0114", `property '${f.name}' has type '${typing.show(g.type)}' on one side of '&' and '${typing.show(f.type)}' on the other`, from.start, to.end);
     }
-    const type = x && y ? merged(typing, x, y, from, to) : finished ?? f.type;
-    fields[i] = { name: f.name, type, ...(g.readonly && f.readonly && { readonly: true }), ...(g.optional && f.optional && { optional: f.optional }) };
+    const type = x !== undefined && y !== undefined ? merged(typing, x, y, from, to) : finished ?? f.type;
+    let field: Field = { name: f.name, type };
+    if (both) field.readonly = true;
+    if (g.optional !== undefined && f.optional !== undefined) field.optional = f.optional;
+    fields[i] = field;
   }
   return typing.objectType(fields);
+}
+
+// A type, when it is an object type.
+function objectTypeOf(typing: Ref<Typing>, t: Type): ObjectType | undefined {
+  if (typeof t === "string") return undefined;
+  return typing.rec(t).kind === "object" ? (t as ObjectType) : undefined;
 }
 
 // Whether every recursive type `t` is, or holds as a union member, knows the type it stands for.
@@ -1440,7 +1497,7 @@ export function unboxedClosure(typing: Typing, t: Type, at: Span) {
   const lowered = typing.lower(t);
   if (typeof lowered === "string") return;
   const c = typing.rec(lowered);
-  if ((c.kind !== "closure" && c.kind !== "function") || c.generic) return;
+  if ((c.kind !== "closure" && c.kind !== "function") || c.generic !== undefined) return;
   throw new CompileError("E0115", `'${p.name}' is a closure's own type here, which a type argument can't hold; write '${p.name}' where it is called, as in '<${c.name}>', or name it in a type argument of the signature, as in 'Box<${p.name}>'`, at.start, at.end);
 }
 
@@ -1471,7 +1528,7 @@ export function interior(typing: Typing, which: InteriorRecord["which"], given: 
 function abstractless(typing: Typing, of: Type, holder: string, at: Span) {
   let found: Type | undefined;
   typing.holdsPart(typing.lower(of), (u) => typeof u !== "string" && ["interface", "function"].includes(typing.rec(u).kind) && (found = u) !== undefined);
-  if (found) throw new CompileError("E0801", `${holder} can't hold a '${typing.show(found)}' yet: name a concrete type`, at.start, at.end);
+  if (found !== undefined) throw new CompileError("E0801", `${holder} can't hold a '${typing.show(found)}' yet: name a concrete type`, at.start, at.end);
 }
 
 // A `shared<T>` holding a T every thread may use at once: nothing in it borrows, points
@@ -1549,7 +1606,7 @@ function unlocked(typing: Typing, u: Type): boolean {
 function keyable(typing: Typing, t: Type): boolean {
   const lowered = typing.lower(t);
   // A key is hashed as 64 bits, which a 128-bit integer doesn't fit.
-  if (lowered === "string" || isFloat(lowered) || (isInteger(lowered) && INTEGERS[lowered].bits <= 64)) return true;
+  if (lowered === "string" || isFloat(lowered) || (isInteger(lowered) && lowered !== "i128" && lowered !== "u128")) return true;
   if (typeof lowered === "string") return false;
   const k = typing.rec(lowered);
   if (k.kind === "param") return !k.concrete;
@@ -1578,7 +1635,8 @@ export function collection(typing: Mut<Typing>, key: Type, value: Type, set: boo
 
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...Object.keys(INTEGERS), "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined", "unknown"]);
+const INTEGER_NAMES = Object.keys(INTEGERS);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...INTEGER_NAMES, "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined", "unknown"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = {
@@ -1593,9 +1651,9 @@ const MEMBER_FORMS = {
 // Fields with their source spans, checked for a name given twice.
 /** @throws {CompileError} */
 export function fields(list: Field[], at: Span[]): Field[] {
-  list.forEach((f, i) => {
-    if (list.findIndex((other) => other.name === f.name) !== i) throw new CompileError("E0402", `duplicate property '${f.name}'`, at[i]!.start, at[i]!.end);
-  });
+  for (let i: usize = 0; i < list.length; i++) {
+    for (let k: usize = 0; k < i; k++) if (list[k]!.name === list[i]!.name) throw new CompileError("E0402", `duplicate property '${list[i]!.name}'`, at[i]!.start, at[i]!.end);
+  }
   return list;
 }
 

@@ -10,7 +10,7 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Param, Span, TypeNode } from "./parser.ts";
 import { cloneTypeNode } from "./rebuild.ts";
 import { storable } from "./resolve.ts";
-import { EMBEDDED, type Field, type MapType, type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing } from "./typing.ts";
+import { EMBEDDED, type Field, type MapType, type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing, copyField } from "./typing.ts";
 
 // A member a class's `override` replaces: its name as shown, its parameters' types and its result.
 type Replaced = { name: string; params: (Type | undefined)[]; returns: Type | undefined };
@@ -544,14 +544,6 @@ function paramInfo(p: Ref<Param>): { name: string | undefined; start: usize; end
     optional: p.optional || p.default !== undefined || p.rest,
     type: p.type !== undefined ? cloneTypeNode(p.type) : undefined,
   };
-}
-
-function copyField(f: Ref<Field>): Field {
-  let out: Field = { name: f.name, type: f.type };
-  if (f.access !== undefined) out.access = f.access;
-  if (f.readonly !== undefined) out.readonly = f.readonly;
-  if (f.optional !== undefined) out.optional = f.optional;
-  return out;
 }
 
 // A type with a class it holds inline, in a union, an object or a tuple, swapped for another.
