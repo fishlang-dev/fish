@@ -7,7 +7,7 @@ import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { cloneEnumMember, cloneParam, cloneStmt, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.ts";
-import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type BlockRecord, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.ts";
+import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, typedNamed, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type BlockRecord, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.ts";
 import { typeForm, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
@@ -357,7 +357,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const outer = this.enterScope(bindings);
       try {
         let members: EnumMember[] = [];
-        for (const m of this.host.enums.get(enumName)!.data!.members) members.push(cloneEnumMember(m));
+        const written = this.host.enums.get(enumName)!.data!;
+        for (const m of written.members) members.push(cloneEnumMember(m));
         for (const m of members) {
           const payload = this.payloadOf(m, args, at);
           variants.set(m.name, this.host.tables.typing.variantType(data.name, data.id, m.name, args, payload));
@@ -836,7 +837,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     if (alias !== undefined) return this.aliasType(alias, args, t);
     const named = this.host.classNamed(t.name, args, spanOf(t));
-    if (named !== undefined && this.host.tables.typing.rec(named).abstract) throw new CompileError("E0701", `'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
+    if (named !== undefined && this.host.tables.typing.rec(named).abstract === true) throw new CompileError("E0701", `'${t.name}' is an abstract class, which only exists embedded in its subclasses, so it can't be a value's type; describe what they share with an interface instead`, t.start, t.end);
     if (named !== undefined) return named;
     const parts = t.name.split(".");
     const owner = parts[0]!;
@@ -864,18 +865,25 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       return this.interfaceOf(trait, held, t);
     }
     // JavaScript's typed arrays, unless the program declares its own of the name.
-    if (isTypedName(t.name)) {
+    const typed = typedNamed(t.name);
+    if (typed !== undefined) {
       if (t.args.length > 0) throw new CompileError("E0106", `'${t.name}' takes no type arguments`, t.start, t.end);
-      return this.host.tables.typing.typedArray(t.name);
+      return this.host.tables.typing.typedArray(typed);
     }
     // Brands and units, unless the program declares its own of the name.
     if (t.name === "Unit") {
-      const [of, text] = t.args;
-      const base = of && args[0];
-      const powers = text?.kind === "literal" && text.value.kind === "string" ? unitPowers(text.value.value) : undefined;
-      if (t.args.length !== 2 || !isNumeric(base!) || !powers) throw new CompileError("E0116", "'Unit' takes a number type and its unit, like 'Unit<f64, \"m/s\">', the unit names with powers over at most one '/'", t.start, t.end);
-      if (Object.values(powers).every((p) => p === 0)) throw new CompileError("E0116", `the unit '${(text as { value: { value: string } }).value.value}' cancels to none, so this is a plain '${this.host.tables.typing.show(base!)}'; write that instead`, t.start, t.end);
-      return this.host.tables.typing.unitType(base!, powers);
+      let written: string | undefined = undefined;
+      if (t.args.length > 1) {
+        const text: Ref<TypeNode> = t.args[1]!;
+        if (text.kind === "literal" && text.value.kind === "string") written = text.value.value;
+      }
+      const powers = written !== undefined ? unitPowers(written) : undefined;
+      const base = t.args.length > 0 ? args[0] : undefined;
+      if (t.args.length !== 2 || base === undefined || !isNumeric(base) || powers === undefined) throw new CompileError("E0116", "'Unit' takes a number type and its unit, like 'Unit<f64, \"m/s\">', the unit names with powers over at most one '/'", t.start, t.end);
+      let cancels = true;
+      for (const p of Object.values(powers)) if (p !== 0) cancels = false;
+      if (cancels) throw new CompileError("E0116", `the unit '${written!}' cancels to none, so this is a plain '${this.host.tables.typing.show(base)}'; write that instead`, t.start, t.end);
+      return this.host.tables.typing.unitType(base, powers);
     }
     if (t.name === "Brand") {
       if (t.args.length !== 2) throw new CompileError("E0116", "'Brand' takes the type it brands and a tag naming it, like 'Brand<usize, \"UserId\">'", t.start, t.end);
@@ -883,18 +891,39 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     // TypeScript's utility types, unless the program declares its own of the name.
     const utility = UTILITIES.get(t.name);
-    if (utility) {
-      const [count, example] = utility;
-      const apply = (given: Type[], at: Span, argAt: Span[]) => this.typeFns().utility(t.name, given, at, argAt);
+    if (utility !== undefined) {
+      const count = utility[0];
+      const example = utility[1];
       if (args.length !== count) throw new CompileError("E0106", `'${t.name}' takes ${count === 1 ? "one type argument" : "two type arguments"}, like '${example}'`, t.start, t.end);
+      let argAt: Span[] = [];
+      for (const a of t.args) argAt.push(spanOf(a));
       // Over a JS handle, a utility type remakes its shape's fields, and gives a handle again.
-      const shapes = args.map((t) => this.host.tables.typing.jsShape(t));
-      if (shapes.some((x) => x !== undefined)) {
-        const made = apply(args.map((a, k) => (shapes[k] ? this.host.tables.typing.objectType(this.host.tables.typing.rec(shapes[k]!).fields) : a)), t, t.args);
-        const r = this.recOf(made);
-        return r?.kind === "object" && !r.tuple ? this.host.tables.typing.blockType("JsValue", made) : made;
+      let shapes: (Type | undefined)[] = [];
+      let handles = false;
+      for (const a of args) {
+        const shape = this.host.tables.typing.jsShape(a);
+        if (shape !== undefined) handles = true;
+        shapes.push(shape);
       }
-      return apply(args, t, t.args);
+      if (handles) {
+        let given: Type[] = [];
+        for (let k: usize = 0; k < args.length; k++) {
+          const shape = shapes[k];
+          if (shape === undefined) {
+            given.push(args[k]!);
+            continue;
+          }
+          let fields: Field[] = [];
+          const record = this.host.tables.typing.rec(shape as Exclude<Type, string>);
+          for (const f of record.fields) fields.push(copyField(f));
+          given.push(this.host.tables.typing.objectType(fields));
+        }
+        const made = this.typeFns().utility(t.name, given, spanOf(t), argAt);
+        const r = this.recOf(made);
+        if (r?.kind === "object" && r.tuple !== true) return this.host.tables.typing.blockType("JsValue", made);
+        return made;
+      }
+      return this.typeFns().utility(t.name, args, spanOf(t), argAt);
     }
     // TypeScript's iterator types, unless the program declares its own of the name: an iterator is
     // what a generator is, and an iterable anything `for...of` reads.

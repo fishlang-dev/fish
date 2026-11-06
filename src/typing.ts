@@ -212,6 +212,12 @@ export const TYPED_ARRAYS = { Uint8Array: "u8", Int8Array: "i8", Uint16Array: "u
 // TYPED_ARRAYS' names, written out since reading an object's keys needs a value to read them from.
 const TYPED_ARRAY_KEYS: (keyof typeof TYPED_ARRAYS)[] = ["Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array", "ArrayBuffer"];
 export const TYPED_ARRAY_NAMES = new Set<string>([...TYPED_ARRAY_KEYS]);
+
+// The typed array a name is, if it is one.
+export function typedNamed(name: string): TypedName | undefined {
+  for (const k of TYPED_ARRAY_KEYS) if (k === name) return k;
+  return undefined;
+}
 const TYPED_ARRAY_MAP = new Map<string, Numeric>([
   ["Uint8Array", "u8"], ["Int8Array", "i8"], ["Uint16Array", "u16"], ["Int16Array", "i16"],
   ["Uint32Array", "u32"], ["Int32Array", "i32"], ["Float32Array", "f32"], ["Float64Array", "f64"], ["ArrayBuffer", "u8"],
