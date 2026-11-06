@@ -1,12 +1,12 @@
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId } from "./arenas.ts";
 import { emptyTables, holdsNode, type Instance } from "./check.ts";
-import { cloneBody, declareClass, inherited, isApart, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { cloneBody, cloneSignature, declareClass, inherited, isApart, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
 import type { Tables } from "./compilation.ts";
 import { literalValue } from "./narrow.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
-import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Expr, Id, Param, Span, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { paramName, unboxedClosure } from "./resolve.ts";
 import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
 import { NodeMap, NodeSet, forEachChild, nextId, renumberTypeNode, Rewrites, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
@@ -63,6 +63,25 @@ function holdsPlaceholder(typing: Ref<Typing>, given: Type, t: Type): boolean {
     for (const b of bound.params) if (holdsPlaceholder(typing, b, t)) return true;
     return holdsPlaceholder(typing, bound.returns, t);
   }, true);
+}
+
+function merged2(m: Ref<Map<usize, Bound>>): Map<usize, Bound> {
+  let out = new Map<usize, Bound>();
+  for (const [k, v] of m) out.set(k, v);
+  return out;
+}
+
+// A concrete instance's symbol: its name and a hash of its type arguments, rather than a count,
+// so it is the same in every program using it. Arguments shown alike get numbered suffixes.
+function instanceSymbol<H extends InstancingHost>(host: Mut<H>, name: string, bindings: Ref<Map<string, Type>>, others: Ref<Map<string, InstanceId>>): string {
+  let parts: string[] = [];
+  for (const [k, t] of bindings) parts.push(`${k}=${host.tables.typing.described(t)}`);
+  const stem = `${name}#${digest(parts.join(","))}`;
+  let symbols = new Set<string>();
+  for (const i of others.values()) symbols.add(host.tables.arenas.instanceOf(i).symbol);
+  let symbol = stem;
+  for (let n = 1; symbols.has(symbol); n++) symbol = `${stem}.${n}`;
+  return symbol;
 }
 
 // A copy of a body's scope, empty when it has none.
@@ -160,8 +179,10 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
     const earlier = bindings.get(node.name);
     // A closure meeting T already decided as the stored callable it fits is boxed into it, as one
     // given first is boxed where the body holds T in a type argument.
-    if (earlier !== undefined && tables.typing.sameCallable(earlier, tables.typing.heldArgument(arg))) return;
-    if (earlier !== undefined && tables.typing.sameCallable(tables.typing.heldArgument(earlier), arg)) {
+    const heldArg = tables.typing.heldArgument(arg);
+    if (earlier !== undefined && tables.typing.sameCallable(earlier, heldArg)) return;
+    const heldEarlier = earlier !== undefined ? tables.typing.heldArgument(earlier) : undefined;
+    if (heldEarlier !== undefined && tables.typing.sameCallable(heldEarlier, arg)) {
       bindings.set(node.name, arg);
       return;
     }
@@ -187,7 +208,7 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
   // `T | null`, `Option<T>` and `T | string` against a value: the members the written ones
   // already cover say nothing, and the rest are T, as TypeScript infers. Absence alone gives no T.
   const option = node.kind === "ref" && node.name === "Option" && node.args.length === 1 && !names.has(node.name);
-  const members = node.kind === "union" ? node.types : node.kind === "ref" && option ? node.args : undefined;
+  const members = writtenMembers(node, option);
   if (members !== undefined) {
     // The one member naming a type parameter decides it, from what the others don't cover.
     let open: usize | undefined = undefined;
@@ -208,7 +229,10 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
       for (let i: usize = 0; i < members.length; i++) if (i !== open && covers(tables.typing, members[i]!, m)) covered = true;
       if (!covered) rest.push(m);
     }
-    if (rest.length > 0) infer(tables, members[open]!, rest.length === 1 ? rest[0]! : tables.typing.unionType(rest), names, bindings, at);
+    if (rest.length > 0) {
+      const given = rest.length === 1 ? rest[0]! : tables.typing.unionType(rest);
+      infer(tables, members[open]!, given, names, bindings, at);
+    }
     return;
   }
   // `Ref<T>` against a value or a reference borrows a T.
@@ -219,8 +243,7 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
   // A function type against a closure binds through its parameters and what it gives.
   if (node.kind === "function" && a?.kind === "closure") {
     for (let i: usize = 0; i < node.params.length && i < a.params.length; i++) {
-      const written = node.params[i]!.type;
-      if (written !== undefined) infer(tables, written, a.params[i]!, names, bindings, at);
+      if (node.params[i]!.type !== undefined) infer(tables, node.params[i]!.type!, a.params[i]!, names, bindings, at);
     }
     if (a.returns !== "void" || node.returns.kind !== "ref" || !names.has(node.returns.name)) infer(tables, node.returns, a.returns, names, bindings, at);
     if (node.throws !== undefined && a.throws !== undefined) infer(tables, node.throws, a.throws, names, bindings, at);
@@ -249,11 +272,18 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
     return;
   }
   // `Record<string, V>` and `{ [k: string]: V }` against a dictionary match its value type.
-  const index = node.kind === "object" && node.members.length === 1 ? node.members[0] : undefined;
-  const entry = node.kind === "ref" && node.name === "Record" && node.args.length === 2 && !names.has(node.name) ? node.args[1] : index?.kind === "index" ? index.type : undefined;
-  if (entry && a?.kind === "map" && a.dict) {
-    infer(tables, entry, a.value, names, bindings, at);
-    return;
+  if (a !== undefined && a.kind === "map" && a.dict === true) {
+    if (node.kind === "ref" && node.name === "Record" && node.args.length === 2 && !names.has(node.name)) {
+      infer(tables, node.args[1]!, a.value, names, bindings, at);
+      return;
+    }
+    if (node.kind === "object" && node.members.length === 1) {
+      for (const m of node.members) {
+        if (m.kind !== "index") continue;
+        infer(tables, m.type, a.value, names, bindings, at);
+        return;
+      }
+    }
   }
   if (node.kind === "ref" && (node.name === "shared" || node.name === "Rc" || node.name === "Weak") && node.args.length === 1 && !names.has(node.name)) {
     if (a?.kind === "shared" && a.which === node.name) infer(tables, node.args[0]!, a.of, names, bindings, at);
@@ -261,7 +291,7 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
   }
   // `Box<T>` against `Box<i64>` matches the type arguments.
   if (node.kind === "ref" && a?.kind === "class" && a.generic?.name === node.name) {
-    node.args.forEach((n, i) => a.generic!.args[i] && infer(tables, n, a.generic!.args[i]!, names, bindings, at));
+    for (let i: usize = 0; i < node.args.length && i < a.generic!.args.length; i++) infer(tables, node.args[i]!, a.generic!.args[i]!, names, bindings, at);
     return;
   }
   // `Dyn<I>` against a Dyn matches the interface it holds.
@@ -273,7 +303,7 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
   const held = a?.kind === "dyn" ? a.of : arg;
   const trait = typeof held === "string" ? undefined : tables.typing.rec(held);
   if (node.kind === "ref" && trait?.kind === "interface" && trait.generic?.name === node.name) {
-    node.args.forEach((n, i) => trait.generic!.args[i] && infer(tables, n, trait.generic!.args[i]!, names, bindings, at));
+    for (let i: usize = 0; i < node.args.length && i < trait.generic!.args.length; i++) infer(tables, node.args[i]!, trait.generic!.args[i]!, names, bindings, at);
     return;
   }
   // `Promise<T>` against a promise matches what it gives.
@@ -285,16 +315,19 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
   // `Generator<T>` against a generator matches what it yields.
   // A parameter of a generator interface, or one standing for a generator, yields too.
   if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && tables.typing.yieldsOf(arg) !== undefined) {
-    infer(tables, node.args[0]!, tables.typing.yieldsOf(arg)!, names, bindings, at);
+    const given = tables.typing.yieldsOf(arg)!;
+    infer(tables, node.args[0]!, given, names, bindings, at);
     return;
   }
   // `Iterable<T>` against anything a loop reads matches what it reads.
   if (node.kind === "ref" && node.name === "Iterable" && node.args.length === 1 && !names.has(node.name) && tables.typing.iteratedBy(arg) !== undefined) {
-    infer(tables, node.args[0]!, tables.typing.iteratedBy(arg)!, names, bindings, at);
+    const given = tables.typing.iteratedBy(arg)!;
+    infer(tables, node.args[0]!, given, names, bindings, at);
     return;
   }
   if (node.kind === "ref" && node.name === "AsyncGenerator" && node.args.length >= 1 && tables.typing.yieldsOf(arg, true) !== undefined) {
-    infer(tables, node.args[0]!, tables.typing.yieldsOf(arg, true)!, names, bindings, at);
+    const given = tables.typing.yieldsOf(arg, true)!;
+    infer(tables, node.args[0]!, given, names, bindings, at);
     return;
   }
   // `FixedArray<T, N>` against a fixed array matches its element type.
@@ -308,28 +341,58 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
   }
   // `[A, B]` against a tuple of its length matches element by element.
   // An optional element matches what it holds when there, and a rest element the tuple's array.
-  const fixed = node.kind === "tuple" ? node.elements.filter((n) => !n.rest) : [];
-  if (node.kind === "tuple" && tables.typing.isTuple(arg) && tables.typing.elementsOf(arg as ObjectType).length === fixed.length && (fixed.length < node.elements.length) === (tables.typing.rec(arg as ObjectType).rest !== undefined)) {
+  if (node.kind === "tuple" && tables.typing.isTuple(arg)) {
+    let fixed: usize = 0;
+    let restAt: usize | undefined = undefined;
+    for (let i: usize = 0; i < node.elements.length; i++) {
+      if (!node.elements[i]!.rest) fixed++;
+      else if (restAt === undefined) restAt = i;
+    }
     const elements = tables.typing.elementsOf(arg as ObjectType);
-    // An optional element left out says nothing about its type.
-    fixed.forEach((n, i) => (n.optional && elements[i] === "null") || infer(tables, n.type, n.optional ? tables.typing.withoutNull(elements[i]!) : elements[i]!, names, bindings, at));
-    const rest = node.elements.find((n) => n.rest);
-    if (rest) infer(tables, rest.type, tables.typing.arrayType(tables.typing.rec(arg as ObjectType).rest!), names, bindings, at);
-    return;
+    const tupleRest = tables.typing.rec(arg as ObjectType).rest;
+    if (elements.length === fixed && (fixed < node.elements.length) === (tupleRest !== undefined)) {
+      // An optional element left out says nothing about its type.
+      let k: usize = 0;
+      for (const n of node.elements) {
+        if (n.rest) continue;
+        const e = elements[k]!;
+        k++;
+        if (n.optional && e === "null") continue;
+        const given = n.optional ? tables.typing.withoutNull(e) : e;
+        infer(tables, n.type, given, names, bindings, at);
+      }
+      if (restAt !== undefined) {
+        const array = tables.typing.arrayType(tupleRest!);
+        infer(tables, node.elements[restAt]!.type, array, names, bindings, at);
+      }
+      return;
+    }
   }
   // `T[]` and `Array<T>` against an array match its element type.
-  const element = node.kind === "array" ? node.element : node.kind === "ref" && node.name === "Array" && node.args.length === 1 ? node.args[0] : undefined;
   // An empty literal's `never` elements say nothing about the element type.
-  if (element && a?.kind === "array") {
-    if (a.element !== "never") infer(tables, element, a.element, names, bindings, at);
-    return;
+  if (a !== undefined && a.kind === "array") {
+    if (node.kind === "array") {
+      if (a.element !== "never") infer(tables, node.element, a.element, names, bindings, at);
+      return;
+    }
+    if (node.kind === "ref" && node.name === "Array" && node.args.length === 1) {
+      if (a.element !== "never") infer(tables, node.args[0]!, a.element, names, bindings, at);
+      return;
+    }
   }
   if (node.kind !== "object" || typeof arg === "string") return;
   for (const m of node.members) {
-    if (m.kind !== "property" || typeof m.name !== "string" || !m.type) continue;
+    if (m.kind !== "property" || typeof m.name !== "string" || m.type === undefined) continue;
     const found = tables.typing.field(arg, m.name);
-    if (found) infer(tables, m.type, found.type, names, bindings, at);
+    if (found !== undefined) infer(tables, m.type, found.type, names, bindings, at);
   }
+}
+
+// The members of a union as written, or of `Option<T>`, the one it holds.
+function writtenMembers(node: Ref<TypeNode>, option: boolean): Ref<TypeNode[]> | undefined {
+  if (node.kind === "union") return node.types;
+  if (node.kind === "ref" && option) return node.args;
+  return undefined;
 }
 
 // Whether a member of a union as written already covers a member of the union an argument is.
@@ -465,7 +528,7 @@ export interface InstancingHost {
   classParams(f: Ref<Body>): TypeParam[];
   // A comptime parameter's argument, computed while compiling, as the literal type of its value.
   /** @throws {CompileError} */
-  comptimeArgument(arg: Expr): Type;
+  comptimeArgument(this: Mut<this>, arg: Ref<Expr>): Type;
   // The error a body's check failed with, when it did.
   failure(f: Ref<Body>): CompileError | undefined;
   /** @throws {CompileError} */
@@ -535,15 +598,14 @@ export class Instancing<H extends InstancingHost> {
       if (r.generic !== undefined) throw unsupported("generic function types as type arguments", at);
       return given as FunctionType;
     }
-    if (written?.kind !== "function" || !this.generic(f)) return undefined;
+    if (written?.kind !== "function" || !this.generic(f.bodyId)) return undefined;
     let bindings = new Map<string, Type>();
     if (typeArgs.length === params.length) for (let k: usize = 0; k < params.length; k++) bindings.set(params[k]!.name, this.host.resolveType(cloneTypeNode(typeArgs[k]!)));
     else {
       const names = new Set(params.map((p) => p.name));
       for (let k: usize = 0; k < f.params.length && k < argTypes.length; k++) {
-        const t = f.params[k]!.type;
         const given = argTypes[k];
-        if (t !== undefined && given !== undefined && k !== i) infer(this.host.tables, t, given, names, bindings, at);
+        if (f.params[k]!.type !== undefined && given !== undefined && k !== i) infer(this.host.tables, f.params[k]!.type!, given, names, bindings, at);
       }
     }
     // Inferred from a literal, a type parameter types the arrow as its base type; written, as the
@@ -551,13 +613,16 @@ export class Instancing<H extends InstancingHost> {
     const explicit = typeArgs.length === params.length;
     let scope = new Map<string, Type>();
     if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
-    for (const [n, t] of this.explicitPlaceholders(f)) scope.set(n, t);
-    for (const [n, t] of bindings) scope.set(n, explicit ? this.host.tables.typing.lowerKeepingBrands(t) : this.host.tables.typing.widenLet(this.host.tables.typing.lowerKeepingBrands(t)));
+    for (const [n, t] of this.explicitPlaceholders(f.bodyId)) scope.set(n, t);
+    for (const [n, t] of bindings) {
+      const lowered = this.host.tables.typing.lowerKeepingBrands(t);
+      scope.set(n, explicit ? lowered : this.host.tables.typing.widenLet(lowered));
+    }
     const resolved = this.host.resolveIn(scope, written);
     const t = typeof resolved === "string" ? undefined : this.host.tables.typing.rec(resolved);
     if (t?.kind !== "function") return undefined;
     // A parameter only the callback itself could decide is left for the call to report.
-    const undecided = [...this.explicitPlaceholders(f)].filter(([n]) => !bindings.has(n)).map(([, p]) => p);
+    const undecided = [...this.explicitPlaceholders(f.bodyId)].filter(([n]) => !bindings.has(n)).map(([, p]) => p);
     if (t.params.some((p) => this.host.tables.typing.holdsPart(p, (u) => undecided.includes(u), true))) return undefined;
     // What it gives is left open while it names a type parameter the call hasn't decided.
     const undecidedIn = (u: Type) => this.host.tables.typing.holdsPart(u, (v) => {
@@ -577,7 +642,7 @@ export class Instancing<H extends InstancingHost> {
   constructs(this: Mut<this>, f: Ref<Body>, args: Expr[], argTypes: Type[]) {
     let scope = new Map<string, Type>();
     if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
-    const params = this.classParamsOf(f);
+    const params = this.classParamsOf(f.bodyId);
     const name = f.owner !== undefined ? this.host.tables.typing.rec(f.owner).name : f.name;
     readOnlyKept(this.host, f.params, params, scope, argTypes, args, name);
   }
@@ -593,7 +658,8 @@ export class Instancing<H extends InstancingHost> {
     if (f.returnType === undefined) return undefined;
     // `x is T` is a boolean that tells a caller's condition what x is.
     if (f.returnType.kind === "predicate") {
-      const p = f.returnType;
+      const p = cloneTypeNode(f.returnType);
+      if (p.kind !== "predicate") return undefined;
       if (p.asserts) throw unsupported("assertion signatures", p);
       if (p.name === "this") throw unsupported("'this' type predicates", p);
       const param = f.params.find((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
@@ -618,29 +684,39 @@ export class Instancing<H extends InstancingHost> {
     const t = this.host.tables.typing.rec(returned);
     if (t.kind !== "ref") return returned;
     // Only the one parameter the result borrows from, by its lifetime or by elision.
-    const implicit = this.implicitOf(f);
-    const refs = f.params.flatMap((p, i) => {
+    const implicit = this.implicitOf(f.bodyId);
+    const life = t.life;
+    let refs: usize[] = [];
+    let index: usize = 0;
+    for (const p of f.params) {
+      const i = index;
+      index++;
       const lent = this.host.instancingState.lent.get(f.bodyId);
-      const kept = lent !== undefined ? lent.get(i as usize) : undefined;
+      const kept = lent !== undefined ? lent.get(i) : undefined;
       const type = kept !== undefined ? kept : p.type !== undefined ? this.host.resolveSigned(f.bodyId, scope, p.type) : undefined;
       const r = type !== undefined && typeof type !== "string" ? this.host.tables.typing.rec(type) : undefined;
-      return r !== undefined && r.kind === "ref" && (t.life === undefined || r.life === t.life) ? [i] : [];
-    });
-    const [i] = refs;
-    const bound = i !== undefined && refs.length === 1 && !(f.self && !f.self.constructor && !t.life) ? implicit.get(i) : undefined;
-    return bound && this.host.instancingState.lent.get(f.bodyId)?.has(i!) && this.host.tables.typing.lower(t.to) === this.host.tables.typing.lower(bound) ? this.host.tables.typing.refType(scope.get(`#${i}`) ?? bound, t.mutable, t.life) : returned;
+      if (r !== undefined && r.kind === "ref" && (life === undefined || r.life === life)) refs.push(i);
+    }
+    const i = refs.length === 1 ? refs[0]! : undefined;
+    const method = f.self !== undefined && !f.self.constructor;
+    const bound = i !== undefined && !(method && life === undefined) ? implicit.get(i) : undefined;
+    if (i === undefined || bound === undefined) return returned;
+    const lent = this.host.instancingState.lent.get(f.bodyId);
+    if (lent === undefined || !lent.has(i) || this.host.tables.typing.lower(t.to) !== this.host.tables.typing.lower(bound)) return returned;
+    const given = scope.get(`#${i}`);
+    return this.host.tables.typing.refType(given !== undefined ? given : bound, t.mutable, life);
   }
 
   // A body's parameter types as written: an implicit parameter's is its interface or object
   // type, which is what an interface's method signature is compared with.
   /** @throws {CompileError} */
   declaredParams(this: Mut<this>, f: Ref<Body>): Type[] {
-    const implicit = this.implicitOf(f);
+    const implicit = this.implicitOf(f.bodyId);
     let scope = new Map<string, Type>();
     if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
     let out: Type[] = [];
     for (let i: usize = 0; i < f.params.length; i++) {
-      const implicitType = this.implicitParam(f, i, implicit.get(i));
+      const implicitType = this.implicitParam(f.bodyId, i, implicit.get(i));
       out.push(implicitType !== undefined ? implicitType : this.host.paramTypeIn(f.bodyId, scope, i));
     }
     return out;
@@ -648,17 +724,18 @@ export class Instancing<H extends InstancingHost> {
 
   // An implicit parameter's type as the body and its callers see it: borrowed when it is a
   // reference, and empty when it is optional and left out.
-  private implicitParam(this: Mut<this>, f: Ref<Body>, i: usize, t: Type | undefined): Type | undefined {
-    return t !== undefined && f.params[i]!.optional ? this.host.tables.typing.unionType([t, "null"]) : this.lentAs(f, i, t);
+  private implicitParam(this: Mut<this>, id: BodyId, i: usize, t: Type | undefined): Type | undefined {
+    const optional = this.host.tables.arenas.bodyOf(id).params[i]!.optional;
+    return t !== undefined && optional ? this.host.tables.typing.unionType([t, "null"]) : this.lentAs(id, i, t);
   }
 
   // An implicit parameter's type, borrowed when the parameter is a reference to it.
-  private lentAs(this: Mut<this>, f: Ref<Body>, i: usize, t: Type | undefined): Type | undefined {
-    const lent = this.host.instancingState.lent.get(f.bodyId);
+  private lentAs(this: Mut<this>, id: BodyId, i: usize, t: Type | undefined): Type | undefined {
+    const lent = this.host.instancingState.lent.get(id);
     const ref = lent !== undefined ? lent.get(i) : undefined;
     if (t === undefined || ref === undefined) return t;
-    const { mutable, life } = this.host.tables.typing.rec(ref);
-    return this.host.tables.typing.refType(t, mutable, life);
+    const r = this.host.tables.typing.rec(ref);
+    return this.host.tables.typing.refType(t, r.mutable, r.life);
   }
 
   // A generic body is checked once at its definition, with placeholders for its type
@@ -666,13 +743,13 @@ export class Instancing<H extends InstancingHost> {
   // It is made once per body: fresh placeholders would make a new instance each time.
   /** @throws {CompileError} */
   definition(this: Mut<this>, f: Ref<Body>): Ref<Instance> {
-    if (!this.generic(f)) return this.instanceOf(f);
+    if (!this.generic(f.bodyId)) return this.instanceOf(f);
     const known = this.host.instancingState.definitions.get(f.bodyId);
     if (known !== undefined) return this.host.tables.arenas.instanceOf(known);
-    let scope = this.explicitPlaceholders(f);
-    for (const [i, bound] of this.implicitOf(f)) {
+    let scope = this.explicitPlaceholders(f.bodyId);
+    for (const [i, bound] of this.implicitOf(f.bodyId)) {
       const shown = this.host.tables.typing.show(bound);
-      const same = this.sameParams(f, i, bound, merged(scopeCopy(f), scope));
+      const same = this.sameParams(f.bodyId, i, bound, merged(scopeCopy(f), scope));
       scope.set(`#${i}`, this.host.tables.typing.typeParameter(shown, same));
     }
     // A comptime parameter's value is known only at each call; the definition has a placeholder.
@@ -681,16 +758,6 @@ export class Instancing<H extends InstancingHost> {
     const id = found.id;
     this.host.instancingState.definitions.set(f.bodyId, id);
     return this.host.tables.arenas.instanceOf(id);
-  }
-
-  // A concrete instance's symbol: its name and a hash of its type arguments, rather than a count,
-  // so it is the same in every program using it. Arguments shown alike get numbered suffixes.
-  private instanceSymbol(this: Mut<this>, name: string, bindings: Map<string, Type>, others: Map<string, InstanceId>): string {
-    const stem = `${name}#${digest([...bindings].map(([k, t]) => `${k}=${this.host.tables.typing.described(t)}`).join(","))}`;
-    const symbols = new Set([...others.values()].map((i) => this.host.tables.arenas.instanceOf(i).symbol));
-    let symbol = stem;
-    for (let n = 1; symbols.has(symbol); n++) symbol = `${stem}.${n}`;
-    return symbol;
   }
 
   // A member of a generic class's instance runs with the class's type arguments in scope.
@@ -703,11 +770,11 @@ export class Instancing<H extends InstancingHost> {
     const known = byKey.get(key);
     if (known !== undefined) return this.host.tables.arenas.instanceOf(known);
     // Every type parameter, implicit ones included, needs a concrete binding to compile.
-    const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...this.implicitOf(f).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
+    const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...this.implicitOf(f.bodyId).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
     const isConcrete = complete && [...bindings].every(([name, t]) => isApart(name) || this.host.instancingState.concreteness.concrete(t));
     const generic = bindings.size > 0;
     const body = this.host.tables.arenas.addBody(cloneBody(f)).bodyId;
-    const symbol = generic && isConcrete ? this.instanceSymbol(f.name, bindings, byKey) : f.name;
+    const symbol = generic && isConcrete ? instanceSymbol(this.host, f.name, bindings, byKey) : f.name;
     const checking = this.host.checking();
     const depth = generic && checking !== undefined ? checking.depth + 1 : 0;
     const found = this.host.tables.arenas.addInstance({
@@ -733,7 +800,7 @@ export class Instancing<H extends InstancingHost> {
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
       throw new CompileError("E0106", `expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
     }
-    if (!this.generic(f)) return this.instanceOf(f);
+    if (!this.generic(f.bodyId)) return this.instanceOf(f);
     // Optional parameters may be left out at the end.
     const required = f.params.filter((p) => !p.optional).length;
     if (args.length < required || args.length > f.params.length) {
@@ -742,18 +809,18 @@ export class Instancing<H extends InstancingHost> {
     }
     let bindings = new Map<string, Type>();
     if (typeArgs.length > 0) {
-      for (let i: usize = 0; i < params.length; i++) bindings.set(params[i]!.name, this.host.tables.typing.heldArgument(this.host.resolveType(typeArgs[i]!)));
+      for (let i: usize = 0; i < params.length; i++) bindings.set(params[i]!.name, this.host.tables.typing.heldArgument(this.host.resolveType(cloneTypeNode(typeArgs[i]!))));
     } else {
       const names = new Set(params.map((p) => p.name));
       for (let i: usize = 0; i < f.params.length && i < argTypes.length; i++) {
-        const written = f.params[i]!.type;
-        if (written !== undefined) infer(this.host.tables, written, this.iteratesAs(written, argTypes[i]!, at), names, bindings, at);
+        if (f.params[i]!.type === undefined) continue;
+        const given = this.iteratesAs(f.params[i]!.type!, argTypes[i]!, { start: at.start, end: at.end });
+        infer(this.host.tables, f.params[i]!.type!, given, names, bindings, at);
       }
       // `G extends Generator<U>` decides `U` from what `G`'s generator yields.
       for (const p of params) {
-        const c = p.constraint;
         const yields = bindings.has(p.name) ? this.host.tables.typing.yieldsOf(bindings.get(p.name)!) : undefined;
-        if (c?.kind === "ref" && c.name === "Generator" && c.args.length === 1 && yields !== undefined) infer(this.host.tables, c.args[0]!, yields, names, bindings, at);
+        if (p.constraint !== undefined && p.constraint.kind === "ref" && p.constraint.name === "Generator" && p.constraint.args.length === 1 && yields !== undefined) infer(this.host.tables, p.constraint.args[0]!, yields, names, bindings, at);
       }
     }
     for (const p of params) {
@@ -785,7 +852,7 @@ export class Instancing<H extends InstancingHost> {
     // A type parameter only an arrow's own parameters decided is still the definition's
     // placeholder, which the arrow was typed with; a body calling itself passes its placeholder
     // on in an argument of its own.
-    const open = new TypeSet([...this.explicitPlaceholders(f).values()]);
+    const open = new TypeSet([...this.explicitPlaceholders(f.bodyId).values()]);
     // A placeholder an argument holds, directly or in a function-typed parameter's bound.
     if (typeArgs.length === 0) for (const p of params) {
       const t = bindings.get(p.name)!;
@@ -797,50 +864,58 @@ export class Instancing<H extends InstancingHost> {
     readOnlyKept(this.host, f.params, params, bindings, argTypes, args, f.name);
     // An argument from inside another instance may be one of its type parameters; the instance
     // is keyed by what that stands for, and the call site remembers the parameter itself.
-    const own = new Map(params.map((p): [string, Type] => [p.name, bindings.get(p.name)!]));
+    let own = new Map<string, Type>();
+    for (const p of params) own.set(p.name, bindings.get(p.name)!);
     // A `Generator<T>` or `Promise<T>` bound names the function's own type parameters, which the
     // call has just decided, so the argument is checked against what they stand for.
     // So does a function type's, and the class's own parameters stand for what this class
     // instance gives them.
-    const classParams = this.classParamsOf(f);
+    const classParams = this.classParamsOf(f.bodyId);
     const outer = classPlaceholders(this.host, classParams);
-    const decided = new TypeMap([
-      ...[...this.explicitPlaceholders(f)].flatMap(([name, held]): [Type, Type][] => (bindings.has(name) ? [[held, bindings.get(name)!]] : [])),
-      ...[...outer].flatMap(([name, held]): [Type, Type][] => (f.scope?.has(name) ? [[held, f.scope.get(name)!]] : [])),
-    ]);
-    for (const [i, bound] of this.implicitOf(f)) {
+    let decided = new TypeMap<Type, Type>();
+    for (const [name, held] of this.explicitPlaceholders(f.bodyId)) {
+      const given = bindings.get(name);
+      if (given !== undefined) decided.set(held, given);
+    }
+    for (const [name, held] of outer) {
+      const given = f.scope !== undefined ? f.scope.get(name) : undefined;
+      if (given !== undefined) decided.set(held, given);
+    }
+    for (const [i, bound] of this.implicitOf(f.bodyId)) {
       const meant = rebound(this.host, bound, decided);
       if (f.params[i]!.optional) {
-        own.set(`#${i}`, this.presentArgument(args[i], argTypes[i], meant));
+        own.set(`#${i}`, presentArgument(this.host, i < args.length ? args[i] : undefined, argTypes[i], meant));
         continue;
       }
-      own.set(`#${i}`, this.implicitArgument(args[i]!, argTypes[i]!, meant, this.host.instancingState.lent.get(f.bodyId)!.get(i)));
+      const lentAs = this.host.instancingState.lent.get(f.bodyId)!.get(i);
+      own.set(`#${i}`, implicitArgument(this.host, args[i]!, argTypes[i]!, meant, lentAs));
       const given = argTypes[i]!;
       const r = typeof given === "string" ? undefined : this.host.tables.typing.rec(given);
       const held = r?.kind === "ref" ? r.to : given;
       const ref = this.host.instancingState.lent.get(f.bodyId)!.get(i);
-      const unlocked = ref && this.host.tables.typing.rec(ref).mutable ? this.host.tables.typing.unlocks(held, bound) : undefined;
-      if (unlocked) throw new CompileError("E0206", `'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${this.host.tables.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
-      if (r?.kind === "closure" && r.once && repeats(f, paramName(f.params[i]!))) {
+      const unlocked = ref !== undefined && this.host.tables.typing.rec(ref).mutable ? this.host.tables.typing.unlocks(held, bound) : undefined;
+      if (unlocked !== undefined) throw new CompileError("E0206", `'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${this.host.tables.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
+      if (r !== undefined && r.kind === "closure" && r.once !== undefined && r.once !== "" && repeats(f, paramName(f.params[i]!))) {
         throw new CompileError("E0210", `'${f.name}' may call '${paramName(f.params[i]!)}' more than once, but this closure moves '${r.once}' out, so it can run only once`, args[i]!.start, args[i]!.end);
       }
     }
     // Each value a comptime parameter is given makes an instance of its own.
-    f.params.forEach((p, i) => p.comptime && own.set(comptimeName(p), this.host.comptimeArgument(args[i]!)));
+    for (let i: usize = 0; i < f.params.length; i++) if (f.params[i]!.comptime) own.set(comptimeName(f.params[i]!), this.host.comptimeArgument(args[i]!));
     // A type argument holding a pattern keeps it, so the instance's parameters still ask for it;
     // one holding no type parameter keeps how its fields were spelled, which printing and JSON
     // read.
-    const lowered = new Map([...own].map(([name, t]): [string, Type] => [name, this.host.tables.typing.holdsPattern(t) || this.host.instancingState.concreteness.concrete(t) ? t : this.host.tables.typing.lowerKeepingBrands(t)]));
+    let lowered = new Map<string, Type>();
+    for (const [name, t] of own) lowered.set(name, this.host.tables.typing.holdsPattern(t) || this.host.instancingState.concreteness.concrete(t) ? t : this.host.tables.typing.lowerKeepingBrands(t));
     // Every instance of the calling body shares the call's node, so each call resets it.
-    if ([...own].some(([name, t]) => lowered.get(name) !== t)) this.host.instancingState.sites.set(at, own);
+    if ([...own].some(([name, t]) => lowered.get(name) !== t)) this.host.instancingState.sites.set({ id: at.id, start: at.start, end: at.end }, own);
     else this.host.instancingState.sites.delete(at);
-    const instance = this.instanceOf(f, new Map([...(f.scope ?? []), ...lowered]));
-    if (instance.depth > 64) {
+    const id = this.instanceOf(f, merged(scopeCopy(f), lowered)).id;
+    if (this.host.tables.arenas.instanceOf(id).depth > 64) {
       const comptime = f.params.some((p) => p.comptime);
-      const why = comptime && typeParamsOf(f).length === 0 && this.implicitOf(f).size === 0 ? "a different comptime value" : comptime ? "a different comptime value or larger type arguments" : "larger type arguments";
+      const why = comptime && typeParamsOf(f).length === 0 && this.implicitOf(f.bodyId).size === 0 ? "a different comptime value" : comptime ? "a different comptime value or larger type arguments" : "larger type arguments";
       throw new CompileError("E0113", `instantiating '${f.name}' never ends: each instance needs another with ${why}`, at.start, at.end);
     }
-    return instance;
+    return this.host.tables.arenas.instanceOf(id);
   }
 
   // The parameter types an instance's callers pass, or with `scopeOf(instance)`, the ones its
@@ -848,11 +923,11 @@ export class Instancing<H extends InstancingHost> {
   /** @throws {CompileError} */
   paramTypes(this: Mut<this>, instance: Ref<Instance>, given?: Map<string, Type>): Type[] {
     const scope = given !== undefined ? given : merged(instance.bindings, undefined);
-    const f = bodyOf(this.host.tables.arenas, instance);
-    const implicit = this.implicitOf(f);
+    const f = cloneSignature(bodyOf(this.host.tables.arenas, instance));
+    const implicit = this.implicitOf(f.bodyId);
     // A generic class's instance gives its parameters what they stand for there, in an implicit
     // parameter's bound too, as a call decides the function's own.
-    const classParams = this.classParamsOf(f);
+    const classParams = this.classParamsOf(f.bodyId);
     const outer = classPlaceholders(this.host, classParams);
     let decided = new TypeMap<Type, Type>();
     for (const [name, held] of outer) {
@@ -863,7 +938,7 @@ export class Instancing<H extends InstancingHost> {
     for (let i: usize = 0; i < f.params.length; i++) {
       const given = scope.get(`#${i}`);
       const bound = given !== undefined ? given : implicit.has(i) ? rebound(this.host, implicit.get(i)!, decided) : undefined;
-      const implicitType = this.implicitParam(f, i, bound);
+      const implicitType = this.implicitParam(f.bodyId, i, bound);
       out.push(implicitType !== undefined ? implicitType : this.host.paramTypeIn(f.bodyId, scope, i));
     }
     return out;
@@ -874,7 +949,7 @@ export class Instancing<H extends InstancingHost> {
   // concrete type for codegen.
   /** @throws {CompileError} */
   scopeOf(this: Mut<this>, instance: Ref<Instance>): Map<string, Type> {
-    const f = bodyOf(this.host.tables.arenas, instance);
+    const f = cloneSignature(bodyOf(this.host.tables.arenas, instance));
     const outer = this.host.classParams(f);
     const outerCount = outer.length;
     let scope = new Map<string, Type>();
@@ -882,25 +957,25 @@ export class Instancing<H extends InstancingHost> {
     else if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
     // A constructor taking its base's parameters also holds the base's type arguments.
     if (f.scope !== undefined) for (const [name, t] of f.scope) if (!scope.has(name)) scope.set(name, t);
-    const names = [...typeParamsOf(f).map((p) => p.name), ...[...this.implicitOf(f).keys()].map((i) => `#${i}`)];
+    const names = [...typeParamsOf(f).map((p) => p.name), ...[...this.implicitOf(f.bodyId).keys()].map((i) => `#${i}`)];
     // A function-typed parameter of a class's member is seen in terms of the class's parameters
     // as this body holds them, even while the parameter itself is still open.
     if (!this.known(instance, names)) {
       if (outerCount === 0) return merged(instance.bindings, undefined);
       // A generic method's own parameters are open here too, offering their bounds.
-      for (const [name, t] of this.explicitPlaceholders(f)) if (!scope.has(name)) scope.set(name, instance.bindings.get(name) ?? t);
-      for (const [i, bound] of this.implicitOf(f)) {
+      for (const [name, t] of this.explicitPlaceholders(f.bodyId)) if (!scope.has(name)) scope.set(name, instance.bindings.get(name) ?? t);
+      for (const [i, bound] of this.implicitOf(f.bodyId)) {
         if (this.host.tables.typing.rec(bound).kind !== "function" || !instance.bindings.has(`#${i}`)) continue;
         const shown = this.host.tables.typing.show(bound);
-        const same = this.sameParams(f, i, bound, scope);
+        const same = this.sameParams(f.bodyId, i, bound, merged(scope, undefined));
         scope.set(`#${i}`, this.host.tables.typing.wrapped(shown, same, instance.bindings.get(`#${i}`)!));
       }
       return scope;
     }
     for (const [name, t] of placeholders(this.host, typeParamsOf(f), merged(scope, undefined), merged(instance.bindings, undefined))) scope.set(name, t);
-    for (const [i, bound] of this.implicitOf(f)) {
+    for (const [i, bound] of this.implicitOf(f.bodyId)) {
       const shown = this.host.tables.typing.show(bound);
-      const same = this.sameParams(f, i, bound, scope);
+      const same = this.sameParams(f.bodyId, i, bound, merged(scope, undefined));
       scope.set(`#${i}`, this.host.tables.typing.wrapped(shown, same, instance.bindings.get(`#${i}`)!));
     }
     return scope;
@@ -917,7 +992,8 @@ export class Instancing<H extends InstancingHost> {
 
   // A generic class's type parameters, for the body of one of its members.
   /** @throws {CompileError} */
-  private classParamsOf(this: Mut<this>, f: Ref<Body>): TypeParam[] {
+  private classParamsOf(this: Mut<this>, id: BodyId): TypeParam[] {
+    const f = cloneSignature(this.host.tables.arenas.bodyOf(id));
     let out: TypeParam[] = [];
     for (const p of this.host.classParams(f)) out.push(cloneTypeParam(p));
     return out;
@@ -926,7 +1002,8 @@ export class Instancing<H extends InstancingHost> {
   // A function-typed parameter's bound as the body sees it: written in terms of the type
   // parameters the body itself holds, so calling it with one of them fits.
   /** @throws {CompileError} */
-  private sameParams(f: Ref<Body>, i: usize, bound: Bound, scope: Map<string, Type>): Bound {
+  private sameParams(this: Mut<this>, id: BodyId, i: usize, bound: Bound, scope: Map<string, Type>): Bound {
+    const f = cloneSignature(this.host.tables.arenas.bodyOf(id));
     const t = this.host.resolveIn(scope, f.params[i]!.type!);
     const r = typeof t === "string" ? undefined : this.host.tables.typing.rec(t);
     const own = r?.kind === "ref" ? r.to : t;
@@ -934,16 +1011,22 @@ export class Instancing<H extends InstancingHost> {
   }
 
   /** @throws {CompileError} */
-  private generic(this: Mut<this>, f: Ref<Body>): boolean {
-    return typeParamsOf(f).length > 0 || this.implicitOf(f).size > 0 || f.params.some((p) => p.comptime);
+  private generic(this: Mut<this>, id: BodyId): boolean {
+    const f = this.host.tables.arenas.bodyOf(id);
+    const own = f.typeParams !== undefined && f.typeParams.some((p) => !isLifetime(p));
+    const comptime = f.params.some((p) => p.comptime);
+    if (own) return true;
+    if (this.implicitOf(id).size > 0) return true;
+    return comptime;
   }
 
   // One set of placeholders per body, so a parameter's type and the body name the same `T`;
   // callers get a copy they may add to.
   /** @throws {CompileError} */
-  private explicitPlaceholders(this: Mut<this>, f: Ref<Body>): Map<string, Type> {
-    let made = this.host.instancingState.explicit.get(f.bodyId);
+  private explicitPlaceholders(this: Mut<this>, id: BodyId): Map<string, Type> {
+    let made = this.host.instancingState.explicit.get(id);
     if (made === undefined) {
+      const f = cloneSignature(this.host.tables.arenas.bodyOf(id));
       // A generic method's own parameters are one placeholder for every instance of its class
       // when no bound names the class's parameters, so 'map<U>(): Box<U>' makes one 'Box<U>'.
       const own = typeParamsOf(f);
@@ -964,7 +1047,7 @@ export class Instancing<H extends InstancingHost> {
   // What a class argument to an `Iterable<T>` parameter, or a reference to one, gives to infer `T`
   // from: what its `[Symbol.iterator]` method gives, which inference alone can't read.
   /** @throws {CompileError} */
-  private iteratesAs(this: Mut<this>, node: TypeNode, t: Type, at: Span): Type {
+  private iteratesAs(this: Mut<this>, node: Ref<TypeNode>, t: Type, at: Span): Type {
     const written = unlent(node);
     if (written.kind !== "ref" || written.name !== "Iterable") return t;
     const r = typeof t === "string" ? undefined : this.host.tables.typing.rec(t);
@@ -982,20 +1065,25 @@ export class Instancing<H extends InstancingHost> {
   // parameter property and a setter's parameter keep their type, since it is a field's, save a
   // parameter property of a function type.
   /** @throws {CompileError} */
-  implicitOf(this: Mut<this>, f: Ref<Body>): Map<usize, Bound> {
-    let found = this.host.instancingState.implicits.get(f.bodyId);
-    if (found !== undefined) return found;
-    found = new Map<usize, Bound>();
-    this.host.instancingState.implicits.set(f.bodyId, found);
+  implicitOf(this: Mut<this>, id: BodyId): Map<usize, Bound> {
+    const known = this.host.instancingState.implicits.get(id);
+    if (known !== undefined) return known;
+    const f = cloneSignature(this.host.tables.arenas.bodyOf(id));
+    // Recorded empty first, so a parameter whose type leads back here finds none.
+    this.host.instancingState.implicits.set(f.bodyId, new Map<usize, Bound>());
     // A generic class's member decides this as its definition does: a parameter of the class's
     // type parameter is one in every instance, whatever that parameter stands for.
-    const classParams = this.classParamsOf(f);
+    const classParams = this.classParamsOf(f.bodyId);
     const outer = classPlaceholders(this.host, classParams);
     let scope = merged(scopeCopy(f), outer);
-    for (const [n, t] of this.explicitPlaceholders(f)) scope.set(n, t);
-    const borrows = new Map<usize, RefType>();
-    this.host.instancingState.lent.set(f.bodyId, borrows);
-    f.params.forEach((p, i) => {
+    for (const [n, t] of this.explicitPlaceholders(f.bodyId)) scope.set(n, t);
+    let found = new Map<usize, Bound>();
+    let borrows = new Map<usize, RefType>();
+    this.host.instancingState.lent.set(f.bodyId, new Map<usize, RefType>());
+    let index: usize = 0;
+    for (const p of f.params) {
+      const i = index;
+      index++;
       const written = p.type !== undefined ? this.host.resolveIn(scope, p.type) : undefined;
       // A reference to an interface or object type is one over what it borrows.
       const w = written !== undefined && typeof written !== "string" ? this.host.tables.typing.rec(written) : undefined;
@@ -1006,9 +1094,9 @@ export class Instancing<H extends InstancingHost> {
       // function-typed parameter property takes a closure as a declared field assigned from a
       // parameter does.
       const optional = p.optional && (written !== type || this.host.tables.typing.recOf(type)?.kind !== "interface" || this.host.tables.defaulted.has(p));
-      if (type === undefined || typeof type === "string" || optional) return;
+      if (type === undefined || typeof type === "string" || optional) continue;
       const t = this.host.tables.typing.rec(type);
-      if (p.modifiers.length > 0 && t.kind !== "function") return;
+      if (p.modifiers.length > 0 && t.kind !== "function") continue;
       if (f.accessor === true && t.kind === "interface") {
         throw new CompileError("E0705", `a setter's parameter can't have the interface type '${t.name}'`, p.start, p.end);
       }
@@ -1016,90 +1104,15 @@ export class Instancing<H extends InstancingHost> {
       // A package's function or object parameter is a callback JS keeps or a JS object, its type
       // the same for every call, not a bound.
       if (f.accessor !== true && ((t.kind === "interface" && !(f.js !== undefined && this.host.tables.typing.promiseElement(type) !== undefined)) || (t.kind === "function" && f.js === undefined) || (t.kind === "regex" && t.any === true) || (t.kind === "object" && t.tuple !== true && this.host.instancingState.concreteness.concrete(type) && f.js === undefined))) {
-        found!.set(i, type as FunctionType | InterfaceType | ObjectType | RegexType);
+        found.set(i, type as FunctionType | InterfaceType | ObjectType | RegexType);
         if (written !== type) borrows.set(i, written as RefType);
       }
-    });
+    }
+    this.host.instancingState.lent.set(f.bodyId, borrows);
+    this.host.instancingState.implicits.set(f.bodyId, merged2(found));
     return found;
   }
 
-  // What an optional interface parameter stands for in a call: what the argument holds besides
-  // null. A call leaving it out or passing null makes an instance where it is always empty, whose
-  // type only needs to satisfy the bound: an array for an `Iterable`, so loops over it check, and
-  // otherwise `never`.
-  /** @throws {CompileError} */
-  private presentArgument(this: Mut<this>, arg: Expr | undefined, type: Type | undefined, bound: Bound): Type {
-    const element = this.host.tables.typing.iterableElement(bound);
-    const absent = element !== undefined ? this.host.tables.typing.arrayType(element) : "never";
-    if (arg === undefined || type === undefined || type === "null") return absent;
-    const r = typeof type === "string" ? undefined : this.host.tables.typing.rec(type);
-    const held = r?.kind === "union" && r.members.includes("null") ? this.host.tables.typing.unionType(r.members.filter((m) => m !== "null")) : type;
-    if (this.host.tables.typing.lower(held) === "never") return absent;
-    return this.implicitArgument(arg, held, bound, undefined);
-  }
-
-  // What an implicit type parameter stands for in a call: the argument's own type, which must
-  // satisfy the parameter's. A fresh object literal takes the declared object type instead, so
-  // it gets TypeScript's excess property check.
-  /** @throws {CompileError} */
-  private implicitArgument(this: Mut<this>, arg: Expr, type: Type, bound: Bound, lent: RefType | undefined): Type {
-    const borrowed = lent !== undefined;
-    // A borrowed argument stands for what it is, or what it refers to.
-    const given = typeof type === "string" ? undefined : this.host.tables.typing.rec(type);
-    // Looping over a generator advances it, which a shared reference to one can't.
-    const referred = given?.kind === "ref" ? given.to : type;
-    if (lent !== undefined && !this.host.tables.typing.rec(lent).mutable && this.host.tables.typing.iterableElement(bound) !== undefined && this.host.tables.typing.recOf(this.host.tables.typing.lower(referred))?.kind === "generator") {
-      throw new CompileError("E0206", `an 'Iterable' parameter is looped over, which advances a generator, so a generator passed by reference needs a 'Mut' parameter, not a 'Ref'`, arg.start, arg.end);
-    }
-    if (borrowed && given?.kind === "ref") type = given.to;
-    else if (given?.kind === "ref") {
-      throw new CompileError("E0202", "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);
-    }
-    // A recursive type's value stands for the type it stands for.
-    type = this.host.tables.typing.unfold(type);
-    // Only an instance where an optional interface parameter was left out holds a 'never', and
-    // that code never runs, so it stands in for any bound.
-    if (this.host.tables.typing.lower(type) === "never") return "never";
-    const message = `argument of type '${this.host.tables.typing.show(type)}' is not assignable to parameter of type '${this.host.tables.typing.show(bound)}'`;
-    const t = typeof type === "string" ? undefined : this.host.tables.typing.rec(type);
-    const b = this.host.tables.typing.rec(bound);
-    // A generic function type takes a generic function value, whose calls each instantiate it.
-    if (b.kind === "function" && b.generic !== undefined) {
-      const held = t !== undefined && t.kind === "param" && t.concrete !== undefined ? this.host.tables.typing.lower(type) : type;
-      const h = typeof held === "string" ? undefined : this.host.tables.typing.rec(held);
-      // A parameter of the same generic function type is passed on as it is, the type known by
-      // its signature as written.
-      // ponytail: compared as shown, which misses differing bounds; compare structurally if that matters
-      const family = h?.kind === "param" ? h.bound : held;
-      const fam = family === undefined || typeof family === "string" ? undefined : this.host.tables.typing.rec(family);
-      if (fam !== undefined && fam.kind === "function" && fam.generic !== undefined && fam.name === b.name) return type;
-      if (h !== undefined && h.kind === "closure" && h.generic !== undefined) {
-        const f = this.host.members().bodyNamed(h.generic);
-        const reason = f !== undefined ? familyMismatch(f.bodyId, bound as FunctionType, this.host.members(), arg) : undefined;
-        if (reason !== undefined && reason !== "") throw new CompileError("E0101", `${message}: ${reason}`, arg.start, arg.end);
-        return type;
-      }
-      throw new CompileError("E0101", `${message}: it takes a generic function, one that works for every type, as '<T>(x: T) => T'`, arg.start, arg.end);
-    }
-    if (b.kind === "function") {
-      if (!this.host.tables.typing.fits(type, bound)) throw new CompileError("E0101", message, arg.start, arg.end);
-      return type;
-    }
-    if (b.kind === "interface") {
-      const reason = unsatisfied(t?.kind === "param" && t.concrete ? this.host.tables.typing.lower(type) : type, bound as InterfaceType, this.host.members(), arg);
-      if (reason) throw new CompileError("E0101", `${message}: ${reason}`, arg.start, arg.end);
-      return type;
-    }
-    // A fresh object literal is checked against the parameter's type when it meets it, as its
-    // nested literals then take their shapes from it.
-    if (arg.kind === "object" && (this.host.tables.typing.holdsRef(bound) || !this.host.tables.typing.fits(type, bound))) return bound;
-    if (!this.host.tables.typing.fits(type, bound)) throw new CompileError("E0101", message, arg.start, arg.end);
-    // A value leaving out an optional field is copied into the parameter's type, which fills
-    // it in empty; a reference can't be.
-    const missing = lacks(this.host.tables.typing, type, bound);
-    if (missing && borrowed) throw new CompileError("E0101", `${message}: it has no '${missing}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
-    return arg.kind === "object" || missing ? bound : type;
-  }
 }
 
 // The path to a field of `to`, at any depth, that a value of `from` leaves out: an optional one,
@@ -1220,6 +1233,91 @@ function rebound<H extends InstancingHost>(host: Mut<H>, bound: Bound, decided: 
   if (promised !== undefined) return host.tables.typing.promiseInterface(host.replaced(promised, decided));
   const b = host.tables.typing.rec(bound);
   return b.kind === "function" || (b.kind === "interface" && b.generic !== undefined) ? host.replaced(bound, decided) as Bound : bound;
+}
+
+// What an optional interface parameter stands for in a call: what the argument holds besides
+// null. A call leaving it out or passing null makes an instance where it is always empty, whose
+// type only needs to satisfy the bound: an array for an `Iterable`, so loops over it check, and
+// otherwise `never`.
+/** @throws {CompileError} */
+function presentArgument<H extends InstancingHost>(host: Mut<H>, arg: Ref<Expr> | undefined, type: Type | undefined, bound: Bound): Type {
+  const element = host.tables.typing.iterableElement(bound);
+  const absent = element !== undefined ? host.tables.typing.arrayType(element) : "never";
+  if (arg === undefined || type === undefined || type === "null") return absent;
+  const r = typeof type === "string" ? undefined : host.tables.typing.rec(type);
+  const held = r?.kind === "union" && r.members.includes("null") ? host.tables.typing.unionType(r.members.filter((m) => m !== "null")) : type;
+  if (host.tables.typing.lower(held) === "never") return absent;
+  return implicitArgument(host, arg, held, bound, undefined);
+}
+
+// What an implicit type parameter stands for in a call: the argument's own type, which must
+// satisfy the parameter's. A fresh object literal takes the declared object type instead, so
+// it gets TypeScript's excess property check.
+/** @throws {CompileError} */
+function implicitArgument<H extends InstancingHost>(host: Mut<H>, arg: Ref<Expr>, type: Type, bound: Bound, lent: RefType | undefined): Type {
+  const borrowed = lent !== undefined;
+  // A borrowed argument stands for what it is, or what it refers to.
+  const given = typeof type === "string" ? undefined : host.tables.typing.rec(type);
+  // Looping over a generator advances it, which a shared reference to one can't.
+  const referred = given?.kind === "ref" ? given.to : type;
+  if (lent !== undefined && !host.tables.typing.rec(lent).mutable && host.tables.typing.iterableElement(bound) !== undefined && generatorLike(host.tables.typing, referred)) {
+    throw new CompileError("E0206", `an 'Iterable' parameter is looped over, which advances a generator, so a generator passed by reference needs a 'Mut' parameter, not a 'Ref'`, arg.start, arg.end);
+  }
+  if (borrowed && given?.kind === "ref") type = given.to;
+  else if (given?.kind === "ref") {
+    throw new CompileError("E0202", "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy", arg.start, arg.end);
+  }
+  // A recursive type's value stands for the type it stands for.
+  type = host.tables.typing.unfold(type);
+  // Only an instance where an optional interface parameter was left out holds a 'never', and
+  // that code never runs, so it stands in for any bound.
+  if (host.tables.typing.lower(type) === "never") return "never";
+  const message = `argument of type '${host.tables.typing.show(type)}' is not assignable to parameter of type '${host.tables.typing.show(bound)}'`;
+  const t = typeof type === "string" ? undefined : host.tables.typing.rec(type);
+  const b = host.tables.typing.rec(bound);
+  // A generic function type takes a generic function value, whose calls each instantiate it.
+  if (b.kind === "function" && b.generic !== undefined) {
+    const held = t !== undefined && t.kind === "param" && t.concrete !== undefined ? host.tables.typing.lower(type) : type;
+    const h = typeof held === "string" ? undefined : host.tables.typing.rec(held);
+    // A parameter of the same generic function type is passed on as it is, the type known by
+    // its signature as written.
+    // ponytail: compared as shown, which misses differing bounds; compare structurally if that matters
+    const family = h?.kind === "param" ? h.bound : held;
+    const fam = family === undefined || typeof family === "string" ? undefined : host.tables.typing.rec(family);
+    if (fam !== undefined && fam.kind === "function" && fam.generic !== undefined && fam.name === b.name) return type;
+    if (h !== undefined && h.kind === "closure" && h.generic !== undefined) {
+      const f = host.members().bodyNamed(h.generic);
+      const reason = f !== undefined ? familyMismatch(f.bodyId, bound as FunctionType, host.members(), { start: arg.start, end: arg.end }) : undefined;
+      if (reason !== undefined && reason !== "") throw new CompileError("E0101", `${message}: ${reason}`, arg.start, arg.end);
+      return type;
+    }
+    throw new CompileError("E0101", `${message}: it takes a generic function, one that works for every type, as '<T>(x: T) => T'`, arg.start, arg.end);
+  }
+  if (b.kind === "function") {
+    if (!host.tables.typing.fits(type, bound)) throw new CompileError("E0101", message, arg.start, arg.end);
+    return type;
+  }
+  if (b.kind === "interface") {
+    const reason = unsatisfied(t !== undefined && t.kind === "param" && t.concrete !== undefined ? host.tables.typing.lower(type) : type, bound as InterfaceType, host.members(), { start: arg.start, end: arg.end });
+    if (reason !== undefined && reason !== "") throw new CompileError("E0101", `${message}: ${reason}`, arg.start, arg.end);
+    return type;
+  }
+  // A fresh object literal is checked against the parameter's type when it meets it, as its
+  // nested literals then take their shapes from it.
+  if (arg.kind === "object" && (host.tables.typing.holdsRef(bound) || !host.tables.typing.fits(type, bound))) return bound;
+  if (!host.tables.typing.fits(type, bound)) throw new CompileError("E0101", message, arg.start, arg.end);
+  // A value leaving out an optional field is copied into the parameter's type, which fills
+  // it in empty; a reference can't be.
+  const missing = lacks(host.tables.typing, type, bound);
+  if (missing !== undefined && missing !== "" && borrowed) throw new CompileError("E0101", `${message}: it has no '${missing}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
+  return arg.kind === "object" || (missing !== undefined && missing !== "") ? bound : type;
+}
+
+// Whether a type, lowered, is a generator.
+function generatorLike(typing: Mut<Typing>, t: Type): boolean {
+  const lowered = typing.lower(t);
+  const r = typing.recOf(lowered);
+  return r !== undefined && r.kind === "generator";
 }
 
 // The generic classes' instances so far, kept by the host between uses.

@@ -1482,7 +1482,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const to = owner && (this.typing.lower(owner) as ClassType);
     if (!owner || to === owner) return target;
     const body = this.arenas.bodyOf(this.registry().bodiesOf(this.registry().classOf(to!).classId)[this.registry().bodiesOf(this.registry().classOf(owner).classId).indexOf(target.body)]!);
-    const implicit = [...this.instancing().implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
+    const implicit = [...this.instancing().implicitOf(body.bodyId).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
     // Its comptime parameters' values carry over too, as do a generic method's own type
     // arguments.
     const fixed = [...target.bindings].filter(([name]) => name.startsWith("comptime "));
@@ -2310,7 +2310,7 @@ class BodyChecker implements Context, GuardHost {
 
   /** @throws {CompileError} */
   implicitOf(this: Mut<this>, f: Body): Map<usize, Bound> {
-    return this.cx.instancing().implicitOf(f);
+    return this.cx.instancing().implicitOf(f.bodyId);
   }
 
   /** @throws {CompileError} */

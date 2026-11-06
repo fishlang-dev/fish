@@ -1122,10 +1122,19 @@ export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): 
 
 // A copy of a body as written, keeping its nodes' ids.
 export function cloneBody(f: Ref<Body>): Body {
+  return copied(f, true);
+}
+
+// A copy of a body's signature, its statements left out, for reading while its arena changes.
+export function cloneSignature(f: Ref<Body>): Body {
+  return copied(f, false);
+}
+
+function copied(f: Ref<Body>, statements: boolean): Body {
   let params: Param[] = [];
   for (const p of f.params) params.push(cloneParam(p));
   let body: Stmt[] = [];
-  for (const st of f.body) body.push(cloneStmt(st));
+  if (statements) for (const st of f.body) body.push(cloneStmt(st));
   let out: Body = { id: f.id, start: f.start, end: f.end, bodyId: f.bodyId, name: f.name, params, body, returnType: f.returnType !== undefined ? cloneTypeNode(f.returnType) : undefined };
   if (f.throws !== undefined) out.throws = cloneTypeNode(f.throws);
   if (f.generator !== undefined) out.generator = f.generator;
