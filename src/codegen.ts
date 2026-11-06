@@ -6685,7 +6685,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (to && dyn && (!isDyn(types.get(e)!) || relays(types.get(e)!, dyn))) {
       const type = types.get(e)!;
       let v = known.get(e) ?? evaluate(e);
-      if (current.consumes.has(e) && lendable(e)) emit(`store ${llvm(e.kind === "member" ? stored(e) : type)} zeroinitializer, ptr ${address(e)}`);
+      if (current.consumes.has(e.id) && lendable(e)) emit(`store ${llvm(e.kind === "member" ? stored(e) : type)} zeroinitializer, ptr ${address(e)}`);
       else if (!fresh(e)) v = copied(v, type);
       return to === dyn ? box(v, type, dyn) : convert(box(v, type, dyn), dyn, to);
     }
@@ -6696,7 +6696,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const v = known.get(e) ?? evaluate(e);
       const out = convert(v, type, to);
       if (fresh(e)) freeBlocks(v, type);
-      else if (current.consumes.has(e) && lendable(e)) {
+      else if (current.consumes.has(e.id) && lendable(e)) {
         freeBlocks(v, type);
         emit(`store ${llvm(placeType(e))} zeroinitializer, ptr ${address(e)}`);
       } else return copied(out, to);
@@ -6706,7 +6706,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (to && boxes(types.get(e)!, to)) {
       const type = types.get(e)!;
       let v = known.get(e) ?? evaluate(e);
-      if (current.consumes.has(e) && lendable(e)) take(e);
+      if (current.consumes.has(e.id) && lendable(e)) take(e);
       else if (!fresh(e)) v = copied(v, type);
       return convert(v, type, to);
     }
@@ -6718,7 +6718,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
     if (to && !needsDrop(types.get(e)!) && typing.holdsPart(to, (t) => recOf(t)?.kind === "recursive")) return value(e, true);
     const v = value(e);
-    if ((whole || rust) && current.consumes.has(e) && lendable(e)) {
+    if ((whole || rust) && current.consumes.has(e.id) && lendable(e)) {
       take(e);
       return v;
     }
@@ -7592,7 +7592,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     // a check narrows. One moved into the call is gone, and nothing reads it after.
     const arg = e.args[index];
     if (arg?.kind !== "ident" && arg?.kind !== "member") return;
-    if (arg.kind === "member" && current.consumes.has(arg)) return;
+    if (arg.kind === "member" && current.consumes.has(arg.id)) return;
     let v: string, whole: Type;
     if (arg.kind === "member") [v, whole] = [value(arg), valueType(arg)];
     else {
@@ -9913,7 +9913,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const read = temp();
     emit(`${read} = load ${llvm(local.type)}, ptr ${slot(local)}`);
     if (!holdsRust(local.type)) return copied(read, local.type);
-    if (!current.consumes.has(p)) throw new Error("internal error: a Rust value in a shorthand property isn't moved");
+    if (!current.consumes.has(p.id)) throw new Error("internal error: a Rust value in a shorthand property isn't moved");
     emit(`store ${llvm(local.type)} zeroinitializer, ptr ${slot(local)}`);
     return read;
   }
@@ -10066,7 +10066,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const rust = holdsRust(option);
     const v = rust && fresh(e.left) ? value(e.left, true) : value(e.left);
     if (rust && !fresh(e.left)) {
-      if (!current.consumes.has(e.left) || !lendable(e.left)) throw new Error("internal error: a Rust value on the left of '??' isn't moved");
+      if (!current.consumes.has(e.left.id) || !lendable(e.left)) throw new Error("internal error: a Rust value on the left of '??' isn't moved");
       take(e.left);
     }
     const [some, none, end] = [label(), label(), label()];

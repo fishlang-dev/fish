@@ -84,11 +84,11 @@ type Site = { id: usize; start: usize; end: usize };
 
 
 /** @throws {CompileError} */
-export function checkMoves<T extends Tables, B extends Body, I extends Instance>(tables: Mut<T>, f: Ref<B>, instance: Ref<I>, origins: Origin[]): Set<LocalId> {
+export function checkMoves<T extends Tables, B extends Body, I extends Instance>(tables: Mut<T>, f: Ref<B>, instance: Ref<I>, origins: Origin[]): { captures: Set<LocalId>; consumes: Set<usize> } {
   let cx = new MoveCx<T, B, I>(tables, f, instance);
   let checker = new MoveChecker<T, B, I>(cx, origins);
   checker.run(cx);
-  return checker.movedOut;
+  return { captures: checker.movedOut, consumes: checker.consumed };
 }
 
 // Generic over its tables, body and instance, since a parameter of an object type stands for
@@ -133,8 +133,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   byId = new Map<usize, LocalId>();
   // What `this` keeps stays held to the end of the body, and after it.
   kept: LocalId;
-  // The captures of this closure that a closure made in it moves into itself.
+  // The captures of this closure that a closure made in it moves into itself, and the places
+  // whose values are moved out, by node id.
   movedOut = new Set<LocalId>();
+  consumed = new Set<usize>();
 
   constructor(cx: Mut<MoveCx<T, B, I>>, origins: Origin[]) {
     const instance = cx.instance;
@@ -212,16 +214,34 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   /** @throws {CompileError} */
   holdProjected(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>): void {
-    if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) return this.holdProjected(cx, holder, e.expr);
-    if ((e.kind === "member" && !cx.instance.calls.has(e)) || e.kind === "index") return this.holdProjected(cx, holder, e.object);
-    if (e.kind === "nonNull" || e.kind === "as") return this.holdProjected(cx, holder, e.expr);
+    if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) {
+      this.holdProjected(cx, holder, e.expr);
+      return;
+    }
+    if ((e.kind === "member" && !cx.instance.calls.has(e)) || e.kind === "index") {
+      this.holdProjected(cx, holder, e.object);
+      return;
+    }
+    if (e.kind === "nonNull" || e.kind === "as") {
+      this.holdProjected(cx, holder, e.expr);
+      return;
+    }
     this.hold(cx, holder, e);
   }
 
   lentProjected(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, out: Mut<Part[]>): void {
-    if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) return this.lentProjected(cx, e.expr, out);
-    if ((e.kind === "member" && !cx.instance.calls.has(e)) || e.kind === "index") return this.lentProjected(cx, e.object, out);
-    if (e.kind === "nonNull" || e.kind === "as") return this.lentProjected(cx, e.expr, out);
+    if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) {
+      this.lentProjected(cx, e.expr, out);
+      return;
+    }
+    if ((e.kind === "member" && !cx.instance.calls.has(e)) || e.kind === "index") {
+      this.lentProjected(cx, e.object, out);
+      return;
+    }
+    if (e.kind === "nonNull" || e.kind === "as") {
+      this.lentProjected(cx, e.expr, out);
+      return;
+    }
     this.lentInto(cx, e, out);
   }
 
@@ -282,7 +302,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         return;
       }
       case "labeled":
-        return this.declaredIn(cx, s.body, out, refs);
+        this.declaredIn(cx, s.body, out, refs);
+        return;
       case "switch":
         for (const c of s.cases) for (const x of c.body) this.declaredIn(cx, x, out, refs);
         return;
@@ -302,16 +323,20 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // A reference declared in a list of statements lets go of what it holds as the list ends.
   /** @throws {CompileError} */
-  statements(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, list: Ref<Stmt[]>) {
+  statements(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, list: Ref<Stmt[]>): void {
     for (const s of list) this.statement(cx, s);
-    for (const s of list) if (s.kind === "let" && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(this.localAt(cx, s)!).type)) this.release(cx, this.localAt(cx, s)!);
+    for (const s of list) {
+      if (s.kind !== "let") continue;
+      const id = this.localAt(cx, s)!;
+      if (cx.tables.typing.holdsRef(cx.tables.arenas.localOf(id).type)) this.release(cx, id);
+    }
     this.ended(cx, list);
   }
 
   // A list's own variables end with it, so a borrow of one still held by a variable from outside
   // the list, and used after it, would point at a dropped value.
   /** @throws {CompileError} */
-  ended(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, list: Ref<Stmt[]>) {
+  ended(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, list: Ref<Stmt[]>): void {
     if (list.length === 0) return;
     let gone: LocalId[] = [];
     for (const s of list) if (s.kind === "let") gone.push(this.localAt(cx, s)!);
@@ -322,7 +347,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // variable from outside, and used after. A variable that is itself a reference only copies a
   // pointer to what it borrows, whose own loans are checked where that ends.
   /** @throws {CompileError} */
-  dropped(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, gone: Ref<LocalId[]>, end: usize) {
+  dropped(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, gone: Ref<LocalId[]>, end: usize): void {
     if (this.state === null || gone.length === 0) return;
     let byName = new Map<string, LocalId>();
     for (const l of gone) byName.set(String(cx.tables.arenas.localOf(l).id), l);
@@ -369,7 +394,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   /** @throws {CompileError} */
-  statement(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, s: Ref<Stmt>) {
+  statement(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, s: Ref<Stmt>): void {
     switch (s.kind) {
       case "expr":
         this.expr(cx, s.expr, undefined, true);
@@ -380,8 +405,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         const local = cx.tables.arenas.localOf(this.localAt(cx, s)!);
         // A declaration run again by a loop makes a fresh variable, which holds nothing yet.
         this.release(cx, local.localId);
-        if (!d.init) {
-          if (this.state !== null) this.state.moves.set(String(local.id), { start: d.start, end: d.end, note: `'${name}' is declared here without a value`, passes: new Map(this.passes), unassigned: true });
+        if (d.init === undefined) {
+          if (this.state !== null) this.state.moves.set(String(local.id), { start: d.start, end: d.end, note: `'${name}' is declared here without a value`, passes: copyPasses(this.passes), unassigned: true });
           return;
         }
         this.expr(cx, d.init, `'${PLACE}' moved here: '${name}' owns it now; use '${PLACE}.clone()' to keep a copy`);
@@ -395,14 +420,15 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         this.statements(cx, s.then);
         const then = this.state;
         this.state = before;
-        if (s.else) this.statements(cx, s.else);
+        if (s.else !== undefined) this.statements(cx, s.else);
         this.state = join(then, this.state);
         return;
       }
       case "block":
       case "comptime":
       case "unsafe":
-        return this.statements(cx, s.body);
+        this.statements(cx, s.body);
+        return;
       // The catch runs from wherever the block raised, so from what all those points had in
       // common; after the try, either path may have run.
       case "try": {
@@ -418,7 +444,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
           const after = join(this.state, null);
           this.state = handler.acc;
           // A raise left the block wherever it was, its variables gone by the catch.
-          this.dropped(cx, this.scopedList(cx, s.block), s.block.length > 0 ? s.block[s.block.length - 1]!.end : s.start);
+          const gone1 = this.scopedList(cx, s.block);
+          this.dropped(cx, gone1, s.block.length > 0 ? s.block[s.block.length - 1]!.end : s.start);
           const caught = s.param !== undefined ? this.localAt(cx, s) : undefined;
           if (caught !== undefined) this.revive(cx, String(cx.tables.arenas.localOf(caught).id));
           this.statements(cx, s.handler);
@@ -442,10 +469,12 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       }
       case "while":
       case "doWhile":
-        return this.loop(cx, s);
+        this.loop(cx, s);
+        return;
       case "for":
-        if (s.init) this.statement(cx, s.init);
-        return this.loop(cx, s);
+        if (s.init !== undefined) this.statement(cx, s.init);
+        this.loop(cx, s);
+        return;
       // The loop reads its array once and keeps it lent, shared, until it ends; its variable,
       // when it is a reference, borrows the array as well.
       case "forOf": {
@@ -471,7 +500,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         // call it makes of a class, or at the definition, where nothing says what it stands for.
         const owning = text || s.await || (cx.instance.iterators !== undefined && cx.instance.iterators.has(s)) || (taken !== undefined && cx.tables.typing.iterableElement(taken) !== undefined && cx.tables.typing.lower(taken) === taken);
         if (place !== undefined && this.state !== null && !text) {
-          this.free(cx, place, this.spot(cx, s.right), "lend");
+          const at2 = this.spot(cx, s.right);
+          this.free(cx, place, at2, "lend");
           this.state.loans.set(s.right.start, { place, mutable: false, start: s.right.start, end: s.right.end, holders: new Set(), call: "the loop", loop: true });
           if (eachRef) this.state.loans.set(-(s.start as f64) - 1, { place: `${place}.[]`, mutable: false, start: s.right.start, end: s.right.end, holders: new Set([each]) });
           // An array reached through a reference keeps what that reference borrows lent until
@@ -495,12 +525,13 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         this.exits.set(s.id, null);
         this.statement(cx, s.body);
         this.state = join(this.state, this.exits.get(s.id)!);
-        this.dropped(cx, this.scoped(cx, s.body), s.end);
+        const gone3 = this.scoped(cx, s.body);
+        this.dropped(cx, gone3, s.end);
         return;
       }
       case "switch": {
         this.expr(cx, s.discriminant);
-        for (const c of s.cases) if (c.test) this.expr(cx, c.test);
+        for (const c of s.cases) if (c.test !== undefined) this.expr(cx, c.test);
         this.exits.set(s.id, null);
         const entry = this.state;
         let falling: State = null;
@@ -510,7 +541,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
           falling = this.state;
         }
         this.state = join(join(falling, this.exits.get(s.id)!), s.cases.some((c) => !c.test) ? null : entry);
-        this.dropped(cx, this.scoped(cx, s), s.end);
+        const gone4 = this.scoped(cx, s);
+        this.dropped(cx, gone4, s.end);
         return;
       }
       case "break":
@@ -536,7 +568,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
           this.state = null;
           return;
         }
-        if (s.value) {
+        if (s.value !== undefined) {
           this.expr(cx, s.value, "");
           // An arrow's expression body may be a call returning nothing.
           if (cx.instance.types.has(s.value)) this.returned(cx, s.value);
@@ -553,7 +585,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // Checks a loop until a pass changes nothing: its condition, a `for...of` loop's variable
   // given its new value (`revived`, when it owns that value), the body and a `for` loop's update.
   /** @throws {CompileError} */
-  loop(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, s: Ref<Stmt>, revived?: string) {
+  loop(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, s: Ref<Stmt>, revived?: string): void {
     const bodyFirst = s.kind === "doWhile";
     const entry = join(this.state, null);
     let back: State = null;
@@ -570,7 +602,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       this.state = join(this.state, this.nexts.get(s.id)!);
       // However a pass ended, `continue` included, its body's variables are gone, and a holder
       // used anywhere in the loop is used again on the next pass.
-      this.dropped(cx, s.kind === "for" ? this.scopedList(cx, s.body) : this.scoped(cx, s), s.end - 1);
+      const gone5 = s.kind === "for" ? this.scopedList(cx, s.body) : this.scoped(cx, s);
+      this.dropped(cx, gone5, s.end - 1);
       // References declared in the body are gone by the time the loop comes round or ends,
       // however it left the body; a `for` loop's initializer outlives every pass.
       for (const local of s.kind === "for" ? this.insideList(cx, s.body) : this.inside(cx, s)) this.release(cx, local);
@@ -580,7 +613,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       const after = join(this.state, null);
       this.state = leaving;
       // However the loop ended, `break` included, its variables are gone.
-      this.dropped(cx, this.scoped(cx, s), s.end);
+      const gone6 = this.scoped(cx, s);
+      this.dropped(cx, gone6, s.end);
       for (const local of this.inside(cx, s)) this.release(cx, local);
       const left = join(this.state, null);
       this.state = after;
@@ -635,13 +669,21 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       case "string":
         return;
       case "ident":
-        if ((cx.instance.envs !== undefined && cx.instance.envs.has(e))) return this.made(cx, e);
+        if ((cx.instance.envs !== undefined && cx.instance.envs.has(e))) {
+          this.made(cx, e);
+          return;
+        }
         // A JsValue read out of JS gives a new value, leaving the JsValue as it was.
-        return cx.instance.locals.has(e) ? this.use(cx, e, cx.instance.copiesOut.has(e) ? undefined : consume) : undefined;
+        if (cx.instance.locals.has(e)) this.use(cx, e, cx.instance.copiesOut.has(e) ? undefined : consume);
+        return;
       case "super":
       case "this":
-        this.free(cx, "this", this.spot(cx, e), "read");
-        if (cx.f.self?.owned) return this.use(cx, e, consume);
+        const at7 = this.spot(cx, e);
+        this.free(cx, "this", at7, "read");
+        if (cx.f.self?.owned) {
+          this.use(cx, e, consume);
+          return;
+        }
         if (consume !== undefined && this.state && !cx.tables.typing.isCopy(cx.instance.types.get(e)!)) {
           throw new CompileError("E0202", this.hinted(cx, cx.instance.types.get(e)!, "'this' can't be moved, since it is only borrowed here; use 'this.clone()' to hand over a copy"), e.start, e.end);
         }
@@ -653,12 +695,18 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
           const held = cx.instance.types.get(e.object)!;
           const low = cx.tables.typing.lower(this.deref(cx, held));
           const tuple = typeof low === "string" ? undefined : cx.tables.typing.rec(low);
-          if (e.name === "length" && tuple?.kind === "object" && tuple.tuple && (tuple.required !== undefined || tuple.rest !== undefined)) this.usable(cx, this.spot(cx, e.object), this.key(cx, e.object)!);
-          return this.use(cx, e, consume);
+          if (e.name === "length" && tuple?.kind === "object" && tuple.tuple && (tuple.required !== undefined || tuple.rest !== undefined)) {
+            const at8 = this.spot(cx, e.object);
+            this.usable(cx, at8, this.key(cx, e.object)!);
+          }
+          this.use(cx, e, consume);
+          return;
         }
-        return this.expr(cx, e.object);
+        this.expr(cx, e.object);
+        return;
       case "arrow":
-        return this.made(cx, e);
+        this.made(cx, e);
+        return;
       case "object": {
         // One value can't hold a mutable borrow of a place beside another borrow of it.
         let lends: Part[] = [];
@@ -700,7 +748,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
           if (cx.instance.raises.has(e)) this.raising(cx);
           return;
         }
-        return this.expr(cx, e.operand);
+        this.expr(cx, e.operand);
+        return;
       case "template":
         for (const x of e.exprs) this.expr(cx, x);
         return;
@@ -712,10 +761,12 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         if (consume !== undefined && this.element(cx, e) && !cx.tables.typing.isCopy(cx.instance.types.get(e)!)) throw this.elementMove(cx, e, cx.instance.types.get(e)!);
         if (this.key(cx, e) === undefined) this.expr(cx, e.object);
         else this.use(cx, e, consume);
-        return this.expr(cx, e.index);
+        this.expr(cx, e.index);
+        return;
       case "update":
         this.expr(cx, e.operand);
-        return this.change(cx, e.operand);
+        this.change(cx, e.operand);
+        return;
       case "assign": {
         const target = bare(e.target);
         // A whole value written through a mutable reference changes everything it points to,
@@ -732,7 +783,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         }
         if (e.op !== "=") this.expr(cx, target);
         // A target's indexes run before the value, as in JavaScript.
-        else for (const index of this.indexes(cx, target)) this.expr(cx, index);
+        else this.indexes(cx, target);
         // A place inside a variable is found before the value runs, so a nested function the
         // value calls can't replace the variable from under it.
         const nested = cx.instance.envs !== undefined && holdsNode({ of: "expr", node: e.value }, (n) => n.of === "expr" && cx.instance.envs!.has(n.node));
@@ -783,7 +834,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
             this.inherit(cx, holder.localId, e.subject);
             if (place === undefined && this.fromCallProjected(cx, e.subject)) this.holdProjected(cx, holder.localId, e.subject);
           }
-          if (arm.guard) {
+          if (arm.guard !== undefined) {
             const at = -arm.guard.start - 1;
             if (place !== undefined && this.state) this.state.loans.set(at, { place, mutable: false, start: arm.guard.start, end: arm.guard.end, holders: new Set(), guard: true });
             this.guarding.add(arm.guard.start);
@@ -801,7 +852,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
             this.exits.set(arm.body.id, null);
             this.statement(cx, arm.body);
             this.state = join(this.state, this.exits.get(arm.body.id)!);
-            this.dropped(cx, [...this.scoped(cx, arm.body), ...bound], arm.body.end);
+            const gone9 = [...this.scoped(cx, arm.body), ...bound];
+            this.dropped(cx, gone9, arm.body.end);
           } else {
             this.expr(cx, arm.body, consume, discarded);
             this.dropped(cx, bound, arm.body.end);
@@ -814,8 +866,14 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       }
       case "conditional": {
         this.expr(cx, e.cond);
-        if (!cx.instance.types.has(e.then)) return this.expr(cx, e.else, consume, discarded);
-        if (!cx.instance.types.has(e.else)) return this.expr(cx, e.then, consume, discarded);
+        if (!cx.instance.types.has(e.then)) {
+          this.expr(cx, e.else, consume, discarded);
+          return;
+        }
+        if (!cx.instance.types.has(e.else)) {
+          this.expr(cx, e.then, consume, discarded);
+          return;
+        }
         const before = join(this.state, null);
         this.expr(cx, e.then, consume, discarded);
         const then = this.state;
@@ -837,24 +895,31 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       }
       // `x!` is x's value, handed over or read as x is.
       case "nonNull":
-        if (redundantBang(e)) return this.expr(cx, e.expr, consume, discarded);
+        if (redundantBang(e)) {
+          this.expr(cx, e.expr, consume, discarded);
+          return;
+        }
         this.outOfBorrow(cx, e.expr, e, consume);
-        return this.expr(cx, e.expr, consume);
+        this.expr(cx, e.expr, consume);
+        return;
       case "as":
         if (narrowsUnion(cx.tables.typing, cx.instance, this.coercions, e)) {
           this.outOfBorrow(cx, e.expr, e, consume);
-          return this.expr(cx, e.expr, consume);
+          this.expr(cx, e.expr, consume);
+          return;
         }
-        return this.expr(cx, e.expr, consume, discarded);
+        this.expr(cx, e.expr, consume, discarded);
+        return;
       case "satisfies":
       case "unsafe":
-        return this.expr(cx, e.expr, consume, discarded);
+        this.expr(cx, e.expr, consume, discarded);
+        return;
       // Comptime code runs while compiling, so it moves and borrows nothing at run time.
       case "comptime":
         return;
       // A yielded value is handed to whoever called `next()`.
       case "yield":
-        if (e.value) this.expr(cx, e.value, `'${PLACE}' moved here: yielding it hands it on; use '${PLACE}.clone()' to keep a copy`);
+        if (e.value !== undefined) this.expr(cx, e.value, `'${PLACE}' moved here: yielding it hands it on; use '${PLACE}.clone()' to keep a copy`);
         this.stillBorrowed(cx, e);
         return;
       // A pipe over a value hands it to the topic, new each time the pipe runs.
@@ -895,7 +960,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // A value that may keep references given to it holds them: a holder variable, or `this`, which
   // may be given only what points into this function's parameters, since it outlives the call.
   /** @throws {CompileError} */
-  keep(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Expr>, values: Ref<Expr[]>, holdingOnly: boolean) {
+  keep(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Expr>, values: Ref<Expr[]>, holdingOnly: boolean): void {
     let any = false;
     for (const v of values) if (!holdingOnly || this.holding(cx, v)) any = true;
     if (!any) return;
@@ -904,7 +969,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   /** @throws {CompileError} */
-  keepOne(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Expr>, v: Ref<Expr>) {
+  keepOne(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Expr>, v: Ref<Expr>): void {
     const k = this.keeper(cx, target);
     this.keepValue(cx, k, v);
   }
@@ -946,7 +1011,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   /** @throws {CompileError} */
-  keepValue(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, k: Ref<Keeper>, v: Ref<Expr>) {
+  keepValue(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, k: Ref<Keeper>, v: Ref<Expr>): void {
     if (k.self) {
       this.stored(cx, v);
       if (cx.f.self !== undefined && cx.tables.typing.holdsRef(cx.f.self.type)) this.hold(cx, this.kept, v);
@@ -955,12 +1020,12 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // Arguments are handed over, or lent for the call, in order.
   /** @throws {CompileError} */
-  handOver(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, args: Ref<Expr[]>, name: string, call: Ref<Expr>) {
+  handOver(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, args: Ref<Expr[]>, name: string, call: Ref<Expr>): void {
     for (let i: usize = 0; i < args.length; i++) this.handOverOne(cx, args[i]!, name, call, i === 0);
   }
 
   /** @throws {CompileError} */
-  handOverOne(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, a: Ref<Expr>, name: string, call: Ref<Expr>, first: boolean) {
+  handOverOne(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, a: Ref<Expr>, name: string, call: Ref<Expr>, first: boolean): void {
     // What crosses into JS is copied there, so it is only read here; a callback is kept by JS,
     // so it is handed over.
     if (cx.tables.jsCrossings.has(call)) {
@@ -971,7 +1036,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     const helper = call.kind === "call" && call.shown !== undefined && first;
     this.expr(cx, a, (helper ? `'${PLACE}' moved here: ${name} takes its generator over` : `'${PLACE}' moved here: passing it to ${name} hands it over, as if ${name} kept it; pass '${PLACE}.clone()' to keep a copy`));
     const parts = this.lent(cx, a);
-    for (let i: usize = 0; i < parts.length; i++) this.lend(cx, parts[i]!.place, parts[i]!.mutable, parts[i]!.at, undefined, name, call.id, parts[i]!.at.start, this.partKey(cx, parts[i]!.at.start, i));
+    for (let i: usize = 0; i < parts.length; i++) this.lend(cx, parts[i]!.place, parts[i]!.mutable, parts[i]!.at, undefined, name, call.id, parts[i]!.at.start, partKey(parts[i]!.at.start, i));
   }
 
   // The places an expression lends a reference to, and how: a place borrowed, a reference
@@ -989,7 +1054,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // `lentInto` of a value taken out of its wrappers, which `lentAs` was met as.
   lentFrom(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, lentAs: Type | undefined, out: Mut<Part[]>): void {
-    if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) return this.lentFrom(cx, e.expr, lentAs, out);
+    if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) {
+      this.lentFrom(cx, e.expr, lentAs, out);
+      return;
+    }
     if (e.kind === "conditional") {
       if (cx.instance.types.has(e.then)) this.lentInto(cx, e.then, out);
       if (cx.instance.types.has(e.else)) this.lentInto(cx, e.else, out);
@@ -1056,7 +1124,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // A call: what a nested function it calls captures, its callee, its receiver lent to it, its
   // arguments handed over or lent, and what it may keep, held once its own loans have ended.
   /** @throws {CompileError} */
-  call(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>) {
+  call(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): void {
     if (e.kind !== "call") return;
     // Printing, `format`, `inspect`, `JSON.stringify`, `Array.isArray` and `assert` read their
     // arguments.
@@ -1131,7 +1199,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     const run = e.callee.kind === "ident" ? cx.tables.typing.lower(cx.instance.types.get(e.callee) ?? "void") : undefined;
     if (e.callee.kind === "ident" && cx.instance.locals.has(e.callee)) {
       const r = this.record(cx, run);
-      const once = r?.kind === "closure" && r.once;
+      const once = r?.kind === "closure" && r.once !== undefined;
       this.expr(cx, e.callee, once ? `'${PLACE}' moved here: calling it runs it once, since it moves out what it captured` : undefined);
     }
     // A method's receiver is lent to it for the call, mutably when the method changes it.
@@ -1194,11 +1262,15 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     // A shared value's, an Rc's or a lock's `update` and `read` hand their callback a pointer
     // into the value the receiver reaches, so the callback can't replace or drop the receiver.
     const reads = builtin && !changes && (this.array(cx, object!) || this.mapped(cx, object!) || cx.tables.regexStringCalls.has(e) || (this.locking(cx, object!) && (method === "update" || method === "read")));
-    if (object !== undefined && place !== undefined && (hasSelf || changes || reads)) this.lend(cx, place, false, this.spot(cx, object), undefined, name, e.id);
+    if (object !== undefined && place !== undefined && (hasSelf || changes || reads)) {
+      const at10 = this.spot(cx, object);
+      this.lend(cx, place, false, at10, undefined, name, e.id);
+    }
     // A receiver that is a reference a call gave lends again what that reference borrows
     // from, for the whole call, so its callback can't replace what the reference reaches.
-    const parts = object !== undefined && place === undefined && (hasSelf || changes || reads) ? this.lent(cx, object) : [];
-    for (let i: usize = 0; i < parts.length; i++) this.lend(cx, parts[i]!.place, false, parts[i]!.at, undefined, name, e.id, parts[i]!.at.start, this.partKey(cx, parts[i]!.at.start, i));
+    let parts: Part[] = [];
+    if (object !== undefined && place === undefined && (hasSelf || changes || reads)) parts = this.lent(cx, object);
+    for (let i: usize = 0; i < parts.length; i++) this.lend(cx, parts[i]!.place, false, parts[i]!.at, undefined, name, e.id, parts[i]!.at.start, partKey(parts[i]!.at.start, i));
     this.handOver(cx, e.args, name, e);
     for (const c of captures) {
       if (!c.changes || this.state === null) continue;
@@ -1213,12 +1285,13 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     }
     if (object !== undefined && place !== undefined && selfMutable && this.state !== null) {
       this.state.loans.delete(object.start as f64);
-      this.lend(cx, place, true, this.spot(cx, object), undefined, name, e.id, e.end - 1);
+      const at11 = this.spot(cx, object);
+      this.lend(cx, place, true, at11, undefined, name, e.id, e.end - 1);
     }
-    if (hasSelf && selfMutable && this.state !== null) {
+    if (hasSelf && selfMutable) {
       for (let i: usize = 0; i < parts.length; i++) {
-        const key = this.partKey(cx, parts[i]!.at.start, i);
-        this.state!.loans.delete(key);
+        const key = partKey(parts[i]!.at.start, i);
+        if (this.state !== null) this.state.loans.delete(key);
         this.lend(cx, parts[i]!.place, parts[i]!.mutable, parts[i]!.at, undefined, name, e.id, e.end - 1, key);
       }
     }
@@ -1234,7 +1307,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // A method that changes its object, or a base's constructor, may keep what it is given, held
   // by its receiver.
   /** @throws {CompileError} */
-  keepReceiver(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>) {
+  keepReceiver(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): void {
     if (e.kind !== "call") return;
     if (e.callee.kind === "member") {
       if (fieldCall(cx.tables, cx.instance, e)) this.keep(cx, e.callee, e.args, true);
@@ -1248,13 +1321,22 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   /** @throws {CompileError} */
   keepWithin(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, at: Ref<Expr>, id: usize, args: Ref<Expr[]>): void {
-    if (at.id === id) return this.keep(cx, at, args, true);
-    if (at.kind === "nonNull" || at.kind === "as" || at.kind === "satisfies" || at.kind === "unsafe") return this.keepWithin(cx, at.expr, id, args);
-    if (at.kind === "member" || at.kind === "index") return this.keepWithin(cx, at.object, id, args);
+    if (at.id === id) {
+      this.keep(cx, at, args, true);
+      return;
+    }
+    if (at.kind === "nonNull" || at.kind === "as" || at.kind === "satisfies" || at.kind === "unsafe") {
+      this.keepWithin(cx, at.expr, id, args);
+      return;
+    }
+    if (at.kind === "member" || at.kind === "index") {
+      this.keepWithin(cx, at.object, id, args);
+      return;
+    }
   }
 
   // Once a call returns, what was lent to it alone is free again.
-  callEnded(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, call: Ref<Expr>) {
+  callEnded(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, call: Ref<Expr>): void {
     if (this.state === null) return;
     let ended: f64[] = [];
     for (const [at, loan] of this.state.loans) if (loan.call !== undefined && loan.callAt === call.id && loan.holders.size === 0) ended.push(at);
@@ -1265,12 +1347,14 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // Reads or hands over a place, which must still hold its value and not be lent so as to
   // forbid it.
   /** @throws {CompileError} */
-  use(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Named>, consume?: Consumer, type: Type = e.kind === "shorthand" ? cx.tables.arenas.localOf(this.localAt(cx, e)!).type : cx.instance.types.get(e)!) {
+  use(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Named>, consume?: Consumer, type: Type = e.kind === "shorthand" ? cx.tables.arenas.localOf(this.localAt(cx, e)!).type : cx.instance.types.get(e)!): void {
     const place = this.key(cx, e)!;
-    this.usable(cx, this.spot(cx, e), place);
+    const at12 = this.spot(cx, e);
+    this.usable(cx, at12, place);
     const moving = consume !== undefined && !cx.tables.typing.isCopy(type);
     if (moving && place.includes(".[]")) throw this.elementMove(cx, e, type);
-    this.free(cx, place, this.spot(cx, e), moving ? "move" : "read");
+    const at13 = this.spot(cx, e);
+    this.free(cx, place, at13, moving ? "move" : "read");
     if (!moving || this.state === null) return;
     const rootId = this.rootLocal(cx, e);
     const root = rootId !== undefined ? cx.tables.arenas.localOf(rootId) : undefined;
@@ -1279,22 +1363,15 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       throw new CompileError("E0202", this.hinted(cx, type, `'${this.text(cx, e)}' can't be moved out of '${name}', which only borrows it; use '${this.text(cx, e)}.clone()'`), e.start, e.end);
     }
     // Nor out of a reference a field holds, or a shared value every clone of it uses.
-    for (let p: Named = e; p.kind === "member"; p = p.object) {
-      const holder = this.record(cx, cx.instance.types.get(p.object));
-      if (holder?.kind === "shared" || (holder?.kind === "ref" && this.record(cx, holder.to)?.kind === "shared")) {
-        throw new CompileError("E0202", `'${this.text(cx, e)}' can't be moved out of '${this.text(cx, p.object)}', which every clone of it shares; use it where it is`, e.start, e.end);
-      }
-      if (p !== e && this.isRef(cx, cx.instance.types.get(p)!)) {
-        throw new CompileError("E0202", this.hinted(cx, type, `'${this.text(cx, e)}' can't be moved out of '${this.text(cx, p)}', which only borrows it; use '${this.text(cx, e)}.clone()'`), e.start, e.end);
-      }
-    }
-    if (place.startsWith("this") && !cx.f.self?.owned) {
+    this.movedThrough(cx, e, e, type);
+    if (place.startsWith("this") && cx.f.self?.owned !== true) {
       throw new CompileError("E0202", this.hinted(cx, type, `'${this.text(cx, e)}' can't be moved out of 'this', since it is only borrowed here; use '${this.text(cx, e)}.clone()'`), e.start, e.end);
     }
     // A closure moving out what it captures holds it, and can run only once.
-    if (root && (cx.instance.captures !== undefined && cx.instance.captures.has(root.localId))) this.movedOut.add(root.localId);
-    cx.instance.consumes.add(e);
-    this.state.moves.set(place, { start: e.start, end: e.end, note: this.hinted(cx, type, consume!.replaceAll(PLACE, this.text(cx, e))), passes: new Map(this.passes) });
+    if (rootId !== undefined && cx.instance.captures !== undefined && cx.instance.captures.has(rootId)) this.movedOut.add(rootId);
+    this.consumed.add(e.id);
+    const note = this.hinted(cx, type, consume!.replaceAll(PLACE, this.text(cx, e)));
+    if (this.state !== null) this.state.moves.set(place, { start: e.start, end: e.end, note, passes: copyPasses(this.passes) });
   }
 
   // A message without its advice to clone, for a value holding a JoinHandle, which can't be.
@@ -1309,7 +1386,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // A place can't be used once it, something it is inside, or something inside it moved.
   /** @throws {CompileError} */
-  usable(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, use: Ref<Spot>, place: string) {
+  usable(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, use: Ref<Spot>, place: string): void {
     if (this.state === null) return;
     // The first move of this place or a part of it, found before its message is built.
     let found: { moved: string; move: Move } | undefined = undefined;
@@ -1349,7 +1426,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   /** @throws {CompileError} */
-  free(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string, use: Ref<Spot>, access: Access, at: usize = use.start) {
+  free(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string, use: Ref<Spot>, access: Access, at: usize = use.start): void {
     if (this.state === null) return;
     // The first loan forbidding this access, found before its message is built.
     let found: Loan | undefined = undefined;
@@ -1386,10 +1463,6 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // Other loans are keyed by whole numbers, or a temporary's by a half, so these keys and a
   // call's captures and an assignment's hold below take other fractions of an offset, which
   // never equal those.
-  partKey(cx: Ref<MoveCx<T, B, I>>, start: usize, i: usize): f64 {
-    return (start as f64) + ((i as f64) + 1) / 8192;
-  }
-
   // Where a place is used and how the source names it there.
   spot(cx: Ref<MoveCx<T, B, I>>, e: Ref<Named>): Spot {
     return { start: e.start, end: e.end, shown: this.text(cx, e) };
@@ -1398,7 +1471,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // Lends a place, which must be free to lend so, to a reference variable or for a call.
   // A loan is keyed by where it starts, or by `key` for one no source offset may share.
   /** @throws {CompileError} */
-  lend(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string, mutable: boolean, use: Ref<Spot>, holder?: LocalId, call?: string, callAt?: usize, at: usize = use.start, key: f64 = use.start as f64) {
+  lend(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string, mutable: boolean, use: Ref<Spot>, holder?: LocalId, call?: string, callAt?: usize, at: usize = use.start, key: f64 = use.start as f64): void {
     this.free(cx, place, use, mutable ? "lend mutably" : "lend", at);
     if (this.state === null) return;
     let holders = new Set<LocalId>();
@@ -1418,7 +1491,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // `hold` of a value taken out of its wrappers, given as `outer` and met as `heldAs`.
   /** @throws {CompileError} */
   holdFrom(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, outer: Ref<Expr>, e: Ref<Expr>, heldAs: Type | undefined): void {
-    if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) return this.holdFrom(cx, holder, outer, e.expr, heldAs);
+    if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) {
+      this.holdFrom(cx, holder, outer, e.expr, heldAs);
+      return;
+    }
     if (e.kind === "conditional") {
       if (cx.instance.types.has(e.then)) this.hold(cx, holder, e.then);
       if (cx.instance.types.has(e.else)) this.hold(cx, holder, e.else);
@@ -1431,8 +1507,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     }
     if (this.lentTemporary(cx, outer)) throw this.outlived(cx, e, `'${cx.tables.arenas.localOf(holder).name}'`);
     // A call's returned reference holds what its sources do: a receiver where it lives.
-    const from = cx.instance.borrowsFrom.get(e);
-    if (from) {
+    const instance = cx.instance;
+    const from = instance.borrowsFrom.get(e);
+    if (from !== undefined) {
       const result = heldAs ?? cx.instance.types.get(e)!;
       // A future holding a mutable reference, or a Dyn's async method declaring `Mut<this>`,
       // lends what it borrows mutably until it is done.
@@ -1442,7 +1519,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         const t = this.coercionOf(cx, s) ?? cx.instance.types.get(s)!;
         if (cx.tables.typing.holdsRef(t) && (this.isRef(cx, t) || this.key(cx, s) === undefined)) this.hold(cx, holder, s);
         else if (this.key(cx, s) !== undefined) {
-          this.lend(cx, this.key(cx, s)!, mutable, this.spot(cx, s), holder);
+          const place = this.key(cx, s)!;
+          const at = this.spot(cx, s);
+          this.lend(cx, place, mutable, at, holder);
           this.inherit(cx, holder, s);
           if (this.throughUnion(cx, s)) this.temporary(cx, holder, s);
         } else this.temporary(cx, holder, s);
@@ -1457,7 +1536,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       for (let i: usize = 0; i < parts.length; i++) {
         const c: Ref<Capture> = parts[i]!;
         // A copy of a mutable reference lends it again.
-        if (!c.held || this.reborrows(cx, c.from!)) this.lend(cx, c.place, c.mutable || c.held, c.at, holder, undefined, undefined, c.at.start, this.partKey(cx, c.at.start, i));
+        if (!c.held || this.reborrows(cx, c.from!)) this.lend(cx, c.place, c.mutable || c.held, c.at, holder, undefined, undefined, c.at.start, partKey(c.at.start, i));
         if (c.from !== undefined && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(c.from).type)) this.inheritFrom(cx, holder, c.from);
       }
       return;
@@ -1469,15 +1548,19 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         for (const p of e.props) {
           if (p.kind === "property") this.hold(cx, holder, p.value);
           else if (p.kind === "shorthand" && this.localAt(cx, p) !== undefined) {
-            const local = cx.tables.arenas.localOf(this.localAt(cx, p)!);
+            const localId = this.localAt(cx, p)!;
+            const type = cx.tables.arenas.localOf(localId).type;
+            const place = String(cx.tables.arenas.localOf(localId).id);
             // A shorthand lent to a reference field lends its variable; a mutable reference copied
             // lends itself mutably, as `{ m: m }` does, so only one of them is used at a time.
             // Meeting a union, the literal's own type is the member it went into.
             const shape = this.isUnion(cx, to) ? cx.instance.types.get(e)! : to;
-            if (this.isRef(cx, cx.tables.typing.field(shape as Exclude<Type, string>, p.name)!.type) && !this.isRef(cx, local.type)) this.lend(cx, String(local.id), false, this.spot(cx, p), holder);
-            else if (cx.tables.typing.holdsRef(local.type)) {
-              if (this.isRef(cx, local.type) && cx.tables.typing.rec(local.type).mutable) this.lend(cx, String(local.id), true, this.spot(cx, p), holder);
-              this.inheritFrom(cx, holder, local.localId);
+            const field = typeof shape !== "string" ? cx.tables.typing.field(shape, p.name) : undefined;
+            const at = this.spot(cx, p);
+            if (field !== undefined && this.isRef(cx, field.type) && !this.isRef(cx, type)) this.lend(cx, place, false, at, holder);
+            else if (cx.tables.typing.holdsRef(type)) {
+              if (this.isRef(cx, type) && cx.tables.typing.rec(type).mutable) this.lend(cx, place, true, at, holder);
+              this.inheritFrom(cx, holder, localId);
             }
           }
         }
@@ -1497,18 +1580,18 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // What a value lends, lent to a holder.
   /** @throws {CompileError} */
-  lendTo(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>) {
+  lendTo(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>): void {
     const parts = this.lent(cx, e);
-    for (let i: usize = 0; i < parts.length; i++) this.lend(cx, parts[i]!.place, parts[i]!.mutable, parts[i]!.at, holder, undefined, undefined, parts[i]!.at.start, this.partKey(cx, parts[i]!.at.start, i));
+    for (let i: usize = 0; i < parts.length; i++) this.lend(cx, parts[i]!.place, parts[i]!.mutable, parts[i]!.at, holder, undefined, undefined, parts[i]!.at.start, partKey(parts[i]!.at.start, i));
   }
 
   // Through a reference, or a value holding references, what it holds stays held.
-  inherit(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>) {
+  inherit(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>): void {
     const root = this.rootLocal(cx, e);
     if (root !== undefined && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(root).type)) this.inheritFrom(cx, holder, root);
   }
 
-  inheritFrom(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, root: LocalId) {
+  inheritFrom(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, root: LocalId): void {
     if (this.state === null || root === holder) return;
     let held: f64[] = [];
     for (const [at, loan] of this.state.loans) if (loan.holders.has(root)) held.push(at);
@@ -1536,7 +1619,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (this.lentTemporary(cx, s, across)) return true;
     if (s.kind === "string" && !across && cx.f.generator !== true && cx.f.async !== true) return false;
     if (this.key(cx, s) !== undefined) return false;
-    return !cx.tables.typing.holdsRef(this.coercionOf(cx, s) ?? cx.instance.types.get(s)!);
+    const type = this.coercionOf(cx, s) ?? cx.instance.types.get(s)!;
+    return !cx.tables.typing.holdsRef(type);
   }
 
   // Nothing an awaited future borrows from may be a temporary: a combinator's future borrows
@@ -1563,7 +1647,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   // A reference to a temporary or a copy holds that, so it is never returned.
-  temporary(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>) {
+  temporary(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>): void {
     // Keyed beside any loan made at the same place, which it must not replace.
     if (this.state !== null) this.state.loans.set((e.start as f64) + 0.5, { place: TEMPORARY, mutable: false, start: e.start, end: e.end, holders: new Set([holder]) });
   }
@@ -1623,13 +1707,15 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // A returned reference may point only into what its lifetime ties it to: a parameter's
   // borrow, or `this`, never this function's own values.
   /** @throws {CompileError} */
-  returned(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>) {
-    this.outlives(cx, e, this.origins, "return", "return an owned value instead");
+  returned(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): void {
+    let origins: Origin[] = [];
+    for (const o of this.origins) origins.push(o);
+    this.outlives(cx, e, origins, "return", "return an owned value instead");
   }
 
   // What a body stores into `this` outlives the call, so it may point only into parameters.
   /** @throws {CompileError} */
-  stored(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>) {
+  stored(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): void {
     let params: Origin[] = [];
     for (let i: usize = 0; i < cx.f.params.length; i++) params.push(i);
     this.outlives(cx, e, params, "store in 'this'", "store an owned value instead");
@@ -1637,7 +1723,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // A value leaving the body may point only into what `allowed` says outlives it.
   /** @throws {CompileError} */
-  outlives(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, allowed: Origin[], verb: string, instead: string) {
+  outlives(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, allowed: Origin[], verb: string, instead: string): void {
     const type = this.coercions.get(e.id) ?? cx.instance.types.get(e)!;
     if (!cx.tables.typing.holdsRef(type)) return;
     for (const place of this.pointsInto(cx, e)) {
@@ -1654,7 +1740,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       for (const o of allowed) shown.push(o === "this" ? "'this'" : `'${this.paramName(cx, o)}'`);
       const names = shown.length > 0 ? shown.join(" or ") : "nothing it was given";
       const what = param !== undefined ? `'${this.paramName(cx, param)}'` : place.startsWith("this") ? `'${this.pathOf(cx, place)}'` : undefined;
-      const message = what
+      const message = what !== undefined
         ? verb === "return" ? `the returned reference points into ${what}, but its lifetime ties it to ${names}; give ${what} that lifetime, or return an owned value` : `the stored reference points into ${what}, but it may only point into ${names}`
         : `can't ${verb} a reference to '${this.pathOf(cx, place)}', which belongs to this function and is gone once it returns; ${instead}`;
       throw new CompileError("E0209", message, e.start, e.end);
@@ -1691,13 +1777,17 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       }
       return out;
     }
-    const from = cx.instance.borrowsFrom.get(e);
-    if (from) {
-      return from.flatMap((s) => {
+    const instance = cx.instance;
+    const from = instance.borrowsFrom.get(e);
+    if (from !== undefined) {
+      let out: string[] = [];
+      for (const s of from) {
         const t = this.coercionOf(cx, s) ?? cx.instance.types.get(s)!;
-        if (this.isRef(cx, t) || (cx.tables.typing.holdsRef(t) && this.key(cx, s) === undefined)) return this.pointsInto(cx, s);
-        return this.key(cx, s) !== undefined && !this.throughUnion(cx, s) ? this.within(cx, s) : [TEMPORARY];
-      });
+        if (this.isRef(cx, t) || (cx.tables.typing.holdsRef(t) && this.key(cx, s) === undefined)) for (const p of this.pointsInto(cx, s)) out.push(p);
+        else if (this.key(cx, s) !== undefined && !this.throughUnion(cx, s)) for (const p of this.within(cx, s)) out.push(p);
+        else out.push(TEMPORARY);
+      }
+      return out;
     }
     const type = cx.instance.types.get(e)!;
     const to = pointsAs ?? type;
@@ -1705,13 +1795,18 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       // A value holding references points wherever its parts, or the value it copies, do.
       if (!cx.tables.typing.holdsRef(to)) return [];
       if (e.kind === "object") {
-        return e.props.flatMap((p) => {
-          if (p.kind === "property") return this.pointsInto(cx, p.value);
-          if (p.kind !== "shorthand") return [];
-          const local = localRecord(cx.tables.arenas, this.localAt(cx, p));
-          if (!local) return [];
-          return this.isRef(cx, cx.tables.typing.field(to as Exclude<Type, string>, p.name)!.type) && !this.isRef(cx, local.type) ? [String(local.id)] : this.heldBy(cx, local.localId);
-        });
+        let out: string[] = [];
+        for (const p of e.props) {
+          if (p.kind === "property") for (const q of this.pointsInto(cx, p.value)) out.push(q);
+          if (p.kind !== "shorthand") continue;
+          const local = cx.instance.locals.getById(p.id);
+          if (local === undefined) continue;
+          const type = cx.tables.arenas.localOf(local).type;
+          const field = typeof to !== "string" ? cx.tables.typing.field(to, p.name) : undefined;
+          if (field !== undefined && this.isRef(cx, field.type) && !this.isRef(cx, type)) out.push(String(cx.tables.arenas.localOf(local).id));
+          else for (const q of this.heldBy(cx, local)) out.push(q);
+        }
+        return out;
       }
       const root = this.rootLocal(cx, e);
       return root !== undefined && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(root).type) ? this.heldBy(cx, root) : [];
@@ -1723,8 +1818,15 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // The places a holder's loans are on, leaving out those inside other holders, whose own
   // loans are held too.
   heldBy(cx: Ref<MoveCx<T, B, I>>, root: LocalId): string[] {
-    const refs = new Set([...cx.instance.locals.values()].map((l) => cx.tables.arenas.localOf(l)).filter((l) => this.isRef(cx, l.type) || cx.tables.typing.optionRef(l.type)).map((l) => String(l.id)));
-    return [...(this.state?.loans.values() ?? [])].filter((l) => l.holders.has(root) && !refs.has(l.place.split(".")[0]!)).map((l) => l.place);
+    let refs = new Set<string>();
+    for (const l of cx.instance.locals.values()) {
+      const local = cx.tables.arenas.localOf(l);
+      if (this.isRef(cx, local.type) || cx.tables.typing.optionRef(local.type) !== undefined) refs.add(String(local.id));
+    }
+    let out: string[] = [];
+    if (this.state === null) return out;
+    for (const l of this.state.loans.values()) if (l.holders.has(root) && !refs.has(l.place.split(".")[0]!)) out.push(l.place);
+    return out;
   }
 
   // Where a place lives: itself, or, reached through a reference variable, what that holds; a
@@ -1744,51 +1846,84 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // A holder given a new value lets go of what it held and holds what the value does, which
   // may be read from the holder itself, so the new holds are gathered first.
   /** @throws {CompileError} */
-  rehold(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, local: LocalId, e: Ref<Expr>) {
+  rehold(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, local: LocalId, e: Ref<Expr>): void {
     if (this.state === null) return;
     const was = cx.tables.arenas.localOf(local);
     const id = was.id;
     const gathering = cx.tables.arenas.addLocal({ name: was.name, type: was.type, mutable: was.mutable, param: was.param, id: SYNTHETIC * 2 + id }).localId;
     this.hold(cx, gathering, e);
     this.release(cx, local);
-    for (const [at, loan] of this.state.loans) {
-      if (!loan.holders.has(gathering)) continue;
-      const holders = new Set([...loan.holders].filter((h) => h !== gathering));
+    if (this.state === null) return;
+    let gathered: f64[] = [];
+    for (const [at, loan] of this.state.loans) if (loan.holders.has(gathering)) gathered.push(at);
+    for (const at of gathered) {
+      let loan = copyLoan(this.state.loans.get(at)!);
+      loan.holders.delete(gathering);
       // Nothing holds a loan of itself.
-      if (loan.place.split(".")[0] === String(id) && holders.size === 0) this.state.loans.delete(at);
-      else this.state.loans.set(at, { ...loan, holders: new Set([...holders, local]) });
+      if (loan.place.split(".")[0] === String(id) && loan.holders.size === 0) this.state.loans.delete(at);
+      else {
+        loan.holders.add(local);
+        this.state.loans.set(at, loan);
+      }
     }
   }
 
   // A reference pointed elsewhere, or declared again, lets go of what it held.
-  release(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId) {
+  release(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId): void {
     if (this.state === null) return;
-    for (const [at, loan] of this.state.loans) {
-      if (!loan.holders.has(holder)) continue;
-      const holders = new Set([...loan.holders].filter((h) => h !== holder));
-      if (holders.size === 0 && !loan.call) this.state.loans.delete(at);
-      else this.state.loans.set(at, { ...loan, holders });
+    let held: f64[] = [];
+    for (const [at, loan] of this.state.loans) if (loan.holders.has(holder)) held.push(at);
+    for (const at of held) {
+      let loan = copyLoan(this.state.loans.get(at)!);
+      loan.holders.delete(holder);
+      if (loan.holders.size === 0 && loan.call === undefined) this.state.loans.delete(at);
+      else this.state.loans.set(at, loan);
     }
   }
 
   // A loan lasts while one of its holders may still be used, or for its call.
   live(cx: Ref<MoveCx<T, B, I>>, loan: Ref<Loan>, at: usize): boolean {
-    if (loan.guard) return this.guarding.has(loan.start);
+    if (loan.guard === true) return this.guarding.has(loan.start);
     return loan.call !== undefined || [...loan.holders].some((h) => (this.last.get(h) ?? -1) > (at as f64));
+  }
+
+  // A value can't be moved out of a field read through a reference, or a shared value every
+  // clone of it uses, anywhere along the path `p` reads it through.
+  /** @throws {CompileError} */
+  movedThrough(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Named>, p: Ref<Named>, type: Type): void {
+    if (p.kind !== "member") return;
+    const holder = this.record(cx, cx.instance.types.get(p.object));
+    if (holder?.kind === "shared" || (holder?.kind === "ref" && this.record(cx, holder.to)?.kind === "shared")) {
+      throw new CompileError("E0202", `'${this.text(cx, e)}' can't be moved out of '${this.text(cx, p.object)}', which every clone of it shares; use it where it is`, e.start, e.end);
+    }
+    if (p.id !== e.id && this.isRef(cx, cx.instance.types.get(p)!)) {
+      throw new CompileError("E0202", this.hinted(cx, type, `'${this.text(cx, e)}' can't be moved out of '${this.text(cx, p)}', which only borrows it; use '${this.text(cx, e)}.clone()'`), e.start, e.end);
+    }
+    this.movedThrough(cx, e, p.object, type);
   }
 
   // Changing a place needs it free of loans; a setter changes the object it is called on.
   /** @throws {CompileError} */
-  change(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Expr>, at: usize = target.start) {
-    const changed = cx.instance.setters.has(target) && target.kind === "member" ? target.object : target;
+  change(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Expr>, at: usize = target.start): void {
+    if (cx.instance.setters.has(target) && target.kind === "member") {
+      this.changePlace(cx, target.object, at);
+      return;
+    }
+    this.changePlace(cx, target, at);
+  }
+
+  /** @throws {CompileError} */
+  changePlace(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, changed: Ref<Expr>, at: usize): void {
     const place = this.key(cx, changed);
-    if (place !== undefined) this.free(cx, place, this.spot(cx, changed), "change", at);
+    if (place === undefined) return;
+    const at2 = this.spot(cx, changed);
+    this.free(cx, place, at2, "change", at);
   }
 
   // Assigning a place gives it a value again, along with everything inside it, but nothing
   // can be assigned inside a value that has moved, nor while it is lent.
   /** @throws {CompileError} */
-  assign(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Expr>, at: usize) {
+  assign(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Expr>, at: usize): void {
     const place = this.key(cx, target);
     if (place === undefined || cx.instance.setters.has(target)) {
       if (target.kind === "member") this.expr(cx, target.object);
@@ -1797,11 +1932,15 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     }
     this.change(cx, target, at);
     if (this.state === null) return;
-    for (const [moved, move] of this.state.moves) {
-      if (place.startsWith(`${moved}.`)) {
-        if (move.unassigned) throw new CompileError("E0205", `'${this.pathOf(cx, moved)}' is used before being assigned, so '${this.text(cx, target)}' can't be set; assign all of '${this.pathOf(cx, moved)}' first`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
-        throw new CompileError("E0201", `can't assign to '${this.text(cx, target)}' because '${this.pathOf(cx, moved)}' was moved`, target.start, target.end, { message: move.note, start: move.start, end: move.end });
-      }
+    // The first move of something this place is inside, found before its message is built.
+    let found: { moved: string; move: Move } | undefined = undefined;
+    for (const [moved, move] of this.state.moves) if (found === undefined && place.startsWith(`${moved}.`)) found = { moved, move: copyMove(move) };
+    if (found !== undefined) {
+      const { moved, move } = found;
+      const note = { message: move.note, start: move.start, end: move.end };
+      const path = this.pathOf(cx, moved);
+      if (move.unassigned === true) throw new CompileError("E0205", `'${path}' is used before being assigned, so '${this.text(cx, target)}' can't be set; assign all of '${path}' first`, target.start, target.end, note);
+      throw new CompileError("E0201", `can't assign to '${this.text(cx, target)}' because '${path}' was moved`, target.start, target.end, note);
     }
     this.revive(cx, place);
   }
@@ -1827,7 +1966,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // An error raised here goes to the innermost catch, which runs from this state too, and any
   // `finally` it leaves through.
-  raising(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>) {
+  raising(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>): void {
     if (this.frames.length === 0) return;
     const i = this.frames.length - 1;
     if (this.frames[i]!.kind === "catch") {
@@ -1839,7 +1978,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   // A `break` or `continue` reaches its target, or first the innermost finally between them.
-  jumping(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Site>, which: "break" | "continue") {
+  jumping(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, target: Ref<Site>, which: "break" | "continue"): void {
     for (let i = this.frames.length; i > 0; i--) {
       const frame: Ref<Frame> = this.frames[i - 1]!;
       if (frame.kind === "catch") continue;
@@ -1852,7 +1991,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   // A `return` passes first through the innermost finally, if any.
-  returning(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>) {
+  returning(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>): void {
     for (let i = this.frames.length; i > 0; i--) {
       if (this.frames[i - 1]!.kind !== "finally") continue;
       this.note(cx, i - 1, { kind: "return", acc: null });
@@ -1862,7 +2001,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // Records a way out through the finally at frame `i`, joining this state into the times it
   // was taken.
-  note(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, i: usize, exit: Exit) {
+  note(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, i: usize, exit: Exit): void {
     const acc = join(null, this.state);
     for (let k: usize = 0; k < this.frames[i]!.exits.length; k++) {
       const e: Ref<Exit> = this.frames[i]!.exits[k]!;
@@ -1874,7 +2013,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     this.frames[i]!.exits.push({ kind: exit.kind, target: exit.target, which: exit.which, acc });
   }
 
-  revive(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string) {
+  revive(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string): void {
     if (this.state === null) return;
     for (const moved of [...this.state.moves.keys()]) if (moved === place || moved.startsWith(`${place}.`)) this.state.moves.delete(moved);
   }
@@ -1905,16 +2044,16 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // What `x!` or `x ?? d` gives, handed over, can't come out of an Option that `x` only borrows.
   /** @throws {CompileError} */
-  outOfBorrow(cx: Ref<MoveCx<T, B, I>>, option: Ref<Expr>, e: Ref<Expr>, consume?: Consumer) {
+  outOfBorrow(cx: Ref<MoveCx<T, B, I>>, option: Ref<Expr>, e: Ref<Expr>, consume?: Consumer): void {
     const t = cx.instance.types.get(option);
-    if (consume !== undefined && this.state && t && this.isRef(cx, t) && !cx.tables.typing.isCopy(cx.instance.types.get(e)!)) {
+    if (consume !== undefined && this.state !== null && t !== undefined && this.isRef(cx, t) && !cx.tables.typing.isCopy(cx.instance.types.get(e)!)) {
       throw new CompileError("E0202", this.hinted(cx, cx.instance.types.get(e)!, "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy"), e.start, e.end);
     }
   }
 
   // A closure made here: what it borrows must be free to lend, and what it moves in leaves.
   /** @throws {CompileError} */
-  made(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>) {
+  made(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): void {
     const parts = this.captured(cx, e);
     // A copy the closure holds of a variable that a nested function it calls changes wouldn't
     // see the change, as JavaScript's closure would.
@@ -1929,11 +2068,14 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     for (const c of parts) {
       this.usable(cx, c.at, c.place);
       const copied = c.from !== undefined && cx.tables.typing.isCopy(cx.tables.arenas.localOf(c.from).type);
-      if (!c.held || copied) this.free(cx, c.place, c.at, c.mutable || (c.held && this.reborrows(cx, c.from!)) ? "lend mutably" : "read");
+      if (!c.held || copied) {
+        const mutably = c.mutable || (c.held && this.reborrows(cx, c.from!));
+        this.free(cx, c.place, c.at, mutably ? "lend mutably" : "read");
+      }
       else {
         this.free(cx, c.place, c.at, "move");
         const name = cx.tables.arenas.localOf(c.from!).name;
-        if (this.state !== null) this.state.moves.set(c.place, { start: c.at.start, end: c.at.end, note: `'${name}' moved here into a closure, which holds it now`, passes: new Map(this.passes) });
+        if (this.state !== null) this.state.moves.set(c.place, { start: c.at.start, end: c.at.end, note: `'${name}' moved here into a closure, which holds it now`, passes: copyPasses(this.passes) });
         // A closure moving one of this closure's captures into itself moves it out of this one.
         if ((cx.instance.captures !== undefined && cx.instance.captures.has(c.from!))) this.movedOut.add(c.from!);
       }
@@ -1948,7 +2090,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     // this body's bindings for what it uses.
     const built = e.kind === "ident" ? cx.instance.envs?.get(e) : undefined;
     if (built !== undefined) {
-      this.envCaptures(cx, built.of, built.env, e, out);
+      this.envCaptures(cx, built.of, built.env, { start: e.start, end: e.end }, out);
       return out;
     }
     if (e.kind !== "arrow" || (cx.tables.nestedFunctions.has(e) && !e.async)) return out;
@@ -2021,10 +2163,15 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
 
   // The indexes into arrays along a place's path, outermost first.
-  indexes(cx: Ref<MoveCx<T, B, I>>, e: Ref<Expr>): Expr[] {
-    const found: Expr[] = [];
-    for (e = bare(e); e.kind === "member" || e.kind === "index"; e = bare(e.object)) if (e.kind === "index" && this.element(cx, e)) found.unshift(e.index);
-    return found;
+  /** @throws {CompileError} */
+  indexes(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): void {
+    if (e.kind === "nonNull" && redundantBang(e)) {
+      this.indexes(cx, e.expr);
+      return;
+    }
+    if (e.kind !== "member" && e.kind !== "index") return;
+    this.indexes(cx, e.object);
+    if (e.kind === "index" && this.element(cx, e)) this.expr(cx, e.index);
   }
 
   // Whether an expression is an index into an array.
@@ -2037,28 +2184,34 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // calls, so no reference into one may still be in use at a `yield`. What a reference
   // parameter points to, and an array's elements, live elsewhere.
   /** @throws {CompileError} */
-  stillBorrowed(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>) {
+  stillBorrowed(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): void {
     if (this.state === null) return;
+    // The first such loan, found before its message is built.
+    let found: Loan | undefined = undefined;
     for (const loan of this.state.loans.values()) {
-      if (loan.loop || loan.guard || !this.live(cx, loan, e.end)) continue;
-      const [root, ...path] = loan.place.split(".");
-      const local = this.byId.get(Number(root));
-      if (local === undefined || this.isRef(cx, cx.tables.arenas.localOf(local).type) || path.includes("[]")) continue;
-      throw new CompileError("E0203", `a reference into '${this.pathOf(cx, loan.place)}' is still in use at this 'yield'; a generator's variables move with it between 'next()' calls, so let the reference end before the yield`, e.start, e.end, {
-        message: `'${this.pathOf(cx, loan.place)}' is borrowed here`, start: loan.start, end: loan.end,
-      });
+      if (found !== undefined || loan.loop === true || loan.guard === true || !this.live(cx, loan, e.end)) continue;
+      const parts = loan.place.split(".");
+      const n = parseInt(parts[0]!);
+      const local = n !== undefined ? this.byId.get(n as usize) : undefined;
+      if (local === undefined || this.isRef(cx, cx.tables.arenas.localOf(local).type) || parts.slice(1).includes("[]")) continue;
+      found = copyLoan(loan);
     }
+    if (found === undefined) return;
+    const lent = this.pathOf(cx, found.place);
+    throw new CompileError("E0203", `a reference into '${lent}' is still in use at this 'yield'; a generator's variables move with it between 'next()' calls, so let the reference end before the yield`, e.start, e.end, {
+      message: `'${lent}' is borrowed here`, start: found.start, end: found.end,
+    });
   }
 
   generator(cx: Ref<MoveCx<T, B, I>>, e: Ref<Expr>): boolean {
     const t = cx.instance.types.get(e);
-    const held = t && this.deref(cx, t);
+    const held = t !== undefined ? this.deref(cx, t) : undefined;
     return held !== undefined && (cx.tables.typing.yieldsOf(held) !== undefined || cx.tables.typing.yieldsOf(held, true) !== undefined);
   }
 
   locking(cx: Ref<MoveCx<T, B, I>>, e: Ref<Expr>): boolean {
     const t = cx.instance.types.get(e);
-    const r = t && this.record(cx, this.deref(cx, t));
+    const r = t !== undefined ? this.record(cx, this.deref(cx, t)) : undefined;
     return r?.kind === "shared" || (r?.kind === "interior" && (r.which === "Lock" || r.which === "RwLock"));
   }
 
@@ -2069,16 +2222,16 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   array(cx: Ref<MoveCx<T, B, I>>, e: Ref<Expr>): boolean {
     const t = cx.instance.types.get(e);
-    const kind = t && this.record(cx, this.deref(cx, t))?.kind;
+    const kind = t !== undefined ? this.record(cx, this.deref(cx, t))?.kind : undefined;
     return kind === "array" || kind === "fixed";
   }
 
   // Moving a value out of an array by index would leave a hole in it, as in Rust.
   elementMove(cx: Ref<MoveCx<T, B, I>>, e: Ref<Named>, type: Type): CompileError {
     const advice = cx.tables.typing.holdsHandle(type, true) ? "" : `'${this.text(cx, e)}.clone()' to take a copy, or `;
-    const t = cx.instance.types.get((e as Extract<Expr, { kind: "index" }>).object);
+    const t = e.kind === "index" ? cx.instance.types.get(e.object) : undefined;
     const inline = t !== undefined && this.record(cx, this.deref(cx, t))?.kind === "fixed";
-    if (inline) return new CompileError("E0202", `'${this.text(cx, e)}' can't be moved out of its fixed array, which keeps every element${advice ? `; use ${advice.slice(0, -5)}` : ""}`, e.start, e.end);
+    if (inline) return new CompileError("E0202", `'${this.text(cx, e)}' can't be moved out of its fixed array, which keeps every element${advice !== "" ? `; use ${advice.slice(0, -5)}` : ""}`, e.start, e.end);
     return new CompileError("E0202", `'${this.text(cx, e)}' can't be moved out of its array; use ${advice}'pop()' to take the last element out`, e.start, e.end);
   }
 
@@ -2100,13 +2253,16 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   pathOf(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string): string {
     // The rest field's name is dots too, so it is split out before the path is.
     const [id, ...fields] = place.replaceAll("....", ".\0").split(".").map((part) => (part === "\0" ? "..." : part));
-    const local = [...cx.instance.locals.values()].map((l) => cx.tables.arenas.localOf(l)).find((l) => String(l.id) === id);
+    let local: LocalId | undefined = undefined;
+    for (const l of cx.instance.locals.values()) if (local === undefined && String(cx.tables.arenas.localOf(l).id) === id) local = l;
+    const name = local !== undefined ? cx.tables.arenas.localOf(local).name : id;
     // A rest tuple's array is its elements from where its fixed ones end, as `t[1...]`.
-    const held = this.record(cx, local && cx.tables.typing.lower(local.type));
+    const lowered = local !== undefined ? cx.tables.typing.lower(cx.tables.arenas.localOf(local).type) : undefined;
+    const held = this.record(cx, lowered);
     const start = held?.kind === "object" && held.rest !== undefined ? held.fields.length - 1 : undefined;
     // The collection a class extending Map or Set embeds reads as the object itself.
     const named = fields.filter((part) => part !== EMBEDDED).map((part, i) => (part === "..." ? (i === 0 && start !== undefined ? `[${start}...]` : "[...]") : part === "[]" ? "[...]" : part));
-    return [local?.name ?? id, ...named].join(".").replaceAll(".[", "[").replace(/\.(\d+)(?=\.|\[|$)/g, "[$1]");
+    return [name, ...named].join(".").replaceAll(".[", "[").replace(/\.(\d+)(?=\.|\[|$)/g, "[$1]");
   }
 }
 
@@ -2165,6 +2321,21 @@ function fieldCall(tables: Mut<Tables>, instance: Ref<Instance>, e: Ref<Expr>): 
   return h.kind === "closure" || (h.kind === "dyn" && tables.typing.callableOf.has(h.of));
 }
 
+
+// A loan's key for the `i`th place a value lends, apart from the others it lends at the same
+// spot, as a closure's variables are when its environment is made from a call's or a name's.
+// Other loans are keyed by whole numbers, or a temporary's by a half, so these keys and a
+// call's captures and an assignment's hold take other fractions of an offset, which never
+// equal those.
+function partKey(start: usize, i: usize): f64 {
+  return (start as f64) + ((i as f64) + 1) / 8192;
+}
+
+function copyPasses(passes: Ref<Map<usize, usize>>): Map<usize, usize> {
+  let out = new Map<usize, usize>();
+  for (const [loop, pass] of passes) out.set(loop, pass);
+  return out;
+}
 
 function copySpot(at: Ref<Spot>): Spot {
   return { start: at.start, end: at.end, shown: at.shown };

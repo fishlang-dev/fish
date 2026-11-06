@@ -60,7 +60,7 @@ export function emptyTables(): Pick<Instance, "types" | "locals" | "calls" | "se
     types: new NodeMap<Expr, Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new NodeMap<Expr, InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
     coercions: new NodeMap<Expr, Type>(), jumps: new NodeMap<Stmt, Stmt>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
     raises: new NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>(), caught: new NodeMap<Stmt, Type>(),
-    consumes: new NodeSet<Expr | ObjectProp>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
+    consumes: new Set<usize>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
   };
 }
 
@@ -111,8 +111,8 @@ export type Instance = {
   raises: NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>;
   // The type of what each `try` catches.
   caught: NodeMap<Stmt, Type>;
-  // Each place whose value is handed over rather than copied, which leaves it empty.
-  consumes: NodeSet<Expr | ObjectProp>;
+  // Each place whose value is handed over rather than copied, which leaves it empty, by node id.
+  consumes: Set<usize>;
   // What each match pattern tests, and the type of the value it meets.
   patterns: NodeMap<Pattern, PatternInfo>;
   // Each read of a shared value's plain field: a copy made under its lock, not a place.
@@ -2422,8 +2422,9 @@ class BodyChecker implements Context, GuardHost {
     // From here on the body is read as a plain tree, its replacements in place.
     for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam(this.f.params[i]!, this.cx.rewrites);
     rebuiltStmts(this.f.body, this.cx.rewrites);
-    const movedOut = timed(this.cx.tables.timings, "moves", () => checkMoves(this.cx.tables, this.f, this.instance, origins));
-    for (const id of movedOut) this.instance.moved!.add(id);
+    const moved = timed(this.cx.tables.timings, "moves", () => checkMoves(this.cx.tables, this.f, this.instance, origins));
+    for (const id of moved.captures) this.instance.moved!.add(id);
+    for (const id of moved.consumes) this.instance.consumes.add(id);
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (this.self && this.cx.registry().classOf(this.self.type).methods.get("clone") === this.f.bodyId && (this.f.params.length > 0 || type !== this.self.type)) {
       throw new CompileError("E0213", `a 'clone' method must take no parameters and return '${this.cx.typing.show(this.self.type)}', since it replaces the compiler's copy`, this.f.start, this.f.end);
@@ -3225,7 +3226,7 @@ class BodyChecker implements Context, GuardHost {
     const inner = this.cx.arenas.addInstance({
       body: body.bodyId, symbol: `${this.instance.symbol}.closure${this.cx.closures.filter((c) => bodyOf(this.cx.arenas, this.cx.arenas.instanceOf(c)).closure!.parent === this.instance.id).length}`,
       bindings: this.instance.bindings, concrete: this.instance.concrete, depth: this.instance.depth, returns: "void",
-      types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new NodeSet(), patterns: new NodeMap(), copiesOut: new NodeSet(),
+      types: new NodeMap(), locals: new NodeMap(), calls: new NodeMap(), setters: new NodeMap(), coercions: new NodeMap(), jumps: new NodeMap(), borrowsFrom: new NodeMap(), raises: new NodeMap(), caught: new NodeMap(), consumes: new Set<usize>(), patterns: new NodeMap(), copiesOut: new NodeSet(),
     });
     inner.captures = new Map();
     inner.captureUses = new Map();
