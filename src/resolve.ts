@@ -466,7 +466,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (t.kind === "mapped") return this.mapped(t);
     if (t.kind === "template") {
       const holes = t.types.map((t) => this.resolveType(t));
-      return standIn(this.typing, holes, "a template literal type", t, false, () => this.host.resolverState.deferring > 0) ?? this.typeFns().templateType(t.quasis, holes, t, t.types);
+      return standIn(this.typing, holes, "a template literal type", t, false, this.host.resolverState.deferring > 0) ?? this.typeFns().templateType(t.quasis, holes, t, t.types);
     }
     if (t.kind === "infer") throw new CompileError("E0114", `'infer ${t.name}' declares a type only inside a conditional type's 'extends' clause, like 'T extends (infer U)[] ? U : never'`, t.start, t.end);
     if (t.kind === "function") {
@@ -1029,7 +1029,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const homomorphic = t.constraint.kind === "operator" && t.constraint.op === "keyof" ? this.resolveType(t.constraint.type) : undefined;
     const keys = this.resolveType(t.constraint);
     if (!t.type) throw new CompileError("E0114", `a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
-    const held = standIn(this.typing, homomorphic ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, () => this.host.resolverState.deferring > 0);
+    const held = standIn(this.typing, homomorphic ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, this.host.resolverState.deferring > 0);
     if (held) {
       this.withScope(new Map([...this.host.resolverState.scope, [t.name, held]]), () => (t.as && this.resolveType(t.as), this.resolveType(t.type!)));
       return held;
@@ -1072,7 +1072,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     let check = this.resolveType(t.check);
     const c = this.recOf(check);
     if (c?.kind === "param" && c.concrete) check = c.concrete;
-    const held = standIn(this.typing, [check], "a conditional type", t.check, true, () => this.host.resolverState.deferring > 0);
+    const held = standIn(this.typing, [check], "a conditional type", t.check, true, this.host.resolverState.deferring > 0);
     if (held) return this.branches(t, held);
     try {
       if (naked && check === "never") return "never";
@@ -1126,7 +1126,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   private comparable(type: Type, at: Span): Type {
     const open = openParam(this.typing, type, true);
     if (open && this.host.resolverState.deferring > 0) throw new Open(open);
-    standIn(this.typing, [type], "a conditional type", at, true, () => false);
+    standIn(this.typing, [type], "a conditional type", at, true, false);
     return type;
   }
 
@@ -1453,7 +1453,7 @@ function keyable(typing: Typing, t: Type): boolean {
 
 // A `Map<K, V>`, or a `Set<K>` when `set`: keys it can hash, and values it can own.
 /** @throws {CompileError} */
-export function collection(typing: Typing, key: Type, value: Type, set: boolean, at: Span, dict?: true): MapType {
+export function collection(typing: Mut<Typing>, key: Type, value: Type, set: boolean, at: Ref<Span>, dict?: true): MapType {
   const what = set ? "a 'Set'" : "a 'Map'";
   if (!keyable(typing, key)) throw new CompileError("E0116", `${what} ${set ? "holds" : "is keyed by"} strings or numbers, or unions of their literals, not '${typing.show(key)}'; objects as keys aren't supported yet`, at.start, at.end);
   if (typing.holdsRef(value)) throw unsupported("maps of references", at);
