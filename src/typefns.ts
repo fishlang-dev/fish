@@ -60,6 +60,7 @@ export function standIn(typing: Ref<Typing>, types: Ref<Type[]>, what: string, a
 // laying it out when first asked; whether a generic alias is being checked before any use; and
 // whether a type fits another, an interface by shape, as `extends` asks.
 export interface TypeFunctionsHost {
+  typingOf(this: Mut<this>): Mut<Typing>;
   /** @throws {CompileError} */
   fieldsKnown(this: Mut<this>, c: ClassType): boolean;
   isDeferring(): boolean;
@@ -93,12 +94,14 @@ type Spelled = { quasis: string[]; holes: Hole[] };
 // TypeScript's type-level functions, computed while compiling into ordinary types: `keyof`,
 // indexed access, and the utility types. A class's fields are known once it is laid out.
 export class TypeFunctions<H extends TypeFunctionsHost> {
-  typing: Typing;
   host: Mut<H>;
 
-  constructor(typing: Typing, host: Mut<H>) {
-    this.typing = typing;
+  constructor(host: Mut<H>) {
     this.host = host;
+  }
+
+  get typing(): Mut<Typing> {
+    return this.host.typingOf();
   }
 
   private recOf(t: Type) {

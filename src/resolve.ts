@@ -34,9 +34,9 @@ export function traitAlias(ids: Ids, a: TypeAlias): Interface | undefined {
 
 // Whether a parameter is written as a tag's strings: `comptime` and a string array.
 export function tagStrings(p: Param | undefined): boolean {
-  const t = p?.type;
-  const typed = t?.kind === "ref" ? t.name === "TemplateStringsArray" : t?.kind === "array" && t.element.kind === "ref" && t.element.name === "string";
-  return p !== undefined && p.comptime && typed;
+  if (p === undefined || !p.comptime || p.type === undefined) return false;
+  if (p.type.kind === "ref") return p.type.name === "TemplateStringsArray";
+  return p.type.kind === "array" && p.type.element.kind === "ref" && p.type.element.name === "string";
 }
 
 /** @throws {CompileError} */
@@ -174,11 +174,14 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     return this.host.resolverState.deferring > 0;
   }
   /** @throws {CompileError} */
-  conforms(from: Type, to: Type, at: Span): boolean {
+  conforms(from: Type, to: Type, at: Ref<Span>): boolean {
     return this.host.conforms(from, to, at);
   }
-  private typeFns(): TypeFunctions<Resolver<H>> {
-    return new TypeFunctions(this.host.tables.typing, this);
+  typingOf(this: Mut<this>): Mut<Typing> {
+    return this.host.tables.typing;
+  }
+  private typeFns(this: Mut<this>): TypeFunctions<Resolver<H>> {
+    return new TypeFunctions(this);
   }
   // A new sight for `body`, written in the body whose sight is `outer`, with one scope open.
   openSight(this: Mut<this>, body: BodyId, outer: usize | undefined): usize {
@@ -198,7 +201,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   }
   // Whether a name is a local or parameter in sight of a type written at `at`: in a scope or the
   // parameters of a body the type is written in, or of one around it.
-  inSight(name: string, at: Span): boolean {
+  inSight(name: string, at: Ref<Span>): boolean {
     let i = this.host.resolverState.sight;
     while (i !== undefined) {
       const s: Ref<Sight> = this.host.resolverState.sights[i]!;
@@ -231,13 +234,14 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const name = this.host.tables.typing.rec(t).generic!.name;
     const named = this.host.interfaces.get(name);
     if (named !== undefined) return this.interfaceOf(named, args);
-    return this.sameShape(this.interfaceOf(this.host.resolverState.inline.get(name)!, args));
+    const inline = this.interfaceOf(this.host.resolverState.inline.get(name)!, args);
+    return this.sameShape(inline);
   }
   // A recursive alias's type made again with other type arguments.
   /** @throws {CompileError} */
   remakeRecursive(this: Mut<this>, t: RecursiveType, args: Type[]): RecursiveType {
     const a = this.host.resolverState.recursiveAliases.get(t);
-    if (!a) return t;
+    if (a === undefined) return t;
     const key = `${a.name}<${args.map((t) => this.host.tables.typing.keyOf(t)).join(",")}>`;
     const of = this.aliasType(a, args, a);
     let back = this.host.resolverState.recursives.get(key);
@@ -277,7 +281,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // types resolved with the type parameters bound, and the enum as their union. An enum
   // holding itself would be infinitely large.
   /** @throws {CompileError} */
-  enumInstance(this: Mut<this>, info: EnumInfo, given: Type[], at: Span): EnumInstance {
+  enumInstance(this: Mut<this>, info: EnumInfo, given: Type[], at: Ref<Span>): EnumInstance {
     given.forEach((a) => unboxedClosure(this.host.tables.typing, a, at));
     const args = given.map((t) => this.host.tables.typing.heldArgument(t));
     const data = info.data!;
@@ -406,7 +410,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // TypeScript's strict mode has no implicit `any`, and Fish has no `any` at all. Only a
   // constructor's parameters may carry modifiers, which make them parameter properties.
   /** @throws {CompileError} */
-  paramType(this: Mut<this>, p: Param, property = false): Type {
+  paramType(this: Mut<this>, p: Ref<Param>, property = false): Type {
     const name = paramName(p);
     if (p.decorators.length > 0) throw unsupported("decorators", p);
     if (p.modifiers.length > 0 && !property) throw unsupported("parameter properties", p);
@@ -443,7 +447,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // A function value is one compiled function, so a function it is given is a stored callable,
   // as in `(resolve: (value: T) => void) => void`.
   /** @throws {CompileError} */
-  private callbackParam(this: Mut<this>, p: Param): Type {
+  private callbackParam(this: Mut<this>, p: Ref<Param>): Type {
     const t = this.paramType(p);
     const r = this.recOf(t);
     return r?.kind === "function" && r.generic === undefined ? this.host.tables.typing.stored(t) : t;
@@ -451,7 +455,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
 
   // What a function type's `throws` clause names, as a declared function's may name.
   /** @throws {CompileError} */
-  private thrownBy(this: Mut<this>, t: Extract<TypeNode, { kind: "function" }>, returns: Type): Type | undefined {
+  private thrownBy(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "function" }>>, returns: Type): Type | undefined {
     if (!t.throws) return undefined;
     // An async function's error comes at the `await`, with its future, not from the call.
     if (this.host.tables.typing.promiseElement(returns) !== undefined) throw unsupported("function types giving a Promise that throw", t.throws);
@@ -464,7 +468,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // An array of an element type. Arrays of references, and of functions, which would need their
   // calls boxed, aren't supported yet.
   /** @throws {CompileError} */
-  private array(element: Type, at: TypeNode): Type {
+  private array(element: Type, at: Ref<TypeNode>): Type {
     if (this.host.tables.typing.holdsRef(element)) throw unsupported("arrays of references", at);
     const e = this.recOf(element);
     if (e?.kind === "closure") throw unsupported("arrays of functions", at);
@@ -481,7 +485,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
 
   // `FixedArray<T, N>`: N elements of T held inline, N a number written in place.
   /** @throws {CompileError} */
-  private fixedArray(this: Mut<this>, t: Extract<TypeNode, { kind: "ref" }>): Type {
+  private fixedArray(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "ref" }>>): Type {
     if (t.args.length !== 2) throw new CompileError("E0116", "'FixedArray' takes an element type and a length, like 'FixedArray<i64, 4>'", t.start, t.end);
     const [of, n] = t.args as [TypeNode, TypeNode];
     if (n.kind === "literal" && n.value.kind === "unary" && n.value.op === "-") throw new CompileError("E0116", "a FixedArray's length can't be negative", n.start, n.end);
@@ -497,7 +501,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   }
 
   /** @throws {CompileError} */
-  resolveType(this: Mut<this>, t: TypeNode): Type {
+  resolveType(this: Mut<this>, t: Ref<TypeNode>): Type {
     const preset = this.host.tables.presetTypes.get(t);
     if (preset !== undefined) {
       const swap = new TypeMap<Type, Type>();
@@ -749,7 +753,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // one property, whose type names the brand. An optional property makes a loose brand, which
   // the base fits too, as it does in TypeScript.
   /** @throws {CompileError} */
-  private brandIdiom(this: Mut<this>, nodes: TypeNode[], sides: Type[]): Type | undefined {
+  private brandIdiom(this: Mut<this>, nodes: Ref<TypeNode[]>, sides: Type[]): Type | undefined {
     if (sides.length !== 2) return undefined;
     const at = typeof sides[0] === "string" ? 0 : 1;
     const [base, other] = [sides[at]!, sides[1 - at]!];
@@ -765,7 +769,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // A brand's base is a primitive, and its tag is known where it is written, since nothing infers
   // a tag from a value.
   /** @throws {CompileError} */
-  private brand(this: Mut<this>, base: Type, tag: Type, baseNode: Span, tagNode: Span, how: Parameters<Typing["brandType"]>[2] = {}): Type {
+  private brand(this: Mut<this>, base: Type, tag: Type, baseNode: Ref<Span>, tagNode: Ref<Span>, how: Parameters<Typing["brandType"]>[2] = {}): Type {
     if (typeof base !== "string" || base === "void" || base === "null" || base === "never") {
       throw new CompileError("E0116", `a brand's base is a number, boolean, string or bigint type, not '${this.host.tables.typing.show(base)}'`, baseNode.start, baseNode.end);
     }
@@ -776,7 +780,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // `Ref<T>` borrows a T, and `Mut<T>` borrows it mutably.
   // `Ref<T, A>` also names the lifetime parameter it lives for, checked by the function.
   /** @throws {CompileError} */
-  private reference(this: Mut<this>, t: Extract<TypeNode, { kind: "ref" }>): Type {
+  private reference(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "ref" }>>): Type {
     if (t.args.length !== 1 && t.args.length !== 2) {
       throw new CompileError("E0209", `type '${t.name}' takes the type it borrows, and optionally a lifetime`, t.start, t.end);
     }
@@ -793,7 +797,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // A union holds a bare reference only as a reference or nothing, `Ref<T> | null`, as Rust's
   // `Option<&T>` is; other references sit in object members a tag tells apart.
   /** @throws {CompileError} */
-  private union(this: Mut<this>, nodes: TypeNode[]): Type {
+  private union(this: Mut<this>, nodes: Ref<TypeNode[]>): Type {
     const option = nodes.filter((n) => !(n.kind === "ref" && (n.name === "null" || n.name === "undefined") && n.args.length === 0)).length === 1;
     return this.host.tables.typing.unionType(nodes.map((n) => this.unionMember(n, option)));
   }
@@ -801,7 +805,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // A union holds values, so an interface, which describes values without being one, can't be
   // a member, and neither can `void`.
   /** @throws {CompileError} */
-  private unionMember(this: Mut<this>, node: TypeNode, option = false): Type {
+  private unionMember(this: Mut<this>, node: Ref<TypeNode>, option = false): Type {
     const t = this.resolveType(node);
     if (t === "void") throw new CompileError("E0118", "'void' can't be a union member", node.start, node.end);
     const r = this.recOf(t);
@@ -814,7 +818,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   }
 
   /** @throws {CompileError} */
-  private literal(e: Expr): Type {
+  private literal(e: Ref<Expr>): Type {
     if (e.kind === "string" || e.kind === "bool") return this.host.tables.typing.literalType(e.value);
     const negative = e.kind === "unary" && e.op === "-";
     const digits = negative ? e.operand : e;
@@ -828,7 +832,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // is a combined bound: an interface with every side's fields and methods. A union of object
   // types as a side distributes, as in TypeScript: `A & (B | C)` is `(A & B) | (A & C)`.
   /** @throws {CompileError} */
-  private intersection(this: Mut<this>, nodes: TypeNode[]): Type {
+  private intersection(this: Mut<this>, nodes: Ref<TypeNode[]>): Type {
     const resolved = nodes.map((node) => this.resolveType(node));
     // A generic alias checked before any use, as `type Brand<K, T> = K & { __brand: T }`, is
     // known only per use.
@@ -874,7 +878,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // An object type with a method, written in place, is an interface of its own, generic over the
   // type parameters around it, since its members may name them.
   /** @throws {CompileError} */
-  private inlineTrait(this: Mut<this>, t: Extract<TypeNode, { kind: "object" }>): InterfaceType {
+  private inlineTrait(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "object" }>>): InterfaceType {
     const scope = [...this.host.resolverState.scope];
     const name = `{} ${t.id} ${scope.map(([k]) => k).join(",")}`;
     const named = t.members.flatMap((m) => ("name" in m && typeof m.name === "string" ? [m.name] : []));
@@ -905,7 +909,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // The interface is registered before its members resolve, so a member may name it. A generic
   // interface is one interface per list of type arguments, its members seeing them.
   /** @throws {CompileError} */
-  private interfaceOf(this: Mut<this>, i: Interface, args: Type[] = [], at: Span = i): InterfaceType {
+  private interfaceOf(this: Mut<this>, i: Ref<Interface>, args: Type[] = [], at: Ref<Span> = i): InterfaceType {
     if (args.length !== i.typeParams.length) {
       throw new CompileError("E0106", `interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
@@ -943,7 +947,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   }
 
   /** @throws {CompileError} */
-  private members(this: Mut<this>, i: Interface, t: InterfaceType): InterfaceType {
+  private members(this: Mut<this>, i: Ref<Interface>, t: InterfaceType): InterfaceType {
     // A package's interface or class may declare again what it inherits, narrowing it, as
     // TypeScript lets a derived member replace its base's.
     const inherited = new Set<string>();
@@ -996,7 +1000,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   }
 
   /** @throws {CompileError} */
-  private memberOf(this: Mut<this>, i: Interface, t: InterfaceType, add: (name: string, at: Span) => void) {
+  private memberOf(this: Mut<this>, i: Ref<Interface>, t: InterfaceType, add: (name: string, at: Ref<Span>) => void) {
     return (m: TypeMember) => {
       if (m.kind === "method") {
         if (typeof m.name !== "string") throw symbolKey(m.name);
@@ -1042,7 +1046,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // An alias met again while its own type is made leads back to itself: that is where the
   // compiler puts a pointer, a recursive type standing for the alias's type.
   /** @throws {CompileError} */
-  private aliasType(this: Mut<this>, a: TypeAlias, args: Type[], at: Span): Type {
+  private aliasType(this: Mut<this>, a: Ref<TypeAlias>, args: Type[], at: Ref<Span>): Type {
     if (args.length !== a.typeParams.length) {
       throw new CompileError("E0106", `type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
@@ -1113,7 +1117,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // `keyof T` it keeps T's optional and readonly fields unless a modifier says otherwise, and
   // `as` renames each key, or drops one renamed to `never`.
   /** @throws {CompileError} */
-  private mapped(this: Mut<this>, t: Extract<TypeNode, { kind: "mapped" }>): Type {
+  private mapped(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "mapped" }>>): Type {
     const homomorphic = t.constraint.kind === "operator" && t.constraint.op === "keyof" ? this.resolveType(t.constraint.type) : undefined;
     const keys = this.resolveType(t.constraint);
     if (t.type === undefined) throw new CompileError("E0114", `a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
@@ -1159,7 +1163,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // parameter distributes over the union it stands for, each member checked on its own, as in
   // TypeScript.
   /** @throws {CompileError} */
-  private conditional(this: Mut<this>, t: Extract<TypeNode, { kind: "conditional" }>): Type {
+  private conditional(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "conditional" }>>): Type {
     const naked = t.check.kind === "ref" && t.check.args.length === 0 && this.host.resolverState.scope.has(t.check.name) ? t.check.name : undefined;
     let check = this.resolveType(t.check);
     const c = this.recOf(check);
@@ -1191,7 +1195,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // use: both branches are still checked, each `infer` name standing for an unknown type, and the
   // placeholder stands in for the result.
   /** @throws {CompileError} */
-  private branches(this: Mut<this>, t: Extract<TypeNode, { kind: "conditional" }>, held: Type): Type {
+  private branches(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "conditional" }>>, held: Type): Type {
     let names = new Map<string, Type>();
     for (const n of inferNames(t.extends)) names.set(n, this.host.tables.typing.typeParameter(n, undefined));
     this.resolveIn(this.scopeAnd(names), t.then);
@@ -1202,7 +1206,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // One check type's branch: the true one, with what each `infer` matched in scope, when the
   // check type fits the extends type.
   /** @throws {CompileError | Open} */
-  private decide(this: Mut<this>, t: Extract<TypeNode, { kind: "conditional" }>, check: Type): Type {
+  private decide(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "conditional" }>>, check: Type): Type {
     const names = inferNames(t.extends);
     if (names.size === 0) return this.resolveType(this.conforms(check, this.comparable(this.resolveType(t.extends), t.extends), t.extends) ? t.then : t.else);
     const found = new Map<string, Type>();
@@ -1216,7 +1220,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // A type a conditional compares against, which can't hold a type parameter of generic code,
   // since fitting it would be decided once for every instance.
   /** @throws {CompileError | Open} */
-  private comparable(type: Type, at: Span): Type {
+  private comparable(type: Type, at: Ref<Span>): Type {
     const open = openParam(this.host.tables.typing, type, true);
     if (open && this.host.resolverState.deferring > 0) throw new Open(open);
     standIn(this.host.tables.typing, [type], "a conditional type", at, true, false);
@@ -1227,7 +1231,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // for; a name inferred twice stands for the union of both. The pattern's form is checked
   // before the type it is matched against, so a refused form is refused for every type.
   /** @throws {CompileError | Open} */
-  private matches(this: Mut<this>, p: TypeNode, t: Type, found: Map<string, Type>): boolean {
+  private matches(this: Mut<this>, p: Ref<TypeNode>, t: Type, found: Map<string, Type>): boolean {
     if (inferNames(p).size === 0) return this.conforms(t, this.comparable(this.resolveType(p), p), p);
     const r = this.recOf(t);
     if (r?.kind === "param" && r.concrete) return this.matches(p, r.concrete, found);
@@ -1312,7 +1316,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   }
 
   /** @throws {CompileError} */
-  private member(this: Mut<this>, m: TypeMember): Field {
+  private member(this: Mut<this>, m: Ref<TypeMember>): Field {
     if (m.kind !== "property") throw unsupported(MEMBER_FORMS[m.kind], m);
     if (typeof m.name !== "string") throw symbolKey(m.name);
     if (!m.type) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
