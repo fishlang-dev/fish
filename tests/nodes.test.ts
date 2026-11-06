@@ -11,8 +11,9 @@ import { expandMacros } from "../src/macros.ts";
 import { analyze } from "../src/main.ts";
 import { flatten, load } from "../src/modules.ts";
 import type { Id } from "../src/ids.ts";
-import { NodeMap, NodeSet, renumber, Rewrites, shiftSpans } from "../src/nodes.ts";
+import { NodeMap, NodeSet, renumberExpr, Rewrites, shiftSpansExpr } from "../src/nodes.ts";
 import { parse, type Expr, type Stmt } from "../src/parser.ts";
+import { cloneExpr } from "../src/rebuild.ts";
 import { stdFor } from "../src/std.ts";
 import { stripTests } from "../src/tests.ts";
 import { Typing, TypeMap, TypeSet, type Type } from "../src/typing.ts";
@@ -22,12 +23,61 @@ const src = join(import.meta.dir, "..", "src");
 // What each node lowering replaced was replaced by, noted as each replacement is made: the
 // compiler tells nodes apart by id alone, and these tests check the ids by object.
 const replacedBy = new WeakMap<object, object>();
-const replace = Rewrites.prototype.replace;
-Rewrites.prototype.replace = function (this: Rewrites, node, by) {
-  const was = this.current(node);
-  if (was !== by) replacedBy.set(was, by);
-  return replace.call(this, node, by);
-} as typeof replace;
+const REPLACERS: [keyof Rewrites, keyof Rewrites][] = [
+  ["replace", "current"],
+  ["replaceStmt", "currentStmt"],
+  ["replaceFunc", "currentFunc"],
+  ["replaceDeclarator", "currentDeclarator"],
+  ["replaceParam", "currentParam"],
+  ["replacePattern", "currentPattern"],
+  ["replaceTypeNode", "currentTypeNode"],
+  ["replaceObjectProp", "currentObjectProp"],
+  ["replaceClassMember", "currentClassMember"],
+  ["replaceTypeMember", "currentTypeMember"],
+  ["replacePatternProp", "currentPatternProp"],
+];
+// Replacements made through a bare `{ id }`, which the test can't tell the replaced node from:
+// lowering passes one where Fish can't lend a node of a wider union as an `Id`.
+const madeForStub = new WeakSet<object>();
+function noteReplaced(was: object, out: object): void {
+  if (was === out) return;
+  if (Object.keys(was).length === 1) madeForStub.add(out);
+  const oldById = new Map<number, object>();
+  const seenOld = new Set<object>();
+  const collectOld = (v: unknown) => {
+    if (typeof v !== "object" || v === null || seenOld.has(v)) return;
+    seenOld.add(v);
+    if (Array.isArray(v)) return v.forEach(collectOld);
+    const n = v as Record<string, unknown>;
+    if (typeof n.id === "number" && !oldById.has(n.id)) oldById.set(n.id, v);
+    Object.values(n).forEach(collectOld);
+  };
+  collectOld(was);
+  const seenNew = new Set<object>();
+  const linkNew = (v: unknown) => {
+    if (typeof v !== "object" || v === null || seenNew.has(v)) return;
+    seenNew.add(v);
+    if (Array.isArray(v)) return v.forEach(linkNew);
+    const n = v as Record<string, unknown>;
+    if (typeof n.id === "number" && oldById.has(n.id)) {
+      const prev = oldById.get(n.id)!;
+      oldById.delete(n.id);
+      if (prev !== v) replacedBy.set(prev, v);
+    }
+    Object.values(n).forEach(linkNew);
+  };
+  linkNew(out);
+}
+for (const [rep, cur] of REPLACERS) {
+  const orig = Rewrites.prototype[rep] as (this: Rewrites, node: Id, by: object) => object;
+  const get = Rewrites.prototype[cur] as (this: Rewrites, node: Id) => object;
+  (Rewrites.prototype as unknown as Record<string, unknown>)[rep] = function (this: Rewrites, node: Id, by: object) {
+    const was = get.call(this, node);
+    const out = orig.call(this, node, by);
+    noteReplaced(was, out);
+    return out;
+  };
+}
 // What `node` is now: the last of its replacements, or itself.
 function latest(node: object): object {
   let n = node;
@@ -50,7 +100,7 @@ function audit(roots: unknown, ids: Map<number, object>, where: string): string[
       const at = `${where}: a ${String(n.kind ?? "node")} at ${n.start}`;
       if (typeof n.id !== "number") problems.push(`${at} has no id`);
       // A replacement takes the id of the node it replaces.
-      else if (ids.has(n.id) && latest(ids.get(n.id) as Id) !== latest(n as Id)) problems.push(`${at} shares id ${n.id} with another node`);
+      else if (ids.has(n.id) && latest(ids.get(n.id) as Id) !== latest(n as Id) && !madeForStub.has(n)) problems.push(`${at} shares id ${n.id} with another node`);
       else ids.set(n.id, n);
     }
     Object.values(n).forEach(visit);
@@ -225,20 +275,21 @@ test("renumbering and moving spans refuse two different nodes under one id", () 
   const copy: Expr = { ...a, start: 4, end: 5 };
   const sum: Expr = { id: 6, kind: "binary", op: "+", left: a, right: copy, start: 0, end: 5 };
   let last = 100;
-  expect(() => renumber("expr", structuredClone(sum), () => ++last)).toThrow("internal error: two nodes share id 5");
-  expect(() => shiftSpans("expr", structuredClone(sum), 10)).toThrow("internal error: two nodes share id 5");
+  expect(() => renumberExpr(cloneExpr(sum), () => ++last)).toThrow("internal error: two nodes share id 5");
+  expect(() => shiftSpansExpr(cloneExpr(sum), 10)).toThrow("internal error: two nodes share id 5");
   const shared: Expr = { id: 6, kind: "binary", op: "+", left: a, right: a, start: 0, end: 5 };
-  const renumbered = renumber("expr", structuredClone(shared), () => ++last) as Extract<Expr, { kind: "binary" }>;
+  const renumbered = renumberExpr(cloneExpr(shared), () => ++last) as Extract<Expr, { kind: "binary" }>;
   expect(renumbered.left.id).toBe(renumbered.right.id);
 });
 
 // Every node table's reads and writes checked against the node it holds under the id, as the
-// tables once checked themselves: one other than that node or its replacement is a clash.
+// tables once checked themselves: one other than that node, a copy of it, or its replacement is a
+// clash. Copies share their id on purpose, since a node copied to be owned twice is still one node.
 const clashes: string[] = [];
 function noting<F extends (this: object, node: Id, ...rest: never[]) => unknown>(method: F, held: (table: object, id: number) => object | undefined): F {
   return function (this: object, node: Id, ...rest: never[]) {
     const was = held(this, node.id);
-    if (was !== undefined && was !== node && latest(was) !== latest(node)) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
+    if (was !== undefined && was !== node && latest(was) !== latest(node) && !Bun.deepEquals(was, node)) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
     return method.call(this, node, ...rest);
   } as F;
 }
@@ -256,8 +307,8 @@ test("no node table meets two different nodes under one id", () => {
   const sample = corpus().filter((p) => /^(macro|comptime|generic|derive|class|std|json)/.test(p.name) && !p.src.includes("// mode: parse"));
   expect(sample.length).toBeGreaterThan(50);
   const a = { id: 1, kind: "a" };
-  new NodeMap<{ id: number }, string>().set(a, "a").get({ ...a });
-  expect(clashes).toEqual(["two nodes share id 1: a a and a a"]);
+  new NodeMap<{ id: number; kind: string }, string>().set(a, "a").get({ ...a, kind: "b" });
+  expect(clashes).toEqual(["two nodes share id 1: a a and a b"]);
   clashes.length = 0;
   for (const p of sample) {
     try {
@@ -400,7 +451,7 @@ const IN_PLACE = [
   // the spans of nodes just made, before any tree holds them;
   "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
   // a Body's overloads, given as ids, an enum's record and a Body's template mark, which are no nodes;
-  "check.ts: for (const f of this.funcs) if (f.overloads) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true",
+  "check.ts: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true",
   // the rebuild itself, putting replacements in place once a body is checked;
   "check.ts: for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam",
   // lists of statements, which have no id to key a replacement by: a statement that becomes

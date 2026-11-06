@@ -248,7 +248,7 @@ export class Registry<H extends RegistryHost> {
       });
       const instance = this.host.instanceOf(initializer);
       this.host.checkBody(instance);
-      return { name: f.name, type: this.typing.widenEnum(instance.returns), access: f.access, ...readonly };
+      return { name: f.name, type: this.typing.widenEnum(instance.branded?.returns ?? instance.returns), access: f.access, ...readonly };
     });
     // A class is laid out as written, so a pattern in a field would reach the binary; one coming
     // from a generic class's type argument goes when the class is made from the lowered argument.
@@ -352,6 +352,6 @@ function swapped(typing: Typing, t: Type, from: ClassType, to: Type): Type {
   if (typeof t === "string") return t;
   const r = typing.rec(t);
   if (r.kind === "union") return typing.unionType(r.members.map((m) => swapped(typing, m, from, to)), r.name);
-  if (r.kind === "object" && !r.match) return r.tuple ? typing.retuple(t as ObjectType, (e) => swapped(typing, e, from, to)) : typing.objectType(r.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
+  if (r.kind === "object" && !r.match) return r.tuple ? typing.retuple(t as ObjectType, typing.elementsOf(t as ObjectType).map((e) => swapped(typing, e, from, to)), r.rest !== undefined ? swapped(typing, r.rest, from, to) : undefined) : typing.objectType(r.fields.map((f) => ({ ...f, type: swapped(typing, f.type, from, to) })));
   return t;
 }

@@ -15,7 +15,7 @@ import { ENGINE_HOOK, STD, STD_MODULES, STD_VALUES, stdModule } from "./std.ts";
 import { refuseCompat } from "./migrate.ts";
 import { unsupported } from "./unsupported.ts";
 import type { Id } from "./ids.ts";
-import { forEachChild, nextId, NodeMap, Rewrites, shiftSpans, walk, type AnyNode, type Ids } from "./nodes.ts";
+import { forEachChild, nextId, NodeMap, Rewrites, shiftSpansStmt, shiftSpansStmts, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
 import { rebuiltStmts } from "./rebuild.ts";
 import { FILE_SPAN } from "./program.ts";
 
@@ -63,7 +63,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
       if (e instanceof CompileError) shiftError(e, base);
       throw e;
     }
-    if (base > 0) shiftSpans("stmt", statements, base);
+    if (base > 0) shiftSpansStmts(statements, base);
     if (!path.startsWith("std:")) lowerImportMeta(ids, statements, key, modules.length === 0);
     // A Rust crate's declarations are reached by importing `rust:<crate>`, not as this file's own.
     if (!path.startsWith("std:")) rustBlocks.set(key, statements.flatMap((s) => rustBlock(s) ?? []));
@@ -175,7 +175,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
       if (overloads.length > 0 && made.kind === "function") made = { ...made, js: { ...made.js!, overloads } };
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
-      for (const s of [made, ...overloads]) shiftSpans("stmt", s, base);
+      for (const s of [made, ...overloads]) shiftSpansStmt(s, base);
       statements.push(exported ? ({ id: nextId(ids), kind: "export", body: made, start: made.start, end: made.end } as Stmt) : made, ...overloads);
       for (const n of refers) {
         const found = declared.resolve(n);
@@ -216,7 +216,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
       if (e instanceof CompileError) shiftError(e, base);
       throw e;
     }
-    shiftSpans("stmt", statements, base);
+    shiftSpansStmts(statements, base);
     const blocks = statements.flatMap((s) => rustBlock(s) ?? []);
     rustBlocks.set(key, blocks);
     return blocks;
@@ -330,7 +330,7 @@ function unwrapped(s: Stmt): Stmt {
 // The members of a name a file reaches, as `ns.f`, each where it is first reached.
 function membersUsed(statements: Stmt[], name: string): { name: string; start: usize; end: usize }[] {
   const found = new Map<string, { name: string; start: usize; end: usize }>();
-  walk("stmt", statements, ({ of, node: n }) => {
+  walk({ of: "stmts", node: statements }, ({ of, node: n }) => {
     if (of === "expr" && n.kind === "member" && n.object.kind === "ident" && n.object.name === name && !found.has(n.name)) found.set(n.name, { name: n.name, start: n.start, end: n.end });
   });
   return [...found.values()];
@@ -372,7 +372,7 @@ function globalsIn(statements: Stmt[]): string[] {
     return namesOf(s.kind === "export" ? s.body : s);
   }));
   const found = new Set<string>();
-  walk("stmt", statements, ({ of, node: n }) => {
+  walk({ of: "stmts", node: statements }, ({ of, node: n }) => {
     if (of === "expr" && n.kind === "member" && n.object.kind === "ident" && Object.hasOwn(STD_MODULES, n.object.name) && !bound.has(n.object.name)) found.add(n.object.name);
   });
   return [...found];
@@ -639,7 +639,7 @@ function lowerImportMeta(ids: Ids, statements: Stmt[], path: string, entry: bool
   const rewrites = new Rewrites();
   const literal = (value: string | boolean, at: Span): Expr => (typeof value === "string" ? { id: nextId(ids), kind: "string", value, ...at } : { id: nextId(ids), kind: "bool", value, ...at });
   const isMeta = (e: Expr | undefined) => e?.kind === "meta" && e.name === "import.meta";
-  walk("stmt", statements, ({ of, node }) => {
+  walk({ of: "stmts", node: statements }, ({ of, node }) => {
     if (of === "declarator") {
       if (node.target.kind !== "object" || !isMeta(node.init)) return;
       const at = { start: node.init!.start, end: node.init!.end };
@@ -852,16 +852,17 @@ export function renameIn(ids: Ids, statements: Stmt[], to: (name: string) => str
   };
   const seen = new Set<unknown>();
   const rewrites = new Rewrites();
-  walk("stmt", statements, ({ of, node: n }) => {
+  walkWhile({ of: "stmts", node: statements }, ({ of, node: n }) => {
     if (seen.has(n)) return false;
     seen.add(n);
     const node = n as Record<string, unknown>;
     if (of === "objectProp" && n.kind === "shorthand") {
       const as = to(n.name);
       // `{ x }` keeps its key while its value takes the new name.
-      if (as !== undefined) rewrites.replace(n, { id: 0, kind: "property", key: n.name, value: { id: nextId(ids), kind: "ident", name: as, start: n.start, end: n.end }, start: n.start, end: n.end });
+      if (as !== undefined) rewrites.replaceObjectProp(n, { id: 0, kind: "property", key: n.name, value: { id: nextId(ids), kind: "ident", name: as, start: n.start, end: n.end }, start: n.start, end: n.end });
     } else if (typeof node.name === "string" && NAMED.has(node.kind as string)) node.name = renamed(node.name);
     if (Array.isArray(node.typeParams)) for (const p of node.typeParams as { name: string }[]) p.name = renamed(p.name);
+    return true;
   });
   rebuiltStmts(statements, rewrites);
 }

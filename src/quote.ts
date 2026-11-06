@@ -3,8 +3,8 @@ import { CompileError } from "./diag.ts";
 import { lexer } from "./lexer.ts";
 import { FILE_SPAN } from "./program.ts";
 import { parse, parseExpression, parseType, type Expr, type Span, type Stmt, type TypeNode } from "./parser.ts";
-import { nextId, renumber, Rewrites, someNode, walk as walkTree, type AnyNode, type Ids } from "./nodes.ts";
-import { rebuiltExpr, rebuiltStmt, rebuiltTypeNode } from "./rebuild.ts";
+import { nextId, renumberExpr, renumberStmt, renumberTypeNode, Rewrites, someNode, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
+import { cloneExpr, cloneStmt, cloneTypeNode, rebuiltExpr, rebuiltStmt, rebuiltTypeNode } from "./rebuild.ts";
 import type { ObjectType, Type, UnionType, Typing } from "./typing.ts";
 
 // `quote` and `quoteType`: Fish source written in a template, parsed while checking into the
@@ -24,9 +24,9 @@ export type Quote = { tree: Expr | Stmt | TypeNode; category: Category; holes: E
 // text is one and doesn't start as JavaScript's statements do, else one statement or
 // declaration. `parsedQuotes` holds each quote parsed so far.
 // Whether `tree` uses `import.meta`.
-function usesImportMeta(tree: Expr | Stmt, expression: boolean): boolean {
-  const found = (n: AnyNode) => n.node !== undefined && (n.node as { kind?: string; name?: string }).kind === "meta" && (n.node as { name?: string }).name === "import.meta";
-  return expression ? someNode("expr", tree as Expr, found) : someNode("stmt", tree as Stmt, found);
+function usesImportMeta(tree: Ref<Expr | Stmt>, expression: boolean): boolean {
+  const found = (n: AnyNode) => n.of === "expr" && n.node.kind === "meta" && n.node.name === "import.meta";
+  return expression ? someNode({ of: "expr", node: tree as Ref<Expr> }, found) : someNode({ of: "stmt", node: tree as Ref<Stmt> }, found);
 }
 
 /** @throws {CompileError} */
@@ -267,7 +267,14 @@ const VARIANTS = new Set(["None"]);
 export type Free = Map<string, string>;
 
 function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode", h: Hygiene, file: usize, bound: Map<string, string>, free: Free): unknown {
-  const copy = renumber(of, structuredClone(tree), () => nextId(ids));
+  const copy: Expr | Stmt | TypeNode =
+    of === "expr"
+      ? renumberExpr(cloneExpr(tree as Expr), () => nextId(ids))
+      : of === "stmt"
+        ? renumberStmt(cloneStmt(tree as Stmt), () => nextId(ids))
+        : renumberTypeNode(cloneTypeNode(tree as TypeNode), () => nextId(ids));
+  const rootOf = (): AnyNode =>
+    of === "expr" ? { of: "expr", node: copy as Expr } : of === "stmt" ? { of: "stmt", node: copy as Stmt } : { of: "typeNode", node: copy as TypeNode };
   const rewrites = new Rewrites();
   const names = h.namesIn.get(file)!;
   const bind = (name: unknown) => {
@@ -283,7 +290,7 @@ function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode
     for (const x of [...(n.elements ?? []), ...(n.args ?? []), ...(n.patterns ?? [])]) pattern(x, inMatch);
     pattern(n.rest, inMatch);
   };
-  walkTree(of, copy, ({ node }) => {
+  walkWhile(rootOf(), ({ node }) => {
     const n = node as Record<string, unknown> & { kind?: string };
     // A C function's name, and its parameters', are C's.
     if (n.kind === "declare") return false;
@@ -293,6 +300,7 @@ function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode
     if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: unknown }[]) bind(p.name);
     if (n.kind === "try") pattern(n.param);
     if (Array.isArray(n.arms)) for (const a of n.arms as { pattern: unknown }[]) pattern(a.pattern, true);
+    return true;
   });
   const renamed = (name: string): string | undefined => {
     const [head, ...rest] = name.split(".");
@@ -307,17 +315,18 @@ function hygienic(ids: Ids, tree: Quote["tree"], of: "expr" | "stmt" | "typeNode
     free.set(head!, pinned);
     return [pinned, ...rest].join(".");
   };
-  walkTree(of, copy, ({ node }) => {
+  walkWhile(rootOf(), ({ of: kind, node }) => {
     const n = node as Record<string, unknown> & { kind?: string };
     if (n.kind === "declare") return false;
     if (NAMED.has(n.kind!) && typeof n.name === "string") n.name = renamed(n.name) ?? n.name;
     // `{ x }` naming a renamed variable is `{ x: x@m0 }`.
-    if (n.kind === "shorthand" && typeof n.name === "string" && renamed(n.name)) {
-      const key = n.name;
-      const value: Expr = { id: nextId(ids), kind: "ident", name: renamed(key)!, start: n.start as usize, end: n.end as usize };
-      rewrites.replace(node as Expr, { id: 0, kind: "property", key, value, start: value.start, end: value.end });
+    if (kind === "objectProp" && node.kind === "shorthand" && renamed(node.name)) {
+      const key = node.name;
+      const value: Expr = { id: nextId(ids), kind: "ident", name: renamed(key)!, start: node.start, end: node.end };
+      rewrites.replaceObjectProp(node, { id: 0, kind: "property", key, value, start: value.start, end: value.end });
     }
     if (Array.isArray(n.typeParams)) for (const p of n.typeParams as { name: string }[]) p.name = bound.get(p.name) ?? p.name;
+    return true;
   });
   return of === "expr" ? rebuiltExpr(copy as Expr, rewrites) : of === "stmt" ? rebuiltStmt(copy as Stmt, rewrites) : rebuiltTypeNode(copy as TypeNode, rewrites);
 }

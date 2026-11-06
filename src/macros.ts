@@ -9,7 +9,7 @@ import { built, declaredBy, freshName, quoted, withHygiene, type Category, type 
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
 import type { Id } from "./ids.ts";
-import { nextId, NodeMap, NodeSet, renumber, Rewrites, walk, type Ids } from "./nodes.ts";
+import { nextId, NodeMap, NodeSet, renumberStmts, Rewrites, walk, type Ids } from "./nodes.ts";
 import { rebuiltStmts } from "./rebuild.ts";
 import { markGenerated } from "./warnings.ts";
 
@@ -153,7 +153,7 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
 
 // Gives every node of a tree one span, as code a decorator made.
 function respan(member: ClassMember, at: { start: usize; end: usize }) {
-  walk("classMember", member, ({ node }) => {
+  walk({ of: "classMember", node: member }, ({ node }) => {
     const n = node as Partial<{ start: usize; end: usize }>;
     if (typeof n.start === "number") n.start = at.start;
     if (typeof n.end === "number") n.end = at.end;
@@ -175,7 +175,7 @@ function copied(ids: Ids, loaded: Loaded): { loaded: Loaded; of: NodeMap<Stmt, S
   const copies = new Map<Module, Module>();
   const of = new NodeMap<Stmt, Stmt>();
   for (const m of loaded.modules) {
-    const statements = renumber("stmt", structuredClone(m.statements), () => nextId(ids));
+    const statements = renumberStmts(structuredClone(m.statements), () => nextId(ids));
     m.statements.forEach((s, i) => of.set(s, statements[i]!));
     copies.set(m, { ...m, statements, targets: new NodeMap() });
   }
@@ -332,7 +332,7 @@ function freeNames(s: Stmt): Set<string> {
     binding(n.rest);
   };
   const top = s.kind === "export" ? s.body : s;
-  walk("stmt", top, ({ node }) => {
+  walk({ of: "stmt", node: top }, ({ node }) => {
     const n = node as Record<string, unknown> & { kind?: string };
     const inner = node !== top;
     if ((n.kind === "ident" || n.kind === "ref" || n.kind === "variant") && typeof n.name === "string") used.add(n.name.split(".")[0]!);
@@ -378,7 +378,7 @@ function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: NodeSet
 // The top-level declarations a program's quotes make.
 function quoteDeclarations(tables: Tables, s: Stmt): string[] {
   const found: string[] = [];
-  walk("stmt", s, ({ of, node: n }) => {
+  walk({ of: "stmt", node: s }, ({ of, node: n }) => {
     if (of !== "expr" || n.kind !== "tagged" || n.tag.kind !== "ident" || (n.tag.name !== "quote" && n.tag.name !== "quoteType")) return;
     try {
       found.push(...declaredBy(quoted(tables, n, n.tag.name === "quoteType")));
@@ -495,10 +495,10 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
       throw new CompileError("E1104", `a macro gave no '${name}' back, so the decorators still to apply to its ${decl.kind === "class" ? "members" : "parameters"} have nowhere to go`, at.start, at.end);
     }
     if (!same) return;
-    if (own.length > 0) rewrites.replace(same, { ...same, decorators: [...own, ...(same.decorators ?? [])] } as Stmt);
+    if (own.length > 0) rewrites.replaceStmt(same, { ...same, decorators: [...own, ...(same.decorators ?? [])] } as Stmt);
     // Each goes back to the member of the same kind and name, or the same kind when it has none,
     // or else the same place, a member taking one member's decorators.
-    const back = <T extends Id & { decorators: Expr[] }>(list: T[], before: T[], saved: Expr[][], key: (x: T) => string) => {
+    const back = <T extends Id & { decorators: Expr[] }>(list: T[], before: T[], saved: Expr[][], key: (x: T) => string, put: (at: T, by: T) => void) => {
       const taken = new Set<T>();
       saved.forEach((decorators, i) => {
         if (decorators.length === 0) return;
@@ -507,13 +507,13 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
         const at = list.find((x) => !taken.has(x) && key(x) === want) ?? (place && !taken.has(place) && kindOf(place) === kindOf(before[i]!) ? place : undefined);
         if (!at) throw new CompileError("E1104", "a macro took away what these decorators were waiting to apply to", decorators[0]!.start, decorators[0]!.end);
         taken.add(at);
-        rewrites.replace(at, { ...at, decorators: [...decorators, ...at.decorators] } as unknown as Param);
+        put(at, { ...at, decorators: [...decorators, ...at.decorators] });
       });
     };
     const kindOf = (x: unknown) => (x as { kind?: string }).kind ?? "param";
     const memberKey = (m: ClassMember) => `${m.kind} ${m.modifiers.includes("static") ? "static " : ""}${typeof (m as { name?: unknown }).name === "string" ? (m as { name: string }).name : ""}`;
-    if (same.kind === "class" && decl.kind === "class") back(same.members, decl.members, members, memberKey);
-    if (same.kind === "function" && decl.kind === "function") back(same.params, decl.params, params, (p) => (p.pattern.kind === "ident" ? p.pattern.name : `#${decl.params.indexOf(p)}`));
+    if (same.kind === "class" && decl.kind === "class") back(same.members, decl.members, members, memberKey, (at, by) => void rewrites.replaceClassMember(at, by));
+    if (same.kind === "function" && decl.kind === "function") back(same.params, decl.params, params, (p) => (p.pattern.kind === "ident" ? p.pattern.name : `#${decl.params.indexOf(p)}`), (at, by) => void rewrites.replaceParam(at, by));
   };
   return { bare: bare as Stmt, restore };
 }

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { forEachChild, walk, type AnyNode } from "../src/nodes.ts";
+import { forEachChild, walk, walkWhile, type AnyNode } from "../src/nodes.ts";
 import { parse, type Expr, type Pattern, type Stmt, type TypeNode } from "../src/parser.ts";
 
 // The checker's files, read as Fish reads them: with the compiler's own parser.
@@ -28,13 +28,14 @@ test("no top-level function in the checker returns an object of its own inner fu
         if (s.kind === "function") inner.add(s.name);
         if (s.kind === "let") for (const d of s.declarations) if (d.target.kind === "ident" && (d.init?.kind === "arrow" || d.init?.kind === "function")) inner.add(d.target.name);
       }
-      walk("stmt", top.body, ({ of, node }) => {
+      walkWhile({ of: "stmts", node: top.body }, ({ of, node }) => {
         if ((of === "stmt" && (node as Stmt).kind === "function") || (of === "expr" && ["arrow", "function"].includes((node as Expr).kind))) return false;
-        if (of !== "stmt") return;
+        if (of !== "stmt") return true;
         const s = node as Stmt;
-        if (s.kind !== "return" || s.value?.kind !== "object") return;
+        if (s.kind !== "return" || s.value?.kind !== "object") return true;
         const handed = s.value.props.flatMap((p) => (p.kind === "shorthand" ? [p.name] : p.kind === "property" && p.value.kind === "ident" ? [p.value.name] : []));
         if (handed.some((n) => inner.has(n))) offenders.push(`${name}.ts:${lineOf(text, s.start)}: ${top.name}`);
+        return true;
       });
     }
   }
@@ -56,7 +57,7 @@ test("no code in the checker destructures a method out of a module class's insta
       const own = new Set(members.flatMap((m) => (m.kind === "method" && typeof m.name === "string" ? [m.name] : [])));
       if (own.size > 0) methods.set((s as { name: string }).name, own);
     }
-    walk("stmt", program, (n) => {
+    walk({ of: "stmts", node: program }, (n) => {
       const c = classAt(n) as { name: string | undefined; members: { kind: string; name?: unknown; type?: TypeNode; returnType?: TypeNode }[] } | undefined;
       if (!c) return;
       if (!c.name) return;
@@ -73,7 +74,7 @@ test("no code in the checker destructures a method out of a module class's insta
   const offenders: string[] = [];
   for (const { name, text, program } of parsed) {
     const typed = new Map<string, string>();
-    walk("stmt", program, ({ of, node }) => {
+    walk({ of: "stmts", node: program }, ({ of, node }) => {
       if (of === "param") {
         const p = node as { pattern: Pattern; type: TypeNode | undefined };
         if (p.pattern.kind === "ident" && typeName(p.type)) typed.set(p.pattern.name, typeName(p.type)!);
@@ -97,7 +98,7 @@ test("no code in the checker destructures a method out of a module class's insta
       const taken = pattern.props.flatMap((p) => (typeof p.key === "string" && own.has(p.key) ? [p.key] : []));
       if (taken.length > 0) offenders.push(`${name}.ts:${lineOf(text, at)}: ${taken.join(", ")} of ${of}`);
     };
-    walk("stmt", program, ({ of, node }) => {
+    walk({ of: "stmts", node: program }, ({ of, node }) => {
       if (of === "declarator") {
         const d = node as { target: Pattern; init: Expr | undefined; start: number };
         check(d.target, classOf(d.init), d.start);
@@ -121,7 +122,7 @@ function hostedModules() {
       const members = s.kind === "interface" ? s.members : s.kind === "typeAlias" && s.type.kind === "object" ? s.type.members : [];
       if (members.some((m) => m.kind === "method")) callable.add((s as { name: string }).name);
     }
-    walk("stmt", program, (n) => {
+    walk({ of: "stmts", node: program }, (n) => {
       const c = classAt(n) as { name: string | undefined; members: Member[] } | undefined;
       if (!c) return;
       if (c.name) classes.set(c.name, c.members);
@@ -144,7 +145,7 @@ test("no class in the checker holds, as a field, a module that calls back into i
   const { hosted, unwrapped } = hostedModules();
   const offenders: string[] = [];
   for (const { name, text, program } of parsed) {
-    walk("stmt", program, (n) => {
+    walk({ of: "stmts", node: program }, (n) => {
       const c = classAt(n) as { name: string | undefined; members: Member[] } | undefined;
       if (!c) return;
       for (const m of c.members) {
@@ -166,7 +167,7 @@ test("no module that calls back into its host keeps state of its own", () => {
   const { hosted } = hostedModules();
   const offenders: string[] = [];
   for (const { name, text, program } of parsed) {
-    walk("stmt", program, (n) => {
+    walk({ of: "stmts", node: program }, (n) => {
       const c = classAt(n) as { name: string | undefined; members: Member[] } | undefined;
       if (!c?.name || !hosted.has(c.name)) return;
       for (const m of c.members) if (m.kind === "field" && m.init) offenders.push(`${name}.ts:${lineOf(text, m.start)}: ${c.name}.${String(m.name)}`);
@@ -283,7 +284,7 @@ test("every fallible function, method, constructor and interface method in the c
         }
       }
     }
-    walk("stmt", prog, ({ of, node }) => {
+    walk({ of: "stmts", node: prog }, ({ of, node }) => {
       if (of === "stmt" && (node as Stmt).kind === "function") {
         const fn = node as Extract<Stmt, { kind: "function" }>;
         if (!fn.body || items.some((i) => i.file === file && i.start === fn.start)) return;

@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { parse, type Expr, type Param, type Stmt } from "../src/parser.ts";
 import { BASELINE, survey, type Baseline } from "../scripts/selfhost.ts";
 
-setDefaultTimeout(300_000);
+// Checking every source file takes minutes now that most get past their first lines.
+setDefaultTimeout(900_000);
 
 const SRC = join(import.meta.dir, "..", "src");
 

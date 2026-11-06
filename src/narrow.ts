@@ -74,7 +74,7 @@ export function literalValue(e: Expr): string | bigint | boolean | undefined {
 // What a call of a function with a type predicate proves: which argument is narrowed, and to what.
 // `narrows` hears whether its true and its false answers narrow, which codegen then checks.
 /** @throws {CompileError} */
-export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usize; type: Type; narrows(yes: boolean, no: boolean): void } | undefined;
+export type Predicate = (call: Extract<Expr, { kind: "call" }>) => { index: usize; type: Type; narrows: (yes: boolean, no: boolean) => void } | undefined;
 
 /** @throws {CompileError} */
 export type NarrowPath = (e: Expr) => string | undefined;
@@ -227,7 +227,10 @@ export function either(typing: Typing, x: Facts, y: Facts): Facts {
   const out: Facts = new Map();
   for (const [local, t] of x) {
     const other = y.get(local);
-    if (other) out.set(local, typing.unionType([t, other]));
+    if (!other) continue;
+    const tr = typing.recOf(t);
+    const or = typing.recOf(other);
+    out.set(local, tr?.kind === "ref" && or?.kind === "ref" ? typing.refType(typing.unionType([tr.to, or.to]), tr.mutable && or.mutable && tr.to === or.to, tr.life === or.life ? tr.life : undefined) : typing.unionType([t, other]));
   }
   return out;
 }

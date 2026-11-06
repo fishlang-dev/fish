@@ -65,7 +65,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   // The record of a type that isn't a primitive.
   const record = (t: Type | undefined) => (t === undefined || typeof t === "string" ? undefined : typing.rec(t));
   // A place put into a `Ref<T> | null` is lent to the reference the Option holds.
-  const coercions = new NodeMap(instance.coercions);
+  const coercions = new NodeMap([...instance.coercions]);
   for (const [e, to] of coercions) {
     const ref = typing.optionRef(to);
     const from = types.get(e);
@@ -205,7 +205,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         // A declaration run again by a loop makes a fresh variable, which holds nothing yet.
         release(local);
         if (!d.init) {
-          state?.moves.set(String(local.id), { start: d.start, end: d.end, note: `'${name}' is declared here without a value`, passes: new NodeMap(passes), unassigned: true });
+          state?.moves.set(String(local.id), { start: d.start, end: d.end, note: `'${name}' is declared here without a value`, passes: new NodeMap([...passes]), unassigned: true });
           return;
         }
         expr(d.init, (p) => `'${p}' moved here: '${name}' owns it now; use '${p}.clone()' to keep a copy`);
@@ -667,7 +667,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
         else for (const index of indexes(target)) expr(index);
         // A place inside a variable is found before the value runs, so a nested function the
         // value calls can't replace the variable from under it.
-        const nested = instance.envs !== undefined && holdsNode("expr", e.value, (n) => instance.envs!.has(n as Expr));
+        const nested = instance.envs !== undefined && holdsNode({ of: "expr", node: e.value }, (n) => n.of === "expr" && instance.envs!.has(n.node));
         const root = nested && (target.kind === "member" || target.kind === "index") ? rootOf(target) : undefined;
         const held = root && key(root);
         const hold = -(target.start + 0.75);
@@ -958,7 +958,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
     // A closure moving out what it captures holds it, and can run only once.
     if (root && instance.captures?.has(root.localId)) instance.moved!.add(root.localId);
     instance.consumes.add(e);
-    state.moves.set(place, { start: e.start, end: e.end, note: hinted(type, consume!(text(e))), passes: new NodeMap(passes) });
+    state.moves.set(place, { start: e.start, end: e.end, note: hinted(type, consume!(text(e))), passes: new NodeMap([...passes]) });
   }
 
   // A message without its advice to clone, for a value holding a JoinHandle, which can't be.
@@ -1454,7 +1454,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
       if (!held || typing.isCopy(from!.type)) free(place, use, mutable || (held && reborrows(from!)) ? "lend mutably" : "read");
       else {
         free(place, use, "move");
-        state?.moves.set(place, { start: use.start, end: use.end, note: `'${from!.name}' moved here into a closure, which holds it now`, passes: new NodeMap(passes) });
+        state?.moves.set(place, { start: use.start, end: use.end, note: `'${from!.name}' moved here into a closure, which holds it now`, passes: new NodeMap([...passes]) });
         // A closure moving one of this closure's captures into itself moves it out of this one.
         if (instance.captures?.has(from!.localId)) instance.moved!.add(from!.localId);
       }

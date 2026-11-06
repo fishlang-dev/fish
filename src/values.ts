@@ -26,8 +26,8 @@ import { bodyOf, type BodyId, type ClassId, type InstanceId, type LocalId } from
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
-import { childrenOf, forEachChild, nextId, NodeMap, NodeSet, renumber, someNode, walk, type AnyNode } from "./nodes.ts";
-import { rebuiltExpr } from "./rebuild.ts";
+import { forEachChild, nextId, NodeMap, NodeSet, renumberExpr, respanExpr, someNode, walk, walkWhile, type AnyNode } from "./nodes.ts";
+import { cloneExpr, rebuiltExpr } from "./rebuild.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -620,19 +620,19 @@ export class Expressions<C extends Context> implements Union {
   private holdsFuture(t: Type): boolean {
     return typeof t !== "string" && (this.typing.rec(t).kind === "future" || this.typing.promiseElement(t) !== undefined);
   }
-  types: Context["types"];
-  private locals: Context["locals"];
-  coercions: Context["coercions"];
-  private calls: Context["calls"];
-  private setters: Context["setters"];
-  private byName: Context["byName"];
-  private classes: Context["classes"];
-  private enums: Context["enums"];
-  private borrowsFrom: Context["borrowsFrom"];
-  private self: Context["self"];
-  private owner: Context["owner"];
-  private superCall: Context["superCall"];
-  private closing: Context["closing"];
+  types: NodeMap<Expr, Type>;
+  private locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
+  coercions: NodeMap<Expr, Type>;
+  private calls: NodeMap<Expr, InstanceId>;
+  private setters: NodeMap<Expr, InstanceId>;
+  private byName: Map<string, BodyId>;
+  private classes: Map<string, ClassId>;
+  private enums: Map<string, EnumInfo>;
+  private borrowsFrom: NodeMap<Expr, Expr[]>;
+  private self: Body["self"];
+  private owner: ClassType | undefined;
+  private superCall: Expr | undefined;
+  private closing: boolean;
   private localAt(n: Expr | Stmt | Param | ObjectProp) {
     return this.arenas.localOf(this.locals.get(n));
   }
@@ -640,7 +640,7 @@ export class Expressions<C extends Context> implements Union {
   private bare(e: Expr): Expr {
     const now = this.rewrites.current(e);
     const off = bareOf(now);
-    return off === now ? now : this.bare(off);
+    return off.id === now.id ? now : this.bare(off);
   }
   private bodyNamed(name: string) {
     return this.arenas.bodyOf(this.byName.get(name));
@@ -867,10 +867,10 @@ export class Expressions<C extends Context> implements Union {
   private armValues(body: Expr | Stmt): Expr[] {
     if (body.kind !== "block") return [body as Expr];
     const found: Expr[] = [];
-    walk("stmt", body, ({ node }) => {
-      const n = node as { kind?: string; value?: Expr };
-      if (n.kind === "arrow" || n.kind === "function" || n.kind === "match") return false;
-      if (n.kind === "return" && n.value) found.push(n.value);
+    walkWhile({ of: "stmt", node: body }, (n) => {
+      if ((n.of === "expr" && (n.node.kind === "arrow" || n.node.kind === "match")) || (n.of === "stmt" && n.node.kind === "function")) return false;
+      if (n.of === "stmt" && n.node.kind === "return" && n.node.value) found.push(n.node.value);
+      return true;
     });
     return found;
   }
@@ -927,7 +927,7 @@ export class Expressions<C extends Context> implements Union {
       if (arm.body.kind === "block") return this.ctx.block(arm.body, wanted);
       return [[arm.body, wanted ? this.value(arm.body) : this.result(arm.body)]];
     }));
-    const example = uncovered(this.typing, this.ids, e.arms.filter((a) => !a.guard).map((a) => [a.pattern]), [subject], (p) => this.ctx.patterns.get(p));
+    const example = uncovered(this.typing, this.ids, e.arms.filter((a) => !a.guard).map((a) => [a.pattern]), [subject], this.ctx.patterns);
     if (example) throw new CompileError("E0607", missing(this.typing, example[0]!, subject), e.start, e.subject.end + 1);
     if (!wanted) return "void";
     // Arms that only throw give nothing, so some other arm has to.
@@ -1011,7 +1011,7 @@ export class Expressions<C extends Context> implements Union {
       if (p.length === 1 && names.has(p[0]!)) return true;
       return own.slice(0, Math.min(own.length, p.length)).every((s, i) => s === p[i]);
     };
-    return someNode("expr", body, ({ of, node: e }) => of === "expr" && ((e.kind === "assign" && overlaps(e.target)) || (e.kind === "update" && overlaps(e.operand))));
+    return someNode({ of: "expr", node: body }, (n) => n.of === "expr" && ((n.node.kind === "assign" && overlaps(n.node.target)) || (n.node.kind === "update" && overlaps(n.node.operand))));
   }
 
   // A binding the right side declares with a name the place reads, which would capture the
@@ -1020,11 +1020,13 @@ export class Expressions<C extends Context> implements Union {
     const root = this.path(place)![0]!;
     const names = new Set([...this.indexNames(place), ...(root === "this" ? [] : [root])]);
     let found: Expr | undefined;
-    const topical = (n: AnyNode) => n.of !== "stmts" && someNode(n.of, n.node as never, ({ of, node }) => of === "expr" && node.kind === "topic");
+    const topical = (n: AnyNode) => n.of !== "stmts" && someNode(n, (c) => c.of === "expr" && c.node.kind === "topic");
     // A name a pattern binds, or one its defaults read.
-    const declared = (p: Pattern) => walk("pattern", p, ({ of, node }) => {
+    const declared = (p: Pattern) => walkWhile({ of: "pattern", node: p }, (n) => {
       if (found) return false;
-      if ((of === "pattern" || of === "expr") && node.kind === "ident" && names.has(node.name)) found = node as Expr;
+      if (n.of === "pattern" && n.node.kind === "ident" && names.has(n.node.name)) found = { id: n.node.id, kind: "ident", name: n.node.name, start: n.node.start, end: n.node.end };
+      else if (n.of === "expr" && n.node.kind === "ident" && names.has(n.node.name)) found = n.node;
+      return true;
     });
     // A declaration's scope is the closest arrow, match arm, block, loop or `try` around it; it
     // captures the place only where a `%` is inside that scope.
@@ -1069,7 +1071,7 @@ export class Expressions<C extends Context> implements Union {
         if (n.kind === "topic") return void this.rewrites.replace(n, replace(n));
         if (n.kind === "pipe") return void this.topics(n.value, replace);
       }
-      for (const c of childrenOf(item)) visit(c);
+      forEachChild(item, (c) => visit(c));
     };
     visit({ of: "expr", node: body });
   }
@@ -1080,24 +1082,19 @@ export class Expressions<C extends Context> implements Union {
   private pipeBody(e: Extract<Expr, { kind: "pipe" }>, replace: (topic: Expr) => Expr): Expr {
     const made = this.rewrites.current(e.body);
     if (made !== e.body) return made;
-    const copy = structuredClone(e.body);
-    const written: AnyNode[] = [];
-    walk("expr", e.body, (n) => void written.push(n));
-    let i = 0;
-    walk("expr", copy, ({ node }) => void this.rewrites.replace(written[i++]!.node as Expr, node as Expr));
-    this.topics(copy, replace);
-    return rebuiltExpr(copy, this.rewrites);
+    this.topics(e.body, replace);
+    const body = rebuiltExpr(e.body, this.rewrites);
+    return body === e.body ? this.rewrites.replace(e.body, { ...body }) : body;
   }
 
   // A copy of `e` with fresh ids, as checking has left it so far.
   private freshCopy(e: Expr): Expr {
-    return renumber("expr", structuredClone(rebuiltExpr(structuredClone(e), this.rewrites)), () => nextId(this.ids));
+    return renumberExpr(cloneExpr(rebuiltExpr(cloneExpr(e), this.rewrites)), () => nextId(this.ids));
   }
 
   // A copy of an expression standing where `at` was, for messages and for keys by position.
   private spanned(e: Expr, at: Expr): Expr {
-    walk("expr", e, ({ node }) => void Object.assign(node, { start: at.start, end: at.end }));
-    return e;
+    return respanExpr(e, at);
   }
 
   // Checks a pattern against the type of the value it meets, declaring what it binds and
@@ -1245,7 +1242,7 @@ export class Expressions<C extends Context> implements Union {
     if (variant) {
       const nothing = this.typing.lower(this.ctx.resolveType(variant.typeArgs[0]!)) === "void";
       const named = this.rewrites.replace(e.callee, { ...(e.callee as Extract<Expr, { kind: "ident" }>), name: nothing ? `${variant.name} void` : variant.name });
-      e = this.rewrites.replace(e, { ...e, callee: named, typeArgs: nothing ? variant.typeArgs.slice(1) : variant.typeArgs });
+      e = this.rewrites.replace(e, { ...e, callee: named, typeArgs: nothing ? variant.typeArgs.slice(1) : variant.typeArgs }) as Call;
     }
     const result = this.callee(e);
     e = this.rewrites.current(e) as Call;
@@ -1282,10 +1279,10 @@ export class Expressions<C extends Context> implements Union {
   private callee(this: Mut<this>, e: Call): { type: Type; what: string } {
     // `c[Symbol.iterator]()` calls the method that key names.
     const key = this.rewrites.current(e.callee);
-    if (key.kind === "index" && isIteratorKey(key.index)) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.replace(key, { id: 0, kind: "member", object: key.object, name: ITERATOR, optional: key.optional, start: key.start, end: key.end }) });
+    if (key.kind === "index" && isIteratorKey(key.index)) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.replace(key, { id: 0, kind: "member", object: key.object, name: ITERATOR, optional: key.optional, start: key.start, end: key.end }) }) as Call;
     // `t[0](x)` calls a tuple's element, as a field holding a callable is called.
     this.untuple(e.callee);
-    if (this.rewrites.current(e.callee) !== e.callee) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.current(e.callee) });
+    if (this.rewrites.current(e.callee) !== e.callee) e = this.rewrites.replace(e, { ...e, callee: this.rewrites.current(e.callee) }) as Call;
     const { callee } = e;
     if (this.blockingRuns.has(e) && callee.kind === "ident") this.blockingRun(callee);
     if (e.optional && callee.kind !== "member") throw unsupported("optional calls", e);
@@ -1355,7 +1352,7 @@ export class Expressions<C extends Context> implements Union {
       if (e.typeArgs.length > 0) throw new CompileError("E0106", `'u8.${callee.name}' takes no type arguments`, e.start, e.end);
       const most = callee.name === "fromBase64" ? 2 : 1;
       if (e.args.length < 1 || e.args.length > most) throw new CompileError("E0504", most === 1 ? "'u8.fromHex' takes one string of hex digits" : "'u8.fromBase64' takes a string and an optional options object, as in '{ alphabet: \"base64url\" }'", e.start, e.end);
-      return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: helper, start: callee.start, end: callee.end } }));
+      return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: helper, start: callee.start, end: callee.end } }) as Call);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Object" && !this.ctx.lookup("Object") && !this.classes.has("Object") && !this.byName.has("Object") && !this.byName.has("const Object") && !this.enums.has("Object")) return this.objectStatic(e, callee);
     if (callee.kind === "member" && this.isString(callee.object)) return this.stringStatic(e, callee);
@@ -1386,7 +1383,7 @@ export class Expressions<C extends Context> implements Union {
       if (e.typeArgs.length > 0) throw new CompileError("E0106", "'fill' takes no type argument; write the element type on the array, as in 'new Array<u8>(n).fill(0)'", e.start, e.end);
       if (made.args?.length !== 1 || e.args.length !== 1) throw new CompileError("E0504", "'new Array(n).fill(x)' makes n copies of x; it takes one length and one value", e.start, e.end);
       const [n, x] = [made.args[0]!, e.args[0]!];
-      const filled = this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [this.arrayLength(n, true), x], typeArgs: made.typeArgs });
+      const filled = this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: "array filled", start: callee.start, end: callee.end }, args: [this.arrayLength(n, true), x], typeArgs: made.typeArgs }) as Call;
       this.fills.add(filled);
       return this.call(filled);
     }
@@ -1552,7 +1549,7 @@ export class Expressions<C extends Context> implements Union {
       const arrow: Expr = { id: nextId(this.ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: run, start: f.start, end: f.end };
       const task: Expr = { id: nextId(this.ids), kind: "call", callee: arrow, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
       const spawned: Expr = made ? { id: nextId(this.ids), kind: "pipe", value: f, body: task, start: f.start, end: f.end } : arrow;
-      return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: "blocking spawn", start: callee.start, end: callee.end }, args: [spawned] }));
+      return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: "blocking spawn", start: callee.start, end: callee.end }, args: [spawned] }) as Call);
     }
     // std's `timer spawn` is `spawn` with the task's first poll run at once; `blocking spawn` is
     // what `spawnBlocking` becomes.
@@ -1563,7 +1560,7 @@ export class Expressions<C extends Context> implements Union {
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
       const given = e.args[0]!;
       if (given.kind === "arrow" && given.async && given.params.length === 0) {
-        e = this.rewrites.replace(e, { ...e, args: [{ id: nextId(this.ids), kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end }] });
+        e = this.rewrites.replace(e, { ...e, args: [{ id: nextId(this.ids), kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end }] }) as Call;
       }
       const t = this.value(e.args[0]!);
       const r = this.recOf(t);
@@ -1728,7 +1725,7 @@ export class Expressions<C extends Context> implements Union {
     if (util === "parseArgs" && !this.parsedArgs.has(e)) {
       if (e.optional) throw new CompileError("E0505", "'parseArgs' is always there, so it is called without '?.'", e.start, e.end);
       this.refuseSpread(e.args);
-      e = this.rewrites.replace(e, { ...e, args: parseArgsArgs(this.ids, e) });
+      e = this.rewrites.replace(e, { ...e, args: parseArgsArgs(this.ids, e) }) as Call;
       this.parsedArgs.add(e);
     }
     // Fish's value equality, which `===` already is.
@@ -1932,8 +1929,7 @@ export class Expressions<C extends Context> implements Union {
   // with them.
   /** @throws {CompileError} */
   private familyCall(this: Mut<this>, e: Call, type: Pick<FunctionRecord, "generic">, name: string): { type: Type; throws: Type | undefined; what: string } {
-    const { names, node, scope } = type.generic!;
-    const written = node as Extract<TypeNode, { kind: "function" }>;
+    const { names, node: written, scope } = type.generic!;
     if (e.args.length !== written.params.length) throw new CompileError("E0501", `expected ${written.params.length} argument${written.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     const argTypes = e.args.map((a) => this.value(a));
     const bindings = new Map<string, Type>();
@@ -2341,14 +2337,14 @@ export class Expressions<C extends Context> implements Union {
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
     if (Object.hasOwn(ITERATORS, callee.name)) {
       if (e.args.length > 0) throw new CompileError("E0504", `'${callee.name}' takes no arguments`, e.start, e.end);
-      return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: ITERATORS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] }));
+      return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: ITERATORS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] }) as Call);
     }
     // `toBase64(options?)` and `toHex()` on bytes call the prelude's encoders, which borrow them.
     if (Object.hasOwn(BYTE_METHODS, callee.name)) {
       if (this.typing.lower(this.typing.rec(array).element) !== "u8") throw new CompileError("E0504", `'${callee.name}' encodes bytes, a 'u8[]', not '${this.typing.show(array)}'`, callee.start, callee.end);
       const most = callee.name === "toBase64" ? 1 : 0;
       if (e.args.length > most) throw new CompileError("E0504", most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
-      return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] }));
+      return this.call(this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] }) as Call);
     }
     if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"].includes(callee.name)) {
       throw new CompileError("E0211", `'${callee.name}' changes its array, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
@@ -3205,12 +3201,12 @@ export class Expressions<C extends Context> implements Union {
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'Object.${name}' takes no type arguments`, e.start, e.end);
     const o = e.args[0];
     if (!o || e.args.length > 1 || o.kind === "spread") throw new CompileError("E0504", `'Object.${name}' takes the object to read`, e.start, e.end);
-    if (this.dictOf(this.value(this.spanned(renumber("expr", structuredClone(o), () => nextId(this.ids)), o)))) return this.call(this.dictCall(e, o, name, []));
+    if (this.dictOf(this.value(this.spanned(renumberExpr(cloneExpr(o), () => nextId(this.ids)), o)))) return this.call(this.dictCall(e, o, name, []));
     const fields = this.objectRead(name, o).fields;
     const at = { start: e.start, end: e.end };
     const key = (f: Field): Expr => ({ id: nextId(this.ids), kind: "string", value: f.name, ...at });
     const fieldValue = (f: Field): Expr => {
-      const member: Expr = { id: nextId(this.ids), kind: "member", object: this.spanned(renumber("expr", structuredClone(o), () => nextId(this.ids)), o), name: f.name, optional: false, ...at };
+      const member: Expr = { id: nextId(this.ids), kind: "member", object: this.spanned(renumberExpr(cloneExpr(o), () => nextId(this.ids)), o), name: f.name, optional: false, ...at };
       return this.typing.isCopy(f.type) ? member : { id: nextId(this.ids), kind: "call", callee: { id: nextId(this.ids), kind: "member", object: member, name: "clone", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
     };
     const elements = fields.map((f): Expr => (name === "keys" ? key(f) : name === "values" ? fieldValue(f) : { id: nextId(this.ids), kind: "array", elements: [key(f), fieldValue(f)], ...at }));
@@ -3229,7 +3225,7 @@ export class Expressions<C extends Context> implements Union {
     let root: Expr = o;
     while (root.kind === "member" && !root.optional) root = root.object;
     if (root.kind !== "this" && root.kind !== "ident") throw notPlace();
-    const probe = this.spanned(renumber("expr", structuredClone(o), () => nextId(this.ids)), o);
+    const probe = this.spanned(renumberExpr(cloneExpr(o), () => nextId(this.ids)), o);
     const t = this.typing.unfolded(this.read(probe));
     if (!this.rooted(probe)) throw notPlace();
     const r = this.recOf(t);
@@ -3295,7 +3291,7 @@ export class Expressions<C extends Context> implements Union {
     else if (!this.isArray(held)) throw new CompileError("E0119", `'...' spreads an array, a string, a generator, a Map, a Set or an iterable class, not '${this.typing.show(t)}'`, source.start, source.end);
     if (from) {
       this.ctx.exprsState.once.add(source);
-      x = this.rewrites.replace(x, { ...x, value: from });
+      x = this.rewrites.replace(x, { ...x, value: from }) as typeof x;
     }
     const array = from ? this.value(from) : t;
     const lowered = this.typing.lowerKeepingBrands(this.isRefType(array) ? this.typing.rec(array).to : array) as ArrayType;
@@ -3317,7 +3313,7 @@ export class Expressions<C extends Context> implements Union {
     if (list.length < fixed) return e;
     const rest = list.slice(fixed);
     const at = rest.length > 0 ? { start: rest[0]!.start, end: rest.at(-1)!.end } : { start: e.end - 1, end: e.end - 1 };
-    const made = this.rewrites.replace(e, { ...e, args: [...list.slice(0, fixed), { id: nextId(this.ids), kind: "array", elements: rest, ...at }] });
+    const made = this.rewrites.replace(e, { ...e, args: [...list.slice(0, fixed), { id: nextId(this.ids), kind: "array", elements: rest, ...at }] }) as T;
     this.packed.add(made);
     return made;
   }
@@ -3339,7 +3335,7 @@ export class Expressions<C extends Context> implements Union {
       const fixed = this.typing.elementsOf(t).map((_, n) => element(String(n)));
       return this.typing.rec(t).rest === undefined ? fixed : [...fixed, { id: nextId(this.ids), kind: "spread", value: element("..."), ...at }];
     });
-    return this.rewrites.replace(e, { ...e, args: parts });
+    return this.rewrites.replace(e, { ...e, args: parts }) as T;
   }
 
   // The tuple a spread argument's variable holds, if it holds one.
@@ -3621,7 +3617,7 @@ export class Expressions<C extends Context> implements Union {
         this.borrowsFrom.set(e, [callee.object]);
         return { type: this.typing.refType(t, true), what: `'${name}'` };
       case "get":
-        this.clonable(this.typing.rec(t).value, callee);
+        this.clonable(this.typing.rec(t).value, callee, undefined, true);
         return { type: this.typing.unionType([this.typing.rec(t).value, "null"]), what: "'get'" };
       case "has":
       case "delete":
@@ -3632,10 +3628,10 @@ export class Expressions<C extends Context> implements Union {
         return { type: this.typing.arrayType(this.typing.rec(t).key), what: "'keys'" };
       case "values":
         if (this.typing.rec(t).set) return { type: this.typing.arrayType(this.typing.rec(t).key), what: "'values'" };
-        this.clonable(this.typing.rec(t).value, callee);
+        this.clonable(this.typing.rec(t).value, callee, undefined, true);
         return { type: this.typing.arrayType(this.typing.rec(t).value), what: "'values'" };
       case "entries":
-        this.clonable(this.typing.rec(t).value, callee);
+        this.clonable(this.typing.rec(t).value, callee, undefined, true);
         return { type: this.typing.arrayType(this.typing.tupleType(this.typing.rec(t).set ? [this.typing.rec(t).key, this.typing.rec(t).key] : [this.typing.rec(t).key, this.typing.rec(t).value])), what: "'entries'" };
     }
     // `update(k, f)` and `forEach(f)` call an arrow written in place: `update`'s gets the value
@@ -3954,7 +3950,7 @@ export class Expressions<C extends Context> implements Union {
   /** @throws {CompileError} */
   private timerCall(this: Mut<this>, e: Call, name: string): Call {
     const at = { start: e.start, end: e.end };
-    const helper = (named: string, args: Expr[]) => this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] });
+    const helper = (named: string, args: Expr[]): Call => this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] }) as Call;
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}' takes no type arguments`, e.start, e.end);
     if (e.args.some((a) => a.kind === "spread")) throw new CompileError("E0504", `'${name}' takes its arguments written out, not spread`, e.start, e.end);
     if (name === "clearTimeout" || name === "clearInterval") {
@@ -3977,7 +3973,7 @@ export class Expressions<C extends Context> implements Union {
     if (callback.kind !== "arrow" && callback.kind !== "ident") throw new CompileError("E0504", `'${name}' takes a function written here or named, as in '${name}(() => tick(), ms)'; give this one a name first`, callback.start, callback.end);
     // An arrow's unwritten parameters take the types of what is passed, as TypeScript infers.
     if (callback.kind === "arrow") {
-      const params = callback.params.map((p, i) => (!p.type && passed[i] ? this.rewrites.replace(p, { ...p, type: this.presetNode(this.typing.widenLet(this.value(passed[i]!)), p) }) : p));
+      const params = callback.params.map((p, i) => (!p.type && passed[i] ? this.rewrites.replaceParam(p, { ...p, type: this.presetNode(this.typing.widenLet(this.value(passed[i]!)), p) }) : p));
       callback = this.rewrites.replace(callback, { ...callback, params });
     }
     const span = { start: callback.start, end: callback.end };
@@ -4031,7 +4027,7 @@ export class Expressions<C extends Context> implements Union {
     const gives = this.ctx.resolveType(e.typeArgs[0]!);
     const error = this.ctx.throwsDeclared() ?? this.arenas.classOf(this.classes.get("Error")!).type;
     const at = { start: e.start, end: e.end };
-    const made = this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [this.presetNode(gives, e)]), this.presetNode(error, e)] });
+    const made = this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [this.presetNode(gives, e)]), this.presetNode(error, e)] }) as Call;
     if (gives !== "void") this.promiseVariants.set(made, { name: "promise with resolvers", typeArgs: made.typeArgs });
     return made;
   }
@@ -4056,12 +4052,12 @@ export class Expressions<C extends Context> implements Union {
       if (r?.kind === "future" || r?.kind === "handle" || (r?.kind === "dyn" && this.typing.promiseElement(r.of) !== undefined)) {
         throw new CompileError("E0305", "'Promise.resolve' of a Promise would hold one Promise inside another, which Fish doesn't flatten; await it first, or use the Promise itself", e.args[0]!.start, e.args[0]!.end);
       }
-      return this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [this.presetNode(gives, e)] });
+      return this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [this.presetNode(gives, e)] }) as Call;
     }
     if (e.args.length === 0) throw new CompileError("E0305", "'Promise.reject' takes the error it throws, as in 'Promise.reject(new Error(\"failed\"))'", e.start, e.end);
     const gives = written ?? met ?? "void";
     const reason = this.value(e.args[0]!);
-    const made = this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [this.presetNode(gives, e)]), this.presetNode(this.typing.widenLet(reason), e)] });
+    const made = this.rewrites.replace(e, { ...e, callee: { id: nextId(this.ids), kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [this.presetNode(gives, e)]), this.presetNode(this.typing.widenLet(reason), e)] }) as Call;
     if (gives !== "void") this.promiseVariants.set(made, { name: "promise reject", typeArgs: made.typeArgs });
     return made;
   }
@@ -4247,7 +4243,7 @@ export class Expressions<C extends Context> implements Union {
       const missing = method.params.slice(e.args.length);
       const left = missing.findIndex((p) => !this.typing.isOption(p));
       const nulls = missing.slice(0, left < 0 ? missing.length : left).map((): Expr => ({ id: nextId(this.ids), kind: "null", start: e.end, end: e.end }));
-      if (nulls.length > 0) e = this.rewrites.replace(e, { ...e, args: [...e.args, ...nulls] });
+      if (nulls.length > 0) e = this.rewrites.replace(e, { ...e, args: [...e.args, ...nulls] }) as Call;
       this.jsCrossings.add(e);
       this.jsOptionalOf.set(e, method.optional ?? []);
       const typed = this.familyCall(e, { generic: method.generic }, `'${callee.name}'`);
@@ -4565,7 +4561,7 @@ export class Expressions<C extends Context> implements Union {
     const param: Param = { ...at, id: nextId(this.ids), pattern: { id: nextId(this.ids), kind: "ident", name, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false };
     const inner: Expr = { ...e, id: nextId(this.ids), callee: { ...callee, id: nextId(this.ids), object: { id: nextId(this.ids), kind: "ident", name, start: callee.object.start, end: callee.object.end } } };
     const arrow: Expr = { id: nextId(this.ids), kind: "arrow", move: false, async: false, typeParams: [], params: [param], returnType: undefined, body: inner, ...at };
-    const read = this.rewrites.replace(e, { ...e, callee: { ...callee, id: nextId(this.ids), name: "read" }, args: [arrow], typeArgs: [] });
+    const read = this.rewrites.replace(e, { ...e, callee: { ...callee, id: nextId(this.ids), name: "read" }, args: [arrow], typeArgs: [] }) as Call;
     return this.call(read);
   }
 
@@ -4791,8 +4787,8 @@ export class Expressions<C extends Context> implements Union {
       const takes = name === "toArray" ? "no arguments" : counted ? "1 argument, a count" : name === "reduce" ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'";
       throw new CompileError("E0504", `'${name}' takes ${takes}`, e.start, e.end);
     }
-    if (name === "toArray") return this.call(this.rewrites.replace(e, helper("array collect", [source])));
-    if (counted) return this.call(this.rewrites.replace(e, helper(GENERATOR_HELPERS[name]!, [source, unwrap(helper("iter count", [e.args[0]!]), `'${name}''s count can't be negative`)])));
+    if (name === "toArray") return this.call(this.rewrites.replace(e, helper("array collect", [source])) as Call);
+    if (counted) return this.call(this.rewrites.replace(e, helper(GENERATOR_HELPERS[name]!, [source, unwrap(helper("iter count", [e.args[0]!]), `'${name}''s count can't be negative`)])) as Call);
     const [named, init] = e.args as [Expr, Expr | undefined];
     // A declared function given by name becomes an arrow calling it, as for array methods.
     let callback = this.namedFunction(named);
@@ -4839,7 +4835,7 @@ export class Expressions<C extends Context> implements Union {
       const folded = unwrap(helper("iter reduce first", [source, callback]), "reduce of empty generator with no initial value");
       return { type: this.typeOf(this.rewrites.replace(e, { id: 0, kind: "index", object: folded, index: { id: nextId(this.ids), kind: "int", value: 0n, ...at }, optional: false, ...at })), what: "'reduce'" };
     }
-    return this.call(this.rewrites.replace(e, helper(target, init ? [source, callback, init] : [source, callback])));
+    return this.call(this.rewrites.replace(e, helper(target, init ? [source, callback, init] : [source, callback])) as Call);
   }
 
   // Whether an expression is an index into an array, a place inside it.
@@ -5569,7 +5565,7 @@ export class Expressions<C extends Context> implements Union {
   /** @throws {CompileError} */
   private keyed(this: Mut<this>, e: Expr): Expr {
     if (e.kind !== "object" || e.props.every((p) => !("key" in p) || typeof p.key === "string")) return e;
-    const props = e.props.map((p) => ("key" in p && typeof p.key !== "string" ? this.rewrites.replace(p, { ...p, key: this.knownKey(p.key) }) : p));
+    const props = e.props.map((p) => ("key" in p && typeof p.key !== "string" ? this.rewrites.replaceObjectProp(p, { ...p, key: this.knownKey(p.key) }) : p));
     return this.rewrites.replace(e, { ...e, props });
   }
 
@@ -7099,10 +7095,10 @@ export class Expressions<C extends Context> implements Union {
   // The values a match arm's block gives, through its own `return`s, not those of functions in it.
   private armReturns(block: Stmt): Expr[] {
     const found: Expr[] = [];
-    walk("stmt", block, ({ node }) => {
-      const s = node as { kind?: string; value?: Expr };
-      if (s.kind === "arrow" || s.kind === "function") return false;
-      if (s.kind === "return" && s.value) found.push(s.value);
+    walkWhile({ of: "stmt", node: block }, (n) => {
+      if ((n.of === "expr" && n.node.kind === "arrow") || (n.of === "stmt" && n.node.kind === "function")) return false;
+      if (n.of === "stmt" && n.node.kind === "return" && n.node.value) found.push(n.node.value);
+      return true;
     });
     return found;
   }

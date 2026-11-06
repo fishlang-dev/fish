@@ -1,7 +1,7 @@
 import type { Compilation } from "./compilation.ts";
 import type { CompileError, Source } from "./diag.ts";
 import { AST } from "./ast.ts";
-import { nextId, renumber, shiftSpans, someNode, walk } from "./nodes.ts";
+import { nextId, renumberStmts, someNode, walk } from "./nodes.ts";
 import { parse, type Pattern, type Stmt } from "./parser.ts";
 import { TYPED_ARRAYS } from "./typing.ts";
 
@@ -6419,12 +6419,8 @@ export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
 export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // Each call takes its own copy, since the passes below change the tree, numbered as it is taken.
   const { std } = session;
-  const all: Stmt[] = renumber("stmt", std.load ? std.load() : (std.parses++, parse(STD_SOURCE, { last: 0 })), () => nextId(ids));
-  shiftSpans("stmt", all, STD_BASE);
-  // The array iterators' generators and the promise cells take names no program can write, so
-  // none hides them.
-  hideHelpers(all);
-  const at = (s: Stmt) => s.start - STD_BASE;
+  const all: Stmt[] = std.load ? std.load() : (std.parses++, parse(STD_SOURCE, { last: 0 }));
+  const at = (s: Stmt) => s.start;
   let from = 0;
   // The statements of std's next section, in the order STD_SOURCE joins them.
   const next = (text: string) => {
@@ -6458,7 +6454,6 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   // program can write.
   const declared = new Set(written.flatMap(declaredNames));
   const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
-  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url, ...bytes, ...btoa, ...atob, ...dates], own);
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   const httpUsed = uses(written, http, HTTP_NAMES);
@@ -6473,7 +6468,12 @@ export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
   const typing = linked.some((s) => dataView.includes(s)) || mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && Object.hasOwn(TYPED_ARRAYS, n.name));
-  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(typing ? typed : []), ...(secure ? tls : [])];
+  const chosen = [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(typing ? typed : []), ...(secure ? tls : [])];
+  if (own.size > 0) hideNames(chosen, own);
+  // The array iterators' generators and the promise cells take names no program can write, so
+  // none hides them.
+  hideHelpers(chosen);
+  return renumberStmts(chosen, () => nextId(ids), STD_BASE);
 }
 
 // A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.
@@ -6486,7 +6486,7 @@ function encodes(n: Record<string, unknown>): boolean {
 // The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which
 // no program can write.
 function hideHelpers(statements: Stmt[]) {
-  walk("stmt", statements, ({ node: n }) => {
+  walk({ of: "stmts", node: statements }, ({ node: n }) => {
     const node = n as Record<string, unknown>;
     const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
     if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url|date)/.test(node.name)) {
@@ -6497,7 +6497,7 @@ function hideHelpers(statements: Stmt[]) {
 
 // Renames std's classes a program declares its own of to names no program can write.
 function hideNames(statements: Stmt[], names: Set<string>) {
-  walk("stmt", statements, ({ node: n }) => {
+  walk({ of: "stmts", node: statements }, ({ node: n }) => {
     const node = n as Record<string, unknown>;
     if ((node.kind === "class" || node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && names.has(node.name)) node.name = `std ${node.name}`;
   });
@@ -6505,7 +6505,7 @@ function hideNames(statements: Stmt[], names: Set<string>) {
 
 // Gives the std's JSON value alias its unwritable name, shown as `Json` in messages.
 function renameValue(statements: Stmt[]) {
-  walk("stmt", statements, ({ node: n }) => {
+  walk({ of: "stmts", node: statements }, ({ node: n }) => {
     const node = n as Record<string, unknown>;
     if ((node.kind === "ref" || node.kind === "typeAlias") && node.name === "JsonValue") {
       node.name = JSON_VALUE_NAME;
@@ -6565,5 +6565,5 @@ function boundNames(p: Pattern | undefined): string[] {
 
 // Whether a node in a tree is one the test picks.
 function mentions(statements: Stmt[], test: (node: Record<string, unknown>) => boolean): boolean {
-  return someNode("stmt", statements, ({ node }) => test(node as Record<string, unknown>));
+  return someNode({ of: "stmts", node: statements }, ({ node }) => test(node as Record<string, unknown>));
 }

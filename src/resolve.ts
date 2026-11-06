@@ -3,10 +3,10 @@ import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { holdsNull } from "./defaults.ts";
 import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNode } from "./parser.ts";
-import { nextId, NodeMap, walk, type Ids } from "./nodes.ts";
+import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { unitPowers, isNumeric, type RecursiveMaker, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
@@ -91,6 +91,8 @@ export interface ResolverHost {
   /** @throws {CompileError} */
   conforms(this: Mut<this>, from: Type, to: Type, at: Span): boolean;
   typeNames(at: usize): string[];
+  /** @throws {CompileError} */
+  replaced(this: Mut<this>, t: Type, swap: TypeMap<Type, Type>): Type;
 }
 
 // What a body being checked keeps in sight of a type written in it: its parameters, read from the
@@ -136,7 +138,7 @@ export class ResolverState {
 
 // Resolves type annotations and aliases. A generic alias is checked with placeholders for its
 // type parameters, and resolved again per set of type arguments.
-export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, RecursiveMaker {
+export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   tables: Tables;
   aliases: Map<string, TypeAlias>;
   interfaces: Map<string, Interface>;
@@ -243,6 +245,13 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
       this.typing.standsFor(back, of);
       this.host.resolverState.recursiveAliases.set(back, a);
     }
+    this.typing.noteRecursiveInstance(a.name, key, back);
+    if (args.some((x) => this.typing.lowerKeepingBrands(x) !== x)) {
+      this.remakeRecursive(back, args.map((x) => this.typing.lowerKeepingBrands(x)));
+    }
+    if (args.some((x) => this.typing.lower(x) !== x)) {
+      this.remakeRecursive(back, args.map((x) => this.typing.lower(x)));
+    }
     return back;
   }
 
@@ -287,6 +296,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
     }
     if (this.host.resolverState.making.has(data)) throw new CompileError("E0707", `enum '${data.name}' holds itself with other type arguments, which would make it infinitely large`, at.start, at.end);
     this.host.resolverState.making.set(data, key);
+    let instance: EnumInstance;
     try {
       const bindings = new Map(data.params.map((p, i) => [p, args[i]!]));
       const variants = new Map(data.members.map((m) => {
@@ -309,12 +319,14 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
         this.typing.standsFor(back, type);
         this.typing.holdsBlock(type as UnionType, back);
       }
-      const instance = { type, variants };
+      instance = { type, variants };
       data.instances.set(key, instance);
-      return instance;
     } finally {
       this.host.resolverState.making.delete(data);
     }
+    // Lowering reads the instance made from the lowered arguments, made once this one is done.
+    if (args.some((a) => this.typing.lower(a) !== a)) this.enumInstance(info, args.map((a) => this.typing.lower(a)), at);
+    return instance;
   }
 
   /** @throws {CompileError} */
@@ -432,7 +444,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
         if (bound !== undefined && bound !== u) swap.set(u, bound);
         return false;
       }, true);
-      return swap.size > 0 ? this.typing.replaced(preset, swap) : preset;
+      return swap.size > 0 ? this.host.replaced(preset, swap) : preset;
     }
     // `readonly T[]` is a shared borrow of an array.
     if (t.kind === "operator" && t.op === "readonly" && t.type.kind === "array") return this.typing.refType(this.typing.arrayType(this.resolveType(t.type.element)), false);
@@ -753,14 +765,14 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
       const s = resolved[i]!;
       const t = this.recOf(s);
       if (t?.kind === "object" || t?.kind === "interface") return s as ObjectType | InterfaceType;
-      if (t?.kind === "union" && t.members.every((m) => this.recOf(m)?.kind === "object")) return s as UnionType;
+      if (t?.kind === "union" && t.members.every((m) => this.recOf(this.typing.unfold(m))?.kind === "object")) return s as UnionType;
       throw unsupported(`intersections with ${t === undefined || t.kind === "literal" ? "primitive types" : t.kind === "union" ? "unions of other than object types" : SIDE_FORMS[t.kind]}`, node);
     });
     const [from, to] = [nodes[0]!, nodes.at(-1)!];
     if (sides.some((s) => this.typing.rec(s).kind === "union")) {
       const at = nodes[sides.findIndex((s) => this.typing.rec(s).kind === "interface")];
       if (at) throw unsupported("intersections of interfaces with unions", at);
-      const choices = sides.map((s) => { const r = this.typing.rec(s); return (r.kind === "union" ? r.members : [s]) as ObjectType[]; });
+      const choices = sides.map((s) => { const r = this.typing.rec(s); return (r.kind === "union" ? r.members.map((m) => this.typing.unfold(m)) : [s]) as ObjectType[]; });
       const combos = choices.reduce<ObjectType[][]>((acc, ms) => acc.flatMap((c) => ms.map((m) => [...c, m])), [[]]);
       return this.typing.unionType(combos.map((c) => c.reduce((a, b) => merged(this.typing, a, b, from, to))));
     }
@@ -833,8 +845,17 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
     const t = this.typing.interfaceType(args.length > 0 ? `${i.name}<${args.map((t) => this.typing.show(t)).join(", ")}>` : i.name);
     if (args.length > 0) this.typing.rec(t).generic = { name: i.name, args };
     byArgs.set(key, t);
+    const isInline = this.host.resolverState.inline.has(i.name);
+    if (args.length > 0 && !isInline) this.typing.noteInterfaceInstance(i.name, key, t);
     // Its members are written where it is declared, with its parameters standing for the arguments.
-    return this.withSight(undefined, () => this.withScope(new Map(i.typeParams.map((p, k) => [p.name, args[k]!])), () => this.members(i, t)));
+    const res = this.withSight(undefined, () => this.withScope(new Map(i.typeParams.map((p, k) => [p.name, args[k]!])), () => this.members(i, t)));
+    if (args.length > 0) {
+      this.typing.noteInterfaceInstance(i.name, key, isInline ? this.sameShape(res) : res);
+      if (args.some((a) => this.typing.lower(a) !== a)) {
+        this.interfaceOf(i, args.map((a) => this.typing.lower(a)), at);
+      }
+    }
+    return res;
   }
 
   /** @throws {CompileError} */
@@ -912,7 +933,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
         if (throws && this.typing.promiseElement(result) !== undefined) throw unsupported("interface methods giving a Promise that throw", m.throws!);
         const method: Method = { name: m.name, params, returns: result, ...(throws !== undefined && { throws }), mutable: self ? mutates(self) : false, owned: self ? owns(self) : false, ...(m.optional && { omittable: true as const }) };
         if (i.js) method.optional = (self ? m.params.slice(1) : m.params).map((p) => p.optional);
-        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { ...m, id: nextId(this.ids), params: self ? m.params.slice(1) : m.params }, scope: around, own: [...own.values()] };
+        if (m.typeParams.length > 0) method.generic = { names: m.typeParams.map((p) => p.name), node: { typeParams: m.typeParams, params: self ? m.params.slice(1) : m.params, returns, ...(m.throws !== undefined && { throws: m.throws }) }, scope: around, own: [...own.values()] };
         if ([method.returns, ...method.params, ...(method.throws ? [method.throws] : [])].some((t) => this.typing.holdsPattern(t))) throw unsupported("template literal pattern types in interface methods", m);
         this.typing.rec(t).methods.push(method);
       } else {
@@ -934,6 +955,17 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
     const key = `${a.name}<${args.map((t) => this.typing.keyOf(t)).join(",")}>`;
     const done = this.host.resolverState.resolved.get(key);
     if (done) return done;
+    if (!this.host.resolverState.resolving.has(key) && args.length === 0 && (a.name === "Stmt" || a.name.startsWith("Stmt-fsh") || a.name === "TypeNode" || a.name.startsWith("TypeNode-fsh"))) {
+      const prefix = a.name.startsWith("Stmt") ? "Stmt" : "TypeNode";
+      const exprName = `Expr${a.name.slice(prefix.length as i64)}`;
+      const exprKey = `${exprName}<>`;
+      const exprAlias = this.aliases.get(exprName);
+      if (exprAlias && exprAlias.typeParams.length === 0 && !this.host.resolverState.resolving.has(exprKey) && !this.host.resolverState.resolved.has(exprKey)) {
+        this.aliasType(exprAlias, [], exprAlias);
+        const nowDone = this.host.resolverState.resolved.get(key);
+        if (nowDone) return nowDone;
+      }
+    }
     // Inside a generic alias checked before any use, another alias given its placeholders is only
     // checked for its arguments: following it could recurse without end.
     const open = this.host.resolverState.deferring > 0 && this.host.resolverState.resolving.size > 0 ? args.map((t) => openParam(this.typing, t, true)).find((t) => t) : undefined;
@@ -971,6 +1003,13 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost, Recu
     if (back) {
       this.typing.standsFor(back, type);
       this.host.resolverState.recursiveAliases.set(back, a);
+      this.typing.noteRecursiveInstance(a.name, key, back);
+      if (args.some((x) => this.typing.lowerKeepingBrands(x) !== x)) {
+        this.remakeRecursive(back, args.map((x) => this.typing.lowerKeepingBrands(x)));
+      }
+      if (args.some((x) => this.typing.lower(x) !== x)) {
+        this.remakeRecursive(back, args.map((x) => this.typing.lower(x)));
+      }
     }
     this.host.resolverState.resolved.set(key, type);
     return type;
@@ -1213,10 +1252,10 @@ function inferredText(typing: Typing, text: string, bound: Type): Type | undefin
 }
 
 // The names a type pattern declares with `infer`.
-function inferNames(t: TypeNode): Set<string> {
+function inferNames(t: Ref<TypeNode>): Set<string> {
   const names = new Set<string>();
-  walk("typeNode", t, ({ of, node }) => {
-    if (of !== "typeNode" || node.kind !== "infer") return;
+  walkWhile({ of: "typeNode", node: t }, ({ of, node }) => {
+    if (of !== "typeNode" || node.kind !== "infer") return true;
     names.add(node.name);
     return false;
   });

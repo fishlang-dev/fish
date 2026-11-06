@@ -33,7 +33,7 @@ export type Union = {
 // The shape a fresh object literal takes when its literal-valued properties fit the literal
 // fields of `to`, and how to record that: each such property is coerced to its field's
 // literal type, and the literal gets the shape. Undefined when it doesn't fit that way.
-export function literalShape(typing: Typing, e: Expr, to: Type, types: NodeMap<Expr, Type>): { type: Type; apply(coercions: NodeMap<Expr, Type>): void } | undefined {
+export function literalShape(typing: Typing, e: Expr, to: Type, types: NodeMap<Expr, Type>): { type: Type; apply: (coercions: NodeMap<Expr, Type>) => void } | undefined {
   to = typing.unfold(to);
   if (typeof to === "string") return undefined;
   const r = typing.rec(to);
@@ -280,7 +280,7 @@ export function intoUnion(e: Expr, type: Type, to: UnionType, message: string, h
   };
   const parts = (s: Type): Type[] => {
     const r = typeof s === "string" ? undefined : host.typing.rec(s);
-    return unionMembers(r?.kind === "param" && r.concrete && host.typing.membersFor(s, to).length === 0 ? host.typing.lower(s) : s);
+    return r?.kind === "param" && r.concrete && host.typing.membersFor(s, to).length === 0 ? unionMembers(r.concrete).flatMap(parts) : unionMembers(s);
   };
   const sources = unionMembers(type).flatMap(parts);
   if (sources.some((s) => kindOf(s) === "generator")) throw unsupported("unions holding generators", e);
@@ -415,6 +415,9 @@ export function comparable(typing: Typing, a: Type, b: Type): boolean {
   return members(a).some((x) => members(b).some((y) => {
     const [lx, ly] = [literal(x), literal(y)];
     if (lx && ly) return lx.value === ly.value;
-    return base(x) === base(y) && typeof base(x) === "string";
+    if (x === y && typeof x !== "string" && typing.rec(x).kind === "brand") return true;
+    const [bx, by] = [typeof x !== "string" && typing.rec(x).kind === "brand", typeof y !== "string" && typing.rec(y).kind === "brand"];
+    const [ux, uy] = bx !== by ? [typing.unbranded(x), typing.unbranded(y)] : [x, y];
+    return base(ux) === base(uy) && typeof base(ux) === "string";
   }));
 }

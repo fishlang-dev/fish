@@ -8,8 +8,8 @@ import { FILE_SPAN, stdModuleAt } from "./program.ts";
 import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
-import { nextId, NodeMap, NodeSet, nodesIn, renumber, Rewrites, walk, type Ids, type NodeOf, type RootKind } from "./nodes.ts";
-import { rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
+import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
+import { cloneExpr, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots } from "./flow.ts";
@@ -17,12 +17,12 @@ import { declareEnum, type EnumInfo, type EnumInstance } from "./enums.ts";
 import { bindingKey, covers, either, guard, isPath, presentKey, type Facts } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
-import { unsatisfied, type Members } from "./interfaces.ts";
+import { unsatisfied, type Members, type Refused } from "./interfaces.ts";
 import { Registry, RegistryState, type RegistryHost } from "./registry.ts";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type InScope, type ResolverHost } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
-import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type InstanceMaker, type Bound } from "./typing.ts";
+import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { localKeys, lowerKeys, numberKey, topKeys } from "./keys.ts";
@@ -182,10 +182,11 @@ function freeNames(fn: Extract<Stmt, { kind: "function" }>): Set<string> {
 // Every name written in a piece of syntax.
 function identifiers(body: Stmt[] | undefined): Set<string> {
   const found = new Set<string>();
-  walk("stmt", body, ({ of, node }) => {
-    if ((of === "expr" || of === "pattern") && node.kind === "ident") found.add(node.name);
+  if (!body) return found;
+  walk({ of: "stmts", node: body }, (n) => {
+    if ((n.of === "expr" || n.of === "pattern") && n.node.kind === "ident") found.add(n.node.name);
     // A shorthand property `{ x }` reads `x` too.
-    if (of === "objectProp" && node.kind === "shorthand") found.add(node.name);
+    if (n.of === "objectProp" && n.node.kind === "shorthand") found.add(n.node.name);
   });
   return found;
 }
@@ -281,11 +282,11 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
   bodyOf(instance).params.forEach((p) => add(arenas.localOf(instance.locals.get(p)!)));
   // A local generic function's name holds nothing.
   [...new Set(instance.locals.values())].map((l) => arenas.localOf(l)).filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
-  walk("stmt", bodyOf(instance).body, ({ of, node }) => {
-    if (of === "expr" && node.kind === "arrow") return false;
-    const s = node as Stmt;
-    if (of === "stmt" && s.kind === "forOf") {
-      loops.set(s, fields.length);
+  walkWhile({ of: "stmts", node: bodyOf(instance).body }, (n) => {
+    if (n.of === "expr" && n.node.kind === "arrow") return false;
+    if (n.of === "stmt" && n.node.kind === "forOf") {
+      const s = n.node;
+      loops.set({ ...s }, fields.length);
       const kept = iterated(instance, instance.iterators?.get(s) ?? s.right);
       const ref = typeof kept === "string" ? undefined : typing.rec(kept);
       const held = ref?.kind === "ref" ? ref.to : kept;
@@ -302,11 +303,12 @@ function frameOf(instance: Instance, generator: GeneratorType | FutureType) {
         fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" }, { name: "await", type: next });
       } else fields.push({ name: "loop", type: kept }, { name: "at", type: "i64" });
     }
-    const e = node as Expr;
-    if (of === "expr" && isAwait(e)) {
-      awaits.set(e, fields.length);
+    if (n.of === "expr" && isAwait(n.node)) {
+      const e = n.node;
+      awaits.set({ ...e }, fields.length);
       fields.push({ name: "await", type: instance.types.get(e.operand)! });
     }
+    return true;
   });
   typing.rec(generator).frame = fields;
   instance.frame = { locals, loops, awaits };
@@ -325,25 +327,31 @@ function timersRunAsync(ids: Ids, written: Stmt[], timerMains: Tables["timerMain
   const main = top.find((f) => f.name === "main");
   if (!main || main.async) return;
   const declared = new Set(top.map((f) => f.name));
-  const timers = holdsNode("stmt", written, (n) => n.kind === "call" && (n as { callee?: { kind?: string; name?: string } }).callee?.kind === "ident" && TIMER_GLOBALS.has((n as { callee: { name: string } }).callee.name) && !declared.has((n as { callee: { name: string } }).callee.name));
+  const timers = holdsNode({ of: "stmts", node: written }, (n) => n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && TIMER_GLOBALS.has(n.node.callee.name) && !declared.has(n.node.callee.name));
   if (!timers) return;
   const returns = main.returnType;
   const returnType: TypeNode | undefined = returns?.kind === "ref" && returns.name === "void" ? { id: nextId(ids), kind: "ref", name: "Promise", args: [returns], start: returns.start, end: returns.end } : returns;
   const rewrites = new Rewrites();
-  timerMains.add(rewrites.replace(main, { ...main, async: true, returnType }));
+  timerMains.add(rewrites.replaceFunc(main, { ...main, async: true, returnType }) as Func);
   rebuiltStmts(written, rewrites);
 }
 const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
 
 // Whether a piece of syntax holds a node `found` picks out.
 // A node shared by several parents is tried once.
-export function holdsNode<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K>[] | undefined, found: (n: { kind?: unknown; name?: unknown }) => boolean): boolean {
-  const seen = new Set<unknown>();
+export function holdsNode(root: AnyNode | undefined, found: (n: AnyNode) => boolean): boolean {
+  if (!root) return false;
+  const seen = new Set<usize>();
   let hit = false;
-  walk(of, roots, ({ node }) => {
-    if (hit || seen.has(node)) return false;
-    seen.add(node);
-    hit = found(node as { kind?: unknown });
+  walkWhile(root, (n) => {
+    if (hit) return false;
+    const rawId = nodeIdOf(n);
+    if (rawId >= 0) {
+      const id = rawId as usize;
+      if (seen.has(id)) return false;
+      seen.add(id);
+    }
+    hit = found(n);
     return !hit;
   });
   return hit;
@@ -354,12 +362,23 @@ export function holdsNode<K extends RootKind>(of: K, roots: NodeOf<K> | NodeOf<K
 function declaredIn(f: { params: Param[]; body?: Stmt[]; typeParams?: TypeParam[] }): Set<string> {
   const names = new Set<string>(f.params.flatMap((p) => namesIn(p.pattern)));
   for (const p of f.typeParams ?? []) names.add(p.name);
-  holdsNode("stmt", f.body, (n) => {
-    const s = n as Stmt | Expr;
-    if (s.kind === "let") for (const d of s.declarations) for (const x of namesIn(d.target)) names.add(x);
-    if ((s.kind === "function" || s.kind === "class") && typeof s.name === "string") names.add(s.name);
-    if (s.kind === "arrow" || s.kind === "function") for (const p of s.params) for (const x of namesIn(p.pattern)) names.add(x);
-    if ((s.kind === "function" || s.kind === "arrow") && s.typeParams) for (const p of s.typeParams) names.add(p.name);
+  if (f.body) holdsNode({ of: "stmts", node: f.body }, (n) => {
+    if (n.of === "stmt") {
+      const s = n.node;
+      if (s.kind === "let") for (const d of s.declarations) for (const x of namesIn(d.target)) names.add(x);
+      if ((s.kind === "function" || s.kind === "class") && typeof s.name === "string") names.add(s.name);
+      if (s.kind === "function") {
+        for (const p of s.params) for (const x of namesIn(p.pattern)) names.add(x);
+        for (const p of s.typeParams) names.add(p.name);
+      }
+    } else if (n.of === "expr") {
+      const e = n.node;
+      if ((e.kind === "function" || e.kind === "class") && typeof e.name === "string") names.add(e.name);
+      if (e.kind === "arrow" || e.kind === "function") {
+        for (const p of e.params) for (const x of namesIn(p.pattern)) names.add(x);
+        for (const p of e.typeParams) names.add(p.name);
+      }
+    }
     return false;
   });
   return names;
@@ -421,7 +440,7 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
   return new Checker(compilation, written, exportsToC, macros, module).run();
 }
 
-class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost, InstanceMaker {
+class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost {
   compilation: Compilation;
   written: Stmt[];
   library: boolean;
@@ -514,7 +533,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // was refused, or a `try` that can't throw only because a function it calls failed before its
   // throws were known.
   claimErrors: CompileError[] = [];
-  refused: Members["refused"] = [];
+  refused: Refused[] = [];
   // Each such `try`'s error, with the bodies its block calls.
   tryCallees: [CompileError, BodyId[]][] = [];
   // The error each failed body's check gave, which a call of it gives again rather than another.
@@ -565,21 +584,24 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.madeArrows = this.tables.madeArrows;
     this.files = this.macros ? undefined : this.compilation.fileNames;
     // A macro applies only to a top-level declaration; the top-level ones are expanded already.
-    for (const { node: n } of nodesIn("stmt", this.written)) {
-      const member = n as { kind?: string; decorators?: Expr[]; modifiers?: unknown };
-      const decorators = member.decorators;
-      if (["function", "typeAlias", "interface", "enum"].includes(member.kind as string) && decorators && decorators.length > 0) throw new CompileError("E1103", "a macro applies to a top-level declaration", decorators[0]!.start, decorators[0]!.end);
-      // A member's decorator a top-level class's expansion didn't reach is on a class no macro runs on.
-      if (MEMBERS.has(member.kind!) && Array.isArray(member.modifiers) && decorators && decorators.length > 0) throw new CompileError("E1103", "a macro on a member applies in a top-level class", decorators[0]!.start, decorators[0]!.end);
-    }
+    walk({ of: "stmts", node: this.written }, (n) => {
+      if (n.of === "stmt") {
+        const s = n.node;
+        if ((s.kind === "function" || s.kind === "typeAlias" || s.kind === "interface" || s.kind === "enum") && s.decorators && s.decorators.length > 0) throw new CompileError("E1103", "a macro applies to a top-level declaration", s.decorators[0]!.start, s.decorators[0]!.end);
+      } else if (n.of === "classMember") {
+        const m = n.node;
+        // A member's decorator a top-level class's expansion didn't reach is on a class no macro runs on.
+        if (m.kind !== "index" && m.kind !== "staticBlock" && m.decorators.length > 0) throw new CompileError("E1103", "a macro on a member applies in a top-level class", m.decorators[0]!.start, m.decorators[0]!.end);
+      }
+    });
     this.written = lowerOverloads(this.ids, this.written);
     localKeys(this.written);
     this.written = [...this.written, ...hoistLocals(this.compilation, this.written)];
     lowerKeys(this.written);
     this.tables.topKeys = topKeys(this.written);
-    holdsNode("stmt", this.written, (n) => {
-      if (n.kind === "get" && typeof (n as { name?: unknown; key?: unknown }).name === "string") this.getterNames.add((n as { name: string }).name);
-      if (n.kind === "get" && typeof (n as { key?: unknown }).key === "string") this.getterNames.add((n as { key: string }).key);
+    holdsNode({ of: "stmts", node: this.written }, (n) => {
+      if (n.of === "classMember" && n.node.kind === "get" && typeof n.node.name === "string") this.getterNames.add(n.node.name);
+      if (n.of === "objectProp" && n.node.kind === "get" && typeof n.node.key === "string") this.getterNames.add(n.node.key);
       return false;
     });
     lowerDefaults(this.tables, this.written);
@@ -708,9 +730,6 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
-    // Overloads are lowered on the tree, where an implementation holds its signatures' functions;
-    // as a body it names them by id.
-    for (const f of this.funcs) if (f.overloads) f.overloads = (f.overloads as unknown as Func[]).map((w) => this.addBody(w).bodyId);
     this.byName = new Map<string, BodyId>();
     for (const f of this.funcs) {
       try {
@@ -730,6 +749,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
+    // Overloads are lowered on the tree, where an implementation lists its signatures' names;
+    // as a body it names them by id.
+    for (const f of this.funcs) if (f.overloadNames) f.overloads = f.overloadNames.map((w) => this.byName.get(w)!);
     // A body using a declaration that failed would only say it can't find it.
     this.stopOnErrors();
     this.main = this.bodyNamed("main");
@@ -739,8 +761,6 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.classes.forEach((c) => this.registry().register(this.arenas.classOf(c)));
     this.genericClassesState = new GenericClassesState();
     this.resolverState = new ResolverState();
-    this.typing.lowersRecursive(this.resolver());
-    this.typing.lowersInstances(this);
     this.done = new Set<InstanceId>();
     this.rustTypes = new Map<string, string>();
     // Comptime runs a function only once the checker has been through it.
@@ -896,6 +916,25 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   /** @throws {CompileError} */
   classInstance(this: Mut<this>, c: ClassType, args: Type[]): ClassType {
     return this.genericClasses().classNamed(this.typing.rec(c).generic!.name, args, (this.beingChecked && bodyOf(this.beingChecked)) ?? { start: 0, end: 0 }, true)!;
+  }
+
+  /** @throws {CompileError} */
+  makeNeededInstances(this: Mut<this>) {
+    while (this.typing.needed.length > 0) {
+      const n = this.typing.needed.shift()!;
+      if (n.kind === "class") this.classInstance(n.c, n.args);
+      else if (n.kind === "interface") this.interfaceInstance(n.t, n.args);
+      else if (n.kind === "variant") this.variantInstance(n.v, n.args);
+      else this.resolver().remakeRecursive(n.t, n.args);
+    }
+  }
+
+  /** @throws {CompileError} */
+  replaced(this: Mut<this>, t: Type, swap: TypeMap<Type, Type>): Type {
+    const out = this.typing.replaced(t, swap);
+    if (this.typing.needed.length === 0) return out;
+    this.makeNeededInstances();
+    return this.replaced(t, swap);
   }
 
   checking(): Instance | undefined {
@@ -1296,12 +1335,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // The lifetime names an annotation writes: on references, and in classes' lifetime slots.
   named(t: TypeNode | undefined): Set<string> {
     const found = new Set<string>();
-    walk("typeNode", t, ({ of, node }) => {
-      if (of !== "typeNode" || node.kind !== "ref") return;
-      const args = node.args as (TypeNode & { name?: string })[];
-      if ((node.name === "Ref" || node.name === "Mut") && args.length === 2) found.add(args[1]!.name!);
-      const lifetime = this.slots.get(node.name);
-      if (lifetime && args.length === lifetime.length) args.forEach((a, i) => lifetime[i] && found.add(a.name!));
+    if (!t) return found;
+    walk({ of: "typeNode", node: t }, (n) => {
+      if (n.of !== "typeNode" || n.node.kind !== "ref") return;
+      const args = n.node.args;
+      if ((n.node.name === "Ref" || n.node.name === "Mut") && args.length === 2 && args[1]!.kind === "ref") found.add(args[1]!.name);
+      const lifetime = this.slots.get(n.node.name);
+      if (lifetime && args.length === lifetime.length) args.forEach((a, i) => lifetime[i] && a.kind === "ref" && found.add(a.name));
     });
     return found;
   }
@@ -1324,13 +1364,16 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   lifetimes(f: Body) {
     const declared = new Set([...(f.typeParams ?? []), ...(f.owner ? this.classNode(this.typing.rec(f.owner).name)?.typeParams ?? [] : [])].filter(isLifetime).map((p) => p.name));
     const types = [...f.params.flatMap((p) => p.type ?? []), ...(f.returnType ? [f.returnType] : [])];
-    for (const { of, node } of nodesIn("typeNode", types)) {
-      if (of !== "typeNode" || node.kind !== "ref") continue;
-      const lives = (node.name === "Ref" || node.name === "Mut") && node.args.length === 2 ? [node.args[1]!]
-        : this.slots.get(node.name)?.length === node.args.length ? node.args.filter((_, i) => this.slots.get(node.name)![i]) : [];
-      for (const life of lives as (Span & { name: string })[]) {
-        if (!declared.has(life.name)) throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
-      }
+    for (const root of types) {
+      walk({ of: "typeNode", node: root }, (n) => {
+        if (n.of !== "typeNode" || n.node.kind !== "ref") return;
+        const node = n.node;
+        const lives = (node.name === "Ref" || node.name === "Mut") && node.args.length === 2 ? [node.args[1]!]
+          : this.slots.get(node.name)?.length === node.args.length ? node.args.filter((_, i) => this.slots.get(node.name)![i]) : [];
+        for (const life of lives) {
+          if (life.kind === "ref" && !declared.has(life.name)) throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
+        }
+      });
     }
   }
 
@@ -1364,7 +1407,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const [from, to] = [this.arenas.instanceOf(target), this.counterpart(this.arenas.instanceOf(target))];
       if (from.generator && to.generator && from.generator !== to.generator) made.set(from.generator, to.generator);
     });
-    const lowered = (t: Type) => (made.size > 0 ? this.typing.replaced(this.typing.lower(t), made) : this.typing.lower(t));
+    const lowered = (t: Type) => (made.size > 0 ? this.replaced(this.typing.lower(t), made) : this.typing.lower(t));
     for (const table of [instance.types, instance.coercions]) table.forEach((t, e) => table.set(e, lowered(t)));
     // A pipe's topic written in as a field read would run a getter once for each `%`.
     for (const e of instance.types.keys()) {
@@ -1577,7 +1620,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const declared = this.instancing().returnTypeOf(f, new Map([...instance.bindings, ...site]));
     if (declared && !this.describes(declared)) return declared;
     const own = this.instancing().scopeOf(instance);
-    return this.typing.replaced(this.views.get(instance.id) ?? returns, new TypeMap([...site].map(([name, t]) => [own.get(name)!, t])));
+    return this.replaced(this.views.get(instance.id) ?? returns, new TypeMap([...site].map(([name, t]) => [own.get(name)!, t])));
   }
 
   // Each member a class writes that implements an abstract member takes what the declaration
@@ -1711,7 +1754,18 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // Clears what checking an instance recorded, for another pass: its tables and its closures.
   // A callee checked during the pass stays checked, closures and all.
   forget(this: Mut<this>, instance: Instance) {
-    for (const table of [instance.types, instance.locals, instance.calls, instance.setters, instance.coercions, instance.jumps, instance.borrowsFrom, instance.raises, instance.caught, instance.consumes, instance.patterns, instance.copiesOut]) table.clear();
+    instance.types.clear();
+    instance.locals.clear();
+    instance.calls.clear();
+    instance.setters.clear();
+    instance.coercions.clear();
+    instance.jumps.clear();
+    instance.borrowsFrom.clear();
+    instance.raises.clear();
+    instance.caught.clear();
+    instance.consumes.clear();
+    instance.patterns.clear();
+    instance.copiesOut.clear();
     instance.returns = "void";
     delete instance.throws;
     delete instance.envs;
@@ -1759,7 +1813,7 @@ class ClassMembers implements Members {
   typing: Typing;
   arenas: Arenas;
   assuming: Set<string>;
-  refused: Members["refused"];
+  refused: Refused[];
 
   constructor(cx: Mut<Checker>) {
     this.cx = cx;
@@ -1793,6 +1847,11 @@ class ClassMembers implements Members {
 
   bodyNamed(name: string): Body | undefined {
     return this.cx.bodyNamed(name);
+  }
+
+  /** @throws {CompileError} */
+  replaced(this: Mut<this>, t: Type, swap: TypeMap<Type, Type>): Type {
+    return this.cx.replaced(t, swap);
   }
 
   /** @throws {CompileError} */
@@ -2486,8 +2545,8 @@ class BodyChecker implements Context {
     const inside = this.written.filter((w) => w.at >= e.start && w.at < e.end);
     // A variable compared as declared, in a check it was already narrowed past, stays as narrow.
     const declared = new Set<LocalId>();
-    walk("expr", e, ({ of, node }) => {
-      if (of === "expr" && node.kind === "ident" && this.exprsState.asDeclared.has(node)) declared.add(this.locals.get(node)!);
+    walk({ of: "expr", node: e }, (n) => {
+      if (n.of === "expr" && n.node.kind === "ident" && this.exprsState.asDeclared.has(n.node)) declared.add(this.locals.get(n.node)!);
     });
     if (inside.length === 0 && declared.size === 0) return proven;
     const keep = (f: Facts) => new Map([...f].filter(([l]) => !inside.some((w) => covers(w.local, l))).map(([l, t]) => [l, declared.has(Number(l) as LocalId) ? this.narrowedPast(Number(l) as LocalId, t) : t] as const));
@@ -2682,7 +2741,7 @@ class BodyChecker implements Context {
     if (target.kind === "member" && target.object.kind === "this" && this.f.self) return this.cx.typing.allFields(this.f.self.type as ClassType).find((x) => x.name === target.name)?.type;
     // A target with only a setter can't be read for its type; its part keeps its own.
     try {
-      const read = renumber("expr", structuredClone(target), () => nextId(this.cx.ids));
+      const read = renumberExpr(cloneExpr(target), () => nextId(this.cx.ids));
       this.exprsState.asDeclared.add(read);
       const t = this.exprs().value(read);
       return this.cx.recOf(t)?.kind === "ref" ? undefined : t;
@@ -2697,7 +2756,7 @@ class BodyChecker implements Context {
   /** @throws {CompileError} */
   separate(this: Mut<this>, list: Stmt[]) {
     for (let i = list.length - 1; i >= 0; i--) {
-      const s = this.cx.rewrites.current(list[i]!);
+      const s = this.cx.rewrites.currentStmt(list[i]!);
       if (s.kind === "expr" && s.expr.kind === "destructure") {
         list.splice(i, 1, ...this.destructuring(s.expr));
         continue;
@@ -2707,10 +2766,10 @@ class BodyChecker implements Context {
         continue;
       }
       let loop = s;
-      while (loop.kind === "labeled") loop = this.cx.rewrites.current(loop.body);
+      while (loop.kind === "labeled") loop = this.cx.rewrites.currentStmt(loop.body);
       if (loop.kind === "for" && loop.init?.kind === "let" && loop.init.declarations.length > 1) {
         list[i] = { id: nextId(this.cx.ids), kind: "block", body: [loop.init, s], start: s.start, end: s.end };
-        this.cx.rewrites.replace(loop, { ...loop, init: undefined });
+        this.cx.rewrites.replaceStmt(loop, { ...loop, init: undefined });
       }
     }
   }
@@ -2754,7 +2813,7 @@ class BodyChecker implements Context {
   // part is null.
   /** @throws {CompileError} */
   destructured(this: Mut<this>, s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>, place: { list: Stmt[]; at: usize } | undefined): undefined {
-    if (!place || this.cx.rewrites.current(place.list[place.at]!) !== s) throw unsupported("destructuring patterns here", pattern);
+    if (!place || this.cx.rewrites.currentStmt(place.list[place.at]!) !== s) throw unsupported("destructuring patterns here", pattern);
     // A place is read part by part where it is, so only the parts named move out of it, as in
     // Rust; any other value goes to a variable named for the pattern, as messages show it.
     if (!d.init) throw new CompileError("E0406", "a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
@@ -2787,10 +2846,10 @@ class BodyChecker implements Context {
         return { ...e, id: nextId(this.cx.ids), object: copy(e.object, at), index, start: at.start, end: at.end };
       };
       from = (at) => copy(init, at);
-      this.cx.rewrites.replace(s, { id: 0, kind: "empty", start: s.start, end: s.end });
+      this.cx.rewrites.replaceStmt(s, { id: 0, kind: "empty", start: s.start, end: s.end });
     } else {
       const held = patternText(pattern);
-      this.cx.rewrites.replace(d, { ...d, target: { id: nextId(this.cx.ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+      this.cx.rewrites.replaceDeclarator(d, { ...d, target: { id: nextId(this.cx.ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
       this.statement(s);
       type = this.cx.localOf(this.locals.get(s)!).type;
       from = (at) => ({ id: nextId(this.cx.ids), kind: "ident", name: held, start: at.start, end: at.end });
@@ -2953,7 +3012,7 @@ class BodyChecker implements Context {
     const test: Expr = { id: nextId(ids), kind: "binary", op: "<", left: counter(), right: member("length"), ...at };
     const update: Expr = { id: nextId(ids), kind: "update", op: "++", prefix: false, operand: counter(), ...at };
     const body: Stmt = { id: nextId(ids), kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
-    return this.cx.rewrites.replace(s, { id: 0, kind: "for", init, test, update, body: [each, body], start: s.start, end: s.end });
+    return this.cx.rewrites.replaceStmt(s, { id: 0, kind: "for", init, test, update, body: [each, body], start: s.start, end: s.end });
   }
 
   /** @throws {CompileError} */
@@ -2980,10 +3039,10 @@ class BodyChecker implements Context {
       return { id: nextId(this.cx.ids), kind: "let", keyword: (s.left as Extract<Stmt, { kind: "let" }>).keyword, declarations: [declarator], ...at };
     });
     const left = s.left as Extract<Stmt, { kind: "let" }>;
-    const target: Declarator = this.cx.rewrites.replace(d, { ...d, target: { id: nextId(this.cx.ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
+    const target: Declarator = this.cx.rewrites.replaceDeclarator(d, { ...d, target: { id: nextId(this.cx.ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
     // The loop's own body is a block inside the parts' scope, so it may declare their names.
     const body: Stmt = { id: nextId(this.cx.ids), kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
-    return this.cx.rewrites.replace(s, { ...s, left: this.cx.rewrites.replace(left, { ...left, declarations: [target] }), body: [...lets, body] });
+    return this.cx.rewrites.replaceStmt(s, { ...s, left: this.cx.rewrites.replaceStmt(left, { ...left, declarations: [target] }) as typeof left, body: [...lets, body] });
   }
 
   // A name a loop's pattern binds: its part of the element, borrowed when the element is.
@@ -3211,7 +3270,7 @@ class BodyChecker implements Context {
 
   /** @throws {CompileError} */
   statement(this: Mut<this>, written: Stmt): Facts | undefined {
-    const s = this.cx.rewrites.current(written);
+    const s = this.cx.rewrites.currentStmt(written);
     if (s.kind !== "while" && s.kind !== "doWhile" && s.kind !== "for" && s.kind !== "forOf") return this.statementOf(s);
     // A loop's condition and update are inside it, run again each time round.
     this.forgetLoop(s);
@@ -3236,7 +3295,7 @@ class BodyChecker implements Context {
           const topic = { id: nextId(this.cx.ids), kind: "ident" as const, name: "%", start, end };
           const each: Stmt = { id: nextId(this.cx.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.ids), target: topic, type: undefined, init: undefined, start, end }], start, end };
           const body: Stmt[] = [{ id: nextId(this.cx.ids), kind: "expr", expr: { id: nextId(this.cx.ids), kind: "yield", value: { ...topic, id: nextId(this.cx.ids) }, delegate: false, start, end }, start, end }];
-          return this.statement(this.cx.rewrites.replace(s, { id: 0, kind: "forOf", await: false, left: each, right: value, body, start: s.start, end: s.end }));
+          return this.statement(this.cx.rewrites.replaceStmt(s, { id: 0, kind: "forOf", await: false, left: each, right: value, body, start: s.start, end: s.end }));
         }
         if (s.expr.kind === "yield") {
           this.yielding(s.expr);
@@ -3286,7 +3345,7 @@ class BodyChecker implements Context {
         return assigned.kind === "assign" && assigned.op === "=" ? this.settles(assigned) : undefined;
       case "let": {
         if (s.keyword === "var") throw new CompileError("E0802", "'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
-        const d = this.cx.rewrites.current(s.declarations[0]!);
+        const d = this.cx.rewrites.currentDeclarator(s.declarations[0]!);
         if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) return this.lift(s, d.target.name, arrowFunction(this.cx.ids, d.target.name, d.init, d));
         if (d.target.kind === "array" || d.target.kind === "object") return this.destructured(s, d, d.target, this.siblings);
         if (this.cx.loopParts.has(d)) return this.loopPart(s, d);
@@ -3354,7 +3413,7 @@ class BodyChecker implements Context {
         // The body is the arrow's now; the statement holds nothing else, or walks over it would find
         // the body twice, as an async function's frame did, taking the function's loops and awaits
         // for its own.
-        return this.statement(this.cx.rewrites.replace(s, { id: 0, kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.ids), target: { id: nextId(this.cx.ids), kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }], ...at }));
+        return this.statement(this.cx.rewrites.replaceStmt(s, { id: 0, kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.ids), target: { id: nextId(this.cx.ids), kind: "ident", name: s.name, start: s.start, end: s.end }, type: undefined, init: arrow, ...at }], ...at }));
       }
       // Checked as the code it is; it runs while compiling, where its locals are its own.
       case "comptime":
@@ -3430,7 +3489,7 @@ class BodyChecker implements Context {
         if (s.await && o?.kind === "class" && o.name === "ServerWebSocket" && this.classOf(object as ClassType).node.start >= STD_BASE) {
           const at = { start: s.right.start, end: s.right.end };
           const callee: Expr = { id: nextId(this.cx.ids), kind: "member", object: s.right, name: "__wsMessages", optional: false, ...at };
-          return this.statement(this.cx.rewrites.replace(s, { ...s, right: { id: nextId(this.cx.ids), kind: "call", callee, typeArgs: [], args: [], optional: false, ...at } }));
+          return this.statement(this.cx.rewrites.replaceStmt(s, { ...s, right: { id: nextId(this.cx.ids), kind: "call", callee, typeArgs: [], args: [], optional: false, ...at } }));
         }
         if (s.await) {
           this.awaitLoop(s, d.target.name, left.keyword === "let", through, object);
@@ -3438,7 +3497,7 @@ class BodyChecker implements Context {
         }
         // A class with a `[Symbol.iterator]` method is looped over through what it gives.
         const iterator = this.exprs().iteratorCall(s.right, object) ?? this.exprs().embeddedIterated(s.right, object);
-        if (iterator) return this.statement(this.cx.rewrites.replace(s, { ...s, right: iterator }));
+        if (iterator) return this.statement(this.cx.rewrites.replaceStmt(s, { ...s, right: iterator }));
         // A loop borrows what it reads from as long as it runs, so it can't read a part of a
         // value made for the statement, which is gone before the first pass.
         // A reference reaches a value living elsewhere, wherever it came from.
@@ -3828,7 +3887,7 @@ class BodyChecker implements Context {
   /** @throws {CompileError} */
   lift(this: Mut<this>, s: Stmt, name: string, fn: Func): undefined {
     this.lifted(s, name, fn, `'${name}'`);
-    return this.statement(this.cx.rewrites.replace(s, { id: 0, kind: "empty", start: s.start, end: s.end })) as undefined;
+    return this.statement(this.cx.rewrites.replaceStmt(s, { id: 0, kind: "empty", start: s.start, end: s.end })) as undefined;
   }
 
   // A generic arrow written as a value is a generic function of its own, as one a const holds
@@ -3844,7 +3903,7 @@ class BodyChecker implements Context {
   /** @throws {CompileError} */
   lifted(this: Mut<this>, key: Stmt | Expr, name: string, fn: Func, who: string): Func {
     const own = fn as Extract<Stmt, { kind: "function" }>;
-    if (holdsNode("stmt", fn.body, (n) => n.kind === "this")) {
+    if (fn.body && holdsNode({ of: "stmts", node: fn.body }, (n) => n.of === "expr" && n.node.kind === "this")) {
       throw new CompileError("E0409", `${who} is generic, so it is made anew for each call and can't use 'this'; pass what it needs as a parameter`, fn.start, fn.end);
     }
     // It is checked apart from the body around it, so a name that body declares anywhere,
@@ -3854,18 +3913,20 @@ class BodyChecker implements Context {
     for (const n of freeNames(own)) {
       if (n !== name && (around.has(n) || this.lookup(n))) throw new CompileError("E0409", `${who} is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
     }
-    const outer = (n: { kind?: unknown; name?: unknown }) => n.kind === "ref" && typeof n.name === "string" && around.has(n.name) && !(fn.typeParams ?? []).some((p) => p.name === n.name);
-    const typed = holdsNode("param", fn.params, outer) || holdsNode("typeNode", fn.returnType, outer) || holdsNode("stmt", fn.body, outer);
+    const outer = (n: AnyNode) => {
+      if (n.of !== "typeNode" || n.node.kind !== "ref") return false;
+      const name = n.node.name;
+      return around.has(name) && !(fn.typeParams ?? []).some((p) => p.name === name);
+    };
+    const typed = fn.params.some((p) => holdsNode({ of: "param", node: p }, outer)) || (fn.returnType !== undefined && holdsNode({ of: "typeNode", node: fn.returnType }, outer)) || (fn.body !== undefined && holdsNode({ of: "stmts", node: fn.body }, outer));
     if (typed) throw new CompileError("E0409", `${who} is generic, so it is made apart from the function around it and can't use its types; declare it at the top level`, fn.start, fn.end);
     let lifted = this.cx.liftedFunctions.get(key);
     if (!lifted) {
       lifted = { name, fn: { ...fn, id: nextId(this.cx.ids), name: `${this.f.name}.${name || "arrow"}#${this.cx.counts.lifts++}` } };
       // Its calls of itself call what it was lifted to.
       const symbol = lifted.fn.name;
-      holdsNode("stmt", fn.body, (n) => {
-        const c = n as Expr;
-        if (c.kind === "call" && c.callee.kind === "ident" && c.callee.name === name) this.cx.rewrites.replace(c.callee, { ...c.callee, name: symbol });
-        return false;
+      if (fn.body) walk({ of: "stmts", node: fn.body }, (n) => {
+        if (n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && n.node.callee.name === name) this.cx.rewrites.replace(n.node.callee, { ...n.node.callee, name: symbol });
       });
       this.cx.liftedFunctions.set(key, lifted);
       this.cx.byName.set(lifted.fn.name, this.cx.addBody(lifted.fn).bodyId);

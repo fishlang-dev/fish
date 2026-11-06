@@ -20,7 +20,7 @@ export type RustTables = { names: NodeMap<Func | ClassMember, RustName>; classNo
 export const HANDLE = "#handle";
 
 // The Rust type a type is, when it is one.
-export function rustClassOf(typing: Typing, t: Type): RustClass | undefined {
+export function rustClassOf(typing: Ref<Typing>, t: Type): RustClass | undefined {
   const r = typeof t === "string" ? undefined : typing.rec(t);
   return r?.kind === "class" ? r.rust : undefined;
 }
@@ -58,17 +58,17 @@ export type Crossing =
   | { kind: "array"; element: Crossing; elementType: Type; lent: boolean };
 
 // How a type crosses as a parameter, or as what a function gives, or why it can't yet.
-export function crossingOf(typing: Typing, t: Type, giving: boolean): Crossing | string {
+export function crossingOf(typing: Ref<Typing>, t: Type, giving: boolean): Crossing | string {
   if (t === "boolean" || (typeof t === "string" && t !== "void" && t !== "string" && t !== "null" && t !== "never")) return { kind: "plain", type: t };
   if (t === "string") return { kind: "string" };
   if (typeof t === "string") return `a '${t}' can't cross the Rust boundary`;
   const rust = rustClassOf(typing, t);
-  if (rust) return { kind: "handle", of: rust };
+  if (rust !== undefined) return { kind: "handle", of: rust };
   const r = typing.rec(t);
   if (r.kind === "ref") {
     if (giving) return "a borrow's lifetime can't cross from Rust yet; give the value itself";
     const lent = rustClassOf(typing, r.to);
-    if (lent) return { kind: "lent", of: lent, mutable: r.mutable };
+    if (lent !== undefined) return { kind: "lent", of: lent, mutable: r.mutable };
     const to = typeof r.to !== "string" ? typing.rec(r.to) : undefined;
     if (to?.kind === "array") {
       if (r.mutable) return "'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it";
@@ -85,12 +85,12 @@ export function crossingOf(typing: Typing, t: Type, giving: boolean): Crossing |
     return { kind: "option", of, inner: others[0]! };
   }
   if (r.kind === "array") return arrayCrossing(typing, r.element, false);
-  if (r.kind === "object" && r.tuple) return "tuples can't cross the Rust boundary yet";
+  if (r.kind === "object" && r.tuple === true) return "tuples can't cross the Rust boundary yet";
   if (r.kind === "map") return "maps can't cross the Rust boundary yet";
   return "it can't cross the Rust boundary yet; Rust functions take and give numbers, booleans, strings, arrays, Options of those and Rust types";
 }
 
-function arrayCrossing(typing: Typing, element: Type, lent: boolean): Crossing | string {
+function arrayCrossing(typing: Ref<Typing>, element: Type, lent: boolean): Crossing | string {
   const of = crossingOf(typing, element, false);
   if (typeof of === "string") return of;
   if (of.kind === "array") return "arrays of arrays can't cross the Rust boundary yet";
@@ -100,9 +100,9 @@ function arrayCrossing(typing: Typing, element: Type, lent: boolean): Crossing |
 }
 
 // A crossing the checker allowed, which code generation trusts.
-export function crossed(typing: Typing, t: Type, giving = false): Crossing {
+export function crossed(typing: Ref<Typing>, t: Type, giving = false): Crossing {
   const c = crossingOf(typing, t, giving);
-  assert(typeof c !== "string", `internal error: a '${t}' reached the Rust boundary: ${String(c)}`);
+  assert(typeof c !== "string", `internal error: a '${typing.keyOf(t)}' reached the Rust boundary: ${typeof c === "string" ? c : ""}`);
   return c;
 }
 

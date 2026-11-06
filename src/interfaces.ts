@@ -4,6 +4,10 @@ import type { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
 import { TypeMap, TypeSet, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
 
+// Each class whose `implements` claim was refused and the interface, as shown, with why, which an
+// error at a use of it as that interface repeats.
+export type Refused = { type: string; trait: string; reason: string };
+
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
   /** @throws {CompileError} */
@@ -19,13 +23,13 @@ export type Members = {
   typeParamsOf(f: Body): Type[];
   // A function declared at the top level, or lifted there, by its name.
   bodyNamed(name: string): Body | undefined;
+  /** @throws {CompileError} */
+  replaced(t: Type, swap: TypeMap<Type, Type>): Type;
   typing: Typing;
   arenas: Arenas;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
   assuming: Set<string>;
-  // Each class whose `implements` claim was refused and the interface, as shown, with why, which an
-  // error at a use of it as that interface repeats.
-  refused: { type: string; trait: string; reason: string }[];
+  refused: Refused[];
 };
 
 // Why the generic function `f` can't be given where the generic function type `family` is, or
@@ -43,10 +47,11 @@ export function familyMismatch(f: Body, family: FunctionType, members: Members, 
   const given = members.returnOf(f, at);
   const swap = byName(typing, [...written, given], own.map((p) => p.name), g.own);
   if (members.typeParamsOf(f).some((p, i) => !sameBounds(typing, p, g.own[i]!))) return "its type parameters' bounds differ";
-  const params = written.map((p) => typing.replaced(p, swap));
+  const params = written.map((p) => members.replaced(p, swap));
   const wrong = params.findIndex((p, i) => !same(typing, p, typing.rec(family).params[i]!));
   if (wrong >= 0) return `its parameter ${wrong + 1} is '${typing.show(params[wrong]!)}', where '${typing.show(family)}' passes '${typing.show(typing.rec(family).params[wrong]!)}'`;
-  if (!typing.fits(typing.replaced(given, swap), typing.rec(family).returns)) return `it returns '${typing.show(typing.replaced(given, swap))}', where '${typing.show(family)}' returns '${typing.show(typing.rec(family).returns)}'`;
+  const givenReplaced = members.replaced(given, swap);
+  if (!typing.fits(givenReplaced, typing.rec(family).returns)) return `it returns '${typing.show(givenReplaced)}', where '${typing.show(family)}' returns '${typing.show(typing.rec(family).returns)}'`;
   return undefined;
 }
 
@@ -180,9 +185,9 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
         swap = byName(typing, [...found.params, found.returns, ...(found.throws ? [found.throws] : [])], found.generic!.names, m.generic!.own);
         if (found.generic!.own.some((p, i) => !sameBounds(typing, p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: their type parameters' bounds differ`;
       }
-      const params = found.params.map((p) => typing.replaced(p, swap));
-      const thrown = found.throws && typing.replaced(found.throws, swap);
-      if (params.some((p, i) => !same(typing, p, m.params[i]!)) || params.length !== m.params.length || !returns(typing.replaced(found.returns, swap), m.returns) || (thrown !== undefined && (m.throws === undefined || !typing.fits(thrown, m.throws)))) {
+      const params = found.params.map((p) => members.replaced(p, swap));
+      const thrown = found.throws && members.replaced(found.throws, swap);
+      if (params.some((p, i) => !same(typing, p, m.params[i]!)) || params.length !== m.params.length || !returns(members.replaced(found.returns, swap), m.returns) || (thrown !== undefined && (m.throws === undefined || !typing.fits(thrown, m.throws)))) {
         return `types of method '${m.name}' are incompatible`;
       }
       continue;
@@ -208,9 +213,9 @@ function check(type: Type, trait: InterfaceType, members: Members, at: Span): st
       swap = byName(typing, [...written, given, ...(thrown ? [thrown] : [])], own.map((p) => p.name), m.generic.own);
       if (members.typeParamsOf(method).some((p, i) => !sameBounds(typing, p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: its type parameters' bounds differ from '${typing.rec(trait).name}''s`;
     }
-    const params = written.map((p) => typing.replaced(p, swap));
-    const result = typing.replaced(given, swap);
-    const error = thrown && typing.replaced(thrown, swap);
+    const params = written.map((p) => members.replaced(p, swap));
+    const result = members.replaced(given, swap);
+    const error = thrown && members.replaced(thrown, swap);
     if (params.length !== m.params.length || params.some((p, i) => !same(typing, p, m.params[i]!)) || !returns(result, m.returns) || (error !== undefined && (m.throws === undefined || !typing.fits(error, m.throws)))) {
       return `types of method '${m.name}' are incompatible`;
     }

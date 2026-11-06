@@ -1,5 +1,5 @@
 import type { Tables } from "./compilation.ts";
-import { nextId, nodesIn, Rewrites, type Id, type Ids } from "./nodes.ts";
+import { nextId, Rewrites, walk, type Id, type Ids } from "./nodes.ts";
 import { CompileError } from "./diag.ts";
 import type { Expr, Param, Stmt, TypeNode } from "./parser.ts";
 import { rebuiltStmts } from "./rebuild.ts";
@@ -14,15 +14,15 @@ import type { Type, Typing } from "./typing.ts";
 export function lowerDefaults(tables: Tables, program: Stmt[]) {
   const rewrites = new Rewrites();
   // Whatever has parameters and a body: functions, arrows, methods, accessors and constructors.
-  for (const { node } of nodesIn("stmt", program)) {
-    const f = node as { kind?: string; params?: unknown; body?: unknown };
-    if (Array.isArray(f.params) && f.body !== undefined) lowered(tables, rewrites, f as Id & { kind?: string; params: Param[]; body: Expr | Stmt[] });
-  }
+  walk({ of: "stmts", node: program }, (n) => {
+    const f = n.node as { kind?: string; params?: unknown; body?: unknown };
+    if (Array.isArray(f.params) && f.body !== undefined) lowered(tables, rewrites, n.of, f as Id & { kind?: string; params: Param[]; body: Expr | Stmt[] });
+  });
   rebuiltStmts(program, rewrites);
 }
 
 /** @throws {CompileError} */
-function lowered(tables: Tables, rewrites: Rewrites, f: Id & { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
+function lowered(tables: Tables, rewrites: Rewrites, of: string, f: Id & { kind?: string; params: Param[]; body: Expr | Stmt[] }) {
   const { defaulted, fallbacks, renamed, prologues, ids } = tables;
   const firsts: Stmt[] = [];
   f.params.forEach((p, i) => {
@@ -36,7 +36,7 @@ function lowered(tables: Tables, rewrites: Rewrites, f: Id & { kind?: string; pa
       prologues.add(binding);
       firsts.push(binding);
       renamed.set(p, "_");
-      rewrites.replace(p, { ...p, pattern: { id: nextId(ids), kind: "ident", name: hidden, ...at } });
+      rewrites.replaceParam(p, { ...p, pattern: { id: nextId(ids), kind: "ident", name: hidden, ...at } });
       return;
     }
     if (!p.default) return;
@@ -60,14 +60,17 @@ function lowered(tables: Tables, rewrites: Rewrites, f: Id & { kind?: string; pa
     const binding: Stmt = { id: nextId(ids), kind: "let", keyword: "let", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name, ...at }, type, init, ...at }], ...at };
     prologues.add(binding);
     firsts.push(binding);
-    rewrites.replace(p, { ...p, pattern: { ...p.pattern, id: nextId(ids), name: hidden }, type, optional: true, default: undefined });
+    rewrites.replaceParam(p, { ...p, pattern: { ...p.pattern, id: nextId(ids), name: hidden }, type, optional: true, default: undefined });
     defaulted.set(p, { name, empty });
   });
   if (firsts.length === 0) return;
   const value = f.body;
   const body = Array.isArray(value) ? [...firsts, ...value] : [...firsts, { id: nextId(ids), kind: "return" as const, value, start: value.start, end: value.end }];
   // Any node with parameters and a body, typed as one of them.
-  rewrites.replace(f, { ...f, body } as unknown as Expr);
+  if (of === "stmt" || of === "func") rewrites.replaceStmt(f as unknown as Stmt, { ...f, body } as unknown as Stmt);
+  else if (of === "classMember") rewrites.replaceClassMember(f, { ...f, body } as unknown as Extract<Stmt, { kind: "class" }>["members"][usize]);
+  else if (of === "objectProp") rewrites.replaceObjectProp(f, { ...f, body } as unknown as Extract<Expr, { kind: "object" }>["props"][usize]);
+  else rewrites.replace(f, { ...f, body } as unknown as Expr);
 }
 
 // The type a literal default says: `1` an i64, `1.5` an f64, `"a"` a string, `true` a boolean.

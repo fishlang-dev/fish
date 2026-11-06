@@ -128,7 +128,7 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
   const option = node.kind === "ref" && node.name === "Option" && node.args.length === 1 && !names.has(node.name);
   const members = node.kind === "union" ? node.types : option ? node.args : undefined;
   if (members) {
-    const open = members.filter((n) => holdsNode("typeNode", n, (x) => x.kind === "ref" && names.has(x.name as string)));
+    const open = members.filter((n) => holdsNode({ of: "typeNode", node: n }, (x) => x.of === "typeNode" && x.node.kind === "ref" && names.has(x.node.name)));
     if (open.length !== 1) return;
     const covers = (n: TypeNode, m: Type) => {
       const r = typeof m === "string" ? undefined : typing.rec(m);
@@ -341,6 +341,8 @@ export interface InstancingHost {
   comptimeArgument(arg: Expr): Type;
   // The error a body's check failed with, when it did.
   failure(f: Body): CompileError | undefined;
+  /** @throws {CompileError} */
+  replaced(this: Mut<this>, t: Type, swap: TypeMap<Type, Type>): Type;
 }
 
 // The instances of every body: one for a plain function, and for a generic one, its
@@ -615,7 +617,7 @@ export class Instancing<H extends InstancingHost> {
     // A type parameter only an arrow's own parameters decided is still the definition's
     // placeholder, which the arrow was typed with; a body calling itself passes its placeholder
     // on in an argument of its own.
-    const open = new TypeSet(this.explicitPlaceholders(f).values());
+    const open = new TypeSet([...this.explicitPlaceholders(f).values()]);
     // A placeholder an argument holds, directly or in a function-typed parameter's bound.
     const holds = (given: Type, t: Type): boolean => this.typing.holdsPart(given, (u) => {
       if (u === t) return true;
@@ -710,16 +712,17 @@ export class Instancing<H extends InstancingHost> {
 
   // An implicit parameter's bound with the type parameters a call or a class instance decided
   // replaced by what they stand for.
-  private rebound(bound: Bound, decided: TypeMap<Type, Type>): Bound {
+  /** @throws {CompileError} */
+  private rebound(this: Mut<this>, bound: Bound, decided: TypeMap<Type, Type>): Bound {
     if (decided.size === 0) return bound;
     const [element, asyncElement, promised] = [this.typing.generatorElement(bound), this.typing.generatorElement(bound, true), this.typing.promiseElement(bound)];
-    if (element !== undefined) return this.typing.generatorInterface(this.typing.replaced(element, decided));
+    if (element !== undefined) return this.typing.generatorInterface(this.host.replaced(element, decided));
     const iterable = this.typing.iterableElement(bound);
-    if (iterable !== undefined) return this.typing.iterableInterface(this.typing.replaced(iterable, decided));
-    if (asyncElement !== undefined) return this.typing.asyncGeneratorInterface(this.typing.replaced(asyncElement, decided));
-    if (promised !== undefined) return this.typing.promiseInterface(this.typing.replaced(promised, decided));
+    if (iterable !== undefined) return this.typing.iterableInterface(this.host.replaced(iterable, decided));
+    if (asyncElement !== undefined) return this.typing.asyncGeneratorInterface(this.host.replaced(asyncElement, decided));
+    if (promised !== undefined) return this.typing.promiseInterface(this.host.replaced(promised, decided));
     const b = this.typing.rec(bound);
-    return b.kind === "function" || (b.kind === "interface" && b.generic) ? this.typing.replaced(bound, decided) as Bound : bound;
+    return b.kind === "function" || (b.kind === "interface" && b.generic) ? this.host.replaced(bound, decided) as Bound : bound;
   }
 
   // What a concrete instance's body sees: each of its type parameters, and those of a generic
@@ -775,7 +778,7 @@ export class Instancing<H extends InstancingHost> {
       // when no bound names the class's parameters, so 'map<U>(): Box<U>' makes one 'Box<U>'.
       const own = typeParamsOf(f);
       const outer = this.host.classParams(f).map((p) => p.name);
-      const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode("typeNode", p.constraint, (n) => n.kind === "ref" && outer.includes(n.name as string)));
+      const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode({ of: "typeNode", node: p.constraint }, (n) => n.of === "typeNode" && n.node.kind === "ref" && outer.includes(n.node.name)));
       made = shared ? this.host.instancingState.sharedPlaceholders.get(f.typeParams![0]!) : undefined;
       // A bound may name the class's own parameters, as this instance holds them.
       if (!made) made = placeholders(this.typing, own, (t, scope) => this.host.withScope(new Map([...(f.scope ?? []), ...scope]), () => this.host.resolveType(t)));
@@ -979,13 +982,14 @@ export interface GenericClassesHost {
 // Whether a body's signature or code writes its type parameter `name` inside a type argument, as
 // in `Box<T>`, `Lock<T>` or `T[]`; a reference, a pointer or an Option to T doesn't hold one.
 function heldInArgument(f: Body, name: string): boolean {
-  const isT = (n: { kind?: unknown; name?: unknown }) => n.kind === "ref" && n.name === name && (n as { args: unknown[] }).args.length === 0;
-  const holds = (n: { kind?: unknown; name?: unknown }) => {
-    const t = n as TypeNode;
-    if (t.kind === "array") return holdsNode("typeNode", t.element, isT);
-    return t.kind === "ref" && t.args.length > 0 && !["Ref", "Mut", "Ptr", "MutPtr", "Option"].includes(t.name) && holdsNode("typeNode", t.args, isT);
+  const isT = (n: AnyNode) => n.of === "typeNode" && n.node.kind === "ref" && n.node.name === name && n.node.args.length === 0;
+  const holds = (n: AnyNode) => {
+    if (n.of !== "typeNode") return false;
+    const t = n.node;
+    if (t.kind === "array") return holdsNode({ of: "typeNode", node: t.element }, isT);
+    return t.kind === "ref" && t.args.length > 0 && !["Ref", "Mut", "Ptr", "MutPtr", "Option"].includes(t.name) && t.args.some((a) => holdsNode({ of: "typeNode", node: a }, isT));
   };
-  return holdsNode("typeNode", f.params.flatMap((p) => p.type ?? []), holds) || holdsNode("typeNode", f.returnType, holds) || holdsNode("stmt", f.body, holds);
+  return f.params.some((p) => p.type !== undefined && holdsNode({ of: "typeNode", node: p.type }, holds)) || (f.returnType !== undefined && holdsNode({ of: "typeNode", node: f.returnType }, holds)) || holdsNode({ of: "stmts", node: f.body }, holds);
 }
 
 // The generic classes' instances so far, kept by the host between uses.
@@ -1066,9 +1070,13 @@ export class GenericClasses<H extends GenericClassesHost> {
     const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
     const c = declareClass(this.host.tables, template, `${template.name}<${args.map((t) => this.typing.show(t)).join(", ")}>`, scope);
     byKey.set(key, c.classId);
+    this.typing.noteClassInstance(template.name, key, c.type);
     shapes.add(shape);
     this.host.register(c);
     this.host.genericClassesState.uses.set(c.type, { c: c.classId, at, derived });
+    if (args.some((a) => this.typing.lowerKeepingBrands(a) !== a)) {
+      this.classInstance(template, args.map((a) => this.typing.lowerKeepingBrands(a)), at, true);
+    }
     if (this.host.genericClassesState.ready) this.bounded(c);
     return c;
   }

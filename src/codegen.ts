@@ -13,7 +13,7 @@ import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { EMBEDDED, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
-import { NodeMap, walk } from "./nodes.ts";
+import { NodeMap, walkWhile } from "./nodes.ts";
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
@@ -872,8 +872,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // A loop's condition and update run again after its body, which may leave first: each C
   // string they make gets its slot in the loop's scope up front, so every way out drops it.
   function reserveC(e: Expr | undefined) {
-    walk("expr", e, ({ of, node: call }) => {
-      if (of !== "expr") return;
+    if (!e) return;
+    walkWhile({ of: "expr", node: e }, ({ of, node: call }) => {
+      if (of !== "expr") return true;
       if (call.kind === "arrow") return false;
       if (call.kind === "call" && call.callee.kind === "ident" && call.callee.name === "cString" && !calls.has(call) && !reserved.has(call)) {
         const held = alloca(ARRAY);
@@ -881,6 +882,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         scopes.at(-1)!.push({ slot: held, type: typing.arrayType("u8") });
         reserved.set(call, held);
       }
+      return true;
     });
   }
 
@@ -6838,12 +6840,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // Whether running an expression might change a place: it assigns, updates or calls.
   function writes(e: Expr): boolean {
     let found = false;
-    walk("expr", e, ({ node }) => {
+    walkWhile({ of: "expr", node: e }, ({ node }) => {
       // A call signature in a type, as in `as { (): T }`, counts too.
       const kind = (node as { kind?: string }).kind;
       if (found || kind === "arrow") return false;
       if (kind === "assign" || kind === "update" || kind === "call" || kind === "new") found = true;
       if (kind === "member" && calls.has(node as Expr)) found = true;
+      return true;
     });
     return found;
   }

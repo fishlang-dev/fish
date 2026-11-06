@@ -68,6 +68,20 @@ export class CompileError extends Error {
     this.end = end;
     this.note = note;
   }
+
+  clone(): CompileError {
+    let out = new CompileError(
+      this.code,
+      this.message,
+      this.start,
+      this.end,
+      this.note === undefined ? undefined : { start: this.note!.start, end: this.note!.end, message: this.note!.message },
+    );
+    out.sources = this.sources.map((s) => ({ base: s.base, src: s.src, file: s.file }));
+    out.names = { local: new Set([...this.names.local]), madeUp: new Map([...this.names.madeUp]) };
+    out.errors = this.errors.map((e) => e.clone());
+    return out;
+  }
 }
 
 // Several errors from one build, in source order. It reads as its first wherever only one error
