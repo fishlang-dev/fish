@@ -644,7 +644,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         let written: Param[] = [];
         for (const p of t.params) written.push(cloneParam(p));
         let node: FamilyNode = { typeParams, params: written, returns: cloneTypeNode(t.returns) };
-        if (t.throws !== undefined) node.throws = cloneTypeNode(t.throws!);
+        const thrown = t.throws;
+        if (thrown !== undefined) node.throws = cloneTypeNode(thrown);
         let ownTypes: Type[] = [];
         for (const x of own.values()) ownTypes.push(x);
         let r = this.host.tables.typing.rec(fn);
@@ -877,7 +878,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // one property, whose type names the brand. An optional property makes a loose brand, which
   // the base fits too, as it does in TypeScript.
   /** @throws {CompileError} */
-  private brandIdiom(this: Mut<this>, nodes: Ref<TypeNode[]>, sides: Type[]): Type | undefined {
+  private brandIdiom(this: Mut<this>, nodes: Ref<TypeNode[]>, sides: Ref<Type[]>): Type | undefined {
     if (sides.length !== 2) return undefined;
     const at: usize = typeof sides[0] === "string" ? 0 : 1;
     const base = sides[at]!;
@@ -1205,7 +1206,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const t = this.host.tables.typing.interfaceType(args.length > 0 ? `${i.name}<${shown.join(", ")}>` : i.name);
     if (args.length > 0) {
       let r = this.host.tables.typing.rec(t);
-      r.generic = { name: i.name, args };
+      let given: Type[] = [];
+      for (const a of args) given.push(a);
+      r.generic = { name: i.name, args: given };
       this.host.tables.typing.setRec(t, r);
     }
     let byArgs = this.host.resolverState.traits.get(owner)!;
@@ -1337,7 +1340,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       for (const p of m.params) if (p.rest) throw unsupported("rest parameters in interface methods", p);
       // A generic method's own type parameters stand for themselves in its signature.
       const around = this.scopeCopy();
-      const own = m.typeParams.length > 0 ? placeholders(this.host, m.typeParams, around, undefined) : new Map<string, Type>();
+      const own = m.typeParams.length > 0 ? placeholders(this.host, m.typeParams, scopes(around, new Map<string, Type>()), undefined) : new Map<string, Type>();
       const returns: Ref<TypeNode> = m.returns;
       let params: Type[] = [];
       let result: Type;
@@ -1410,7 +1413,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (exprAlias !== undefined && exprAlias.typeParams.length === 0 && !this.host.resolverState.resolving.has(exprKey) && !this.host.resolverState.resolved.has(exprKey)) {
         this.aliasType(exprAlias, [], exprAlias);
         const nowDone = this.host.resolverState.resolved.get(key);
-        if (nowDone) return nowDone;
+        if (nowDone !== undefined) return nowDone;
       }
     }
     // Inside a generic alias checked before any use, another alias given its placeholders is only
@@ -1466,7 +1469,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const keys = this.resolveType(t.constraint);
     if (t.type === undefined) throw new CompileError("E0114", `a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
     const held = standIn(this.host.tables.typing, homomorphic !== undefined ? [homomorphic, keys] : [keys], "a mapped type", spanOf(t.constraint), false, this.host.resolverState.deferring > 0);
-    if (held) {
+    if (held !== undefined) {
       let bound = this.scopeCopy();
       bound.set(t.name, held);
       if (t.as !== undefined) this.resolveIn(bound, t.as);
@@ -1516,7 +1519,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const c = this.recOf(check);
     if (c?.kind === "param" && c.concrete !== undefined) check = c.concrete;
     const held = standIn(this.host.tables.typing, [check], "a conditional type", spanOf(t.check), true, this.host.resolverState.deferring > 0);
-    if (held) return this.branches(t, held);
+    if (held !== undefined) return this.branches(t, held);
     try {
       if (naked && check === "never") return "never";
       const r = this.recOf(check);
@@ -1554,10 +1557,11 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // One check type's branch: the true one, with what each `infer` matched in scope, when the
   // check type fits the extends type.
   /** @throws {CompileError | Open} */
-  private decide(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "conditional" }>>, check: Type): Type {
+  private decide(this: Mut<this>, t: Ref<TypeNode>, check: Type): Type {
+    if (t.kind !== "conditional") return check;
     const names = inferNames(t.extends);
     if (names.size === 0) {
-      const extended = this.resolveType(t.extends!);
+      const extended = this.resolveType(t.extends);
       const against = this.comparable(extended, spanOf(t.extends));
       if (this.conforms(check, against, spanOf(t.extends))) return this.resolveType(t.then);
       return this.resolveType(t.else);
@@ -1593,7 +1597,11 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const r = this.recOf(t);
     if (r?.kind === "param" && r.concrete !== undefined) return this.matches(p, r.concrete, found);
     if (p.kind === "infer") {
-      if (p.constraint && !this.conforms(t, this.comparable(this.resolveType(p.constraint), p.constraint), p.constraint)) return false;
+      if (p.constraint !== undefined) {
+        const constraint = this.resolveType(p.constraint);
+        const against = this.comparable(constraint, spanOf(p.constraint));
+        if (!this.conforms(t, against, spanOf(p.constraint))) return false;
+      }
       const prior = found.get(p.name);
       found.set(p.name, prior ? this.host.tables.typing.unionType([prior, t]) : t);
       return true;
@@ -1670,7 +1678,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (index.readonly) throw unsupported("readonly index signatures", index);
     const key = index.params[0]!;
     const keyType = key.type !== undefined ? this.resolveType(key.type) : undefined;
-    if (keyType !== "string") throw new CompileError("E0116", `an index signature is keyed by 'string' so far; for keys of another type use a 'Map'${keyType !== undefined && isInteger(this.host.tables.typing.lower(keyType)) ? ", or an array for consecutive numbers" : ""}`, (key.type ?? key).start, (key.type ?? key).end);
+    const keyAt: Span = key.type !== undefined ? spanOf(key.type) : { start: key.start, end: key.end };
+    if (keyType !== "string") throw new CompileError("E0116", `an index signature is keyed by 'string' so far; for keys of another type use a 'Map'${keyType !== undefined && isInteger(this.host.tables.typing.lower(keyType)) ? ", or an array for consecutive numbers" : ""}`, keyAt.start, keyAt.end);
     return collection(this.host.tables.typing, "string", this.resolveType(index.type), false, index, true);
   }
 
@@ -1720,6 +1729,10 @@ function keyed(typing: Ref<Typing>, t: Type): boolean {
   if (k.kind !== "union") return false;
   for (const m of k.members) if (!keyed(typing, m)) return false;
   return true;
+}
+
+function kindOf(typing: Ref<Typing>, t: Type | undefined): string | undefined {
+  return t === undefined || typeof t === "string" ? undefined : typing.rec(t).kind;
 }
 
 // Whether a parameter is a method's `this`.
@@ -1823,8 +1836,15 @@ function merged(typing: Mut<Typing>, a: ObjectType, b: ObjectType, from: Ref<Spa
     const gRequired = g.optional !== undefined && f.optional === undefined;
     const fRequired = f.optional !== undefined && g.optional === undefined;
     if (gRequired || fRequired) {
-      const required = gRequired ? f : g;
-      const other = gRequired ? g : f;
+      let required: Field;
+      let other: Field;
+      if (gRequired) {
+        required = copyField(f);
+        other = copyField(g);
+      } else {
+        required = copyField(g);
+        other = copyField(f);
+      }
       if (typing.fits(required.type, other.type)) {
         let kept: Field = { name: required.name, type: required.type };
         if (required.access !== undefined) kept.access = required.access;
@@ -1915,8 +1935,7 @@ function abstractless(typing: Mut<Typing>, of: Type, holder: string, at: Ref<Spa
 // A `shared<T>` holding a T every thread may use at once: nothing in it borrows, points
 // unchecked, or changes without a lock.
 /** @throws {CompileError} */
-export function shareable(typing: Typing, given: Type, at: Span): SharedType {
-  const kindOf = (t: Type | undefined) => (t === undefined || typeof t === "string" ? undefined : typing.rec(t).kind);
+export function shareable(typing: Mut<Typing>, given: Type, at: Ref<Span>): SharedType {
   unboxedClosure(typing, given, at);
   const of = typing.heldArgument(given);
   const held = typing.lower(of);
@@ -1925,7 +1944,7 @@ export function shareable(typing: Typing, given: Type, at: Span): SharedType {
   for (const u of typing.partsOf(held)) if (blocker === undefined && unlocked(typing, u)) blocker = u;
   if (typing.holdsHandle(held)) throw new CompileError("E0303", "a 'shared' value can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only", at.start, at.end);
   if (blocker !== undefined) {
-    const why = kindOf(blocker) === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from one place, which other threads can't keep alive";
+    const why = kindOf(typing, blocker) === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : kindOf(typing, blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(typing, blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from one place, which other threads can't keep alive";
     throw new CompileError("E0303", `a 'shared' value is used from many threads at once, so it can't hold a '${typing.show(blocker)}', which ${why}`, at.start, at.end);
   }
   return typing.sharedType(of);
@@ -1947,8 +1966,7 @@ export function counted(typing: Typing, given: Type, which: "Rc" | "Weak", at: S
 // A `Channel<T>` carrying values from one task to another: nothing in them borrows, points
 // unchecked, or changes without a lock.
 /** @throws {CompileError} */
-export function channel(typing: Typing, given: Type, at: Span): BlockType {
-  const kindOf = (t: Type | undefined) => (t === undefined || typeof t === "string" ? undefined : typing.rec(t).kind);
+export function channel(typing: Mut<Typing>, given: Type, at: Ref<Span>): BlockType {
   unboxedClosure(typing, given, at);
   const of = typing.heldArgument(given);
   const held = typing.lower(of);
@@ -1961,7 +1979,7 @@ export function channel(typing: Typing, given: Type, at: Span): BlockType {
   const lowered = typing.lower(of);
   let blocker: Type | undefined = undefined;
   for (const u of typing.partsOf(lowered)) if (blocker === undefined && unlocked(typing, u)) blocker = u;
-  if (blocker !== undefined) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made"}`, at.start, at.end);
+  if (blocker !== undefined) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(typing, blocker) === "interior" ? "changes without a lock" : kindOf(typing, blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(typing, blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made"}`, at.start, at.end);
   return typing.blockType("Channel", of);
 }
 
