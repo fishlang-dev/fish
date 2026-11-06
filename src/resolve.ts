@@ -717,7 +717,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (INTEGER_NAMES.includes(t.name) || ["boolean", "void", "number", "f32", "f64", "string", "bigint"].includes(t.name)) {
       if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
       // `number` is JavaScript's 64-bit float.
-      return t.name === "number" ? "f64" : (t.name as Integer | "f32" | "f64" | "boolean" | "void" | "string" | "bigint");
+      return primitiveNamed(t.name);
     }
     if (t.name === "Array" && t.args.length === 1) return this.array(this.resolveType(t.args[0]!), t);
     if (t.name === "FixedArray") return this.fixedArray(t);
@@ -736,7 +736,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     if (INTERIORS.has(t.name)) {
       if (t.args.length !== 1) throw new CompileError("E0116", `'${t.name}' takes the type it holds, like '${t.name}<i64>'`, t.start, t.end);
-      return interior(this.host.tables.typing, t.name as InteriorRecord["which"], this.resolveType(t.args[0]!), t);
+      const held = this.resolveType(t.args[0]!);
+      return interior(this.host.tables.typing, interiorNamed(t.name), held, spanOf(t));
     }
     if (t.name === "Dyn") {
       const of = t.args.length === 1 ? this.resolveType(t.args[0]!) : undefined;
@@ -1408,11 +1409,13 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // An alias met again while its own type is made leads back to itself: that is where the
   // compiler puts a pointer, a recursive type standing for the alias's type.
   /** @throws {CompileError} */
-  private aliasType(this: Mut<this>, a: Ref<TypeAlias>, args: Type[], at: Ref<Span>): Type {
+  private aliasType(this: Mut<this>, a: Ref<TypeAlias>, args: Ref<Type[]>, at: Ref<Span>): Type {
     if (args.length !== a.typeParams.length) {
       throw new CompileError("E0106", `type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
-    const key = `${a.name}<${args.map((t) => this.host.tables.typing.keyOf(t)).join(",")}>`;
+    let keys: string[] = [];
+    for (const x of args) keys.push(this.host.tables.typing.keyOf(x));
+    const key = `${a.name}<${keys.join(",")}>`;
     const done = this.host.resolverState.resolved.get(key);
     if (done !== undefined) return done;
     if (!this.host.resolverState.resolving.has(key) && args.length === 0 && (a.name === "Stmt" || a.name.startsWith("Stmt-fsh") || a.name === "TypeNode" || a.name.startsWith("TypeNode-fsh"))) {
@@ -1461,7 +1464,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     let type: Type;
     try {
       // An alias's body sees the names where it is declared, not where it is used.
-      type = this.resolveDeclared(paramBindings(a.typeParams, args), a.type);
+      const bindings = paramBindings(a.typeParams, args);
+      type = this.resolveDeclared(bindings, a.type);
     } finally {
       this.host.resolverState.resolving.delete(key);
     }
@@ -1472,7 +1476,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (back !== undefined && (type === back || (r?.kind === "union" && r.members.includes(back)))) {
       throw new CompileError("E0113", `type '${a.name}' circularly references itself; a type can hold itself only inside an object, a tuple or an array`, a.start, a.end);
     }
-    if (back) {
+    if (back !== undefined) {
       this.host.tables.typing.standsFor(back, type);
       this.host.resolverState.recursiveAliases.set(back, a.name);
       this.host.tables.typing.noteRecursiveInstance(a.name, key, back);
@@ -1505,8 +1509,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       let bound = this.scopeCopy();
       bound.set(t.name, this.host.tables.typing.literalType(key));
       const renamed = t.as !== undefined ? this.resolveIn(bound, t.as) : this.host.tables.typing.literalType(key);
-      const names = renamed === "never" ? [] : this.typeFns().keysOf(renamed, "a mapped type's 'as' clause", t.as ?? t);
-      const value = storable(this.host.tables.typing, this.resolveIn(bound, t.type), t.type);
+      const asAt = t.as !== undefined ? spanOf(t.as) : spanOf(t);
+      const names: string[] = renamed === "never" ? [] : this.typeFns().keysOf(renamed, "a mapped type's 'as' clause", asAt);
+      const resolved = this.resolveIn(bound, t.type);
+      const value = storable(this.host.tables.typing, resolved, spanOf(t.type));
       const from = source.find((f) => f.name === key);
       const readonly = t.readonly ? t.readonly === "+" : from?.readonly === true;
       for (const name of names) {
@@ -1817,6 +1823,22 @@ function anyArgs(p: Ref<Param>): boolean {
   return p.rest && p.type !== undefined && p.type.kind === "array" && p.type.element.kind === "ref" && ["any", "unknown"].includes(p.type.element.name);
 }
 
+// The kind of interior a built-in name makes.
+function interiorNamed(name: string): InteriorRecord["which"] {
+  if (name === "Atomic") return "Atomic";
+  if (name === "Lock") return "Lock";
+  if (name === "RwLock") return "RwLock";
+  return "Cell";
+}
+
+// The primitive type a built-in name is, `number` being `f64`.
+const PRIMITIVES: Type[] = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "boolean", "void", "string", "bigint"];
+function primitiveNamed(name: string): Type {
+  if (name === "number") return "f64";
+  for (const p of PRIMITIVES) if (p === name) return p;
+  return "never";
+}
+
 // Whether a parameter is a method's `this`.
 function isThisParam(p: Ref<Param>): boolean {
   return p.pattern.kind === "ident" && p.pattern.name === "this";
@@ -1986,7 +2008,7 @@ export function unboxedClosure(typing: Mut<Typing>, t: Type, at: Ref<Span>) {
 // An `Atomic<T>`, `Lock<T>` or `Cell<T>` holding a T it can hold: an Atomic, an integer or a
 // boolean, which the processor changes in one step.
 /** @throws {CompileError} */
-export function interior(typing: Typing, which: InteriorRecord["which"], given: Type, at: Span): InteriorType {
+export function interior(typing: Mut<Typing>, which: InteriorRecord["which"], given: Type, at: Ref<Span>): InteriorType {
   unboxedClosure(typing, given, at);
   const of = typing.heldArgument(given);
   const held = typing.lower(of);
