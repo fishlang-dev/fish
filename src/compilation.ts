@@ -3,10 +3,10 @@ import type { Value } from "./comptime.ts";
 import type { CompileError, Names } from "./diag.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 import { Rewrites, NodeMap, NodeSet, type Id, type Ids } from "./nodes.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
 import type { Category, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
-import type { RustTables } from "./rust.ts";
+import type { RustClass, RustName, RustTables } from "./rust.ts";
 import type { Locking } from "./program.ts";
 import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type } from "./typing.ts";
 import type { DynTable } from "./values.ts";
@@ -63,7 +63,7 @@ export function newSession(): Session {
 }
 
 export function newCompilation(session: Session): Compilation {
-  return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: new Typing(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new NodeMap(), classNodes: new NodeMap() }, enumInits: [], generated: new NodeSet(), looked: [] };
+  return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: new Typing(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new NodeMap<Declared | ClassMember, RustName>(), classNodes: new NodeMap<ClassNode, RustClass>() }, enumInits: [], generated: new NodeSet<Id>(), looked: [] };
 }
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
@@ -452,13 +452,19 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
 // checker, or the comptime interpreter inside macro expansion, is counted once, under its own name.
 // `inner` is the time the stages running inside the current one have taken so far. `objects` names
 // the cached objects built, and counts those reused. `now` is the clock, which a test replaces.
-export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; now: () => f64 };
+// `manual`, when set, is the clock: a test sets it and moves it by hand.
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64 };
 
 export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
 export const NATIVE_STAGES = ["compile", "runtime", "link"];
 
-export function newTimings(now: () => f64 = () => performance.now()): Timings {
-  return { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, now };
+export function newTimings(): Timings {
+  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 } };
+  return made;
+}
+
+function now(timings: Ref<Timings>): f64 {
+  return timings.manual !== undefined ? timings.manual : performance.now();
 }
 
 // Runs `run`, adding its own time to stage `name` when timing.
@@ -467,11 +473,11 @@ export function timed<T>(timings: Timings | undefined, name: string, run: Timed<
   if (timings === undefined) return run();
   const outer = timings.inner;
   timings.inner = 0;
-  const start = timings.now();
+  const start = now(timings);
   try {
     return run();
   } finally {
-    const spent = timings.now() - start;
+    const spent = now(timings) - start;
     timings.ms.set(name, (timings.ms.get(name) ?? 0) + spent - timings.inner);
     timings.inner = outer + spent;
   }
@@ -485,5 +491,6 @@ export function formatTimings(timings: Timings, stages: string[], total: f64): s
 
 // Which cached objects a build made and how many it reused, as the runtime stage's note.
 export function objectsNote({ objects: { built, cached } }: Timings): string {
-  return [...(built.length > 0 ? [`built ${built.join(", ")}`] : []), `${cached} cached`].join("; ");
+  const cachedNote = `${cached} cached`;
+  return built.length > 0 ? `built ${built.join(", ")}; ${cachedNote}` : cachedNote;
 }

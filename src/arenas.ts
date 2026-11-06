@@ -10,7 +10,7 @@ export type LocalId = Brand<usize, "local">;
 export type ClassId = Brand<usize, "class">;
 
 // The body an instance checks, from its compilation's arena.
-export function bodyOf(instance: Instance): Body {
+export function bodyOf(instance: Ref<Instance>): Ref<Body> {
   return instance.tables.arenas.bodyOf(instance.body);
 }
 
@@ -22,57 +22,55 @@ export class Arenas {
   private locals: Local[] = [];
   private classes: ClassInfo[] = [];
 
-  instanceOf(id: InstanceId): Instance;
-  instanceOf(id: InstanceId | undefined): Instance | undefined;
-  instanceOf(id: InstanceId | undefined): Instance | undefined {
+  instanceOf(id: InstanceId): Ref<Instance>;
+  instanceOf(id: InstanceId | undefined): Ref<Instance> | undefined;
+  instanceOf(id: InstanceId | undefined): Ref<Instance> | undefined {
     return id === undefined ? undefined : this.instances[id - 1];
   }
 
-  bodyOf(id: BodyId): Body;
-  bodyOf(id: BodyId | undefined): Body | undefined;
-  bodyOf(id: BodyId | undefined): Body | undefined {
+  bodyOf(id: BodyId): Ref<Body>;
+  bodyOf(id: BodyId | undefined): Ref<Body> | undefined;
+  bodyOf(id: BodyId | undefined): Ref<Body> | undefined {
     return id === undefined ? undefined : this.bodies[id - 1];
   }
 
-  localOf(id: LocalId): Local;
-  localOf(id: LocalId | undefined): Local | undefined;
-  localOf(id: LocalId | undefined): Local | undefined {
+  localOf(id: LocalId): Ref<Local>;
+  localOf(id: LocalId | undefined): Ref<Local> | undefined;
+  localOf(id: LocalId | undefined): Ref<Local> | undefined {
     return id === undefined ? undefined : this.locals[id - 1];
   }
 
-  classOf(id: ClassId): ClassInfo;
-  classOf(id: ClassId | undefined): ClassInfo | undefined;
-  classOf(id: ClassId | undefined): ClassInfo | undefined {
+  classOf(id: ClassId): Ref<ClassInfo>;
+  classOf(id: ClassId | undefined): Ref<ClassInfo> | undefined;
+  classOf(id: ClassId | undefined): Ref<ClassInfo> | undefined {
     return id === undefined ? undefined : this.classes[id - 1];
   }
 
-  addInstance(instance: Omit<Instance, "id">): Instance {
-    const made = { id: (this.instances.length + 1) as InstanceId, ...instance } as Instance;
-    this.instances.push(made);
-    return made;
+  addInstance(this: Mut<this>, instance: Omit<Instance, "id">): Mut<Instance> {
+    this.instances.push({ id: (this.instances.length + 1) as InstanceId, ...instance } as Instance);
+    return this.instances[this.instances.length - 1]!;
   }
 
-  addLocal(local: Omit<Local, "localId">): Local {
-    const made = { ...local, localId: (this.locals.length + 1) as LocalId } as Local;
-    this.locals.push(made);
-    return made;
+  addLocal(this: Mut<this>, local: Omit<Local, "localId">): Mut<Local> {
+    this.locals.push({ ...local, localId: (this.locals.length + 1) as LocalId } as Local);
+    return this.locals[this.locals.length - 1]!;
   }
 
-  addClass(info: Omit<ClassInfo, "classId">): ClassInfo {
-    const made = { ...info, classId: (this.classes.length + 1) as ClassId } as ClassInfo;
-    this.classes.push(made);
-    return made;
+  addClass(this: Mut<this>, info: Omit<ClassInfo, "classId">): Mut<ClassInfo> {
+    this.classes.push({ ...info, classId: (this.classes.length + 1) as ClassId } as ClassInfo);
+    return this.classes[this.classes.length - 1]!;
   }
 
   // A body is often a function declaration the parser made, met again by every check that reaches
   // it, or a copy of one carrying the copied body's id, so it is added the first time it is met as
-  // itself.
-  addBody<B extends Omit<Body, "bodyId">>(body: B): B & Body {
-    const b = body as B & Body;
-    if (this.bodies[b.bodyId - 1] !== b) {
-      this.bodies.push(b);
-      b.bodyId = this.bodies.length as BodyId;
-    }
-    return b;
+  // itself: a copy has a node id of its own. The arena keeps its own copy, and the body given is
+  // numbered too, so meeting it again finds that copy.
+  addBody(this: Mut<this>, body: Omit<Body, "bodyId"> & { bodyId?: BodyId }): Mut<Body> {
+    const at = body.bodyId;
+    if (at !== undefined && at <= this.bodies.length && this.bodies[at - 1]!.id === body.id) return this.bodies[at - 1]!;
+    const bodyId = (this.bodies.length + 1) as BodyId;
+    body.bodyId = bodyId;
+    this.bodies.push({ ...body, bodyId });
+    return this.bodies[this.bodies.length - 1]!;
   }
 }

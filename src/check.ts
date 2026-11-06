@@ -1127,8 +1127,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   isRef(t: Type): t is RefType {
     return this.recOf(t)?.kind === "ref";
   }
-  addBody<F extends Func>(this: Mut<this>, f: F) {
-    return this.arenas.addBody(f);
+  addBody(this: Mut<this>, f: Func): Func & Body {
+    return this.arenas.addBody(f) as Func & Body;
   }
   bodyNamed(this: Mut<this>, name: string) {
     return this.arenas.bodyOf(this.byName.get(name));

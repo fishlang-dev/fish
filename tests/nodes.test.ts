@@ -36,6 +36,9 @@ const REPLACERS: [keyof Rewrites, keyof Rewrites][] = [
   ["replaceTypeMember", "currentTypeMember"],
   ["replacePatternProp", "currentPatternProp"],
 ];
+// Every object a replacement replaced or made, by node id: a table may hold a copy of any of them.
+const versions = new Map<number, object[]>();
+const isVersion = (id: number, node: object) => versions.get(id)?.some((v) => v === node || Bun.deepEquals(v, node)) ?? false;
 // Replacements made through a bare `{ id }`, which the test can't tell the replaced node from:
 // lowering passes one where Fish can't lend a node of a wider union as an `Id`.
 const madeForStub = new WeakSet<object>();
@@ -63,6 +66,7 @@ function noteReplaced(was: object, out: object): void {
       const prev = oldById.get(n.id)!;
       oldById.delete(n.id);
       if (prev !== v) replacedBy.set(prev, v);
+      versions.set(n.id, [...(versions.get(n.id) ?? []), prev, v]);
     }
     Object.values(n).forEach(linkNew);
   };
@@ -99,8 +103,8 @@ function audit(roots: unknown, ids: Map<number, object>, where: string): string[
     if (typeof n.start === "number" && typeof n.end === "number") {
       const at = `${where}: a ${String(n.kind ?? "node")} at ${n.start}`;
       if (typeof n.id !== "number") problems.push(`${at} has no id`);
-      // A replacement takes the id of the node it replaces.
-      else if (ids.has(n.id) && latest(ids.get(n.id) as Id) !== latest(n as Id) && !madeForStub.has(n)) problems.push(`${at} shares id ${n.id} with another node`);
+      // A replacement takes the id of the node it replaces, and a copy the id of what it copies.
+      else if (ids.has(n.id) && latest(ids.get(n.id) as Id) !== latest(n as Id) && !madeForStub.has(n) && !Bun.deepEquals(ids.get(n.id), n)) problems.push(`${at} shares id ${n.id} with another node`);
       else ids.set(n.id, n);
     }
     Object.values(n).forEach(visit);
@@ -289,7 +293,7 @@ const clashes: string[] = [];
 function noting<F extends (this: object, node: Id, ...rest: never[]) => unknown>(method: F, held: (table: object, id: number) => object | undefined): F {
   return function (this: object, node: Id, ...rest: never[]) {
     const was = held(this, node.id);
-    if (was !== undefined && was !== node && latest(was) !== latest(node) && !Bun.deepEquals(was, node)) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
+    if (was !== undefined && was !== node && latest(was) !== latest(node) && !Bun.deepEquals(was, node) && !(isVersion(node.id, was) && isVersion(node.id, node))) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
     return method.call(this, node, ...rest);
   } as F;
 }

@@ -17,13 +17,13 @@ export function fileAt(files: Compilation["files"], offset: usize): string {
 // offset is in a file of the program's own, whatever that file is named.
 export function stdModuleAt(files: Compilation["files"], offset: usize): string | undefined {
   const f = files.findLast((f) => offset >= f.base);
-  return f?.std ? f.file : undefined;
+  return f !== undefined && f.std ? f.file : undefined;
 }
 
 // The source text a span covers in the program last loaded; std's prelude is in none of its files.
 export function textAt(files: Compilation["files"], at: Span): string {
   const f = files.findLast((f) => at.start >= f.base);
-  return f && at.end - f.base <= f.src.length ? f.src.slice(at.start - f.base, at.end - f.base) : "";
+  return f !== undefined && at.end - f.base <= f.src.length ? f.src.slice((at.start - f.base) as i64, (at.end - f.base) as i64) : "";
 }
 
 // Whether a build may change `fish.lock`, as `fishc build --locked` says it may not, for CI;
