@@ -4,7 +4,7 @@ import { bodyOf, type Arenas, type LocalId } from "./arenas.ts";
 import type { Instance, Local, Origin } from "./check.ts";
 import type { Body } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import type { Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
+import type { Declarator, Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
 import { indexText, MAP_CHANGES, restBase, restSuffix } from "./values.ts";
@@ -998,7 +998,13 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   // moves and mutable loans.
   // Holders as a message names them, each once.
   function named(holders: LocalId[]): string[] {
-    return [...new Set(holders.map((id) => arenas.localOf(id)).map((h) => (h.name === "for...of" ? "a 'for...of' loop" : `'${h.name}'`)))];
+    let out: string[] = [];
+    for (const id of holders) {
+      const name = arenas.localOf(id).name;
+      const shown = name === "for...of" ? "a 'for...of' loop" : `'${name}'`;
+      if (!out.includes(shown)) out.push(shown);
+    }
+    return out;
   }
 
   /** @throws {CompileError} */
@@ -1168,8 +1174,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
     if (list.kind !== "array") return false;
     for (const x of list.elements) {
       if (x === undefined) continue;
-      let found = awaitedSources(x);
-      while (found.length > 0) out.push(found.shift()!);
+      for (const y of awaitedSources(x)) out.push(y);
     }
     return true;
   }
@@ -1684,188 +1689,212 @@ function overlaps(a: string, b: string): boolean {
 // Where each reference variable is used last: a use as an argument or receiver lasts until
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
-function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, calls, envs, made }: Instance): Map<LocalId, f64> {
-  const { arenas, typing } = tables;
-  const localAt = (n: Expr | Stmt | Param | ObjectProp): LocalId | undefined => locals.get(n);
-  // An argument lent to the call, as a reference or a value holding references, is in use
-  // until the call ends.
-  const lentTo = (a: Expr) => {
-    const t = coercions.get(a) ?? types.get(a);
-    return t !== undefined && typing.holdsRef(t);
-  };
-  let last = new Map<LocalId, f64>();
-  // The loops around the statement being read, innermost last, each by its id and end; and the
-  // loops each variable was declared inside, by their ids.
-  let loops: { id: usize; end: usize }[] = [];
-  let declared = new Map<LocalId, usize[]>();
-  const used = (id: LocalId | undefined, at: usize) => {
-    if (id === undefined || !typing.holdsRef(arenas.localOf(id).type)) return;
-    const inside = declared.get(id);
-    let outer: usize = at;
-    for (const l of loops) {
-      if (inside !== undefined && inside.includes(l.id)) continue;
-      outer = l.end;
-      break;
-    }
-    last.set(id, Math.max(last.get(id) ?? -1, at as f64, outer as f64));
-  };
-  function stmt(s: Stmt) {
-    switch (s.kind) {
-      case "expr":
-        return expr(s.expr);
-      case "let":
-        declared.set(locals.get(s)!, loopIds(loops));
-        return s.declarations[0]!.init && expr(s.declarations[0]!.init);
-      case "if":
-        expr(s.cond);
-        for (const x of s.then) stmt(x);
-        if (s.else) for (const x of s.else) stmt(x);
-        return;
-      case "try":
-        for (const x of s.block) stmt(x);
-        if (s.handler) for (const x of s.handler) stmt(x);
-        if (s.finalizer) for (const x of s.finalizer) stmt(x);
-        return;
-      case "block":
-      case "comptime":
-      case "unsafe":
-        {
-          for (const x of s.body) stmt(x);
-          return;
-        }
-      case "while":
-      case "doWhile":
-        loops.push({ id: s.id, end: s.end });
-        expr(s.cond);
-        for (const x of s.body) stmt(x);
-        loops.pop();
-        return;
-      case "for":
-        if (s.init) stmt(s.init);
-        loops.push({ id: s.id, end: s.end });
-        if (s.test) expr(s.test);
-        if (s.update) expr(s.update);
-        for (const x of s.body) stmt(x);
-        loops.pop();
-        return;
-      case "forOf":
-        expr(s.right);
-        loops.push({ id: s.id, end: s.end });
-        for (const x of s.body) stmt(x);
-        loops.pop();
-        return;
-      case "labeled":
-        return stmt(s.body);
-      case "switch":
-        expr(s.discriminant);
-        for (const c of s.cases) {
-          if (c.test) expr(c.test);
-          for (const x of c.body) stmt(x);
-        }
-        return;
-      case "return":
-      case "throw":
-        if (s.value) expr(s.value);
-        return;
-    }
+function lastUses(tables: Ref<Tables>, body: Ref<Stmt[]>, instance: Ref<Instance>): Map<LocalId, f64> {
+  let st: LastUseState = { last: new Map<LocalId, f64>(), loops: [], declared: new Map<LocalId, usize[]>() };
+  for (const x of body) stmtUses(tables, instance, st, x);
+  return st.last;
+}
+
+// The last use of each reference variable so far; the loops around the statement being read,
+// innermost last, each by its id and end; and the loops each variable was declared inside.
+type LastUseState = { last: Map<LocalId, f64>; loops: { id: usize; end: usize }[]; declared: Map<LocalId, usize[]> };
+
+// An argument lent to the call, as a reference or a value holding references, is in use
+// until the call ends.
+function lentTo(tables: Ref<Tables>, instance: Ref<Instance>, a: Ref<Expr>): boolean {
+  const t = instance.coercions.get(a) ?? instance.types.get(a);
+  return t !== undefined && tables.typing.holdsRef(t);
+}
+
+function markUsed(tables: Ref<Tables>, st: Mut<LastUseState>, id: LocalId | undefined, at: usize): void {
+  if (id === undefined || !tables.typing.holdsRef(tables.arenas.localOf(id).type)) return;
+  const inside = st.declared.get(id);
+  let outer: usize = at;
+  for (const l of st.loops) {
+    if (inside !== undefined && inside.includes(l.id)) continue;
+    outer = l.end;
+    break;
   }
-  function expr(e: Expr, call?: usize) {
-    switch (e.kind) {
-      case "ident":
-        // A nested function used as a value uses what its closure lends from here.
-        for (const l of envs?.get(e)?.env ?? []) used(l, call ?? e.end);
-        return used(localAt(e), call ?? e.end);
-      case "member":
-        return expr(e.object, call);
-      case "object":
-        for (const p of e.props) {
-          if (p.kind === "property" || p.kind === "spread") expr(p.value);
-          else if (p.kind === "shorthand") used(localAt(p), p.end);
-        }
-        return;
-      case "new":
-        for (const a of e.args ?? []) expr(a, lentTo(a) ? e.end : undefined);
-        return;
-      case "call":
-        if (e.callee.kind === "member") expr(e.callee.object, e.end);
-        // A closure called through a variable is in use until the call ends, as is what a
-        // nested function called by name uses.
-        if (e.callee.kind === "ident") expr(e.callee, e.end);
-        for (const l of envs?.get(e)?.env ?? []) used(l, e.end);
-        for (const a of e.args) expr(a, lentTo(a) ? e.end : undefined);
-        return;
-      case "unary":
-      case "update":
-        return expr(e.operand);
-      case "template":
-        for (const x of e.exprs) expr(x);
-        return;
-      case "tagged":
-        if (e.template.kind === "template") for (const x of e.template.exprs) expr(x);
-        return;
-      case "index":
-        expr(e.object);
-        return expr(e.index);
-      case "assign":
-        expr(e.target);
-        return expr(e.value);
-      case "conditional":
-        expr(e.cond);
-        if (types.has(e.then)) expr(e.then, call);
-        if (types.has(e.else)) expr(e.else, call);
-        return;
-      case "match":
-        expr(e.subject);
-        for (const arm of e.arms) {
-          if (arm.guard) expr(arm.guard);
-          if (arm.body.kind === "block") stmt(arm.body);
-          else expr(arm.body, call);
-        }
-        return;
-      // A closure uses what it captures where it is made; whatever holds it holds that after.
-      case "arrow":
-        for (const from of arenas.instanceOf(calls.get(e)!).captures!.values()) if (from !== "this") used(from, call ?? e.end);
-        for (const { env } of made?.get(e) ?? []) for (const l of env) used(l, call ?? e.end);
-        return;
-      case "throw":
-        return expr(e.value);
-      case "comptime":
-        return;
-      case "nonNull":
-      case "as":
-      case "satisfies":
-      case "unsafe":
-        return expr(e.expr, call);
-      case "binary":
-        expr(e.left);
-        return expr(e.right);
-      case "array":
-        for (const x of e.elements) if (x) expr(x.kind === "spread" ? x.value : x);
-        return;
-      case "yield":
-        if (e.value) expr(e.value);
-        return;
-      // A pipe's topic is declared where the pipe runs, as a `let` is.
-      case "pipe":
-        expr(e.value);
-        if (locals.has(e)) declared.set(locals.get(e)!, loopIds(loops));
-        return expr(e.body, call);
-      case "int":
-      case "float":
-      case "bigint":
-      case "regex":
-      case "bool":
-      case "string":
-      case "null":
-      case "this":
-      case "super":
-        return;
-      default:
-        assert(false, `the last-use walk has no case for '${e.kind}' expressions`);
+  st.last.set(id, Math.max(st.last.get(id) ?? -1, at as f64, outer as f64));
+}
+
+function stmtUses(tables: Ref<Tables>, instance: Ref<Instance>, st: Mut<LastUseState>, s: Ref<Stmt>): void {
+  switch (s.kind) {
+    case "expr":
+      exprUses(tables, instance, st, s.expr);
+      return;
+    case "let": {
+      st.declared.set(instance.locals.get(s)!, loopIds(st.loops));
+      const d: Ref<Declarator> = s.declarations[0]!;
+      if (d.init !== undefined) exprUses(tables, instance, st, d.init);
+      return;
     }
+    case "if":
+      exprUses(tables, instance, st, s.cond);
+      for (const x of s.then) stmtUses(tables, instance, st, x);
+      if (s.else !== undefined) for (const x of s.else) stmtUses(tables, instance, st, x);
+      return;
+    case "try":
+      for (const x of s.block) stmtUses(tables, instance, st, x);
+      if (s.handler !== undefined) for (const x of s.handler) stmtUses(tables, instance, st, x);
+      if (s.finalizer !== undefined) for (const x of s.finalizer) stmtUses(tables, instance, st, x);
+      return;
+    case "block":
+    case "comptime":
+    case "unsafe":
+      {
+        for (const x of s.body) stmtUses(tables, instance, st, x);
+        return;
+      }
+    case "while":
+    case "doWhile":
+      st.loops.push({ id: s.id, end: s.end });
+      exprUses(tables, instance, st, s.cond);
+      for (const x of s.body) stmtUses(tables, instance, st, x);
+      st.loops.pop();
+      return;
+    case "for":
+      if (s.init !== undefined) stmtUses(tables, instance, st, s.init);
+      st.loops.push({ id: s.id, end: s.end });
+      if (s.test !== undefined) exprUses(tables, instance, st, s.test);
+      if (s.update !== undefined) exprUses(tables, instance, st, s.update);
+      for (const x of s.body) stmtUses(tables, instance, st, x);
+      st.loops.pop();
+      return;
+    case "forOf":
+      exprUses(tables, instance, st, s.right);
+      st.loops.push({ id: s.id, end: s.end });
+      for (const x of s.body) stmtUses(tables, instance, st, x);
+      st.loops.pop();
+      return;
+    case "labeled":
+      stmtUses(tables, instance, st, s.body);
+      return;
+    case "switch":
+      exprUses(tables, instance, st, s.discriminant);
+      for (const c of s.cases) {
+        if (c.test !== undefined) exprUses(tables, instance, st, c.test);
+        for (const x of c.body) stmtUses(tables, instance, st, x);
+      }
+      return;
+    case "return":
+      if (s.value !== undefined) exprUses(tables, instance, st, s.value);
+      return;
+    case "throw":
+      exprUses(tables, instance, st, s.value);
+      return;
   }
-  for (const x of body) stmt(x);
-  return last;
+}
+function exprUses(tables: Ref<Tables>, instance: Ref<Instance>, st: Mut<LastUseState>, e: Ref<Expr>, call?: usize): void {
+  switch (e.kind) {
+    // A nested function used as a value uses what its closure lends from here.
+    case "ident": {
+      const env = instance.envs?.get(e)?.env;
+      if (env !== undefined) for (const l of env) markUsed(tables, st, l, call ?? e.end);
+      markUsed(tables, st, instance.locals.get(e), call ?? e.end);
+      return;
+    }
+    case "member":
+      exprUses(tables, instance, st, e.object, call);
+      return;
+    case "object":
+      for (const p of e.props) {
+        if (p.kind === "property" || p.kind === "spread") exprUses(tables, instance, st, p.value);
+        else if (p.kind === "shorthand") markUsed(tables, st, instance.locals.get(p), p.end);
+      }
+      return;
+    case "new": {
+      if (e.args !== undefined) for (const a of e.args) exprUses(tables, instance, st, a, lentTo(tables, instance, a) ? e.end : undefined);
+      return;
+    }
+    case "call": {
+      if (e.callee.kind === "member") exprUses(tables, instance, st, e.callee.object, e.end);
+      // A closure called through a variable is in use until the call ends, as is what a
+      // nested function called by name uses.
+      if (e.callee.kind === "ident") exprUses(tables, instance, st, e.callee, e.end);
+      const env = instance.envs?.get(e)?.env;
+      if (env !== undefined) for (const l of env) markUsed(tables, st, l, e.end);
+      for (const a of e.args) exprUses(tables, instance, st, a, lentTo(tables, instance, a) ? e.end : undefined);
+      return;
+    }
+    case "unary":
+    case "update":
+      exprUses(tables, instance, st, e.operand);
+      return;
+    case "template":
+      for (const x of e.exprs) exprUses(tables, instance, st, x);
+      return;
+    case "tagged":
+      if (e.template.kind === "template") for (const x of e.template.exprs) exprUses(tables, instance, st, x);
+      return;
+    case "index":
+      exprUses(tables, instance, st, e.object);
+      exprUses(tables, instance, st, e.index);
+      return;
+    case "assign":
+      exprUses(tables, instance, st, e.target);
+      exprUses(tables, instance, st, e.value);
+      return;
+    case "conditional":
+      exprUses(tables, instance, st, e.cond);
+      if (instance.types.has(e.then)) exprUses(tables, instance, st, e.then, call);
+      if (instance.types.has(e.else)) exprUses(tables, instance, st, e.else, call);
+      return;
+    case "match":
+      exprUses(tables, instance, st, e.subject);
+      for (const arm of e.arms) {
+        if (arm.guard !== undefined) exprUses(tables, instance, st, arm.guard);
+        if (arm.body.kind === "block") stmtUses(tables, instance, st, arm.body);
+        else exprUses(tables, instance, st, arm.body, call);
+      }
+      return;
+    // A closure uses what it captures where it is made; whatever holds it holds that after.
+    case "arrow": {
+      for (const from of tables.arenas.instanceOf(instance.calls.get(e)!).captures!.values()) if (from !== "this") markUsed(tables, st, from, call ?? e.end);
+      const held = instance.made?.get(e);
+      if (held !== undefined) for (const { env } of held) for (const l of env) markUsed(tables, st, l, call ?? e.end);
+      return;
+    }
+    case "throw":
+      exprUses(tables, instance, st, e.value);
+      return;
+    case "comptime":
+      return;
+    case "nonNull":
+    case "as":
+    case "satisfies":
+    case "unsafe":
+      exprUses(tables, instance, st, e.expr, call);
+      return;
+    case "binary":
+      exprUses(tables, instance, st, e.left);
+      exprUses(tables, instance, st, e.right);
+      return;
+    case "array":
+      for (const x of e.elements) if (x !== undefined) exprUses(tables, instance, st, x.kind === "spread" ? x.value : x);
+      return;
+    case "yield":
+      if (e.value !== undefined) exprUses(tables, instance, st, e.value);
+      return;
+    // A pipe's topic is declared where the pipe runs, as a `let` is.
+    case "pipe":
+      exprUses(tables, instance, st, e.value);
+      if (instance.locals.has(e)) st.declared.set(instance.locals.get(e)!, loopIds(st.loops));
+      exprUses(tables, instance, st, e.body, call);
+      return;
+    case "int":
+    case "float":
+    case "bigint":
+    case "regex":
+    case "bool":
+    case "string":
+    case "null":
+    case "this":
+    case "super":
+      return;
+    default:
+      assert(false, `the last-use walk has no case for '${e.kind}' expressions`);
+  }
 }
 
 function loopIds(loops: Ref<{ id: usize; end: usize }[]>): usize[] {
