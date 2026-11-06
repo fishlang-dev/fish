@@ -22,12 +22,13 @@ export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bigint" | "
 };
 
 // What each type form is called when the checker rejects it.
-export const TYPE_FORMS: Record<Exclude<TypeNode["kind"], "ref" | "operator" | "function" | "object" | "literal" | "union" | "array" | "indexed" | "conditional" | "infer" | "query" | "mapped" | "template">, string> = {
-  tuple: "tuple types",
-  intersection: "intersection types",
-  predicate: "type predicates",
-  import: "import types",
-};
+export function typeForm(kind: string): string | undefined {
+  if (kind === "tuple") return "tuple types";
+  if (kind === "intersection") return "intersection types";
+  if (kind === "predicate") return "type predicates";
+  if (kind === "import") return "import types";
+  return undefined;
+}
 
 // The members of `import.meta` fixed while compiling, each file's own.
 export const IMPORT_META_MEMBERS = ["path", "file", "dir", "url", "main", "dirname", "filename"];

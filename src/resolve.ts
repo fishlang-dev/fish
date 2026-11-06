@@ -7,8 +7,8 @@ import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
 import { cloneParam, cloneStmt, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.ts";
-import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, copyField, copyMethod } from "./typing.ts";
-import { TYPE_FORMS, unsupported } from "./unsupported.ts";
+import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.ts";
+import { typeForm, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
 import { openParam, standIn, TypeFunctions, UTILITIES, type TypeFunctionsHost } from "./typefns.ts";
@@ -704,7 +704,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (t.target.kind !== "ref" || t.target.args.length > 0 || t.target.name.includes(".")) throw unsupported("'typeof' types other than of a top-level function or const", t);
       return this.host.valueType(t.target.name, t, this.inSight(t.target.name, t));
     }
-    if (t.kind !== "ref") throw unsupported(TYPE_FORMS[t.kind], t);
+    if (t.kind !== "ref") throw unsupported(typeForm(t.kind)!, t);
     const bound = this.host.resolverState.scope.get(t.name);
     if (bound && t.args.length === 0) return bound;
     if (Object.hasOwn(INTEGERS, t.name) || ["boolean", "void", "number", "f32", "f64", "string", "bigint"].includes(t.name)) {
@@ -1603,14 +1603,17 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // for; a name inferred twice stands for the union of both. The pattern's form is checked
   // before the type it is matched against, so a refused form is refused for every type.
   /** @throws {CompileError | Open} */
-  private matches(this: Mut<this>, p: Ref<TypeNode>, t: Type, found: Map<string, Type>): boolean {
+  private matches(this: Mut<this>, p: Ref<TypeNode>, t: Type, found: Mut<Map<string, Type>>): boolean {
     if (inferNames(p).size === 0) {
       const resolved = this.resolveType(p);
       const against = this.comparable(resolved, spanOf(p));
       return this.conforms(t, against, spanOf(p));
     }
-    const r = this.recOf(t);
-    if (r?.kind === "param" && r.concrete !== undefined) return this.matches(p, r.concrete, found);
+    const kind = this.recOf(t)?.kind;
+    if (kind === "param") {
+      const concrete = this.host.tables.typing.rec(t as ParamType).concrete;
+      if (concrete !== undefined) return this.matches(p, concrete, found);
+    }
     if (p.kind === "infer") {
       if (p.constraint !== undefined) {
         const constraint = this.resolveType(p.constraint);
@@ -1621,69 +1624,114 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       found.set(p.name, prior !== undefined ? this.host.tables.typing.unionType([prior, t]) : t);
       return true;
     }
-    if (p.kind === "array" || (p.kind === "ref" && p.name === "Array" && p.args.length === 1)) {
-      return r?.kind === "array" && this.matches(p.kind === "array" ? p.element : p.args[0]!, r.element, found);
+    if (p.kind === "array") {
+      if (kind !== "array") return false;
+      return this.matches(p.element, this.host.tables.typing.rec(t as ArrayType).element, found);
+    }
+    if (p.kind === "ref" && p.name === "Array" && p.args.length === 1) {
+      if (kind !== "array") return false;
+      return this.matches(p.args[0]!, this.host.tables.typing.rec(t as ArrayType).element, found);
     }
     if (p.kind === "ref" && p.name === "Promise" && p.args.length === 1) {
-      const gives = this.host.tables.typing.promiseElement(t) ?? (r?.kind === "future" ? r.gives : undefined);
+      const promised = this.host.tables.typing.promiseElement(t);
+      const gives = promised !== undefined ? promised : kind === "future" ? this.host.tables.typing.rec(t as FutureType).gives : undefined;
       return gives !== undefined && this.matches(p.args[0]!, gives, found);
     }
     // `Option<infer U>` is `U | null`: the empty value matches with nothing for U, anything else is U.
     if (p.kind === "ref" && p.name === "Option" && p.args.length === 1) {
       if (t === "null") return this.matches(p.args[0]!, "never", found);
-      return this.matches(p.args[0]!, this.host.tables.typing.withoutNull(t), found);
+      const present = this.host.tables.typing.withoutNull(t);
+      return this.matches(p.args[0]!, present, found);
     }
     if (p.kind === "ref" && (p.name === "Ref" || p.name === "Mut") && p.args.length === 1) {
-      return r?.kind === "ref" && r.mutable === (p.name === "Mut") && this.matches(p.args[0]!, r.to, found);
+      if (kind !== "ref") return false;
+      const mutable = this.host.tables.typing.rec(t as RefType).mutable;
+      const to = this.host.tables.typing.rec(t as RefType).to;
+      return mutable === (p.name === "Mut") && this.matches(p.args[0]!, to, found);
     }
     if (p.kind === "ref") {
-      const args = r?.kind === "class" && r.generic?.name === p.name ? r.generic.args : undefined;
-      return args !== undefined && args.length === p.args.length && p.args.every((a, i) => this.matches(a, args[i]!, found));
+      if (kind !== "class") return false;
+      const generic = this.host.tables.typing.rec(t as ClassType).generic;
+      if (generic === undefined || generic.name !== p.name) return false;
+      let args: Type[] = [];
+      for (const a of generic.args) args.push(a);
+      if (args.length !== p.args.length) return false;
+      for (let i: usize = 0; i < p.args.length; i++) if (!this.matches(p.args[i]!, args[i]!, found)) return false;
+      return true;
     }
     if (p.kind === "function") {
-      const [rest] = p.params;
-      const any = p.params.length === 1 && rest!.rest && rest!.type?.kind === "array" && rest!.type.element.kind === "ref" && ["any", "unknown"].includes(rest!.type.element.name);
-      const spread = p.params.find((q) => q.rest);
-      if (!any && spread) throw unsupported("rest parameters other than '...args: any[]' in an 'infer' pattern, which need tuple types,", spread);
-      if (r?.kind !== "function" && r?.kind !== "closure") return false;
-      if (!any && p.params.length !== r.params.length) return false;
+      const any = p.params.length === 1 && anyArgs(p.params[0]!);
+      for (const q of p.params) if (!any && q.rest) throw unsupported("rest parameters other than '...args: any[]' in an 'infer' pattern, which need tuple types,", q);
+      if (kind !== "function" && kind !== "closure") return false;
+      let params: Type[] = [];
+      let returns: Type;
+      const record = this.host.tables.typing.rec(t as FunctionType | ClosureType);
+      for (const x of record.params) params.push(x);
+      returns = record.returns;
+      if (!any && p.params.length !== params.length) return false;
       // A parameter fits the other way round: the function must take what the pattern passes.
-      const params = any || p.params.every((q, i) => (q.type && inferNames(q.type).size > 0 ? this.matches(q.type, r.params[i]!, found) : this.host.tables.typing.fits(this.comparable(this.paramType(q), q), r.params[i]!)));
-      return params && this.matches(p.returns, r.returns, found);
+      if (!any) {
+        for (let i: usize = 0; i < p.params.length; i++) {
+          const q: Ref<Param> = p.params[i]!;
+          if (q.type !== undefined && inferNames(q.type).size > 0) {
+            if (!this.matches(q.type, params[i]!, found)) return false;
+            continue;
+          }
+          const taken = this.paramType(q);
+          const comparable = this.comparable(taken, q);
+          if (!this.host.tables.typing.fits(comparable, params[i]!)) return false;
+        }
+      }
+      return this.matches(p.returns, returns, found);
     }
     if (p.kind === "object") {
-      for (const m of p.members) if (m.kind !== "property" || typeof m.name !== "string" || !m.type) throw unsupported("members other than properties in an 'infer' pattern", m);
-      if (r?.kind !== "object" && r?.kind !== "class") return false;
-      return p.members.every((m) => {
-        const member = m as Extract<TypeMember, { kind: "property" }>;
-        const f = this.host.tables.typing.field(t as ClassType | ObjectType, member.name as string);
-        if (!f || (f.access ?? "public") !== "public") return member.optional === true;
-        return this.matches(member.type!, f.type, found);
-      });
+      for (const m of p.members) if (m.kind !== "property" || memberName(m) === undefined || m.type === undefined) throw unsupported("members other than properties in an 'infer' pattern", m);
+      if (kind !== "object" && kind !== "class") return false;
+      for (const m of p.members) {
+        if (m.kind !== "property") continue;
+        const name = memberName(m)!;
+        const f = this.host.tables.typing.field(t as ClassType | ObjectType, name);
+        if (f === undefined || (f.access ?? "public") !== "public") {
+          if (m.optional !== true) return false;
+          continue;
+        }
+        const type = f.type;
+        if (!this.matches(m.type!, type, found)) return false;
+      }
+      return true;
     }
-    if (p.kind === "template" && r?.kind === "pattern") throw unsupported("'infer' patterns matched against template literal pattern types", p);
+    if (p.kind === "template" && kind === "pattern") throw unsupported("'infer' patterns matched against template literal pattern types", p);
     // A template takes a string literal's text apart; each `infer` hole is its piece of text, as
     // a literal of the type its bound asks for.
     if (p.kind === "template") {
-      if (r?.kind !== "literal" || typeof r.value !== "string" || r.owner) return false;
-      const parts = splitTemplate(r.value, p.quasis);
-      return parts !== undefined && p.types.every((hole, i) => {
+      if (kind !== "literal") return false;
+      const literal = this.host.tables.typing.rec(t as LiteralType);
+      if (typeof literal.value !== "string" || literal.owner !== undefined) return false;
+      const parts = splitTemplate(literal.value, p.quasis);
+      if (parts === undefined) return false;
+      for (let i: usize = 0; i < p.types.length; i++) {
+        const hole: Ref<TypeNode> = p.types[i]!;
         const text = parts[i]!;
         if (hole.kind !== "infer") {
           if (inferNames(hole).size > 0) throw unsupported("template literal holes holding 'infer' inside other types", hole);
           const resolved = this.resolveType(hole);
-          const comparable = this.comparable(resolved, hole);
-          return this.host.tables.typing.textFits(text, comparable);
+          const comparable = this.comparable(resolved, spanOf(hole));
+          if (!this.host.tables.typing.textFits(text, comparable)) return false;
+          continue;
         }
-        const bound = hole.constraint ? this.comparable(this.resolveType(hole.constraint), hole.constraint) : "string";
+        let bound: Type = "string";
+        if (hole.constraint !== undefined) {
+          const constraint = this.resolveType(hole.constraint);
+          bound = this.comparable(constraint, spanOf(hole.constraint));
+        }
         const value = inferredText(this.host.tables.typing, text, bound);
         if (value === undefined) return false;
         const prior = found.get(hole.name);
-        found.set(hole.name, prior ? this.host.tables.typing.unionType([prior, value]) : value);
-        return true;
-      });
+        found.set(hole.name, prior !== undefined ? this.host.tables.typing.unionType([prior, value]) : value);
+      }
+      return true;
     }
-    throw unsupported(p.kind === "union" ? "unions holding 'infer'" : `${TYPE_FORMS[p.kind as keyof typeof TYPE_FORMS] ?? "these types"} holding 'infer'`, p);
+    throw unsupported(p.kind === "union" ? "unions holding 'infer'" : `${typeForm(p.kind) ?? "these types"} holding 'infer'`, p);
   }
 
   // `{ [k: string]: V }`: a dictionary, whose keys are known only when the program runs.
@@ -1748,6 +1796,11 @@ function keyed(typing: Ref<Typing>, t: Type): boolean {
 
 function kindOf(typing: Ref<Typing>, t: Type | undefined): string | undefined {
   return t === undefined || typeof t === "string" ? undefined : typing.rec(t).kind;
+}
+
+// Whether a parameter is written `...args: any[]` or `...args: unknown[]`.
+function anyArgs(p: Ref<Param>): boolean {
+  return p.rest && p.type !== undefined && p.type.kind === "array" && p.type.element.kind === "ref" && ["any", "unknown"].includes(p.type.element.name);
 }
 
 // Whether a parameter is a method's `this`.
