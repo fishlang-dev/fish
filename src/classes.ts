@@ -72,7 +72,9 @@ export type Body = Span & Id & {
 
 // A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather
 // than instantiated.
-export const isLifetime = (p: TypeParam) => p.constraint?.kind === "ref" && p.constraint.name === "Lifetime" && p.constraint.args.length === 0;
+export function isLifetime(p: Ref<TypeParam>): boolean {
+  return p.constraint !== undefined && p.constraint.kind === "ref" && p.constraint.name === "Lifetime" && p.constraint.args.length === 0;
+}
 
 // A field as declared: its annotation, its initializer, or both give its type.
 // `written` is an optional field's type as written, before `?` made it nullable.
@@ -570,10 +572,13 @@ function renamed<T>(t: T, names: Map<string, string>): T {
 }
 
 // A member of a class or of the bases it embeds, nearest first.
-export function inherited(arenas: Arenas, c: ClassInfo, table: "methods" | "statics" | "getters" | "setters", name: string): Body | undefined {
-  for (let b: ClassInfo | undefined = c; b; b = arenas.classOf(b.base)) {
-    const found = b[table].get(name);
+export function inherited(arenas: Ref<Arenas>, c: Ref<ClassInfo>, table: "methods" | "statics" | "getters" | "setters", name: string): Ref<Body> | undefined {
+  let at: ClassId | undefined = c.classId;
+  while (at !== undefined) {
+    const b: Ref<ClassInfo> = arenas.classOf(at);
+    const found = table === "methods" ? b.methods.get(name) : table === "statics" ? b.statics.get(name) : table === "getters" ? b.getters.get(name) : b.setters.get(name);
     if (found !== undefined) return arenas.bodyOf(found);
+    at = b.base;
   }
   return undefined;
 }

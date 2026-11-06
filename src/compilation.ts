@@ -48,18 +48,19 @@ export type Counts = { enums: usize; lifts: usize; destructures: usize; expansio
 // objects reads are on `mathlib.ts`'s `BuildSession`, out of the checker's reach.
 // `locking`: whether the lockfile may be rewritten, and which dependencies `fishc update` moves.
 // `engineHook`: whether programs may import `fish:engine`, which only the compiler's own tests do.
-// `std`: what gives std's statements, each call a fresh copy, without which each compilation parses
-// std's source; and how many times std was parsed rather than loaded.
+// `std`: std's statements when `cached`, each read a fresh copy, without which each compilation
+// parses std's source; and how many times std was parsed rather than loaded.
 // `timings`: each build stage's time, kept only when `--timings` asks.
+
 export type Session = {
   locking: Locking;
   engineHook: boolean;
-  std: { load?: () => Stmt[]; parses: usize };
+  std: { tree: Stmt[]; cached: boolean; parses: usize };
   timings?: Timings;
 };
 
 export function newSession(): Session {
-  return { locking: { locked: false }, engineHook: false, std: { parses: 0 } };
+  return { locking: { locked: false }, engineHook: false, std: { tree: [], cached: false, parses: 0 } };
 }
 
 export function newCompilation(session: Session): Compilation {

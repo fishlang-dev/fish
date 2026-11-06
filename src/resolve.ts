@@ -6,7 +6,7 @@ import type { Expr, Interface, Param, Span, Stmt, TypeAlias, TypeMember, TypeNod
 import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
+import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, isTypedName, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing } from "./typing.ts";
 import { TYPE_FORMS, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
 import { byteSize } from "./sizes.ts";
@@ -80,6 +80,11 @@ export interface ResolverHost {
   tables: Tables;
   interfaces: Map<string, Interface>;
   enums: Map<string, EnumInfo>;
+  // An enum's type and a member of it, read once the enum is settled.
+  /** @throws {CompileError} */
+  enumType(this: Mut<this>, name: string): Type;
+  /** @throws {CompileError} */
+  enumMember(this: Mut<this>, name: string, member: string): LiteralType | undefined;
   slots: Map<string, boolean[]>;
   resolverState: ResolverState;
   /** @throws {CompileError} */
@@ -621,8 +626,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const variant = instance.variants.get(name);
       if (variant) return variant;
     }
-    if (e && name === undefined) return e.type;
-    if (e && e.members.has(name!)) return e.members.get(name!)!;
+    if (e && name === undefined) return this.host.enumType(owner!);
+    const found = e && this.host.enumMember(owner!, name!);
+    if (found) return found;
     const trait = this.interfaces.get(t.name);
     // A package's interface or class is a JS handle of its shape.
     if (trait?.js) return this.typing.blockType("JsValue", this.interfaceOf(trait, args, t));

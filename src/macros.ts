@@ -144,7 +144,7 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
     const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`, ids)[0] as Extract<Stmt, { kind: "class" }>;
     const method = made.members[0]!;
     respan(method, at);
-    markGenerated(generated, method);
+    markGenerated(generated, { of: "classMember", node: method });
     upcasts.add(`${at.start}:${at.end}`);
     decl = { ...decl, members: [...decl.members, method] };
   }
@@ -445,7 +445,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   }
   const node = nodeOf(ids, result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
-  markGenerated(compilation.generated, given);
+  for (const d of given) markGenerated(compilation.generated, { of: "stmt", node: d });
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
   const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
   if (forged) throw new CompileError("E1103", `the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);

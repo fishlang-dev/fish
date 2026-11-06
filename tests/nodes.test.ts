@@ -36,7 +36,14 @@ const REPLACERS: [keyof Rewrites, keyof Rewrites][] = [
   ["replaceTypeMember", "currentTypeMember"],
   ["replacePatternProp", "currentPatternProp"],
 ];
+// A copy of a node, made as it was at some point, keeps its span; two different nodes under one id
+// would have to have been made at the same place.
+const sameSpan = (a: object, b: object) => {
+  const [x, y] = [a as { start?: unknown; end?: unknown }, b as { start?: unknown; end?: unknown }];
+  return typeof x.start === "number" && x.start === y.start && x.end === y.end;
+};
 // Every object a replacement replaced or made, by node id: a table may hold a copy of any of them.
+// Ids start again with each compilation, so each program clears it.
 const versions = new Map<number, object[]>();
 const isVersion = (id: number, node: object) => versions.get(id)?.some((v) => v === node || Bun.deepEquals(v, node)) ?? false;
 // Replacements made through a bare `{ id }`, which the test can't tell the replaced node from:
@@ -104,7 +111,7 @@ function audit(roots: unknown, ids: Map<number, object>, where: string): string[
       const at = `${where}: a ${String(n.kind ?? "node")} at ${n.start}`;
       if (typeof n.id !== "number") problems.push(`${at} has no id`);
       // A replacement takes the id of the node it replaces, and a copy the id of what it copies.
-      else if (ids.has(n.id) && latest(ids.get(n.id) as Id) !== latest(n as Id) && !madeForStub.has(n) && !Bun.deepEquals(ids.get(n.id), n)) problems.push(`${at} shares id ${n.id} with another node`);
+      else if (ids.has(n.id) && latest(ids.get(n.id) as Id) !== latest(n as Id) && !madeForStub.has(n) && !sameSpan(ids.get(n.id)!, n)) problems.push(`${at} shares id ${n.id} with another node`);
       else ids.set(n.id, n);
     }
     Object.values(n).forEach(visit);
@@ -147,6 +154,7 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
   const session = cachedSession();
   const problems: string[] = [];
   for (const p of corpus()) {
+    versions.clear();
     const ids = new Map<number, object>();
     let written: Stmt[] = [];
     try {
@@ -207,6 +215,7 @@ test("every type of the checked test programs is in its arena", () => {
   const problems: string[] = [];
   let types = 0;
   for (const p of corpus()) {
+    versions.clear();
     if (p.src.includes("// mode: parse")) continue;
     try {
       const { checked } = analyze(session, p.src, p.file);
@@ -251,6 +260,7 @@ test("no two types of the checked test programs share a Field array or Field", (
   const session = cachedSession();
   const problems: string[] = [];
   for (const p of corpus()) {
+    versions.clear();
     if (p.src.includes("// mode: parse")) continue;
     try {
       problems.push(...sharedFields(analyze(session, p.src, p.file).checked.compilation.typing, p.name));
@@ -286,6 +296,7 @@ test("renumbering and moving spans refuse two different nodes under one id", () 
   expect(renumbered.left.id).toBe(renumbered.right.id);
 });
 
+// A table holding a bare `{ id }`, as the generated marks are, holds no node to clash with.
 // Every node table's reads and writes checked against the node it holds under the id, as the
 // tables once checked themselves: one other than that node, a copy of it, or its replacement is a
 // clash. Copies share their id on purpose, since a node copied to be owned twice is still one node.
@@ -293,7 +304,7 @@ const clashes: string[] = [];
 function noting<F extends (this: object, node: Id, ...rest: never[]) => unknown>(method: F, held: (table: object, id: number) => object | undefined): F {
   return function (this: object, node: Id, ...rest: never[]) {
     const was = held(this, node.id);
-    if (was !== undefined && was !== node && latest(was) !== latest(node) && !Bun.deepEquals(was, node) && !(isVersion(node.id, was) && isVersion(node.id, node))) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
+    if (was !== undefined && was !== node && Object.keys(was).length > 1 && Object.keys(node).length > 1 && latest(was) !== latest(node) && !sameSpan(was, node) && !(isVersion(node.id, was) && isVersion(node.id, node))) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
     return method.call(this, node, ...rest);
   } as F;
 }
@@ -310,11 +321,12 @@ test("no node table meets two different nodes under one id", () => {
   const session = cachedSession();
   const sample = corpus().filter((p) => /^(macro|comptime|generic|derive|class|std|json)/.test(p.name) && !p.src.includes("// mode: parse"));
   expect(sample.length).toBeGreaterThan(50);
-  const a = { id: 1, kind: "a" };
-  new NodeMap<{ id: number; kind: string }, string>().set(a, "a").get({ ...a, kind: "b" });
+  const a = { id: 1, kind: "a", start: 0, end: 1 };
+  new NodeMap<{ id: number; kind: string; start: number; end: number }, string>().set(a, "a").get({ ...a, kind: "b", start: 4, end: 5 });
   expect(clashes).toEqual(["two nodes share id 1: a a and a b"]);
   clashes.length = 0;
   for (const p of sample) {
+    versions.clear();
     try {
       analyze(session, p.src, p.file);
     } catch (e) {

@@ -164,6 +164,9 @@ export const integerInfo = (t: Integer): { bits: usize; signed: boolean } => INT
 
 // JavaScript's typed arrays, by the element each holds; an ArrayBuffer is its bytes.
 export const TYPED_ARRAYS = { Uint8Array: "u8", Int8Array: "i8", Uint16Array: "u16", Int16Array: "i16", Uint32Array: "u32", Int32Array: "i32", Float32Array: "f32", Float64Array: "f64", ArrayBuffer: "u8" } as const;
+// TYPED_ARRAYS' names, written out since reading an object's keys needs a value to read them from.
+const TYPED_ARRAY_KEYS: (keyof typeof TYPED_ARRAYS)[] = ["Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array", "ArrayBuffer"];
+export const TYPED_ARRAY_NAMES = new Set<string>([...TYPED_ARRAY_KEYS]);
 const TYPED_ARRAY_MAP = new Map<string, Numeric>([
   ["Uint8Array", "u8"], ["Int8Array", "i8"], ["Uint16Array", "u16"], ["Int16Array", "i16"],
   ["Uint32Array", "u32"], ["Int32Array", "i32"], ["Float32Array", "f32"], ["Float64Array", "f64"], ["ArrayBuffer", "u8"],

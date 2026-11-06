@@ -25,7 +25,7 @@ import { holdsNull } from "./defaults.ts";
 import { bodyOf, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.ts";
-import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
+import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, applyShape, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 import { forEachChild, nextId, NodeMap, NodeSet, renumberExpr, respanExpr, someNode, walk, walkWhile, type AnyNode } from "./nodes.ts";
 import { cloneExpr, rebuiltExpr } from "./rebuild.ts";
 
@@ -104,6 +104,11 @@ export type Context = {
   byName: Map<string, BodyId>;
   classes: Map<string, ClassId>;
   enums: Map<string, EnumInfo>;
+  // A C-like enum's member, and its members' names, read once the enum is settled.
+  /** @throws {CompileError} */
+  enumMember(name: string, member: string): LiteralType | undefined;
+  /** @throws {CompileError} */
+  enumMemberNames(name: string): string[];
   // A data-carrying enum made with these type arguments.
   /** @throws {CompileError} */
   enumInstance(info: EnumInfo, args: Type[], at: Span): EnumInstance;
@@ -1217,9 +1222,10 @@ export class Expressions<C extends Context> implements Union {
   }
 
   // A C-like enum's member named by a pattern, `Color.Red`.
+  /** @throws {CompileError} */
   private enumMember(this: Mut<this>, p: Extract<Pattern, { kind: "variant" }>): LiteralType | undefined {
     const [owner, name] = p.name.split(".");
-    return p.args === undefined && name !== undefined && !this.ctx.lookup(owner!) ? this.enums.get(owner!)?.members.get(name) : undefined;
+    return p.args === undefined && name !== undefined && !this.ctx.lookup(owner!) && this.enums.has(owner!) ? this.ctx.enumMember(owner!, name) : undefined;
   }
 
   // The variant among a type's members that a pattern names: `Circle`, or `Shape.Circle`.
@@ -5744,9 +5750,9 @@ export class Expressions<C extends Context> implements Union {
         // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
         const named = e.object.kind === "ident" && !this.ctx.lookup(e.object.name) ? this.enums.get(e.object.name) : undefined;
         if (named?.data) return this.variant(e, named, true);
-        if (named) {
-          const found = named.members.get(e.name);
-          if (!found) throw new CompileError("E0502", `property '${e.name}' does not exist on enum '${(e.object as { name: string }).name}'${didYouMean(e.name, named.members.keys())}`, e.start, e.end);
+        if (named && e.object.kind === "ident") {
+          const found = this.ctx.enumMember(e.object.name, e.name);
+          if (!found) throw new CompileError("E0502", `property '${e.name}' does not exist on enum '${e.object.name}'${didYouMean(e.name, this.ctx.enumMemberNames(e.object.name))}`, e.start, e.end);
           return found;
         }
         if (e.object.kind === "ident") this.ctx.exprsState.objects.add(e.object);
@@ -6185,7 +6191,7 @@ export class Expressions<C extends Context> implements Union {
             return wider;
           }
         }
-        return bothSides(this.typing, e, then, otherwise, (v, from, to, message) => this.coerce(v, from, to, message));
+        return bothSides(this, e, then, otherwise);
       }
       case "binary":
         if (this.presence(e)) return "boolean";
@@ -6730,7 +6736,7 @@ export class Expressions<C extends Context> implements Union {
     if (e.kind === "object" && tr?.kind === "object" && this.typing.holdsRef(to)) type = this.lendFields(e, to as ObjectType, message);
     const shape = !this.typing.fits(type, to) ? literalShape(this.typing, e, to, this.types) : undefined;
     if (shape) {
-      shape.apply(this.coercions);
+      applyShape(shape, this.coercions, this.types);
       type = shape.type;
     }
     if (tr?.kind === "function") {
@@ -6771,7 +6777,7 @@ export class Expressions<C extends Context> implements Union {
 
   /** @throws {CompileError} */
   private compared(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): Type {
-    const special = this.jsEmpty(e) ?? typeofComparison(e, this) ?? this.equality(e) ?? unionComparison(e, this, (v, to) => this.adapt(v, to));
+    const special = this.jsEmpty(e) ?? typeofComparison(e, this) ?? this.equality(e) ?? unionComparison(e, this);
     return special ?? binaryType(this.typing, e.op, ...this.sameNumbers(e.left, this.operand(e.left), e.right, this.operand(e.right), true), e);
   }
 

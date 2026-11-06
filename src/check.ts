@@ -13,8 +13,8 @@ import { cloneExpr, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots } from "./flow.ts";
-import { declareEnum, type EnumInfo, type EnumInstance } from "./enums.ts";
-import { bindingKey, covers, either, guard, isPath, presentKey, type Facts } from "./narrow.ts";
+import { declareEnum, enumMemberNames, enumMemberOf, enumType, settleEnum, type EnumHost, type EnumInfo, type EnumInstance } from "./enums.ts";
+import { bindingKey, covers, either, guard, isPath, presentKey, type Facts, type GuardHost } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
 import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
 import { unsatisfied, type Members, type Refused } from "./interfaces.ts";
@@ -22,7 +22,7 @@ import { Registry, RegistryState, type RegistryHost } from "./registry.ts";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type InScope, type ResolverHost } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
-import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound } from "./typing.ts";
+import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { localKeys, lowerKeys, numberKey, topKeys } from "./keys.ts";
@@ -440,7 +440,7 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
   return new Checker(compilation, written, exportsToC, macros, module).run();
 }
 
-class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost {
+class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost, EnumHost {
   compilation: Compilation;
   written: Stmt[];
   library: boolean;
@@ -622,7 +622,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
         if (e.kind === "enum") {
           typeName(e.name, e, aliases, this.classes, this.templates, this.interfaces, this.enums);
-          this.enums.set(e.name, declareEnum(this.compilation, e, (owner, member, init) => this.enumMemberValue(owner, member, init)));
+          this.enums.set(e.name, declareEnum(this.compilation, e));
           continue;
         }
         const trait = s.kind === "typeAlias" ? traitAlias(this.ids, s) : undefined;
@@ -971,11 +971,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // function's inferred result, and so is an enum with no type parameters, made now so a
     // payload naming no type is caught unused.
     this.resolver().validate();
-    for (const e of this.enums.values()) if (e.data && e.data.params.length === 0) e.type = this.resolver().enumInstance(e, [], e.data.at).type;
+    for (const [name, e] of [...this.enums]) if (e.data && e.data.params.length === 0) this.enums.set(name, { ...e, type: this.resolver().enumInstance(e, [], e.data.at).type });
     this.classes.forEach((c) => this.implementsSignatures(this.arenas.classOf(c)));
     // An enum with computed members is settled when first read; one nothing reads still reports
     // a bad initializer.
-    for (const e of this.enums.values()) void e.members;
+    for (const name of [...this.enums.keys()]) settleEnum(this, name);
     const { unsettled } = this.registryState;
     const { pending } = this.instancingState;
     // The classes as declared, and generic classes' definitions; any other is an instance a call made.
@@ -1185,6 +1185,21 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   // A computed enum member's value: its initializer, run while compiling as a top-level const is.
+  /** @throws {CompileError} */
+  enumType(this: Mut<this>, name: string): Type {
+    return enumType(this, name);
+  }
+
+  /** @throws {CompileError} */
+  enumMember(this: Mut<this>, name: string, member: string): LiteralType | undefined {
+    return enumMemberOf(this, name, member);
+  }
+
+  /** @throws {CompileError} */
+  enumMemberNames(this: Mut<this>, name: string): string[] {
+    return enumMemberNames(this, name);
+  }
+
   /** @throws {CompileError} */
   enumMemberValue(this: Mut<this>, owner: string, member: string, init: Expr): Value {
     const giving: Stmt = { id: nextId(this.ids), kind: "return", value: init, start: init.start, end: init.end };
@@ -1861,7 +1876,7 @@ class ClassMembers implements Members {
   }
 }
 
-class BodyChecker implements Context {
+class BodyChecker implements Context, GuardHost {
   cx: Mut<Checker>;
   instance: Instance;
   // The body a closure is written in, which its body reaches back into as it is checked.
@@ -2108,6 +2123,16 @@ class BodyChecker implements Context {
   /** @throws {CompileError} */
   enumInstance(this: Mut<this>, info: EnumInfo, args: Type[], at: Span): EnumInstance {
     return this.cx.resolver().enumInstance(info, args, at);
+  }
+
+  /** @throws {CompileError} */
+  enumMember(this: Mut<this>, name: string, member: string): LiteralType | undefined {
+    return this.cx.enumMember(name, member);
+  }
+
+  /** @throws {CompileError} */
+  enumMemberNames(this: Mut<this>, name: string): string[] {
+    return this.cx.enumMemberNames(name);
   }
 
   /** @throws {CompileError} */
@@ -2536,12 +2561,21 @@ class BodyChecker implements Context {
     if (!target || p?.kind !== "predicate" || !p.type) return undefined;
     const index = bodyOf(target).params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === p.name) as usize;
     const type = this.cx.resolver().withScope(target.bindings, () => this.cx.resolver().resolveType(p.type!));
-    return { index, type, narrows: (yes: boolean, no: boolean) => void ((yes || no) && (this.instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no })) };
+    return { index, type };
+  }
+  predicateNarrows(this: Mut<this>, call: Extract<Expr, { kind: "call" }>, index: usize, type: Type, yes: boolean, no: boolean) {
+    if (yes || no) (this.instance.predicates ??= new NodeMap()).set(call, { index, type, yes, no });
+  }
+  typeChecked(e: Expr): Type | undefined {
+    return this.types.get(e);
+  }
+  localRead(e: Expr): LocalId | undefined {
+    return this.locals.get(e);
   }
   // A binding the condition itself writes isn't narrowed by it.
   /** @throws {CompileError} */
   proves(e: Expr) {
-    const proven = guard(this.cx.tables, e, this.types, this.locals as NodeMap<Expr, LocalId>, (l) => this.narrowable(l), (x) => this.pathKey(x), (call) => this.predicate(call));
+    const proven = guard(this, e);
     const inside = this.written.filter((w) => w.at >= e.start && w.at < e.end);
     // A variable compared as declared, in a check it was already narrowed past, stays as narrow.
     const declared = new Set<LocalId>();

@@ -554,6 +554,11 @@ export class NodeSet<K extends Id> {
   has(node: Ref<K>): boolean {
     return this.table.has(idOf(node));
   }
+  // Whether a node of this id is in the set, for a node of a type the set doesn't hold.
+  hasId(id: usize): boolean {
+    return this.table.has(id);
+  }
+
 
   add(this: Mut<this>, node: K): Mut<this> {
     this.table.set(idOf(node), node);

@@ -61,6 +61,9 @@ export function cachedSession(): BuildSession {
     tree = { path, bytes };
     return bytes;
   };
-  session.std.load = (): Stmt[] => deserialize(bytes());
+  // Read through a getter, so each compilation takes a fresh copy of the tree, read from the cache
+  // as it is then.
+  Object.defineProperty(session.std, "tree", { get: (): Stmt[] => deserialize(bytes()) });
+  session.std.cached = true;
   return session;
 }

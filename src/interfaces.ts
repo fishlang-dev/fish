@@ -13,18 +13,18 @@ export type Members = {
   /** @throws {CompileError} */
   classOf(t: ClassType): ClassInfo;
   /** @throws {CompileError} */
-  returnOf(f: Body, at: Span): Type;
+  returnOf(f: Ref<Body>, at: Span): Type;
   /** @throws {CompileError} */
-  throwsOf(f: Body): Type | undefined;
+  throwsOf(f: Ref<Body>): Type | undefined;
   // A method's parameter types, resolved with its class's type arguments.
-  paramTypesOf(f: Body): Type[];
+  paramTypesOf(f: Ref<Body>): Type[];
   // A generic method's own type parameters' placeholders, in order.
   /** @throws {CompileError} */
-  typeParamsOf(f: Body): Type[];
+  typeParamsOf(f: Ref<Body>): Type[];
   // A function declared at the top level, or lifted there, by its name.
   bodyNamed(name: string): Body | undefined;
   /** @throws {CompileError} */
-  replaced(t: Type, swap: TypeMap<Type, Type>): Type;
+  replaced(t: Type, swap: Ref<TypeMap<Type, Type>>): Type;
   typing: Typing;
   arenas: Arenas;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
@@ -36,67 +36,72 @@ export type Members = {
 // undefined when it can: as many type parameters, bounded alike, and the same signature with
 // them standing for the type's.
 /** @throws {CompileError} */
-export function familyMismatch(f: Body, family: FunctionType, members: Members, at: Span): string | undefined {
-  const { typing } = members;
-  const g = typing.rec(family).generic!;
-  const own = (f.typeParams ?? []).filter((p) => !isLifetime(p));
-  if (own.length !== g.names.length) return `it has ${own.length} type parameter${own.length === 1 ? "" : "s"}, where '${typing.show(family)}' has ${g.names.length}`;
-  const written = members.paramTypesOf(f).map((p) => implicitBound(typing, p));
-  if (written.length !== typing.rec(family).params.length) return `it takes ${written.length} parameter${written.length === 1 ? "" : "s"}, where '${typing.show(family)}' takes ${typing.rec(family).params.length}`;
-  if (f.throws) return `it can throw, which '${typing.show(family)}' doesn't say`;
+export function familyMismatch(f: Ref<Body>, family: FunctionType, members: Mut<Members>, at: Span): string | undefined {
+  const g = members.typing.rec(family).generic!;
+  let own: string[] = [];
+  if (f.typeParams !== undefined) for (const p of f.typeParams) if (!isLifetime(p)) own.push(p.name);
+  if (own.length !== g.names.length) return `it has ${own.length} type parameter${own.length === 1 ? "" : "s"}, where '${members.typing.show(family)}' has ${g.names.length}`;
+  const written = members.paramTypesOf(f).map((p) => implicitBound(members.typing, p));
+  if (written.length !== members.typing.rec(family).params.length) return `it takes ${written.length} parameter${written.length === 1 ? "" : "s"}, where '${members.typing.show(family)}' takes ${members.typing.rec(family).params.length}`;
+  if (f.throws !== undefined) return `it can throw, which '${members.typing.show(family)}' doesn't say`;
   const given = members.returnOf(f, at);
-  const swap = byName(typing, [...written, given], own.map((p) => p.name), g.own);
-  if (members.typeParamsOf(f).some((p, i) => !sameBounds(typing, p, g.own[i]!))) return "its type parameters' bounds differ";
+  const swap = byName(members.typing, [...written, given], own, g.own);
+  if (members.typeParamsOf(f).some((p, i) => !sameBounds(members.typing, p, g.own[i as usize]!))) return "its type parameters' bounds differ";
   const params = written.map((p) => members.replaced(p, swap));
-  const wrong = params.findIndex((p, i) => !same(typing, p, typing.rec(family).params[i]!));
-  if (wrong >= 0) return `its parameter ${wrong + 1} is '${typing.show(params[wrong]!)}', where '${typing.show(family)}' passes '${typing.show(typing.rec(family).params[wrong]!)}'`;
+  const expected = members.typing.rec(family).params;
+  const wrong = params.findIndex((p, i) => !same(members.typing, p, expected[i as usize]!));
+  if (wrong >= 0) return `its parameter ${wrong + 1} is '${members.typing.show(params[wrong as usize]!)}', where '${members.typing.show(family)}' passes '${members.typing.show(members.typing.rec(family).params[wrong as usize]!)}'`;
   const givenReplaced = members.replaced(given, swap);
-  if (!typing.fits(givenReplaced, typing.rec(family).returns)) return `it returns '${typing.show(givenReplaced)}', where '${typing.show(family)}' returns '${typing.show(typing.rec(family).returns)}'`;
+  if (!members.typing.fits(givenReplaced, members.typing.rec(family).returns)) return `it returns '${members.typing.show(givenReplaced)}', where '${members.typing.show(family)}' returns '${members.typing.show(members.typing.rec(family).returns)}'`;
   return undefined;
 }
 
 // The type parameters named `names` found in `types`, each mapped to the one at its place in `to`:
 // a method's own placeholders may be met as more than one type, so they are found by name.
-function byName(typing: Typing, types: Type[], names: string[], to: Type[]): TypeMap<Type, Type> {
-  const swap = new TypeMap<Type, Type>();
-  const seen = new TypeSet<Type>();
-  const walk = (t: Type) => {
-    if (typeof t === "string" || seen.has(t)) return;
+function byName(typing: Mut<Typing>, types: Ref<Type[]>, names: Ref<string[]>, to: Ref<Type[]>): TypeMap<Type, Type> {
+  let swap = new TypeMap<Type, Type>();
+  let seen = new TypeSet<Type>();
+  let left: Type[] = [...types];
+  while (left.length > 0) {
+    const t = left.pop()!;
+    if (typeof t === "string" || seen.has(t)) continue;
     seen.add(t);
     const r = typing.rec(t);
-    if (r.kind === "param" && names.includes(r.name)) swap.set(t, to[names.indexOf(r.name)]!);
-    typing.links(t).forEach(walk);
-  };
-  types.forEach(walk);
+    if (r.kind === "param" && names.includes(r.name)) swap.set(t, to[names.indexOf(r.name) as usize]!);
+    for (const u of typing.links(t)) left.push(u);
+  }
   return swap;
 }
 
+
 // Whether two type parameters standing for each other have the same bound.
-function sameBounds(typing: Typing, a: Type, b: Type): boolean {
-  const bound = (t: Type) => {
-    const r = typeof t === "string" ? undefined : typing.rec(t);
-    return r?.kind === "param" ? r.bound : undefined;
-  };
-  const [x, y] = [bound(a), bound(b)];
+function sameBounds(typing: Ref<Typing>, a: Type, b: Type): boolean {
+  const x = boundOf(typing, a);
+  const y = boundOf(typing, b);
   return x === y || (x !== undefined && y !== undefined && typing.keyOf(x) === typing.keyOf(y));
 }
+
+function boundOf(typing: Ref<Typing>, t: Type): Type | undefined {
+  const r = typeof t === "string" ? undefined : typing.rec(t);
+  return r?.kind === "param" ? r.bound : undefined;
+}
+
 
 // Why a value of `type` doesn't satisfy `trait`, or undefined when it does. Satisfying is
 // by shape: a public field or getter of a fitting type for each of the interface's fields,
 // and a public method taking exactly its parameter types and returning a fitting type for
 // each of its methods. `implements` is never needed.
 /** @throws {CompileError} */
-export function unsatisfied(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
-  const { assuming, typing } = members;
+export function unsatisfied(type: Type, trait: InterfaceType, members: Mut<Members>, at: Span): string | undefined {
   // An interface can name itself, as a builder's methods return the builder, so a pair already
   // being checked is taken as satisfied rather than checked again forever.
-  const key = `${typing.keyOf(type)} ${typing.keyOf(trait)}`;
-  if (assuming.has(key)) return undefined;
-  assuming.add(key);
+  const key = `${members.typing.keyOf(type)} ${members.typing.keyOf(trait)}`;
+  if (members.assuming.has(key)) return undefined;
+  members.assuming.add(key);
   try {
     return check(type, trait, members, at);
   } finally {
-    assuming.delete(key);
+    members.assuming.delete(key);
   }
 }
 
@@ -104,127 +109,157 @@ export function unsatisfied(type: Type, trait: InterfaceType, members: Members, 
 // method names for itself, or in how an optional field is spelled.
 // A function-typed parameter of a generic method is its implicit type parameter, bounded by the
 // function type written, which is what it is compared as.
-function implicitBound(typing: Typing, t: Type): Type {
+function implicitBound(typing: Ref<Typing>, t: Type): Type {
   const r = typeof t === "string" ? undefined : typing.rec(t);
   return r?.kind === "param" && typing.recOf(r.bound)?.kind === "function" ? r.bound! : t;
 }
 
-function same(typing: Typing, a: Type, b: Type): boolean {
-  [a, b] = [implicitBound(typing, a), implicitBound(typing, b)];
-  const [x, y] = [a, b].map((t) => (typeof t === "string" ? undefined : typing.rec(t)));
+function same(typing: Mut<Typing>, a: Type, b: Type): boolean {
+  const left = implicitBound(typing, a);
+  const right = implicitBound(typing, b);
+  const x = typeof left === "string" ? undefined : typing.rec(left);
+  const y = typeof right === "string" ? undefined : typing.rec(right);
   // Function types, which each signature makes anew, are the same when their parts are.
   if (x?.kind === "function" && y?.kind === "function") {
-    return x.params.length === y.params.length && x.params.every((p, i) => same(typing, p, y.params[i]!)) && same(typing, x.returns, y.returns) && x.generic?.names.length === y.generic?.names.length;
+    if (x.params.length !== y.params.length) return false;
+    for (let i: usize = 0; i < x.params.length; i++) if (!same(typing, x.params[i]!, y.params[i as usize]!)) return false;
+    return same(typing, x.returns, y.returns) && x.generic?.names.length === y.generic?.names.length;
   }
-  const plain = (t: Type) => {
-    const r = typeof t === "string" ? undefined : typing.rec(t);
-    return typing.shapeKey(r?.kind === "ref" ? typing.refType(r.to, r.mutable) : t);
-  };
-  return plain(a) === plain(b);
+  return plain(typing, left) === plain(typing, right);
 }
 
+function plain(typing: Mut<Typing>, t: Type): string {
+  const r = typeof t === "string" ? undefined : typing.rec(t);
+  const shaped = r?.kind === "ref" ? typing.refType(r.to, r.mutable) : t;
+  return typing.shapeKey(shaped);
+}
+
+
 /** @throws {CompileError} */
-function check(type: Type, trait: InterfaceType, members: Members, at: Span): string | undefined {
-  const { typing } = members;
-  // A return type fits an interface method's when it fits, or, for an interface, satisfies it.
-  const returns = (actual: Type, expected: Type) => {
-    const r = typeof expected === "string" ? undefined : typing.rec(expected);
-    return r?.kind === "interface" ? unsatisfied(actual, expected as InterfaceType, members, at) === undefined : typing.fits(actual, expected);
-  };
-  const missing = (what: string, name: string) => `${what} '${name}' is missing in type '${typing.show(type)}' but required in type '${typing.rec(trait).name}'`;
+function check(type: Type, trait: InterfaceType, members: Mut<Members>, at: Span): string | undefined {
   if (type === trait) return undefined;
   // An array, a Map, a Set, a string or a generator is an `Iterable<T>` for exactly what a loop
   // over it reads; a class is one through its `[Symbol.iterator]` method, checked as any method.
-  const iterable = typing.iterableElement(trait);
-  const gives = iterable === undefined ? undefined : typing.iteratedBy(type);
-  // String literals, or a union of them, give strings, as a `let` of one widens.
-  const text = (t: Type) => { const r = typing.recOf(t); return r?.kind === "union" ? r.members.every((m) => typing.widenLet(m) === "string") : typing.widenLet(t) === "string"; };
+  const iterable = members.typing.iterableElement(trait);
+  const gives = iterable === undefined ? undefined : members.typing.iteratedBy(type);
   // A pair is the `readonly [K, V]` a table's entries are written as, whether or not it is readonly.
-  if (gives !== undefined) return typing.lower(typing.writable(gives)) === typing.lower(typing.writable(iterable!)) || (typing.lower(iterable!) === "string" && text(typing.lower(gives))) ? undefined : `it gives '${typing.show(gives)}', not '${typing.show(iterable!)}'`;
-  const t = typeof type === "string" ? undefined : typing.rec(type);
+  if (gives !== undefined && iterable !== undefined) {
+    const givesWritable = members.typing.writable(gives);
+    const wantsWritable = members.typing.writable(iterable);
+    if (members.typing.lower(givesWritable) === members.typing.lower(wantsWritable)) return undefined;
+    const loweredGives = members.typing.lower(gives);
+    if (members.typing.lower(iterable) === "string" && text(members.typing, loweredGives)) return undefined;
+    return `it gives '${members.typing.show(gives)}', not '${members.typing.show(iterable)}'`;
+  }
+  const t = typeof type === "string" ? undefined : members.typing.rec(type);
   // A type parameter has what its bound has.
   if (t?.kind === "param") {
-    return t.bound ? unsatisfied(t.bound, trait, members, at) : `type '${t.name}' has no members`;
+    return t.bound !== undefined ? unsatisfied(t.bound, trait, members, at) : `type '${t.name}' has no members`;
   }
   // A future is a `Promise<T>` for exactly what it gives, a type parameter's union in an
   // instance being the one it flattens into.
   if (t?.kind === "future") {
-    const element = typing.promiseElement(trait);
-    if (element === undefined) return `a promise has no members, which type '${typing.rec(trait).name}' expects`;
-    return typing.lower(t.gives) === typing.lower(element) ? undefined : `it gives '${typing.show(t.gives)}', not '${typing.show(element)}'`;
+    const element = members.typing.promiseElement(trait);
+    if (element === undefined) return `a promise has no members, which type '${members.typing.rec(trait).name}' expects`;
+    return members.typing.lower(t.gives) === members.typing.lower(element) ? undefined : `it gives '${members.typing.show(t.gives)}', not '${members.typing.show(element)}'`;
   }
   // A generator is a `Generator<T>` for exactly what it yields, its `next` being its only member.
   if (t?.kind === "generator") {
-    const element = typing.generatorElement(trait, t.async);
-    if (element === undefined) return `${t.async ? "an async" : "a"} generator has only 'next', which type '${typing.rec(trait).name}' doesn't describe`;
-    if (t.throws) return `its 'next' throws '${typing.show(t.throws)}', which '${typing.rec(trait).name}' doesn't`;
+    const element = members.typing.generatorElement(trait, t.async === true);
+    if (element === undefined) return `${t.async === true ? "an async" : "a"} generator has only 'next', which type '${members.typing.rec(trait).name}' doesn't describe`;
+    if (t.throws !== undefined) return `its 'next' throws '${members.typing.show(t.throws)}', which '${members.typing.rec(trait).name}' doesn't`;
     // One taking values may still be advanced without, as `Generator<T>`'s `next()` is.
-    const sends = typing.generatorSends(trait);
-    if (sends !== undefined && (t.sends === undefined || typing.lower(t.sends) !== typing.lower(sends))) return `its 'next' takes ${t.sends === undefined ? "nothing" : `'${typing.show(t.sends)}'`}, not '${typing.show(sends)}'`;
-    return typing.lower(t.yields) === typing.lower(element) ? undefined : `it yields '${typing.show(t.yields)}', not '${typing.show(element)}'`;
+    const sends = members.typing.generatorSends(trait);
+    if (sends !== undefined && (t.sends === undefined || members.typing.lower(t.sends) !== members.typing.lower(sends))) return `its 'next' takes ${t.sends === undefined ? "nothing" : `'${members.typing.show(t.sends)}'`}, not '${members.typing.show(sends)}'`;
+    return members.typing.lower(t.yields) === members.typing.lower(element) ? undefined : `it yields '${members.typing.show(t.yields)}', not '${members.typing.show(element)}'`;
   }
-  const c = t?.kind === "class" ? members.classOf(type as ClassType) : undefined;
-  for (const f of typing.rec(trait).fields) {
-    const own = typeof type === "string" ? undefined : typing.field(type, f.name);
-    const getter = !own && c ? inherited(members.arenas, c, "getters", f.name) : undefined;
-    if (getter && getter.access === "public") {
-      if (!typing.fits(members.returnOf(getter, at), f.type)) return `types of property '${f.name}' are incompatible`;
+  const c = t !== undefined && t.kind === "class" ? members.classOf(type as ClassType) : undefined;
+  const wanted = members.typing.rec(trait);
+  for (const f of wanted.fields) {
+    const own = typeof type === "string" ? undefined : members.typing.field(type, f.name);
+    const getter = own === undefined && c !== undefined ? inherited(members.arenas, c, "getters", f.name) : undefined;
+    if (getter !== undefined && getter.access === "public") {
+      if (!members.typing.fits(members.returnOf(getter, at), f.type)) return `types of property '${f.name}' are incompatible`;
       continue;
     }
-    if (!own || (own.access ?? "public") !== "public") return missing("property", f.name);
-    if (!typing.fits(own.type, f.type)) return `types of property '${f.name}' are incompatible`;
+    if (own === undefined || (own.access ?? "public") !== "public") return missing(members, type, trait, "property", f.name);
+    if (!members.typing.fits(own.type, f.type)) return `types of property '${f.name}' are incompatible`;
   }
-  for (const m of typing.rec(trait).methods) {
+  for (const m of wanted.methods) {
     const found = t?.kind === "interface" ? t.methods.find((x) => x.name === m.name) : undefined;
-    if (found) {
-      if (found.omittable && !m.omittable) return `method '${m.name}' is optional in type '${typing.show(type)}' but required in type '${typing.rec(trait).name}'`;
+    if (found !== undefined) {
+      if (found.omittable === true && m.omittable !== true) return `method '${m.name}' is optional in type '${members.typing.show(type)}' but required in type '${members.typing.rec(trait).name}'`;
       // Generic methods are compared with their type parameters standing for each other.
       let swap = new TypeMap<Type, Type>();
-      if (m.generic || found.generic) {
+      if (m.generic !== undefined || found.generic !== undefined) {
         if (found.generic?.names.length !== m.generic?.names.length) return `types of method '${m.name}' are incompatible`;
-        swap = byName(typing, [...found.params, found.returns, ...(found.throws ? [found.throws] : [])], found.generic!.names, m.generic!.own);
-        if (found.generic!.own.some((p, i) => !sameBounds(typing, p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: their type parameters' bounds differ`;
+        let parts: Type[] = [...found.params, found.returns];
+        if (found.throws !== undefined) parts.push(found.throws);
+        swap = byName(members.typing, parts, found.generic!.names, m.generic!.own);
+        if (found.generic!.own.some((p, i) => !sameBounds(members.typing, p, m.generic!.own[i as usize]!))) return `types of method '${m.name}' are incompatible: their type parameters' bounds differ`;
       }
       const params = found.params.map((p) => members.replaced(p, swap));
-      const thrown = found.throws && members.replaced(found.throws, swap);
-      if (params.some((p, i) => !same(typing, p, m.params[i]!)) || params.length !== m.params.length || !returns(members.replaced(found.returns, swap), m.returns) || (thrown !== undefined && (m.throws === undefined || !typing.fits(thrown, m.throws)))) {
+      const thrown = found.throws !== undefined ? members.replaced(found.throws, swap) : undefined;
+      if (params.some((p, i) => !same(members.typing, p, m.params[i as usize]!)) || params.length !== m.params.length || !returnsFit(members, at, members.replaced(found.returns, swap), m.returns) || (thrown !== undefined && (m.throws === undefined || !members.typing.fits(thrown, m.throws)))) {
         return `types of method '${m.name}' are incompatible`;
       }
       continue;
     }
-    const method = c ? inherited(members.arenas, c, "methods", m.name) : undefined;
+    const method = c !== undefined ? inherited(members.arenas, c, "methods", m.name) : undefined;
     // An optional method may be left out, but not stood in for by a field.
-    if (!method && m.omittable && (typeof type === "string" || !typing.field(type, m.name))) continue;
-    if (m.omittable && !method) return `property '${m.name}' of type '${typing.show(type)}' is a field, where '${typing.rec(trait).name}' declares an optional method`;
-    if (m.omittable && method!.access !== "public") return `method '${m.name}' is ${method!.access} in type '${typing.show(type)}', where '${typing.rec(trait).name}' declares it public`;
+    if (method === undefined && m.omittable === true && (typeof type === "string" || members.typing.field(type, m.name) === undefined)) continue;
+    if (m.omittable === true && method === undefined) return `property '${m.name}' of type '${members.typing.show(type)}' is a field, where '${members.typing.rec(trait).name}' declares an optional method`;
+    if (m.omittable === true && method!.access !== "public") return `method '${m.name}' is ${method!.access ?? "public"} in type '${members.typing.show(type)}', where '${members.typing.rec(trait).name}' declares it public`;
     // An object's fields hold values, and a callable held in one isn't a method yet.
-    if (t?.kind === "object") return `${missing("method", m.name)}; an object can't supply a method yet, so use a class`;
-    if (!method || method.access !== "public") return missing("method", m.name);
-    if (method.throws && !m.throws) return `method '${m.name}' can throw, and an interface's methods can't declare errors yet`;
+    if (t?.kind === "object") return `${missing(members, type, trait, "method", m.name)}; an object can't supply a method yet, so use a class`;
+    if (method === undefined || method.access !== "public") return missing(members, type, trait, "method", m.name);
+    if (method.throws !== undefined && m.throws === undefined) return `method '${m.name}' can throw, and an interface's methods can't declare errors yet`;
     // A generic method stands in for one with as many type parameters, compared with them
     // standing for the interface's.
     let swap = new TypeMap<Type, Type>();
-    const written = members.paramTypesOf(method).map((p) => implicitBound(typing, p));
+    const written = members.paramTypesOf(method).map((p) => implicitBound(members.typing, p));
     const given = members.returnOf(method, at);
     const thrown = members.throwsOf(method);
-    if (m.generic) {
-      const own = (method.typeParams ?? []).filter((p) => !isLifetime(p));
-      if (own.length !== m.generic.names.length) return `method '${m.name}' must be generic with ${m.generic.names.length} type parameter${m.generic.names.length === 1 ? "" : "s"}, as '${typing.rec(trait).name}' declares it`;
-      swap = byName(typing, [...written, given, ...(thrown ? [thrown] : [])], own.map((p) => p.name), m.generic.own);
-      if (members.typeParamsOf(method).some((p, i) => !sameBounds(typing, p, m.generic!.own[i]!))) return `types of method '${m.name}' are incompatible: its type parameters' bounds differ from '${typing.rec(trait).name}''s`;
+    if (m.generic !== undefined) {
+      let own: string[] = [];
+      if (method.typeParams !== undefined) for (const p of method.typeParams) if (!isLifetime(p)) own.push(p.name);
+      if (own.length !== m.generic.names.length) return `method '${m.name}' must be generic with ${m.generic.names.length} type parameter${m.generic.names.length === 1 ? "" : "s"}, as '${members.typing.rec(trait).name}' declares it`;
+      let parts: Type[] = [...written, given];
+      if (thrown !== undefined) parts.push(thrown);
+      swap = byName(members.typing, parts, own, m.generic.own);
+      if (members.typeParamsOf(method).some((p, i) => !sameBounds(members.typing, p, m.generic!.own[i as usize]!))) return `types of method '${m.name}' are incompatible: its type parameters' bounds differ from '${members.typing.rec(trait).name}''s`;
     }
     const params = written.map((p) => members.replaced(p, swap));
     const result = members.replaced(given, swap);
-    const error = thrown && members.replaced(thrown, swap);
-    if (params.length !== m.params.length || params.some((p, i) => !same(typing, p, m.params[i]!)) || !returns(result, m.returns) || (error !== undefined && (m.throws === undefined || !typing.fits(error, m.throws)))) {
+    const error = thrown !== undefined ? members.replaced(thrown, swap) : undefined;
+    if (params.length !== m.params.length || params.some((p, i) => !same(members.typing, p, m.params[i as usize]!)) || !returnsFit(members, at, result, m.returns) || (error !== undefined && (m.throws === undefined || !members.typing.fits(error, m.throws)))) {
       return `types of method '${m.name}' are incompatible`;
     }
     // An interface method's reference borrows from its receiver, so one borrowing from a
     // parameter instead can't stand in for it.
-    const r = typeof result === "string" ? undefined : typing.rec(result);
-    if (r?.kind === "ref" && r.life) {
-      return `method '${m.name}' returns a reference tied to lifetime '${r.life}' of a parameter, where '${typing.rec(trait).name}' borrows from 'this'`;
+    const r = typeof result === "string" ? undefined : members.typing.rec(result);
+    if (r !== undefined && r.kind === "ref" && r.life !== undefined) {
+      return `method '${m.name}' returns a reference tied to lifetime '${r.life}' of a parameter, where '${members.typing.rec(trait).name}' borrows from 'this'`;
     }
   }
   return undefined;
 }
+// A return type fits an interface method's when it fits, or, for an interface, satisfies it.
+/** @throws {CompileError} */
+function returnsFit(members: Mut<Members>, at: Span, actual: Type, expected: Type): boolean {
+  const r = typeof expected === "string" ? undefined : members.typing.rec(expected);
+  return r?.kind === "interface" ? unsatisfied(actual, expected as InterfaceType, members, at) === undefined : members.typing.fits(actual, expected);
+}
+
+function missing(members: Mut<Members>, type: Type, trait: InterfaceType, what: string, name: string): string {
+  return `${what} '${name}' is missing in type '${members.typing.show(type)}' but required in type '${members.typing.rec(trait).name}'`;
+}
+
+// String literals, or a union of them, give strings, as a `let` of one widens.
+function text(typing: Mut<Typing>, t: Type): boolean {
+  const r = typing.recOf(t);
+  if (r?.kind !== "union") return typing.widenLet(t) === "string";
+  for (const m of r.members) if (typing.widenLet(m) !== "string") return false;
+  return true;
+}
+

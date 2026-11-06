@@ -361,9 +361,9 @@ test("a session that parses std each check gives the cached session's IR", () =>
   const programs = sampled();
   const plain = newSession();
   const cached = cachedSession();
-  const load = cached.std.load!;
+  const read = Object.getOwnPropertyDescriptor(cached.std, "tree")!.get!;
   let loads = 0;
-  cached.std.load = () => (loads++, load());
+  Object.defineProperty(cached.std, "tree", { get: () => (loads++, read()) });
   for (const p of programs) expect({ file: p.file, ir: compile(plain, p.src, p.file) }).toEqual({ file: p.file, ir: compile(cached, p.src, p.file) });
   expect(plain.std.parses).toBeGreaterThanOrEqual(programs.length);
   expect(plain.std.parses).toBe(loads);
