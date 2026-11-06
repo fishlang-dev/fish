@@ -1,8 +1,8 @@
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
-import type { RustName, RustTables } from "./rust.ts";
+import type { RustName } from "./rust.ts";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
-import { rebuiltParam } from "./rebuild.ts";
+import { cloneClassNode, cloneExpr, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltParam } from "./rebuild.ts";
 import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.ts";
 import { unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
@@ -132,269 +132,348 @@ export type ClassInfo = {
 // Collects a class declaration's fields and builds the constructor it compiles to. A generic
 // class is declared once per set of type arguments, under a name like `Box<i64>`, with
 // `scope` saying what its type parameters stand for.
+// What declaring one class gathers as it goes through its members. `shared` says a generic
+// class's statics were declared by an earlier instance, which every instance shares.
+type Declaring = {
+  name: string;
+  scope: Map<string, Type>;
+  type: ClassType;
+  shared: boolean;
+  fields: FieldDecl[];
+  abstracts: AbstractMember[];
+  methods: Map<string, BodyId>;
+  statics: Map<string, BodyId>;
+  staticFields: Map<string, FieldDecl>;
+  getters: Map<string, BodyId>;
+  setters: Map<string, BodyId>;
+};
+
 /** @throws {CompileError} */
-export function declareClass(tables: Tables, node: ClassNode & { name: string }, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
-  const { arenas, genericStatics, ids, rust, typing } = tables;
+export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: string }>, name: string = node.name, scope: Map<string, Type> = new Map<string, Type>()): ClassInfo {
   if (node.decorators.length > 0) throw unsupported("decorators", node.decorators[0]!);
   // A template is copied into each concrete class by the abstract class's one declaration, which a
   // generic class doesn't have.
-  if (node.abstract && node.typeParams.length > 0) throw unsupported("generic abstract classes", node);
-  if (node.extends && node.extends.kind !== "ident" && !(node.extends.kind === "instantiation" && node.extends.expr.kind === "ident")) {
-    throw unsupported("base class expressions", node.extends);
+  if (node.abstract && node.typeParams.length > 0) throw unsupported("generic abstract classes", { start: node.start, end: node.end });
+  if (node.extends !== undefined && node.extends.kind !== "ident" && !(node.extends.kind === "instantiation" && node.extends.expr.kind === "ident")) {
+    throw unsupported("base class expressions", { start: node.extends.start, end: node.extends.end });
   }
-  const fields: FieldDecl[] = [];
-  const constructors = node.members.filter((m) => m.kind === "constructor");
-  const ctor = constructors[0];
-  if (ctor && !ctor.body && constructors.length > 1) throw unsupported("constructor overloads", ctor);
+  let constructors: Extract<ClassMember, { kind: "constructor" }>[] = [];
+  for (const m of node.members) if (m.kind === "constructor") constructors.push({ ...m });
+  const ctor = constructors.length > 0 ? constructors[0] : undefined;
+  if (ctor !== undefined && ctor.body === undefined && constructors.length > 1) throw unsupported("constructor overloads", { start: ctor.start, end: ctor.end });
   if (constructors.length > 1) throw new CompileError("E0703", "a class can have only one constructor", constructors[1]!.start, constructors[1]!.end);
-  if (ctor && !ctor.body) throw unsupported("constructor overloads", ctor);
+  if (ctor !== undefined && ctor.body === undefined) throw unsupported("constructor overloads", { start: ctor.start, end: ctor.end });
 
-  const type = typing.classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
-  if (node.abstract) typing.rec(type).abstract = true;
-  const abstracts: AbstractMember[] = [];
-  const methods = new Map<string, BodyId>();
+  const type = tables.typing.classType(name, scope.size > 0 ? { name: node.name, args: [...scope.values()] } : undefined);
+  if (node.abstract) {
+    let r = tables.typing.rec(type);
+    r.abstract = true;
+    tables.typing.setRec(type, r);
+  }
   // A generic class's statics can't use its type parameters, so every instance shares one set.
-  const shared = node.typeParams.length > 0 ? genericStatics.get(node) : undefined;
-  const statics = shared ?? new Map<string, BodyId>();
-  if (node.typeParams.length > 0 && !shared) genericStatics.set(node, statics);
-  const staticFields = new Map<string, FieldDecl>();
-  const getters = new Map<string, BodyId>();
-  const setters = new Map<string, BodyId>();
+  const shared = node.typeParams.length > 0 ? tables.genericStatics.get(node) : undefined;
+  let d: Declaring = { name, scope, type, shared: shared !== undefined, fields: [], abstracts: [], methods: new Map(), statics: shared !== undefined ? shared : new Map(), staticFields: new Map(), getters: new Map(), setters: new Map() };
   for (const m of node.members) {
     if (m.kind === "constructor") continue;
     if ("modifiers" in m && m.modifiers.includes("abstract")) {
-      abstractMember(m);
+      abstractMember(tables, node, d, m);
       continue;
     }
     if (m.kind === "method") {
-      method(m);
+      method(tables, node, d, m);
       continue;
     }
     if (m.kind === "get" || m.kind === "set") {
-      accessor(m);
+      accessor(tables, node, d, m);
       continue;
     }
-    if (m.kind !== "field") throw unsupported(MEMBER_FORMS[m.kind], m);
+    if (m.kind !== "field") throw unsupported(MEMBER_FORMS[m.kind], { start: m.start, end: m.end });
     if (typeof m.name !== "string") throw symbolKey(m.name);
     if (m.modifiers.includes("static")) {
-      staticField(m, m.name);
+      staticField(node, d, m, m.name);
       continue;
     }
     const access = modifiers(m.modifiers, m, m.name);
-    if (m.definite) throw unsupported("definite assignment assertions", m);
-    if (!m.type && !m.init) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
+    if (m.definite) throw unsupported("definite assignment assertions", { start: m.start, end: m.end });
+    if (m.type === undefined && m.init === undefined) throw new CompileError("E0104", `property '${m.name}' implicitly has an 'any' type; add a type annotation`, m.start, m.end);
     // An optional field is an Option, empty until assigned.
-    const at = { start: m.start, end: m.end };
-    const type: TypeNode | undefined = m.optional && m.type ? { id: nextId(ids), kind: "union", types: [m.type, { id: nextId(ids), kind: "ref", name: "null", args: [], ...at }], ...at } : m.type;
-    const init: Expr | undefined = m.optional ? (m.init ?? { id: nextId(ids), kind: "null", ...at }) : m.init;
-    add({ name: m.name, type, init, access, readonly: m.modifiers.includes("readonly"), start: m.start, end: m.end, ...(m.optional && m.type && { written: m.type }), ...(!m.optional && m.type && withoutUndefined(ids, m.type) && { undefinedSpelled: true as const }) });
+    add(d, fieldOf(tables.ids, m.name, m.type, m.optional, m.optional ? (m.init !== undefined ? cloneExpr(m.init) : { id: nextId(tables.ids), kind: "null", start: m.start, end: m.end }) : m.init !== undefined ? cloneExpr(m.init) : undefined, access, m.modifiers.includes("readonly"), m));
   }
-  const properties = (ctor?.params ?? []).filter((p) => p.modifiers.length > 0).map((p) => {
-    if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", p.pattern);
-    const access = modifiers(p.modifiers, p, p.pattern.name);
-    // An optional parameter property is an Option, as the parameter is.
-    const at = { start: p.start, end: p.end };
-    const type: TypeNode | undefined = p.optional && p.type ? { id: nextId(ids), kind: "union", types: [p.type, { id: nextId(ids), kind: "ref", name: "null", args: [], ...at }], ...at } : p.type;
-    return add({ name: p.pattern.name, type, init: undefined, access, readonly: p.modifiers.includes("readonly"), start: p.start, end: p.end, ...(p.optional && p.type && { written: p.type }), ...(!p.optional && p.type && withoutUndefined(ids, p.type) && { undefinedSpelled: true as const }) });
-  });
-
-  for (const [name, f] of staticFields) {
-    if (statics.has(name) || statics.has(`get ${name}`) || statics.has(`set ${name}`)) throw new CompileError("E0402", `duplicate property '${name}'`, f.start, f.end);
-  }
-  for (const name of statics.keys()) {
-    const accessor = /^[gs]et (.*)$/.exec(name)?.[1];
-    if (accessor !== undefined && statics.has(accessor)) {
-      const m = arenas.bodyOf(statics.get(accessor)!);
-      throw new CompileError("E0402", `duplicate property '${accessor}'`, m.start, m.end);
+  if (node.typeParams.length > 0 && shared === undefined) tables.genericStatics.set(cloneClassNode(node), new Map([...d.statics]));
+  let properties: FieldDecl[] = [];
+  if (ctor !== undefined) {
+    for (const p of ctor.params) {
+      if (p.modifiers.length === 0) continue;
+      if (p.pattern.kind !== "ident") throw unsupported("destructuring patterns", { start: p.pattern.start, end: p.pattern.end });
+      const access = modifiers(p.modifiers, p, p.pattern.name);
+      // An optional parameter property is an Option, as the parameter is.
+      const f = fieldOf(tables.ids, p.pattern.name, p.type, p.optional, undefined, access, p.modifiers.includes("readonly"), p);
+      add(d, cloneFieldDecl(f));
+      properties.push(f);
     }
   }
-  for (const name of [...methods.keys(), ...getters.keys(), ...setters.keys()]) {
-    const clash = fields.find((f) => f.name === name);
-    if (clash) throw new CompileError("E0402", `duplicate property '${name}'`, clash.start, clash.end);
-    if (methods.has(name) && (getters.has(name) || setters.has(name))) {
-      const m = arenas.bodyOf(methods.get(name)!);
-      throw new CompileError("E0402", `duplicate property '${name}'`, m.start, m.end);
+
+  for (const [field, f] of d.staticFields) {
+    if (d.statics.has(field) || d.statics.has(`get ${field}`) || d.statics.has(`set ${field}`)) throw new CompileError("E0402", `duplicate property '${field}'`, f.start, f.end);
+  }
+  for (const key of d.statics.keys()) {
+    const found = /^[gs]et (.*)$/.exec(key);
+    const accessorName = found !== null ? found[1] : undefined;
+    if (accessorName !== undefined && d.statics.has(accessorName)) {
+      const m = tables.arenas.bodyOf(d.statics.get(accessorName)!);
+      throw new CompileError("E0402", `duplicate property '${accessorName}'`, m.start, m.end);
+    }
+  }
+  for (const member of [...d.methods.keys(), ...d.getters.keys(), ...d.setters.keys()]) {
+    const clash = d.fields.find((f) => f.name === member);
+    if (clash !== undefined) throw new CompileError("E0402", `duplicate property '${member}'`, clash.start, clash.end);
+    if (d.methods.has(member) && (d.getters.has(member) || d.setters.has(member))) {
+      const m = tables.arenas.bodyOf(d.methods.get(member)!);
+      throw new CompileError("E0402", `duplicate property '${member}'`, m.start, m.end);
     }
   }
   // An abstract accessor's pair must be abstract too, as in TypeScript.
-  for (const a of abstracts) {
-    const pair = arenas.bodyOf(a.table === "getters" ? setters.get(a.name) : a.table === "setters" ? getters.get(a.name) : undefined);
-    if (pair && !pair.abstract) throw new CompileError("E0701", `a getter and a setter for '${a.name}' must both be abstract or neither`, a.start, a.end);
+  for (const a of d.abstracts) {
+    const pair = tables.arenas.bodyOf(a.table === "getters" ? d.setters.get(a.name) : a.table === "setters" ? d.getters.get(a.name) : undefined);
+    if (pair !== undefined && pair.abstract === undefined) throw new CompileError("E0701", `a getter and a setter for '${a.name}' must both be abstract or neither`, a.start, a.end);
   }
   // As in TypeScript, parameter properties are assigned before field initializers run.
-  const initializers = fields.filter((f) => f.init).map((f) => assignField(ids, f.name, f.init!, f));
-  const prelude = [
-    ...properties.map((f) => assignField(ids, f.name, { id: nextId(ids), kind: "ident", name: f.name, start: f.start, end: f.end }, f)),
-    ...initializers,
-  ];
-  const constructor = arenas.addBody({
-    id: nextId(ids),
+  let initializers: Stmt[] = [];
+  for (const f of d.fields) if (f.init !== undefined) initializers.push(assignField(tables.ids, f.name, cloneExpr(f.init), f));
+  let prelude: Stmt[] = [];
+  for (const f of properties) prelude.push(assignField(tables.ids, f.name, { id: nextId(tables.ids), kind: "ident", name: f.name, start: f.start, end: f.end }, f));
+  for (const s of initializers) prelude.push(cloneStmt(s));
+  let body: Stmt[] = prelude.map((s) => cloneStmt(s));
+  if (ctor !== undefined && ctor.body !== undefined) for (const s of ctor.body) body.push(cloneStmt(s));
+  const at = ctor !== undefined ? { start: ctor.start, end: ctor.end } : { start: node.start, end: node.end };
+  const rustName = ctor !== undefined ? tables.rust.names.get(ctor) : undefined;
+  const constructor = tables.arenas.addBody({
+    id: nextId(tables.ids),
     name: `${name}.constructor`,
     scope,
-    params: ctor?.params ?? [],
-    body: [...prelude, ...(ctor?.body ?? [])],
+    params: ctor !== undefined ? ctor.params : [],
+    body,
     returnType: undefined,
     self: { type, constructor: true, mutable: true },
     owner: type,
-    start: (ctor ?? node).start,
-    end: (ctor ?? node).end,
-    ...(ctor && rustOf(rust, ctor)),
-    ...(ctor?.throws && { throws: ctor.throws }),
+    start: at.start,
+    end: at.end,
+    ...(rustName !== undefined && { foreign: true as const, rust: rustName }),
+    ...(ctor !== undefined && ctor.throws !== undefined && { throws: ctor.throws }),
   }).bodyId;
-  const required = new Set(fields.map((f) => f.name));
-  const overrides = [
-    ...node.members.flatMap((m): Overridden[] => ("name" in m && m.modifiers.includes("override") && typeof m.name === "string" ? [{ name: m.name, static: m.modifiers.includes("static"), start: m.start, end: m.end }] : [])),
-    ...(ctor?.params ?? []).flatMap((p): Overridden[] => (p.modifiers.includes("override") && p.pattern.kind === "ident" ? [{ name: p.pattern.name, static: false, start: p.start, end: p.end }] : [])),
-  ];
-  const named = node.extends?.kind === "instantiation" ? node.extends.expr : node.extends;
-  const baseName = named?.kind === "ident" ? named.name : undefined;
-  return arenas.addClass({ type, abstracts, copies: new Map(), fields, constructor, required, initializers: new NodeSet(initializers), scope, overrides, methods, statics, staticFields, getters, setters, baseName, prelude, node, wraps: [] });
-
-  // A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
-  /** @throws {CompileError} */
-  function staticField(m: Extract<ClassMember, { kind: "field" }>, field: string) {
-    if (node.typeParams.length > 0) throw unsupported("static fields in generic classes", m);
-    if (!m.modifiers.includes("readonly")) throw new CompileError("E0706", `a static field that isn't 'readonly' would be a global that changes; declare it 'static readonly ${field}', whose value is computed while compiling, or hold an Atomic or a Lock in one`, m.start, m.end);
-    if (m.optional) throw unsupported("optional static fields", m);
-    if (m.definite) throw unsupported("definite assignment assertions", m);
-    if (!m.init) throw new CompileError("E0706", `a 'static readonly' field needs its value where it is declared, as in 'static readonly ${field} = ...'`, m.start, m.end);
-    const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, field);
-    if (staticFields.has(field)) throw new CompileError("E0402", `duplicate property '${field}'`, m.start, m.end);
-    staticFields.set(field, { name: field, type: m.type, init: m.init, access, readonly: true, start: m.start, end: m.end });
+  const required = new Set(d.fields.map((f) => f.name));
+  let overrides: Overridden[] = [];
+  for (const m of node.members) {
+    if ("name" in m && m.modifiers.includes("override") && typeof m.name === "string") overrides.push({ name: m.name, static: m.modifiers.includes("static"), start: m.start, end: m.end });
   }
-
-  // TypeScript's rules: only an abstract class has abstract members, which are methods or
-  // accessors without a body, never private or static.
-  /** @throws {CompileError} */
-  function abstractMember(m: ClassMember) {
-    if (!node.abstract) throw new CompileError("E0701", "abstract members can only appear in an abstract class", m.start, m.end);
-    if (m.kind === "field") throw unsupported("abstract fields", m);
-    if (m.kind !== "method" && m.kind !== "get" && m.kind !== "set") throw unsupported(MEMBER_FORMS[m.kind as keyof typeof MEMBER_FORMS] ?? "abstract members", m);
-    if (typeof m.name !== "string") throw symbolKey(m.name);
-    if (m.modifiers.includes("static")) throw new CompileError("E0701", "'static' can't be used with 'abstract'", m.start, m.end);
-    if (m.modifiers.includes("private") || m.name.startsWith("#")) throw new CompileError("E0701", "an abstract member can't be private, since subclasses must implement it", m.start, m.end);
-    if (m.body) throw new CompileError("E0701", `'${m.name}' can't have a body because it is marked abstract`, m.start, m.end);
-    if (m.kind === "method" && m.optional) throw unsupported("optional methods", m);
-    if (m.kind === "method" && m.typeParams.length > 0) throw unsupported("generic abstract methods", m);
-    if (m.kind !== "set" && !m.returnType) throw new CompileError("E0701", `'${m.name}' needs its return type written, since it is abstract and has no body to infer it from`, m.start, m.end);
-    const access = modifiers(m.modifiers.filter((x) => x !== "abstract" && x !== "async"), m, m.name);
-    const table = m.kind === "method" ? "methods" : m.kind === "get" ? "getters" : "setters";
-    const signature = { ...m, modifiers: m.modifiers.filter((x) => x !== "abstract"), body: [] };
-    if (signature.kind === "method") method(signature);
-    else accessor(signature);
-    arenas.bodyOf(({ methods, getters, setters })[table].get(m.name)!).abstract = true;
-    abstracts.push({ name: m.name, table, access, start: m.start, end: m.end });
+  if (ctor !== undefined) {
+    for (const p of ctor.params) if (p.modifiers.includes("override") && p.pattern.kind === "ident") overrides.push({ name: p.pattern.name, static: false, start: p.start, end: p.end });
   }
+  const named = node.extends !== undefined && node.extends.kind === "instantiation" ? node.extends.expr : node.extends;
+  const baseName = named !== undefined && named.kind === "ident" ? named.name : undefined;
+  return tables.arenas.addClass({ type, abstracts: d.abstracts, copies: new Map(), fields: d.fields, constructor, required, initializers: new NodeSet(initializers), scope, overrides, methods: d.methods, statics: d.statics, staticFields: d.staticFields, getters: d.getters, setters: d.setters, baseName, prelude, node: cloneClassNode(node), wraps: [] });
+}
 
-  /** @throws {CompileError} */
-  function accessor(m: Extract<ClassMember, { kind: "get" | "set" }>) {
-    const isStatic = m.modifiers.includes("static");
-    if (isStatic && node.typeParams.length > 0) throw unsupported("static accessors in generic classes", m);
-    if (typeof m.name !== "string") throw symbolKey(m.name);
-    const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, m.name);
-    if (m.name === "constructor") throw new CompileError("E0705", "'constructor' can't be the name of an accessor", m.start, m.end);
-    if (!m.body) throw unsupported("accessors without a body", m);
-    // Only a JSDoc `@throws` gives an accessor an error type: reading a property can't fail yet.
-    if (m.throws) throw unsupported("accessors that throw", m.throws);
-    const table = isStatic ? statics : m.kind === "get" ? getters : setters;
-    const key = isStatic ? `${m.kind} ${m.name}` : m.name;
-    if (table.has(key)) throw new CompileError("E0705", `duplicate ${m.kind === "get" ? "getter" : "setter"} '${m.name}'`, m.start, m.end);
-    if (m.kind === "set" && m.params.length !== 1) throw new CompileError("E0705", "a setter takes exactly one parameter", m.start, m.end);
-    if (m.kind === "set" && m.returnType) throw new CompileError("E0705", "a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
-    if (isStatic && m.params[0]?.pattern.kind === "ident" && m.params[0].pattern.name === "this") throw new CompileError("E0706", "a static accessor has no 'this'", m.params[0].start, m.params[0].end);
-    table.set(key, arenas.addBody({
-      id: nextId(ids),
-      name: `${name}.${isStatic ? "static " : ""}${m.kind} ${m.name}`,
-      scope,
-      params: m.params,
-      body: m.body,
-      returnType: m.returnType,
-      ...(!isStatic && { self: { type, constructor: false, mutable: m.kind === "set" } }),
-      accessor: true,
-      owner: type,
-      access,
-      start: m.start,
-      end: m.end,
-    }).bodyId);
-  }
+// A field as declared, from a field or a parameter property: an optional one is an Option.
+function fieldOf(ids: Mut<Ids>, name: string, written: Ref<TypeNode> | undefined, optional: boolean, init: Expr | undefined, access: Access, readonly: boolean, at: Ref<Span>): FieldDecl {
+  const span = { start: at.start, end: at.end };
+  const type: TypeNode | undefined = written === undefined ? undefined : optional ? { id: nextId(ids), kind: "union", types: [cloneTypeNode(written), { id: nextId(ids), kind: "ref", name: "null", args: [], ...span }], ...span } : cloneTypeNode(written);
+  let f: FieldDecl = { name, type, init, access, readonly, start: span.start, end: span.end };
+  if (optional && written !== undefined) f.written = cloneTypeNode(written);
+  if (!optional && written !== undefined && withoutUndefined(ids, written) !== undefined) f.undefinedSpelled = true;
+  return f;
+}
 
-  /** @throws {CompileError} */
-  function method(m: Extract<ClassMember, { kind: "method" }>) {
-    const isStatic = m.modifiers.includes("static");
-    if (isStatic && shared) return;
-    if (typeof m.name !== "string") throw symbolKey(m.name);
-    const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, m.name);
-    if (m.optional) throw unsupported("optional methods", m);
-    if (!m.body) throw new CompileError("E0410", `'${m.name}' has no implementation; follow its overload signatures with a '${m.name}' method that has a body`, m.start, m.end);
-    if (m.name === "constructor") throw new CompileError("E0407", "'constructor' can't be the name of a method", m.start, m.end);
-    const table = isStatic ? statics : methods;
-    if (table.has(m.name)) throw new CompileError("E0402", `duplicate method '${m.name}'`, m.start, m.end);
-    const [first, ...rest] = m.params;
-    const receiver = first?.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
-    if (receiver && isStatic) throw new CompileError("E0706", "a static method has no 'this'", receiver.start, receiver.end);
-    if (!isStatic) for (const p of receiver ? rest : m.params) if (p.type) rebuiltParam(namesClass(p), tables.rewrites);
-    if (isStatic) classParamIn(m);
-    table.set(m.name, arenas.addBody({
-      id: nextId(ids),
-      // A static method has its own symbol, since an instance method may share its name.
-      name: `${isStatic ? node.name : name}.${isStatic ? "static " : ""}${m.name}`,
-      scope: isStatic ? new Map() : scope,
-      params: receiver ? rest : m.params,
-      body: m.body,
-      returnType: m.returnType,
-      ...(m.throws && { throws: m.throws }),
-      ...(m.modifiers.includes("async") && { async: true }),
-      ...(m.generator && { generator: true }),
-      typeParams: m.typeParams,
-      self: isStatic ? undefined : { type, constructor: false, mutable: receiver ? mutates(receiver) : false, owned: receiver ? owns(receiver) : false },
-      owner: type,
-      access,
-      start: m.start,
-      end: m.end,
-      ...rustOf(rust, m),
-      ...(m.signature && { signature: true as const }),
-    }).bodyId);
-    // The implementation comes right after its signatures.
-    if (m.overloadNames) arenas.bodyOf(table.get(m.name)!).overloads = m.overloadNames.map((w) => table.get(w)!);
-  }
+function cloneFieldDecl(f: Ref<FieldDecl>): FieldDecl {
+  let out: FieldDecl = { name: f.name, type: f.type !== undefined ? cloneTypeNode(f.type) : undefined, init: f.init !== undefined ? cloneExpr(f.init) : undefined, access: f.access, readonly: f.readonly, start: f.start, end: f.end };
+  if (f.written !== undefined) out.written = cloneTypeNode(f.written);
+  if (f.undefinedSpelled !== undefined) out.undefinedSpelled = true;
+  return out;
+}
 
-  // As in TypeScript, a static member can't name the class's type parameters, only its own.
-  /** @throws {CompileError} */
-  function classParamIn(m: Extract<ClassMember, { kind: "method" }>) {
-    const outer = new Set(node.typeParams.map((p) => p.name));
-    // A function inside declaring its own type parameter of that name hides the class's.
-    const find = (n: AnyNode, hidden: Set<string>): (Span & { name: string }) | undefined => {
-      if (n.of === "typeNode" && n.node.kind === "ref" && n.node.args.length === 0 && outer.has(n.node.name) && !hidden.has(n.node.name)) return n.node;
-      const typeParams = (n.node as { typeParams?: TypeParam[] }).typeParams;
-      const inner = typeParams?.length ? new Set([...hidden, ...typeParams.map((p) => p.name)]) : hidden;
-      let hit: (Span & { name: string }) | undefined;
-      forEachChild(n, (c) => {
-        if (!hit) hit = find(c, inner);
-      });
-      return hit;
-    };
-    const used = find({ of: "classMember", node: m }, new Set());
-    if (used) throw new CompileError("E0706", `a static method can't use the class's type parameter '${used.name}'; give the method its own, as in 'static ${m.name as string}<${used.name}>(...)'`, used.start, used.end);
-  }
+// A static field can't change, as a top-level `let` can't, so only `static readonly` is one.
+/** @throws {CompileError} */
+function staticField(node: Ref<ClassNode>, d: Mut<Declaring>, m: Ref<Extract<ClassMember, { kind: "field" }>>, field: string) {
+  const at = { start: m.start, end: m.end };
+  if (node.typeParams.length > 0) throw unsupported("static fields in generic classes", at);
+  if (!m.modifiers.includes("readonly")) throw new CompileError("E0706", `a static field that isn't 'readonly' would be a global that changes; declare it 'static readonly ${field}', whose value is computed while compiling, or hold an Atomic or a Lock in one`, m.start, m.end);
+  if (m.optional) throw unsupported("optional static fields", at);
+  if (m.definite) throw unsupported("definite assignment assertions", at);
+  if (m.init === undefined) throw new CompileError("E0706", `a 'static readonly' field needs its value where it is declared, as in 'static readonly ${field} = ...'`, m.start, m.end);
+  const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, field);
+  if (d.staticFields.has(field)) throw new CompileError("E0402", `duplicate property '${field}'`, m.start, m.end);
+  d.staticFields.set(field, { name: field, type: m.type !== undefined ? cloneTypeNode(m.type) : undefined, init: cloneExpr(m.init), access, readonly: true, start: m.start, end: m.end });
+}
 
-  // In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
-  function namesClass(p: Param): Param {
-    if (p.type) {
-      walkWhile({ of: "typeNode", node: p.type }, ({ of, node: n }) => {
-        if (of !== "typeNode" || n.kind !== "ref" || n.name !== "this" || n.args.length !== 0) return true;
-        tables.rewrites.replaceTypeNode(n, { ...n, name: node.name, args: node.typeParams.map((p): TypeNode => ({ id: nextId(ids), kind: "ref", name: p.name, args: [], start: p.start, end: p.end })) });
-        return false;
-      });
-    }
-    return p;
-  }
+// TypeScript's rules: only an abstract class has abstract members, which are methods or
+// accessors without a body, never private or static.
+/** @throws {CompileError} */
+function abstractMember(tables: Mut<Tables>, node: Ref<ClassNode>, d: Mut<Declaring>, m: Ref<ClassMember>) {
+  const at = { start: m.start, end: m.end };
+  if (!node.abstract) throw new CompileError("E0701", "abstract members can only appear in an abstract class", m.start, m.end);
+  if (m.kind === "field") throw unsupported("abstract fields", at);
+  if (m.kind !== "method" && m.kind !== "get" && m.kind !== "set") throw unsupported(m.kind === "index" || m.kind === "staticBlock" ? MEMBER_FORMS[m.kind] : "abstract members", at);
+  if (typeof m.name !== "string") throw symbolKey(m.name);
+  const name = m.name;
+  if (m.modifiers.includes("static")) throw new CompileError("E0701", "'static' can't be used with 'abstract'", m.start, m.end);
+  if (m.modifiers.includes("private") || name.startsWith("#")) throw new CompileError("E0701", "an abstract member can't be private, since subclasses must implement it", m.start, m.end);
+  if (m.body !== undefined) throw new CompileError("E0701", `'${name}' can't have a body because it is marked abstract`, m.start, m.end);
+  if (m.kind === "method" && m.optional) throw unsupported("optional methods", at);
+  if (m.kind === "method" && m.typeParams.length > 0) throw unsupported("generic abstract methods", at);
+  if (m.kind !== "set" && m.returnType === undefined) throw new CompileError("E0701", `'${name}' needs its return type written, since it is abstract and has no body to infer it from`, m.start, m.end);
+  const access = modifiers(m.modifiers.filter((x) => x !== "abstract" && x !== "async"), m, name);
+  const table = m.kind === "method" ? "methods" : m.kind === "get" ? "getters" : "setters";
+  const kept = m.modifiers.filter((x) => x !== "abstract");
+  const made = m.kind === "method" ? method(tables, node, d, { ...m, modifiers: kept, body: [] }) : accessor(tables, node, d, { ...m, modifiers: kept, body: [] });
+  if (made !== undefined) tables.arenas.bodyMut(made).abstract = true;
+  d.abstracts.push({ name, table, access, start: m.start, end: m.end });
+}
 
-  /** @throws {CompileError} */
-  function add(f: FieldDecl): FieldDecl {
-    if (fields.some((other) => other.name === f.name)) throw new CompileError("E0402", `duplicate property '${f.name}'`, f.start, f.end);
-    fields.push(f);
-    return f;
+/** @throws {CompileError} */
+function accessor(tables: Mut<Tables>, node: Ref<ClassNode>, d: Mut<Declaring>, m: Ref<Extract<ClassMember, { kind: "get" | "set" }>>): BodyId {
+  const isStatic = m.modifiers.includes("static");
+  const at = { start: m.start, end: m.end };
+  if (isStatic && node.typeParams.length > 0) throw unsupported("static accessors in generic classes", at);
+  if (typeof m.name !== "string") throw symbolKey(m.name);
+  const name = m.name;
+  const access = modifiers(m.modifiers.filter((x) => x !== "static"), m, name);
+  if (name === "constructor") throw new CompileError("E0705", "'constructor' can't be the name of an accessor", m.start, m.end);
+  if (m.body === undefined) throw unsupported("accessors without a body", at);
+  // Only a JSDoc `@throws` gives an accessor an error type: reading a property can't fail yet.
+  if (m.throws !== undefined) throw unsupported("accessors that throw", { start: m.throws.start, end: m.throws.end });
+  const key = isStatic ? `${m.kind} ${name}` : name;
+  const taken = isStatic ? d.statics.has(key) : m.kind === "get" ? d.getters.has(key) : d.setters.has(key);
+  if (taken) throw new CompileError("E0705", `duplicate ${m.kind === "get" ? "getter" : "setter"} '${name}'`, m.start, m.end);
+  if (m.kind === "set" && m.params.length !== 1) throw new CompileError("E0705", "a setter takes exactly one parameter", m.start, m.end);
+  if (m.kind === "set" && m.returnType !== undefined) throw new CompileError("E0705", "a setter can't have a return type annotation", m.returnType.start, m.returnType.end);
+  const first = m.params.length > 0 ? m.params[0] : undefined;
+  if (isStatic && first !== undefined && first.pattern.kind === "ident" && first.pattern.name === "this") throw new CompileError("E0706", "a static accessor has no 'this'", first.start, first.end);
+  const made = tables.arenas.addBody({
+    id: nextId(tables.ids),
+    name: `${d.name}.${isStatic ? "static " : ""}${m.kind} ${name}`,
+    scope: new Map([...d.scope]),
+    params: m.params.map((p) => cloneParam(p)),
+    body: m.body.map((s) => cloneStmt(s)),
+    returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : undefined,
+    ...(!isStatic && { self: { type: d.type, constructor: false, mutable: m.kind === "set" } }),
+    accessor: true,
+    owner: d.type,
+    access,
+    start: m.start,
+    end: m.end,
+  }).bodyId;
+  if (isStatic) d.statics.set(key, made);
+  else if (m.kind === "get") d.getters.set(key, made);
+  else d.setters.set(key, made);
+  return made;
+}
+
+/** @throws {CompileError} */
+function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d: Mut<Declaring>, m: Ref<Extract<ClassMember, { kind: "method" }>>): BodyId | undefined {
+  const isStatic = m.modifiers.includes("static");
+  if (isStatic && d.shared) return undefined;
+  if (typeof m.name !== "string") throw symbolKey(m.name);
+  const name = m.name;
+  const access = modifiers(m.modifiers.filter((x) => x !== "static" && x !== "async"), m, name);
+  if (m.optional) throw unsupported("optional methods", { start: m.start, end: m.end });
+  if (m.body === undefined) throw new CompileError("E0410", `'${name}' has no implementation; follow its overload signatures with a '${name}' method that has a body`, m.start, m.end);
+  if (name === "constructor") throw new CompileError("E0407", "'constructor' can't be the name of a method", m.start, m.end);
+  if (isStatic ? d.statics.has(name) : d.methods.has(name)) throw new CompileError("E0402", `duplicate method '${name}'`, m.start, m.end);
+  const first = m.params.length > 0 ? m.params[0] : undefined;
+  const receiver = first !== undefined && first.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
+  if (receiver !== undefined && isStatic) throw new CompileError("E0706", "a static method has no 'this'", receiver.start, receiver.end);
+  let params: Param[] = [];
+  for (let i: usize = receiver !== undefined ? 1 : 0; i < m.params.length; i++) params.push(cloneParam(m.params[i]!));
+  if (!isStatic) {
+    for (const p of params) if (p.type !== undefined) namesClass(tables, node, p);
+    let rebuilt: Param[] = [];
+    for (let p = params.shift(); p !== undefined; p = params.shift()) rebuilt.push(rebuiltParam(p, tables.rewrites));
+    params = rebuilt;
   }
+  if (isStatic) classParamIn(node, m);
+  const rustName = tables.rust.names.get(m);
+  const body = tables.arenas.addBody({
+    id: nextId(tables.ids),
+    // A static method has its own symbol, since an instance method may share its name.
+    name: `${isStatic ? node.name! : d.name}.${isStatic ? "static " : ""}${name}`,
+    scope: isStatic ? new Map() : new Map([...d.scope]),
+    params,
+    body: m.body.map((s) => cloneStmt(s)),
+    returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : undefined,
+    ...(m.throws !== undefined && { throws: cloneTypeNode(m.throws) }),
+    ...(m.modifiers.includes("async") && { async: true }),
+    ...(m.generator && { generator: true }),
+    typeParams: m.typeParams.map((p) => cloneTypeParam(p)),
+    self: isStatic ? undefined : { type: d.type, constructor: false, mutable: receiver !== undefined ? mutates(receiver) : false, owned: receiver !== undefined ? owns(receiver) : false },
+    owner: d.type,
+    access,
+    start: m.start,
+    end: m.end,
+    ...(rustName !== undefined && { foreign: true as const, rust: rustName }),
+    ...(m.signature !== undefined && { signature: true as const }),
+  });
+  const made = body.bodyId;
+  // The implementation comes right after its signatures.
+  if (m.overloadNames !== undefined) {
+    let overloads: BodyId[] = [];
+    for (const w of m.overloadNames) overloads.push(isStatic ? d.statics.get(w)! : d.methods.get(w)!);
+    body.overloads = overloads;
+  }
+  if (isStatic) d.statics.set(name, made);
+  else d.methods.set(name, made);
+  return made;
+}
+
+// As in TypeScript, a static member can't name the class's type parameters, only its own.
+/** @throws {CompileError} */
+function classParamIn(node: Ref<ClassNode>, m: Ref<Extract<ClassMember, { kind: "method" }>>) {
+  let outer = new Set<string>();
+  for (const p of node.typeParams) outer.add(p.name);
+  const used = classParamUse({ of: "classMember", node: m }, outer, new Set<string>());
+  if (used !== undefined) throw new CompileError("E0706", `a static method can't use the class's type parameter '${used.name}'; give the method its own, as in 'static ${typeof m.name === "string" ? m.name : ""}<${used.name}>(...)'`, used.start, used.end);
+}
+
+// Where a node names one of `outer` that isn't `hidden`. A function inside declaring its own type
+// parameter of that name hides the class's.
+function classParamUse(n: Ref<AnyNode>, outer: Ref<Set<string>>, hidden: Ref<Set<string>>): { name: string; start: usize; end: usize } | undefined {
+  if (n.of === "typeNode" && n.node.kind === "ref" && n.node.args.length === 0 && outer.has(n.node.name) && !hidden.has(n.node.name)) return { name: n.node.name, start: n.node.start, end: n.node.end };
+  let inner = new Set<string>([...hidden]);
+  for (const name of typeParamNames(n)) inner.add(name);
+  let hit: { name: string; start: usize; end: usize } | undefined = undefined;
+  forEachChild(n, (c) => {
+    if (hit === undefined) hit = classParamUse(c, outer, inner);
+  });
+  return hit;
+}
+
+// The type parameters a node declares.
+function typeParamNames(n: Ref<AnyNode>): string[] {
+  if (n.of === "stmt" && (n.node.kind === "function" || n.node.kind === "class" || n.node.kind === "typeAlias" || n.node.kind === "interface")) return n.node.typeParams.map((p) => p.name);
+  if (n.of === "expr" && (n.node.kind === "arrow" || n.node.kind === "function" || n.node.kind === "class")) return n.node.typeParams.map((p) => p.name);
+  if (n.of === "classMember" && n.node.kind === "method") return n.node.typeParams.map((p) => p.name);
+  if (n.of === "objectProp" && n.node.kind === "method") return n.node.typeParams.map((p) => p.name);
+  if (n.of === "typeNode" && n.node.kind === "function") return n.node.typeParams.map((p) => p.name);
+  if (n.of === "typeMember" && (n.node.kind === "method" || n.node.kind === "call" || n.node.kind === "construct")) return n.node.typeParams.map((p) => p.name);
+  if (n.of === "func" || n.of === "typeAlias" || n.of === "interface" || n.of === "classNode") return n.node.typeParams.map((p) => p.name);
+  return [];
+}
+
+// In a parameter's type, `this` names the class, as in `equals(other: Ref<this>)`.
+function namesClass(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, p: Ref<Param>): void {
+  if (p.type === undefined) return;
+  walkWhile({ of: "typeNode", node: p.type }, (n) => {
+    if (n.of !== "typeNode" || n.node.kind !== "ref" || n.node.name !== "this" || n.node.args.length !== 0) return true;
+    const t = n.node;
+    const args = node.typeParams.map((q): TypeNode => ({ id: nextId(tables.ids), kind: "ref", name: q.name, args: [], start: q.start, end: q.end }));
+    tables.rewrites.replaceTypeNode(t, { ...t, name: node.name!, args });
+    return false;
+  });
+}
+
+/** @throws {CompileError} */
+function add(d: Mut<Declaring>, f: FieldDecl): void {
+  if (d.fields.some((other) => other.name === f.name)) throw new CompileError("E0402", `duplicate property '${f.name}'`, f.start, f.end);
+  d.fields.push(f);
 }
 
 // A `#name` belongs to the class whose body declares it, so a subclass declaring a `#name` its
@@ -431,11 +510,6 @@ function renamePrivate(members: ClassMember[], from: string, to: string) {
 // A private name as written, without the class a subclass's own copy of it is renamed for.
 export const shownName = (name: string) => (name.startsWith("#") ? name.replace(/@.*$/, "") : name);
 
-// A Rust type's member is a foreign function, called through the shim.
-function rustOf(rust: RustTables, m: ClassMember): { foreign?: true; rust?: RustName } {
-  const named = rust.names.get(m);
-  return named ? { foreign: true, rust: named } : {};
-}
 
 // Links a derived class to the base it embeds. Its constructor must start with
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
@@ -608,8 +682,9 @@ export function checkOverrides(arenas: Arenas, typing: Typing, c: ClassInfo) {
           grew = true;
         }
       }
-      const bodies = new Set([...b.methods.values(), ...b.getters.values(), ...b.setters.values()].map((f) => arenas.bodyOf(f)).filter((f) => f.template).map((f) => f.body));
-      const members = b.node.members.filter((m) => !("body" in m && m.body && bodies.has(m.body)));
+      // A template is known by its member's span, which its body keeps.
+      const bodies = new Set([...b.methods.values(), ...b.getters.values(), ...b.setters.values()].map((f) => arenas.bodyOf(f)).filter((f) => f.template).map((f) => `${f.start}:${f.end}`));
+      const members = b.node.members.filter((m) => !("body" in m && m.body && bodies.has(`${m.start}:${m.end}`)));
       const via = [...through].find((n) => members.some((m) => usesOnThisIn({ of: "classMember", node: m }, n, false)));
       if (via === name) {
         throw new CompileError(

@@ -34,6 +34,15 @@ export class Arenas {
     return id === undefined ? undefined : this.bodies[id - 1];
   }
 
+  // A body or a class to change in place.
+  bodyMut(this: Mut<this>, id: BodyId): Mut<Body> {
+    return this.bodies[id - 1]!;
+  }
+
+  classMut(this: Mut<this>, id: ClassId): Mut<ClassInfo> {
+    return this.classes[id - 1]!;
+  }
+
   localOf(id: LocalId): Ref<Local>;
   localOf(id: LocalId | undefined): Ref<Local> | undefined;
   localOf(id: LocalId | undefined): Ref<Local> | undefined {
