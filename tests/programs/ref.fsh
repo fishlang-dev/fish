@@ -759,3 +759,80 @@ function main() {
   print(c.tokens.length, c.tokens[0]!.start, c.lex.scanned)
 }
 // expect: 1 2 1
+// case: ref_method_keeps_nothing
+// A method of a class holding a reference that stores nothing in `this` can be lent a local.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  seen: i64 = 0
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  count(this: Mut<this>, other: Ref<P>): i64 {
+    this.seen += other.x + this.src.x
+    return this.seen
+  }
+  run(this: Mut<this>): i64 {
+    const local = new P()
+    return this.count(local)
+  }
+}
+
+function main() {
+  const p = new P()
+  let v = new View(p)
+  console.log(v.run())
+}
+// expect: 2
+// case: ref_method_keeps_nothing_declared_later
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  seen: i64 = 0
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  run(this: Mut<this>): i64 {
+    const local = new P()
+    return this.count(local)
+  }
+  count(this: Mut<this>, other: Ref<P>): i64 {
+    this.seen += other.x + this.src.x
+    return this.seen
+  }
+}
+
+function main() {
+  const p = new P()
+  let v = new View(p)
+  console.log(v.run())
+}
+// expect: 2
+// case: ref_method_keeps_what_it_stores
+// One that stores what it is lent keeps it, so it can't be lent a local.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    this.src = other
+  }
+  run(this: Mut<this>) {
+    const local = new P()
+    this.point(local)
+  }
+}
+
+function main() {}
+// error: can't store in 'this' a reference to 'local', which belongs to this function

@@ -84,11 +84,11 @@ type Site = { id: usize; start: usize; end: usize };
 
 
 /** @throws {CompileError} */
-export function checkMoves<T extends Tables, B extends Body, I extends Instance>(tables: Mut<T>, f: Ref<B>, instance: Ref<I>, origins: Origin[]): { captures: Set<LocalId>; consumes: Set<usize> } {
+export function checkMoves<T extends Tables, B extends Body, I extends Instance>(tables: Mut<T>, f: Ref<B>, instance: Ref<I>, origins: Origin[]): { captures: Set<LocalId>; consumes: Set<usize>; keeps: boolean } {
   let cx = new MoveCx<T, B, I>(tables, f, instance);
   let checker = new MoveChecker<T, B, I>(cx, origins);
   checker.run(cx);
-  return { captures: checker.movedOut, consumes: checker.consumed };
+  return { captures: checker.movedOut, consumes: checker.consumed, keeps: checker.keepsInThis };
 }
 
 // Generic over its tables, body and instance, since a parameter of an object type stands for
@@ -137,6 +137,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // whose values are moved out, by node id.
   movedOut = new Set<LocalId>();
   consumed = new Set<usize>();
+  // Whether the body stores a value holding references into `this`.
+  keepsInThis = false;
 
   constructor(cx: Mut<MoveCx<T, B, I>>, origins: Origin[]) {
     const instance = cx.instance;
@@ -994,6 +996,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   /** @throws {CompileError} */
   keepValue(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, k: Ref<Keeper>, v: Ref<Expr>): void {
     if (k.self) {
+      this.keepsInThis = true;
       this.stored(cx, v);
       if (cx.f.self !== undefined && cx.tables.typing.holdsRef(cx.f.self.type)) this.hold(cx, this.kept, v);
     } else if (k.owner !== undefined) this.hold(cx, k.owner, v);
@@ -1282,7 +1285,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (keeper === undefined) return false;
     const keeperType = cx.instance.types.get(keeper);
     const holder = keeperType === undefined || cx.tables.typing.holdsRef(this.deref(cx, keeperType));
-    return holder && (selfMutable || e.callee.kind === "super");
+    if (!holder || !(selfMutable || e.callee.kind === "super")) return false;
+    // A method whose body is known to store nothing holding references in `this` keeps none of
+    // what it is given.
+    return target === undefined || cx.tables.arenas.instanceOf(target).keeps !== false;
   }
 
   // A method that changes its object, or a base's constructor, may keep what it is given, held

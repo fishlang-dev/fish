@@ -113,6 +113,9 @@ export type Instance = {
   caught: NodeMap<Stmt, Type>;
   // Each place whose value is handed over rather than copied, which leaves it empty, by node id.
   consumes: Set<usize>;
+  // Whether the body stores a value holding references into `this`, set by its move check; a
+  // call of a method that doesn't can't keep what it lends, so its arguments may be anything.
+  keeps?: boolean;
   // What each match pattern tests, and the type of the value it meets.
   patterns: NodeMap<Pattern, PatternInfo>;
   // Each read of a shared value's plain field: a copy made under its lock, not a place.
@@ -788,6 +791,23 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.nextLocal = 0;
     this.closures = [];
     this.closureBodies = new TypeMap<ClosureType, InstanceId>();
+  }
+
+  // Checks a method changing an object that holds references, unless it is being checked or
+  // its check failed, so whether its body keeps what it is lent is known; a failed check is
+  // reported where the method itself is checked.
+  /** @throws {CompileError} */
+  keepsKnown(this: Mut<this>, target: InstanceId) {
+    const callee = this.arenas.instanceOf(target);
+    if (callee.keeps !== undefined || this.inProgress.has(callee.id) || this.done.has(callee.id)) return;
+    const f = bodyOf(this.arenas, callee);
+    if (f.self === undefined || !f.self.mutable || f.self.constructor || !this.typing.holdsRef(f.self.type)) return;
+    if (this.failed.has(f.bodyId)) return;
+    try {
+      this.checkBody(callee);
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw e;
+    }
   }
 
   // Whether a class, class template, interface or enum has a name.
@@ -2427,9 +2447,13 @@ class BodyChecker implements Context, GuardHost {
     // From here on the body is read as a plain tree, its replacements in place.
     for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam(this.f.params[i]!, this.cx.rewrites);
     rebuiltStmts(this.f.body, this.cx.rewrites);
+    // A method this body calls on an object holding references is checked first, so the move
+    // check knows whether it keeps what it is lent.
+    for (const target of this.instance.calls.values()) this.cx.keepsKnown(target);
     const moved = timed(this.cx.tables.timings, "moves", () => checkMoves(this.cx.tables, this.f, this.instance, origins));
     for (const id of moved.captures) this.instance.moved!.add(id);
     for (const id of moved.consumes) this.instance.consumes.add(id);
+    this.instance.keeps = moved.keeps;
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (this.self && this.cx.registry().classOf(this.self.type).methods.get("clone") === this.f.bodyId && (this.f.params.length > 0 || type !== this.self.type)) {
       throw new CompileError("E0213", `a 'clone' method must take no parameters and return '${this.cx.typing.show(this.self.type)}', since it replaces the compiler's copy`, this.f.start, this.f.end);
