@@ -1,6 +1,6 @@
 import { declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
-import { newTables, timed, type Compilation, type Tables } from "./compilation.ts";
+import { newDeclarations, newTables, timed, type Compilation, type Declarations, type Tables } from "./compilation.ts";
 import { CompileError, compileErrors, named } from "./diag.ts";
 import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
@@ -446,7 +446,8 @@ export function check(compilation: Compilation, written: Stmt[], exportsToC: Set
 
 /** @throws {CompileError} */
 function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): Checked {
-  return new Checker(compilation, written, exportsToC, macros, module).run();
+  let declared = newDeclarations();
+  return new Checker(compilation, written, exportsToC, macros, module, declared).run();
 }
 
 class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost, EnumHost {
@@ -496,10 +497,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   classes: Map<string, ClassId>;
   // Generic classes, declared again for each set of type arguments they are used with.
   templates: Map<string, ClassNode & { name: string }>;
-  interfaces: Map<string, Interface>;
+  // The program's aliases, interfaces and lifetimes, which nothing changes once declared.
+  decls: Ref<Declarations>;
   enums: Map<string, EnumInfo>;
-  // For each class declaring lifetimes, which of its type parameters are lifetimes.
-  slots: Map<string, boolean[]>;
   byName: Map<string, BodyId>;
   main: Body | undefined;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
@@ -549,8 +549,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   failed = new Map<BodyId, CompileError>();
 
   /** @throws {CompileError} */
-  constructor(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean) {
+  constructor(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean, declarations: Mut<Declarations>) {
     this.compilation = compilation;
+    this.decls = declarations;
     this.written = written;
     this.library = exportsToC !== false;
     this.takenInC = exportsToC || new Set();
@@ -618,12 +619,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.program = [...lowerOverloads(this.ids, stdFor(this.compilation, this.written)), ...this.written];
     this.funcs = [];
     this.typedArrows = [];
-    const aliases: Tables["aliases"] = this.tables.aliases;
+    const aliases = declarations.aliases;
     this.classes = new Map<string, ClassId>();
     this.templates = new Map<string, ClassNode & { name: string }>();
-    this.interfaces = new Map<string, Interface>();
     this.enums = new Map<string, EnumInfo>();
-    this.slots = new Map<string, boolean[]>();
     separatePrivateNames(this.program);
     for (const s of this.program) {
       try {
@@ -637,18 +636,18 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         const trait = s.kind === "typeAlias" ? traitAlias(this.ids, s) : undefined;
         if (s.kind === "typeAlias" && !trait) {
           // An alias's lifetimes, like a class's, are checked and erased.
-          if (s.typeParams.some(isLifetime)) this.slots.set(s.name, s.typeParams.map(isLifetime));
+          if (s.typeParams.some(isLifetime)) declarations.slots.set(s.name, s.typeParams.map(isLifetime));
           addAlias(aliases, s.typeParams.some(isLifetime) ? { ...s, typeParams: s.typeParams.filter((p) => !isLifetime(p)) } : s, this.typeNamed(s.name));
           continue;
         }
         if (trait) {
           typeName(trait.name, s, aliases.has(trait.name) || this.typeNamed(trait.name));
-          this.interfaces.set(trait.name, trait);
+          declarations.interfaces.set(trait.name, trait);
           continue;
         }
         if (s.kind === "interface") {
           typeName(s.name, s, aliases.has(s.name) || this.typeNamed(s.name));
-          this.interfaces.set(s.name, s);
+          declarations.interfaces.set(s.name, s);
           if (s.jsClass) jsClasses.set(s.name, s);
           continue;
         }
@@ -656,7 +655,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           typeName(s.name, s, aliases.has(s.name) || this.typeNamed(s.name));
           // A class's lifetimes are checked and erased, never instanced, so they are set aside.
           const node = { ...s, id: nextId(this.ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
-          if (s.typeParams.some(isLifetime)) this.slots.set(s.name, s.typeParams.map(isLifetime));
+          if (s.typeParams.some(isLifetime)) declarations.slots.set(s.name, s.typeParams.map(isLifetime));
           if (node.typeParams.length > 0) this.templates.set(s.name, node);
           else this.classes.set(s.name, declareClass(this.tables, node));
           const declared = this.arenas.classOf(this.classes.get(s.name));
@@ -812,7 +811,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   // Whether a class, class template, interface or enum has a name.
   typeNamed(name: string): boolean {
-    return this.classes.has(name) || this.templates.has(name) || this.interfaces.has(name) || this.enums.has(name);
+    return this.classes.has(name) || this.templates.has(name) || this.decls.interfaces.has(name) || this.enums.has(name);
   }
 
   /** @throws {CompileError} */
@@ -951,7 +950,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   typeNames(at: usize): string[] {
-    return this.reached([...this.tables.aliases.keys(), ...this.classes.keys(), ...this.templates.keys(), ...this.interfaces.keys(), ...this.enums.keys()], at);
+    return this.reached([...this.decls.aliases.keys(), ...this.classes.keys(), ...this.templates.keys(), ...this.decls.interfaces.keys(), ...this.enums.keys()], at);
   }
 
   // A generic enum's variant made with other type arguments, while lowering.
@@ -1133,7 +1132,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (crossing) throw new CompileError("E1005", "turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
     // A package's declarations have no body to compile.
     // An interface's method may be any class's, as interfaces are met by shape.
-    const signed = new Set([...this.interfaces.values()].flatMap((x) => x.members.flatMap((m) => (m.kind === "method" && typeof m.name === "string" ? [m.name] : []))));
+    const signed = new Set([...this.decls.interfaces.values()].flatMap((x) => x.members.flatMap((m) => (m.kind === "method" && typeof m.name === "string" ? [m.name] : []))));
     // A method's body is named for its class, as in `C.m`.
     const method = (b: Body) => b.name.slice(b.name.lastIndexOf(".") + 1);
     const overrides = (b: Body) => {
@@ -1409,7 +1408,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       if (n.of !== "typeNode" || n.node.kind !== "ref") return;
       const args = n.node.args;
       if ((n.node.name === "Ref" || n.node.name === "Mut") && args.length === 2 && args[1]!.kind === "ref") found.add(args[1]!.name);
-      const lifetime = this.slots.get(n.node.name);
+      const lifetime = this.decls.slots.get(n.node.name);
       if (lifetime && args.length === lifetime.length) args.forEach((a, i) => lifetime[i] && a.kind === "ref" && found.add(a.name));
     });
     return found;
@@ -1438,7 +1437,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         if (n.of !== "typeNode" || n.node.kind !== "ref") return;
         const node = n.node;
         const lives = (node.name === "Ref" || node.name === "Mut") && node.args.length === 2 ? [node.args[1]!]
-          : this.slots.get(node.name)?.length === node.args.length ? node.args.filter((_, i) => this.slots.get(node.name)![i]) : [];
+          : this.decls.slots.get(node.name)?.length === node.args.length ? node.args.filter((_, i) => this.decls.slots.get(node.name)![i]) : [];
         for (const life of lives) {
           if (life.kind === "ref" && !declared.has(life.name)) throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
         }
@@ -1729,7 +1728,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // A generic implementation is the instance its type parameters take from the declaration's.
     const names = new Set(typeParamsOf(f).map((p) => p.name));
     const bindings = new Map<string, Type>();
-    if (names.size > 0) f.params.forEach((p, i) => p.type && want[i] !== undefined && infer(this.tables, p.type, want[i]!, names, bindings, f));
+    if (names.size > 0) f.params.forEach((p, i) => p.type && want[i] !== undefined && infer(this.tables, this.decls, p.type, want[i]!, names, bindings, f));
     if (bindings.size < names.size) throw why(`must take (${want.map((t) => this.typing.show(t)).join(", ")})`);
     const instance = names.size > 0 ? this.instancing().instanceOf(f, new Map([...(f.scope ?? []), ...bindings])) : this.instancing().instanceOf(f);
     const have = names.size > 0 ? this.instancing().paramTypes(instance) : this.instancing().declaredParams(f);
@@ -1945,6 +1944,7 @@ class BodyChecker implements Context, GuardHost {
   calls: Instance["calls"];
   jumps: Instance["jumps"];
   declared: Type | undefined;
+  decls: Ref<Declarations>;
   // A generator's declared `Generator<T>`, or an async one's `AsyncGenerator<T>`, says what it
   // yields; calling it gives its own type.
   generatorType: GeneratorType | undefined;
@@ -2128,6 +2128,7 @@ class BodyChecker implements Context, GuardHost {
     this.self = this.f.closure ? this.enclosing && { ...this.enclosing, constructor: false, mutable: false, owned: false } : this.f.self && { ...this.f.self, type: viewed ?? this.f.self.type };
     this.captures = this.instance.captures;
     this.tables = this.cx.tables;
+    this.decls = this.cx.decls;
     this.byName = this.cx.byName;
     this.classes = this.cx.classes;
     this.enums = this.cx.enums;

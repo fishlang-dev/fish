@@ -2,7 +2,7 @@ import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId } from 
 import { emptyTables, holdsNode, type Instance } from "./check.ts";
 import { cloneBody, cloneSignature, declareClass, inherited, isApart, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import type { Tables } from "./compilation.ts";
+import type { Declarations, Tables } from "./compilation.ts";
 import { literalValue } from "./narrow.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
@@ -157,11 +157,11 @@ export function typeParamsOf(f: Ref<Body>): TypeParam[] {
 // Binds the type parameters `node` names by matching it against an argument's type, looking
 // through the check's type aliases.
 /** @throws {CompileError} */
-export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names: Ref<Set<string>>, bindings: Mut<Map<string, Type>>, at: Ref<Span>): void {
+export function infer(tables: Mut<Tables>, declared: Ref<Declarations>, node: Ref<TypeNode>, arg: Type, names: Ref<Set<string>>, bindings: Mut<Map<string, Type>>, at: Ref<Span>): void {
   arg = tables.typing.unfold(arg);
   // `Pair<T>` naming a generic alias matches what the alias stands for, its parameters given
   // as written.
-  const alias = node.kind === "ref" && node.args.length > 0 && !names.has(node.name) ? tables.aliases.get(node.name) : undefined;
+  const alias = node.kind === "ref" && node.args.length > 0 && !names.has(node.name) ? declared.aliases.get(node.name) : undefined;
   if (node.kind === "ref" && alias !== undefined && alias.typeParams.length === node.args.length && !tables.expanding.has(alias.name)) {
     let given = new Map<string, TypeNode>();
     for (let i: usize = 0; i < alias.typeParams.length; i++) given.set(alias.typeParams[i]!.name, cloneTypeNode(node.args[i]!));
@@ -169,7 +169,7 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
     const body = substituted(tables.ids, alias.type, given);
     tables.expanding.add(name);
     try {
-      infer(tables, body, arg, names, bindings, at);
+      infer(tables, declared, body, arg, names, bindings, at);
     } finally {
       tables.expanding.delete(name);
     }
@@ -231,112 +231,112 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
     }
     if (rest.length > 0) {
       const given = rest.length === 1 ? rest[0]! : tables.typing.unionType(rest);
-      infer(tables, members[open]!, given, names, bindings, at);
+      infer(tables, declared, members[open]!, given, names, bindings, at);
     }
     return;
   }
   // `Ref<T>` against a value or a reference borrows a T.
   if (node.kind === "ref" && (node.name === "Ref" || node.name === "Mut") && node.args.length >= 1 && !names.has(node.name)) {
-    infer(tables, node.args[0]!, a?.kind === "ref" ? a.to : arg, names, bindings, at);
+    infer(tables, declared, node.args[0]!, a?.kind === "ref" ? a.to : arg, names, bindings, at);
     return;
   }
   // A function type against a closure binds through its parameters and what it gives.
   if (node.kind === "function" && a?.kind === "closure") {
     for (let i: usize = 0; i < node.params.length && i < a.params.length; i++) {
-      if (node.params[i]!.type !== undefined) infer(tables, node.params[i]!.type!, a.params[i]!, names, bindings, at);
+      if (node.params[i]!.type !== undefined) infer(tables, declared, node.params[i]!.type!, a.params[i]!, names, bindings, at);
     }
-    if (a.returns !== "void" || node.returns.kind !== "ref" || !names.has(node.returns.name)) infer(tables, node.returns, a.returns, names, bindings, at);
-    if (node.throws !== undefined && a.throws !== undefined) infer(tables, node.throws, a.throws, names, bindings, at);
+    if (a.returns !== "void" || node.returns.kind !== "ref" || !names.has(node.returns.name)) infer(tables, declared, node.returns, a.returns, names, bindings, at);
+    if (node.throws !== undefined && a.throws !== undefined) infer(tables, declared, node.throws, a.throws, names, bindings, at);
     return;
   }
   // `Ptr<T>` against a raw pointer points at a T.
   if (node.kind === "ref" && (node.name === "Ptr" || node.name === "MutPtr") && node.args.length === 1 && !names.has(node.name)) {
-    if (a?.kind === "pointer") infer(tables, node.args[0]!, a.to, names, bindings, at);
+    if (a?.kind === "pointer") infer(tables, declared, node.args[0]!, a.to, names, bindings, at);
     return;
   }
   // `Lock<T>` against a Lock holds a T.
   if (node.kind === "ref" && INTERIORS.has(node.name) && node.args.length === 1 && !names.has(node.name)) {
-    if (a?.kind === "interior" && a.which === node.name) infer(tables, node.args[0]!, a.of, names, bindings, at);
+    if (a?.kind === "interior" && a.which === node.name) infer(tables, declared, node.args[0]!, a.of, names, bindings, at);
     return;
   }
   if (node.kind === "ref" && node.name === "Channel" && node.args.length === 1 && !names.has(node.name)) {
-    if (a?.kind === "block" && a.which === "Channel") infer(tables, node.args[0]!, a.of, names, bindings, at);
+    if (a?.kind === "block" && a.which === "Channel") infer(tables, declared, node.args[0]!, a.of, names, bindings, at);
     return;
   }
   // `Map<K, V>` and `Set<T>` against one match their key and value types.
   if (node.kind === "ref" && (node.name === "Map" || node.name === "Set") && !names.has(node.name)) {
     if (a !== undefined && a.kind === "map" && a.set === (node.name === "Set") && a.dict !== true) {
-      if (node.args.length > 0) infer(tables, node.args[0]!, a.key, names, bindings, at);
-      if (node.args.length > 1) infer(tables, node.args[1]!, a.value, names, bindings, at);
+      if (node.args.length > 0) infer(tables, declared, node.args[0]!, a.key, names, bindings, at);
+      if (node.args.length > 1) infer(tables, declared, node.args[1]!, a.value, names, bindings, at);
     }
     return;
   }
   // `Record<string, V>` and `{ [k: string]: V }` against a dictionary match its value type.
   if (a !== undefined && a.kind === "map" && a.dict === true) {
     if (node.kind === "ref" && node.name === "Record" && node.args.length === 2 && !names.has(node.name)) {
-      infer(tables, node.args[1]!, a.value, names, bindings, at);
+      infer(tables, declared, node.args[1]!, a.value, names, bindings, at);
       return;
     }
     if (node.kind === "object" && node.members.length === 1) {
       for (const m of node.members) {
         if (m.kind !== "index") continue;
-        infer(tables, m.type, a.value, names, bindings, at);
+        infer(tables, declared, m.type, a.value, names, bindings, at);
         return;
       }
     }
   }
   if (node.kind === "ref" && (node.name === "shared" || node.name === "Rc" || node.name === "Weak") && node.args.length === 1 && !names.has(node.name)) {
-    if (a?.kind === "shared" && a.which === node.name) infer(tables, node.args[0]!, a.of, names, bindings, at);
+    if (a?.kind === "shared" && a.which === node.name) infer(tables, declared, node.args[0]!, a.of, names, bindings, at);
     return;
   }
   // `Box<T>` against `Box<i64>` matches the type arguments.
   if (node.kind === "ref" && a?.kind === "class" && a.generic?.name === node.name) {
-    for (let i: usize = 0; i < node.args.length && i < a.generic!.args.length; i++) infer(tables, node.args[i]!, a.generic!.args[i]!, names, bindings, at);
+    for (let i: usize = 0; i < node.args.length && i < a.generic!.args.length; i++) infer(tables, declared, node.args[i]!, a.generic!.args[i]!, names, bindings, at);
     return;
   }
   // `Dyn<I>` against a Dyn matches the interface it holds.
   if (node.kind === "ref" && node.name === "Dyn" && node.args.length === 1 && !names.has("Dyn") && a?.kind === "dyn") {
-    infer(tables, node.args[0]!, a.of, names, bindings, at);
+    infer(tables, declared, node.args[0]!, a.of, names, bindings, at);
     return;
   }
   // So does a generic interface, given as one or held by a Dyn of one.
   const held = a?.kind === "dyn" ? a.of : arg;
   const trait = typeof held === "string" ? undefined : tables.typing.rec(held);
   if (node.kind === "ref" && trait?.kind === "interface" && trait.generic?.name === node.name) {
-    for (let i: usize = 0; i < node.args.length && i < trait.generic!.args.length; i++) infer(tables, node.args[i]!, trait.generic!.args[i]!, names, bindings, at);
+    for (let i: usize = 0; i < node.args.length && i < trait.generic!.args.length; i++) infer(tables, declared, node.args[i]!, trait.generic!.args[i]!, names, bindings, at);
     return;
   }
   // `Promise<T>` against a promise matches what it gives.
   if (node.kind === "ref" && node.name === "Promise" && node.args.length === 1 && !names.has(node.name)) {
     const gives = a?.kind === "future" ? a.gives : tables.typing.promiseElement(arg);
-    if (gives !== undefined) infer(tables, node.args[0]!, gives, names, bindings, at);
+    if (gives !== undefined) infer(tables, declared, node.args[0]!, gives, names, bindings, at);
     return;
   }
   // `Generator<T>` against a generator matches what it yields.
   // A parameter of a generator interface, or one standing for a generator, yields too.
   if (node.kind === "ref" && node.name === "Generator" && node.args.length >= 1 && tables.typing.yieldsOf(arg) !== undefined) {
     const given = tables.typing.yieldsOf(arg)!;
-    infer(tables, node.args[0]!, given, names, bindings, at);
+    infer(tables, declared, node.args[0]!, given, names, bindings, at);
     return;
   }
   // `Iterable<T>` against anything a loop reads matches what it reads.
   if (node.kind === "ref" && node.name === "Iterable" && node.args.length === 1 && !names.has(node.name) && tables.typing.iteratedBy(arg) !== undefined) {
     const given = tables.typing.iteratedBy(arg)!;
-    infer(tables, node.args[0]!, given, names, bindings, at);
+    infer(tables, declared, node.args[0]!, given, names, bindings, at);
     return;
   }
   if (node.kind === "ref" && node.name === "AsyncGenerator" && node.args.length >= 1 && tables.typing.yieldsOf(arg, true) !== undefined) {
     const given = tables.typing.yieldsOf(arg, true)!;
-    infer(tables, node.args[0]!, given, names, bindings, at);
+    infer(tables, declared, node.args[0]!, given, names, bindings, at);
     return;
   }
   // `FixedArray<T, N>` against a fixed array matches its element type.
   if (node.kind === "ref" && node.name === "FixedArray" && node.args.length === 2 && a?.kind === "fixed") {
-    infer(tables, node.args[0]!, a.element, names, bindings, at);
+    infer(tables, declared, node.args[0]!, a.element, names, bindings, at);
     return;
   }
   if (node.kind === "operator" && node.op === "readonly" && node.type.kind === "tuple") {
-    infer(tables, node.type, arg, names, bindings, at);
+    infer(tables, declared, node.type, arg, names, bindings, at);
     return;
   }
   // `[A, B]` against a tuple of its length matches element by element.
@@ -359,11 +359,11 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
         k++;
         if (n.optional && e === "null") continue;
         const given = n.optional ? tables.typing.withoutNull(e) : e;
-        infer(tables, n.type, given, names, bindings, at);
+        infer(tables, declared, n.type, given, names, bindings, at);
       }
       if (restAt !== undefined) {
         const array = tables.typing.arrayType(tupleRest!);
-        infer(tables, node.elements[restAt]!.type, array, names, bindings, at);
+        infer(tables, declared, node.elements[restAt]!.type, array, names, bindings, at);
       }
       return;
     }
@@ -372,11 +372,11 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
   // An empty literal's `never` elements say nothing about the element type.
   if (a !== undefined && a.kind === "array") {
     if (node.kind === "array") {
-      if (a.element !== "never") infer(tables, node.element, a.element, names, bindings, at);
+      if (a.element !== "never") infer(tables, declared, node.element, a.element, names, bindings, at);
       return;
     }
     if (node.kind === "ref" && node.name === "Array" && node.args.length === 1) {
-      if (a.element !== "never") infer(tables, node.args[0]!, a.element, names, bindings, at);
+      if (a.element !== "never") infer(tables, declared, node.args[0]!, a.element, names, bindings, at);
       return;
     }
   }
@@ -384,7 +384,7 @@ export function infer(tables: Mut<Tables>, node: Ref<TypeNode>, arg: Type, names
   for (const m of node.members) {
     if (m.kind !== "property" || typeof m.name !== "string" || m.type === undefined) continue;
     const found = tables.typing.field(arg, m.name);
-    if (found !== undefined) infer(tables, m.type, found.type, names, bindings, at);
+    if (found !== undefined) infer(tables, declared, m.type, found.type, names, bindings, at);
   }
 }
 
@@ -507,6 +507,7 @@ class Concreteness {
 // What instantiating needs from the checker.
 export interface InstancingHost {
   tables: Tables;
+  decls: Ref<Declarations>;
   /** @throws {CompileError} */
   resolveType(t: TypeNode): Type;
   /** @throws {CompileError} */
@@ -605,7 +606,7 @@ export class Instancing<H extends InstancingHost> {
       const names = new Set(params.map((p) => p.name));
       for (let k: usize = 0; k < f.params.length && k < argTypes.length; k++) {
         const given = argTypes[k];
-        if (f.params[k]!.type !== undefined && given !== undefined && k !== i) infer(this.host.tables, f.params[k]!.type!, given, names, bindings, at);
+        if (f.params[k]!.type !== undefined && given !== undefined && k !== i) infer(this.host.tables, this.host.decls, f.params[k]!.type!, given, names, bindings, at);
       }
     }
     // Inferred from a literal, a type parameter types the arrow as its base type; written, as the
@@ -815,12 +816,12 @@ export class Instancing<H extends InstancingHost> {
       for (let i: usize = 0; i < f.params.length && i < argTypes.length; i++) {
         if (f.params[i]!.type === undefined) continue;
         const given = this.iteratesAs(f.params[i]!.type!, argTypes[i]!, { start: at.start, end: at.end });
-        infer(this.host.tables, f.params[i]!.type!, given, names, bindings, at);
+        infer(this.host.tables, this.host.decls, f.params[i]!.type!, given, names, bindings, at);
       }
       // `G extends Generator<U>` decides `U` from what `G`'s generator yields.
       for (const p of params) {
         const yields = bindings.has(p.name) ? this.host.tables.typing.yieldsOf(bindings.get(p.name)!) : undefined;
-        if (p.constraint !== undefined && p.constraint.kind === "ref" && p.constraint.name === "Generator" && p.constraint.args.length === 1 && yields !== undefined) infer(this.host.tables, p.constraint.args[0]!, yields, names, bindings, at);
+        if (p.constraint !== undefined && p.constraint.kind === "ref" && p.constraint.name === "Generator" && p.constraint.args.length === 1 && yields !== undefined) infer(this.host.tables, this.host.decls, p.constraint.args[0]!, yields, names, bindings, at);
       }
     }
     for (const p of params) {
@@ -1158,6 +1159,7 @@ function callsIn(n: AnyNode, name: string, repeated: boolean, count: Mut<Calls>)
 // What generic classes need from the checker.
 export interface GenericClassesHost {
   tables: Tables;
+  decls: Ref<Declarations>;
   classes: Map<string, ClassId>;
   templates: Map<string, ClassNode & { name: string }>;
   register(c: ClassInfo): void;
@@ -1475,7 +1477,7 @@ export class GenericClasses<H extends GenericClassesHost> {
       if (m.kind !== "constructor" || hasConstructor) continue;
       hasConstructor = true;
       for (let i: usize = 0; i < m.params.length; i++) {
-        if (m.params[i]!.type !== undefined && i < argTypes.length) infer(this.host.tables, m.params[i]!.type!, argTypes[i]!, names, bindings, { start: at.start, end: at.end });
+        if (m.params[i]!.type !== undefined && i < argTypes.length) infer(this.host.tables, this.host.decls, m.params[i]!.type!, argTypes[i]!, names, bindings, { start: at.start, end: at.end });
       }
     }
     let baseName: string | undefined = undefined;
@@ -1491,7 +1493,7 @@ export class GenericClasses<H extends GenericClassesHost> {
     const given = this.inferred(base, argTypes.slice(), { start: at.start, end: at.end }, seen);
     for (let i: usize = 0; i < params.length; i++) {
       const g = given.get(params[i]!);
-      if (g !== undefined && i < passed.length) infer(this.host.tables, passed[i]!, g, names, bindings, { start: at.start, end: at.end });
+      if (g !== undefined && i < passed.length) infer(this.host.tables, this.host.decls, passed[i]!, g, names, bindings, { start: at.start, end: at.end });
     }
     return bindings;
   }

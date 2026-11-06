@@ -1,4 +1,4 @@
-import type { Tables } from "./compilation.ts";
+import type { Declarations, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { holdsNull } from "./defaults.ts";
@@ -80,14 +80,13 @@ export type InScope<T> = () => T;
 
 export interface ResolverHost {
   tables: Tables;
-  interfaces: Map<string, Interface>;
+  decls: Ref<Declarations>;
   enums: Map<string, EnumInfo>;
   // An enum's type and a member of it, read once the enum is settled.
   /** @throws {CompileError} */
   enumType(this: Mut<this>, name: string): Type;
   /** @throws {CompileError} */
   enumMember(this: Mut<this>, name: string, member: string): LiteralType | undefined;
-  slots: Map<string, boolean[]>;
   resolverState: ResolverState;
   /** @throws {CompileError} */
   classNamed(this: Mut<this>, name: string, args: Type[], at: Span): ClassType | undefined;
@@ -232,7 +231,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   /** @throws {CompileError} */
   interfaceInstance(this: Mut<this>, t: InterfaceType, args: Type[]) {
     const name = this.host.tables.typing.rec(t).generic!.name;
-    const named = this.host.interfaces.get(name);
+    const named = this.host.decls.interfaces.get(name);
     if (named !== undefined) return this.interfaceOf(named, args);
     const inline = this.interfaceOf(this.host.resolverState.inline.get(name)!, args);
     return this.sameShape(inline);
@@ -264,7 +263,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // uses it. Run once classes are linked, since an alias may read a class's fields.
   /** @throws {CompileError} */
   validate(this: Mut<this>) {
-    this.host.tables.aliases.forEach((a) => {
+    this.host.decls.aliases.forEach((a) => {
       const scope = placeholders(this.host, a.typeParams, undefined, undefined);
       if (a.typeParams.length > 0) this.host.resolverState.deferring++;
       try {
@@ -274,7 +273,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       }
     });
     // A generic interface is checked once with placeholders for its parameters.
-    this.host.interfaces.forEach((i) => this.interfaceOf(i, [...placeholders(this.host, i.typeParams, undefined, undefined).values()]));
+    this.host.decls.interfaces.forEach((i) => this.interfaceOf(i, [...placeholders(this.host, i.typeParams, undefined, undefined).values()]));
   }
 
   // A data-carrying enum made with these type arguments: a variant per member, its payload
@@ -678,9 +677,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       return this.host.tables.typing.unionType([this.unionMember(t.args[0]!, true), "null"]);
     }
     // A class's lifetimes, written or left out, are no type arguments.
-    const lifetime = this.host.slots.get(t.name);
+    const lifetime = this.host.decls.slots.get(t.name);
     const args = (lifetime && t.args.length === lifetime.length ? t.args.filter((_, i) => !lifetime[i]) : t.args).map((t) => this.resolveType(t));
-    const alias = this.host.tables.aliases.get(t.name);
+    const alias = this.host.decls.aliases.get(t.name);
     // A package's object type is a JS handle of that shape; its other aliases are what they say.
     if (alias?.js) {
       const aliased = this.aliasType(alias, args, t);
@@ -702,7 +701,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (e && name === undefined) return this.host.enumType(owner!);
     const found = e && this.host.enumMember(owner!, name!);
     if (found) return found;
-    const trait = this.host.interfaces.get(t.name);
+    const trait = this.host.decls.interfaces.get(t.name);
     // A package's interface or class is a JS handle of its shape.
     if (trait?.js) return this.host.tables.typing.blockType("JsValue", this.interfaceOf(trait, args, t));
     if (trait) return this.interfaceOf(trait, args.map((t) => this.host.tables.typing.heldArgument(t)), t);
@@ -1057,7 +1056,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const prefix = a.name.startsWith("Stmt") ? "Stmt" : "TypeNode";
       const exprName = `Expr${a.name.slice(prefix.length as i64)}`;
       const exprKey = `${exprName}<>`;
-      const exprAlias = this.host.tables.aliases.get(exprName);
+      const exprAlias = this.host.decls.aliases.get(exprName);
       if (exprAlias && exprAlias.typeParams.length === 0 && !this.host.resolverState.resolving.has(exprKey) && !this.host.resolverState.resolved.has(exprKey)) {
         this.aliasType(exprAlias, [], exprAlias);
         const nowDone = this.host.resolverState.resolved.get(key);

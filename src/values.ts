@@ -1,4 +1,4 @@
-import type { Tables } from "./compilation.ts";
+import type { Declarations, Tables } from "./compilation.ts";
 import { stdModuleAt, textAt } from "./program.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
 import { abstractIn, copyFor, inherited, selfTyped, shownName, isLifetime, type Body, type ClassInfo, type FieldDecl } from "./classes.ts";
@@ -96,6 +96,7 @@ function holdsFloat(typing: Typing, t: Type, seen: TypeSet<Type> = new TypeSet<T
 // What expression checking needs from the program and the function it is in.
 export type Context = {
   tables: Tables;
+  decls: Ref<Declarations>;
   types: NodeMap<Expr, Type>;
   locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
   coercions: NodeMap<Expr, Type>;
@@ -1948,7 +1949,7 @@ export class Expressions<C extends Context> implements Union {
     if (e.typeArgs.length > 0) {
       if (e.typeArgs.length !== names.length) throw new CompileError("E0106", `expected ${names.length} type argument${names.length === 1 ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
       names.forEach((n, i) => bindings.set(n, this.ctx.resolveType(e.typeArgs[i]!)));
-    } else written.params.forEach((p, i) => p.type && infer(this.ctx.tables, p.type, argTypes[i]!, new Set(names), bindings, e.args[i]!));
+    } else written.params.forEach((p, i) => p.type && infer(this.ctx.tables, this.ctx.decls, p.type, argTypes[i]!, new Set(names), bindings, e.args[i]!));
     for (const [i, n] of names.entries()) {
       const bound = bindings.get(n);
       if (!bound) throw new CompileError("E0104", `can't infer a type for '${n}' in this call of ${name}; pass it, as in '${(e.callee as { name?: string }).name ?? "f"}<i64>(...)'`, e.start, e.end);
@@ -4887,7 +4888,7 @@ export class Expressions<C extends Context> implements Union {
     else if (expected) data.params.forEach((p, i) => bindings.set(p, this.typing.rec(expected).args[i]!));
     else {
       const names = new Set(data.params);
-      (member.payload ?? []).forEach((node, i) => given[i] && infer(this.ctx.tables, node, this.typing.widenLet(given[i]!), names, bindings, e));
+      (member.payload ?? []).forEach((node, i) => given[i] && infer(this.ctx.tables, this.ctx.decls, node, this.typing.widenLet(given[i]!), names, bindings, e));
     }
     const missing = data.params.find((p) => !bindings.has(p));
     if (missing) {

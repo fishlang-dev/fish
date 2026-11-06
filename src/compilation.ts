@@ -275,9 +275,7 @@ export type Tables = {
   // A generic class's placeholders, by its first type parameter, shared by its definition
   // check and its members.
   classScopes: NodeMap<TypeParam, Map<string, Type>>;
-  // The program's type aliases, which inference looks through, and those being looked through,
-  // so one that holds itself is looked into once.
-  aliases: Map<string, TypeAlias>;
+  // The aliases being looked through by inference, so one that holds itself is looked into once.
   expanding: Set<string>;
 
   // The `instanceof Map`, `instanceof Set` and `instanceof Array` tests and the `Array.isArray`
@@ -434,7 +432,6 @@ export function newTables({ session, typing, arenas, upcasts, ids, rewrites, cou
     presenceTests: new NodeMap<Expr, { object: Expr; name: string; when: boolean }>(),
     genericStatics: new NodeMap<ClassNode, Map<string, BodyId>>(),
     classScopes: new NodeMap<TypeParam, Map<string, Type>>(),
-    aliases: new Map<string, TypeAlias>(),
     expanding: new Set<string>(),
     kindTests: new NodeMap<Expr, Kind>(),
     keyTests: new NodeMap<Expr, TypeMap<Type, Verdict>>(),
@@ -479,6 +476,15 @@ function now(timings: Ref<Timings>): f64 {
 
 // Runs `run`, adding its own time to stage `name` when timing.
 /** @throws {CompileError} */
+// The program's type aliases and interfaces, by name, and the lifetimes each class and alias
+// declares, which nothing changes once they are declared, so the checker reads them while
+// changing its own state.
+export type Declarations = { aliases: Map<string, TypeAlias>; interfaces: Map<string, Interface>; slots: Map<string, boolean[]> };
+
+export function newDeclarations(): Declarations {
+  return { aliases: new Map<string, TypeAlias>(), interfaces: new Map<string, Interface>(), slots: new Map<string, boolean[]>() };
+}
+
 export function timed<T>(timings: Timings | undefined, name: string, run: Timed<T>): T {
   if (timings === undefined) return run();
   const outer = timings.inner;
