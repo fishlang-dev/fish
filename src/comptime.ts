@@ -34,17 +34,19 @@ export type Member = { kind: "member"; type: Type; value: Value };
 // so a JS reference stands for one.
 export type Value = bigint | f64 | boolean | string | null | undefined | Record | Items | Variant | Interior | Table | Member | Place;
 
-// Where a value lives, as a `Mut` holds it: reading and writing go through to it. `this` and a
-// string's character can't be written. An element's or character's index was checked against the
-// length the place was taken at, `before` counting a rest tuple's fixed elements, and is checked
-// again at each use. An accessor's runs its getter and setter, which only the interpreter can.
+// A step from a value into one of its parts: a field by name, or an element by index.
+type Step = { kind: "field"; name: string } | { kind: "element"; index: bigint };
+
+// Where a value lives, as a `Mut` holds it: reading and writing go through to it. Values are
+// owned trees, so a local's place, or a temporary's, is its frame and the steps into it. A
+// string's character can't be written. An element's or character's index was checked against
+// the length when the place was taken, `before` counting a rest tuple's fixed elements. An
+// accessor's runs its getter and setter, which only the interpreter can.
 export type Place =
-  | { kind: "place"; of: "this"; frame: Frame; at: Span }
-  | { kind: "place"; of: "local"; frame: Frame; local: LocalId }
-  | { kind: "place"; of: "field"; holder: Record; name: string }
-  | { kind: "place"; of: "accessor"; self: Record; name: string; getter: Instance | undefined; setter: Instance; at: Span }
-  | { kind: "place"; of: "char"; text: string; index: bigint; length: bigint; before: bigint; at: Span }
-  | { kind: "place"; of: "element"; array: Items; index: bigint; length: bigint; before: bigint; at: Span };
+  | { kind: "place"; of: "local"; frame: usize; local: LocalId; path: Step[] }
+  | { kind: "place"; of: "temp"; frame: usize; index: usize; path: Step[] }
+  | { kind: "place"; of: "accessor"; self: Place; name: string; getter: Instance | undefined; setter: Instance; at: Span }
+  | { kind: "place"; of: "char"; text: string; index: bigint; length: bigint; before: bigint; at: Span };
 
 // The most steps one evaluation may take, the deepest its calls may nest, and the longest
 // string it may make.
@@ -101,25 +103,26 @@ class Thrown {
   }
 }
 
-type Frame = { instance: Instance; locals: Map<LocalId, Value>; self: Record | undefined };
+// A call's locals, the temporaries its places name, and the place of its `this`.
+type Frame = { instance: Instance; locals: Map<LocalId, Value>; temps: Value[]; self: Place | undefined };
 
 
 // The value of `comptime expr`, written in `instance`.
 /** @throws {CompileError} */
 export function comptimeValue(tables: Tables, instance: Instance, site: Expr & { kind: "comptime" }): Value {
-  return guarded(tables, site, (run) => run.expr(seeded(tables, instance), site.expr));
+  return guarded(tables, site, (run) => run.expr(run.enter(seeded(tables, instance)), site.expr));
 }
 
 // Runs a `comptime { }` block written in `instance`, for what it checks.
 /** @throws {CompileError} */
 export function comptimeBlock(tables: Tables, instance: Instance, site: Stmt & { kind: "comptime" }) {
-  guarded(tables, site, (run) => run.block(seeded(tables, instance), site.body));
+  guarded(tables, site, (run) => run.block(run.enter(seeded(tables, instance)), site.body));
 }
 
 // A comptime parameter's argument at a call written in `instance`.
 /** @throws {CompileError} */
 export function comptimeArgument(tables: Tables, instance: Instance, arg: Expr): Value {
-  return guarded(tables, arg, (run) => run.expr(seeded(tables, instance), arg));
+  return guarded(tables, arg, (run) => run.expr(run.enter(seeded(tables, instance)), arg));
 }
 
 // Renames, in a quote's value, the names spelled `from` in nodes its quotes made.
@@ -235,7 +238,7 @@ export function comptimeParameter(tables: Tables, instance: Instance, p: Param):
 
 // A frame for comptime code in an instance, which knows the instance's comptime parameters.
 function seeded(tables: Tables, instance: Instance): Frame {
-  return { instance, locals: known(tables, instance), self: undefined };
+  return { instance, locals: known(tables, instance), temps: [], self: undefined };
 }
 
 // The comptime parameters an instance can read, by local: its own, and in a closure, those of
@@ -341,15 +344,67 @@ class Interpreter {
   private clocks: Tables["clocks"];
   private integerCalls: Tables["integerCalls"];
   private arenas: Tables["arenas"];
-  private calledAt(f: Frame, e: Expr) {
-    return this.arenas.instanceOf(f.instance.calls.get(e));
+  private calledAt(f: usize, e: Expr) {
+    return this.arenas.instanceOf(this.frames[f]!.instance.calls.get(e));
   }
   private steps = 0;
   private depth = 0;
+  // The frames of the calls running, innermost last; a place names its frame by its index here.
+  private frames: Frame[] = [];
+
+  enter(this: Mut<this>, frame: Frame): usize {
+    this.frames.push(frame);
+    return this.frames.length - 1;
+  }
+
+  // A place holding a value no variable holds, alive until its frame returns.
+  // ponytail: a frame keeps every temporary until it returns, so a long loop grows it; STEPS bounds it.
+  private temp(this: Mut<this>, f: usize, v: Value): Place {
+    let temps = this.frames[f]!.temps;
+    temps.push(v);
+    return { kind: "place", of: "temp", frame: f, index: temps.length - 1, path: [] };
+  }
+
+  // The place of a part of what a place holds; an accessor's value is its getter's copy, whose
+  // parts a temporary holds.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private extend(this: Mut<this>, p: Place, step: Step): Place {
+    if (p.of === "local") return { kind: "place", of: "local", frame: p.frame, local: p.local, path: [...p.path, step] };
+    if (p.of === "temp") return { kind: "place", of: "temp", frame: p.frame, index: p.index, path: [...p.path, step] };
+    const held = this.temp(this.frames.length - 1, this.read(p));
+    return this.extend(held, step);
+  }
+
+  // `held` with `v` put at the end of `path`. A union's tag is kept on the way, and at the end
+  // too when `inner`, as when a call changes the value inside it.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private placed(this: Mut<this>, held: Value, path: Step[], i: usize, v: Value, inner: boolean): Value {
+    if ((i < path.length || inner) && held !== null && typeof held === "object" && held.kind === "member") {
+      held.value = this.placed(held.value, path, i, v, inner);
+      return held;
+    }
+    if (i === path.length) return v;
+    // A `Mut` held on the way: what follows is written through it.
+    if (isPlace(held)) {
+      let at = held;
+      for (let j = i; j < path.length; j++) at = this.extend(at, path[j]!);
+      this.write(at, v, inner);
+      return held;
+    }
+    const step = path[i]!;
+    if (step.kind === "field") {
+      const r = held as Record;
+      r.fields.set(step.name, this.placed(r.fields.get(step.name), path, i + 1, v, inner));
+      return r;
+    }
+    const a = held as Items;
+    a.items[Number(step.index)] = this.placed(a.items[Number(step.index)], path, i + 1, v, inner);
+    return a;
+  }
 
   // A block's statements; the checker lets no `return`, `break` or `continue` leave it.
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
-  block(this: Mut<this>, f: Frame, body: Stmt[]): Value {
+  block(this: Mut<this>, f: usize, body: Stmt[]): Value {
     this.statements(f, body);
     return undefined;
   }
@@ -408,26 +463,45 @@ class Interpreter {
   // What a place holds, an accessor's read through its getter.
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private read(this: Mut<this>, p: Place): Value {
-    if (p.of !== "accessor") return readPlace(p);
-    return p.getter ? this.call(p.getter, [], p.self, p.at) : p.self.fields.get(p.name);
+    switch (p.of) {
+      case "accessor":
+        if (p.getter !== undefined) return this.call(p.getter, [], p.self, p.at);
+        return (this.unwrap(this.read(p.self)) as Record).fields.get(p.name);
+      case "char":
+        return p.text[Number(p.index)];
+      case "local":
+      case "temp": {
+        const frame = this.frames[p.frame]!;
+        let v = p.of === "local" ? frame.locals.get(p.local) : frame.temps[p.index];
+        for (const step of p.path) {
+          const holder = this.unwrap(v);
+          v = step.kind === "field" ? (holder as Record).fields.get(step.name) : (holder as Items).items[Number(step.index)];
+        }
+        return v;
+      }
+    }
   }
 
-  // Writes `v` where a place is, an accessor's through its setter.
+  // Writes `v` where a place is, an accessor's through its setter; `inner` keeps a union's tag
+  // around what is there.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private write(this: Mut<this>, p: Place, v: Value) {
+  private write(this: Mut<this>, p: Place, v: Value, inner = false) {
     switch (p.of) {
-      case "this":
-        return this.unsupported("replacing 'this'", p.at);
-      case "local":
-        return void p.frame.locals.set(p.local, v);
-      case "field":
-        return void p.holder.fields.set(p.name, v);
       case "accessor":
-        return void this.call(p.setter, [v], p.self, p.at);
+        this.call(p.setter, [v], p.self, p.at);
+        return;
       case "char":
         return this.unsupported("changing a string's character", p.at);
-      case "element":
-        p.array.items[Number(p.index)] = v;
+      case "local": {
+        let locals = this.frames[p.frame]!.locals;
+        locals.set(p.local, this.placed(locals.get(p.local), p.path, 0, v, inner));
+        return;
+      }
+      case "temp": {
+        let temps = this.frames[p.frame]!.temps;
+        temps[p.index] = this.placed(temps[p.index], p.path, 0, v, inner);
+        return;
+      }
     }
   }
 
@@ -438,22 +512,75 @@ class Interpreter {
     return v && typeof v === "object" && v.kind === "member" ? this.unwrap(v.value) : v;
   }
 
-  private typeOf(f: Frame, e: Expr): Type {
-    return f.instance.coercions.get(e) ?? f.instance.types.get(e)!;
+  private typeOf(f: usize, e: Expr): Type {
+    return this.frames[f]!.instance.coercions.get(e) ?? this.frames[f]!.instance.types.get(e)!;
   }
 
-  // Calls a function, a `Mut` parameter given the place its argument names.
-  // Instances of a class with an `equals` compare through it, as they do at run time.
+  // An instance's comparison through its class's `equals`, or nothing for other records.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private byEquals(this: Mut<this>, at: Span): Equals {
-    return (a, b) => {
-      const method = this.typing.rec(a.type).kind === "class" ? this.arenas.instanceOf(this.equalities.get(a.type as ClassType)) : undefined;
-      return method && this.call(method, [b], a, at) === true;
-    };
+  private equals(this: Mut<this>, a: Record, b: Record, at: Span): boolean | undefined {
+    if (this.typing.rec(a.type).kind !== "class") return undefined;
+    const method = this.arenas.instanceOf(this.equalities.get(a.type as ClassType));
+    if (method === undefined) return undefined;
+    const self = this.temp(this.frames.length - 1, a);
+    return this.call(method, [b], self, at) === true;
+  }
+
+  // Which member of its union a value is: its tag, or else the type it is written as, a literal
+  // standing for its base type.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private memberType(this: Mut<this>, v: Value, t: Type | undefined): Type | undefined {
+    if (v !== null && typeof v === "object" && v.kind === "member") return this.memberType(v.value, v.type);
+    const own = deref(this.typing, t);
+    const r = own === undefined || typeof own === "string" ? undefined : this.typing.rec(own);
+    if (r?.kind === "union") return memberOf(this.typing, this.resolved(v), own as UnionType);
+    if (r?.kind === "literal") return this.typing.baseOf(own as LiteralType) ?? own;
+    return own;
+  }
+
+  // A value read through any places it is, keeping a union's tag.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private resolved(this: Mut<this>, v: Value): Value {
+    return isPlace(v) ? this.resolved(this.read(v)) : v;
+  }
+
+  // `===` on two values of the types they are written as: a union compares its member, then the
+  // value it holds. Instances of a class with an `equals` compare through it when `at` is given,
+  // as they do at run time.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private equal(this: Mut<this>, a: Value, ta: Type | undefined, b: Value, tb: Type | undefined, at: Span | undefined): boolean {
+    const [ma, mb] = [this.memberType(a, ta), this.memberType(b, tb)];
+    // A literal stands for its base type: members of two enums that share a value are equal, as
+    // they are at run time.
+    if (ma !== undefined && mb !== undefined && plainType(this.typing, ma) !== plainType(this.typing, mb)) return false;
+    return this.same(a, b, at);
+  }
+
+  // Values compare as `===` compares them: primitives by value, variants by member and payload.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private same(this: Mut<this>, x: Value, y: Value, at: Span | undefined): boolean {
+    // Two members of a union are equal when they are the same member holding equal values.
+    if (x !== null && y !== null && typeof x === "object" && typeof y === "object" && x.kind === "member" && y.kind === "member") {
+      if (plainType(this.typing, x.type) !== plainType(this.typing, y.type)) return false;
+    }
+    const [a, b] = [this.unwrap(x), this.unwrap(y)];
+    if (a !== null && b !== null && typeof a === "object" && typeof b === "object" && a.kind === "variant" && b.kind === "variant") {
+      return a.type === b.type && a.args.every((v, i) => this.same(v, b.args[i], at));
+    }
+    // Objects and arrays compare part by part.
+    if (a !== null && b !== null && typeof a === "object" && typeof b === "object" && a.kind === "record" && b.kind === "record") {
+      const written = at === undefined ? undefined : this.equals(a, b, at);
+      if (written !== undefined) return written;
+      return a.fields.size === b.fields.size && [...a.fields].every(([k, v]) => b.fields.has(k) && this.same(v, b.fields.get(k), at));
+    }
+    if (a !== null && b !== null && typeof a === "object" && typeof b === "object" && a.kind === "array" && b.kind === "array") {
+      return a.items.length === b.items.length && a.items.every((v, i) => this.same(v, b.items[i], at));
+    }
+    return a === b;
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  call(this: Mut<this>, callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
+  call(this: Mut<this>, callee: Instance, args: Value[], self: Place | undefined, at: Span): Value {
     if (++this.depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
       if (RANDOM.has(bodyOf(this.arenas, callee).name) && stdModuleAt(this.files, bodyOf(this.arenas, callee).start) === "node:crypto") this.random(`'crypto.${bodyOf(this.arenas, callee).name}'`, at);
@@ -462,9 +589,14 @@ class Interpreter {
       if (bodyOf(this.arenas, callee).foreign) this.refuse(`the ${bodyOf(this.arenas, callee).rust ? "Rust" : "C"} function '${bodyOf(this.arenas, callee).name}'`, at);
       if (bodyOf(this.arenas, callee).js) this.refuse(`'${bodyOf(this.arenas, callee).name}' from the package '${bodyOf(this.arenas, callee).js!.module}'`, at);
       if (!this.ensureChecked(callee.id)) throw new Stop(`this comptime code calls '${bodyOf(this.arenas, callee).name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
-      const frame: Frame = { instance: callee, locals: new Map(), self };
+      const frame: Frame = { instance: callee, locals: new Map(), temps: [], self };
       bodyOf(this.arenas, callee).params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!, args[i] ?? null));
-      this.statements(frame, bodyOf(this.arenas, callee).body ?? []);
+      const f = this.enter(frame);
+      try {
+        this.statements(f, bodyOf(this.arenas, callee).body ?? []);
+      } finally {
+        this.frames.pop();
+      }
       return undefined;
     } catch (e) {
       if (e instanceof Return) return e.value;
@@ -476,17 +608,17 @@ class Interpreter {
 
   // The arguments of a call: a `Mut` parameter takes its argument's place, the rest values.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private args(this: Mut<this>, f: Frame, callee: Instance, list: Expr[]): Value[] {
+  private args(this: Mut<this>, f: usize, callee: Instance, list: Expr[]): Value[] {
     return list.map((a) => this.expr(f, a));
   }
 
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
-  private statements(this: Mut<this>, f: Frame, list: Stmt[]) {
+  private statements(this: Mut<this>, f: usize, list: Stmt[]) {
     for (const s of list) this.statement(f, s);
   }
 
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
-  private statement(this: Mut<this>, f: Frame, s: Stmt) {
+  private statement(this: Mut<this>, f: usize, s: Stmt) {
     this.step(s);
     switch (s.kind) {
       case "expr":
@@ -494,10 +626,10 @@ class Interpreter {
         return;
       case "let": {
         // The checker gives a declaration one name, its local keyed by the statement.
-        const local = f.instance.locals.get(s);
+        const local = this.frames[f]!.instance.locals.get(s);
         const d = s.declarations[0]!;
         if (!local || s.declarations.length !== 1) return this.unsupported("destructuring", s);
-        f.locals.set(local, d.init ? this.expr(f, d.init) : undefined);
+        this.frames[f]!.locals.set(local, d.init ? this.expr(f, d.init) : undefined);
         return;
       }
       case "return":
@@ -528,18 +660,18 @@ class Interpreter {
         return;
       case "forOf": {
         const over = this.unwrap(this.expr(f, s.right));
-        const local = f.instance.locals.get(s.left as Stmt)!;
+        const local = this.frames[f]!.instance.locals.get(s.left as Stmt)!;
         const items = this.iterated(over, s.right);
         for (const item of [...items]) {
-          f.locals.set(local, item);
+          this.frames[f]!.locals.set(local, item);
           if (!this.loopBody(f, s, s.body)) break;
         }
         return;
       }
       case "switch": {
         const v = this.expr(f, s.discriminant);
-        const subject = f.instance.types.get(s.discriminant);
-        let at = s.cases.findIndex((c) => c.test !== undefined && equal(this.typing, v, subject, this.expr(f, c.test), f.instance.types.get(c.test)));
+        const subject = this.frames[f]!.instance.types.get(s.discriminant);
+        let at = s.cases.findIndex((c) => c.test !== undefined && this.equal(v, subject, this.expr(f, c.test), this.frames[f]!.instance.types.get(c.test), undefined));
         if (at < 0) at = s.cases.findIndex((c) => c.test === undefined);
         if (at < 0) return;
         try {
@@ -551,7 +683,7 @@ class Interpreter {
       }
       case "break":
       case "continue":
-        throw new Jump(f.instance.jumps.get(s)!, s.kind === "continue");
+        throw new Jump(this.frames[f]!.instance.jumps.get(s)!, s.kind === "continue");
       case "labeled":
         try {
           this.statement(f, s.body);
@@ -573,15 +705,15 @@ class Interpreter {
   // A `try`: its catch takes a thrown error; its `finally` runs however the block is left, but
   // not for a panic, which skips both, as it does at run time.
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
-  private attempt(this: Mut<this>, f: Frame, s: Extract<Stmt, { kind: "try" }>) {
+  private attempt(this: Mut<this>, f: usize, s: Extract<Stmt, { kind: "try" }>) {
     let left: unknown;
     let leaving = false;
     try {
       this.statements(f, s.block);
     } catch (e) {
       if (e instanceof Thrown && s.handler) {
-        const local = s.param ? f.instance.locals.get(s) : undefined;
-        if (local) f.locals.set(local, e.value);
+        const local = s.param ? this.frames[f]!.instance.locals.get(s) : undefined;
+        if (local) this.frames[f]!.locals.set(local, e.value);
         try {
           this.statements(f, s.handler);
         } catch (again) {
@@ -596,7 +728,7 @@ class Interpreter {
 
   // Runs a loop's body once: false when a `break` leaves the loop.
   /** @throws {CompileError} */
-  private loopBody(this: Mut<this>, f: Frame, loop: Stmt, body: Stmt[]): boolean {
+  private loopBody(this: Mut<this>, f: usize, loop: Stmt, body: Stmt[]): boolean {
     try {
       this.statements(f, body);
       return true;
@@ -607,7 +739,7 @@ class Interpreter {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  expr(this: Mut<this>, f: Frame, e: Expr): Value {
+  expr(this: Mut<this>, f: usize, e: Expr): Value {
     const v = this.link(f, e);
     return isShort(v) ? this.typed(f, e, null) : v;
   }
@@ -615,25 +747,25 @@ class Interpreter {
   // An expression's value; a member or call in an optional chain that met an empty Option
   // gives SHORT, which ends the chain as an empty Option.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private link(this: Mut<this>, f: Frame, e: Expr): Value | typeof SHORT {
+  private link(this: Mut<this>, f: usize, e: Expr, keep = false): Value | typeof SHORT {
     this.step(e);
     // A place lent to a `Mut`: the place itself, which reads and writes go through.
-    const [own, target] = [f.instance.types.get(e), f.instance.coercions.get(e) ?? f.instance.types.get(e)];
+    const [own, target] = [this.frames[f]!.instance.types.get(e), this.frames[f]!.instance.coercions.get(e) ?? this.frames[f]!.instance.types.get(e)];
     // A fixed array copies where an array shares, which comptime values don't follow yet.
     const held = deref(this.typing, own);
     if (held !== undefined && typeof held !== "string" && this.typing.rec(held).kind === "fixed") this.unsupported("a FixedArray", e);
     if (mutable(this.typing, target) && !mutable(this.typing, own) && (e.kind === "ident" || e.kind === "member" || e.kind === "index" || e.kind === "this")) return this.place(f, e);
     const v = this.raw(f, e);
-    return isShort(v) ? v : this.typed(f, e, v);
+    return isShort(v) || (keep && isPlace(v)) ? v : this.typed(f, e, v);
   }
 
   // A value as the type it meets: a `Mut` stays a place, anything else reads through one; a float
   // where a literal meets one; a union's value tagged with the member its type says, in fields and
   // elements too; a member out of its union where a check narrowed it.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private typed(f: Frame, e: Expr, value: Value): Value {
-    const own = f.instance.types.get(e);
-    const target = f.instance.coercions.get(e) ?? own;
+  private typed(f: usize, e: Expr, value: Value): Value {
+    const own = this.frames[f]!.instance.types.get(e);
+    const target = this.frames[f]!.instance.coercions.get(e) ?? own;
     if (isPlace(value) && mutable(this.typing, target)) return value;
     const v = isPlace(value) ? this.read(value) : value;
     const to = deref(this.typing, target);
@@ -642,8 +774,8 @@ class Interpreter {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private raw(this: Mut<this>, f: Frame, e: Expr): Value | typeof SHORT {
-    const type = f.instance.types.get(e)!;
+  private raw(this: Mut<this>, f: usize, e: Expr): Value | typeof SHORT {
+    const type = this.frames[f]!.instance.types.get(e)!;
     switch (e.kind) {
       case "int":
         return isFloat(type) ? fit(Number(e.value), type) : BigInt(e.value);
@@ -666,7 +798,7 @@ class Interpreter {
         const types = this.quotes.get(e);
         if (!types) return this.unsupported("this tagged template", e);
         const q = quoted(this.tables, e, e.tag.kind === "ident" && e.tag.name === "quoteType");
-        const holes = q.holes.map((x) => ({ value: this.expr(f, x), type: f.instance.types.get(x) }));
+        const holes = q.holes.map((x) => ({ value: this.expr(f, x), type: this.frames[f]!.instance.types.get(x) }));
         // A quote spliced in shares its bindings with this one, and a name it leaves free means
         // this one's binding of it; what this one leaves free, a quote around it may bind.
         const scope = new Map(holes.flatMap((h) => [...(this.quoteEntry(this.scopes, h.value) ?? [])]));
@@ -708,16 +840,19 @@ class Interpreter {
       }
       case "ident": {
         const literal = literalValue(this.typing, type);
-        if (literal !== undefined && !f.instance.locals.has(e)) return literal;
+        if (literal !== undefined && !this.frames[f]!.instance.locals.has(e)) return literal;
         const read = this.calledAt(f, e);
         if (read && bodyOf(this.arenas, read).comptime === "const") return this.constant(read, e);
-        const local = f.instance.locals.get(e);
+        const local = this.frames[f]!.instance.locals.get(e);
         if (!local && e.name === "undefined") return null;
-        if (!local || !f.locals.has(local)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
-        return f.locals.get(local);
+        if (!local || !this.frames[f]!.locals.has(local)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
+        return this.frames[f]!.locals.get(local);
       }
-      case "this":
-        return f.self ?? this.unsupported("'this'", e);
+      case "this": {
+        const self = this.frames[f]!.self;
+        if (self === undefined) return this.unsupported("'this'", e);
+        return this.read(self);
+      }
       case "comptime":
         return this.expr(f, e.expr);
       case "conditional":
@@ -737,12 +872,12 @@ class Interpreter {
         return e.prefix ? next : old;
       }
       case "as": {
-        const from = this.typing.lower(f.instance.coercions.get(e.expr) ?? this.typeOf(f, e.expr));
+        const from = this.typing.lower(this.frames[f]!.instance.coercions.get(e.expr) ?? this.typeOf(f, e.expr));
         if (typeof from !== "string" && this.typing.rec(from).kind === "union" && from !== type && !this.typing.fits(from, type)) {
           const held = this.expr(f, e.expr);
           const r = typeof type === "string" ? undefined : this.typing.rec(type);
           const kept = r?.kind === "union" ? r.members : [type];
-          const actual = memberType(this.typing, held, from);
+          const actual = this.memberType(held, from);
           if (actual === undefined || (!kept.includes(actual) && !kept.includes(this.typing.unfold(actual)))) {
             this.panic(`'as ${this.typing.show(type)}' failed: union held another member`, e);
           }
@@ -755,12 +890,12 @@ class Interpreter {
       case "nonNull": {
         // An overload's body narrows the implementation's value to the signature's return type.
         if (e.narrows) {
-          const [from, to] = [f.instance.types.get(e.expr), type];
+          const [from, to] = [this.frames[f]!.instance.types.get(e.expr), type];
           const held = this.expr(f, e.expr);
           if (from === to) return held;
           const r = typeof to === "string" ? undefined : this.typing.rec(to);
           const kept = r?.kind === "union" ? r.members : [to];
-          if (!kept.includes(memberType(this.typing, held, from)!)) this.panic("the implementation returned a value this overload signature doesn't declare", e);
+          if (!kept.includes(this.memberType(held, from)!)) this.panic("the implementation returned a value this overload signature doesn't declare", e);
           return retag(this.typing, held, from, to);
         }
         if (redundantBang(e)) return this.expr(f, e.expr);
@@ -773,9 +908,9 @@ class Interpreter {
         for (const p of e.props) {
           if (p.kind === "property" && typeof p.key === "string") fields.set(p.key, this.expr(f, p.value));
           else if (p.kind === "shorthand") {
-            const local = f.instance.locals.get(p)!;
-            if (!f.locals.has(local)) throw new Stop(`'${p.name}' is only known when the program runs, so comptime code can't read it`, p, false);
-            const held = f.locals.get(local);
+            const local = this.frames[f]!.instance.locals.get(p)!;
+            if (!this.frames[f]!.locals.has(local)) throw new Stop(`'${p.name}' is only known when the program runs, so comptime code can't read it`, p, false);
+            const held = this.frames[f]!.locals.get(local);
             fields.set(p.name, held);
           } else return this.unsupported("this property", p);
         }
@@ -806,7 +941,7 @@ class Interpreter {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private construct(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "new" }>, type: Type): Value {
+  private construct(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "new" }>, type: Type): Value {
     const r = typeof type === "string" ? undefined : this.typing.rec(type);
     if (r?.kind === "interior" && r.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: this.expr(f, e.args[0]!) };
     if (r?.kind === "map") {
@@ -821,23 +956,35 @@ class Interpreter {
     if (r?.kind !== "class") return this.refuse(`'new ${this.typing.show(type)}'`, e);
     const ctor = this.calledAt(f, e)!;
     const made: Record = { kind: "record", type: type as ClassType, fields: new Map() };
-    this.call(ctor, this.args(f, ctor, e.args ?? []), made, e);
-    return made;
+    const self = this.temp(f, made);
+    this.call(ctor, this.args(f, ctor, e.args ?? []), self, e);
+    return this.read(self);
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private member(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "member" }>, type: Type): Value | typeof SHORT {
+  private member(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "member" }>, type: Type): Value | typeof SHORT {
     // An enum's member, as `Color.Red`, is known from its type alone.
     const literal = literalValue(this.typing, type);
     if (literal !== undefined) return literal;
     const r = typeof type === "string" ? undefined : this.typing.rec(type);
     if (r?.kind === "variant" && r.fields.length === 0 && enumName(e.object)) return { kind: "variant", type: type as VariantType, args: [] };
+    const getter = this.calledAt(f, e);
+    if (getter) {
+      const self = this.receiver(f, e.object);
+      if (isShort(self)) return SHORT;
+      if (e.optional && this.unwrap(this.read(self)) === null) return SHORT;
+      return this.call(getter, [], self, e);
+    }
     const linked = this.link(f, e.object);
     if (isShort(linked)) return SHORT;
     const object = this.unwrap(linked);
     if (object === null && e.optional) return SHORT;
-    const getter = this.calledAt(f, e);
-    if (getter) return this.call(getter, [], object as Record, e);
+    return this.memberValue(e, object);
+  }
+
+  // A member read from a value: a length, a size, or a field.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private memberValue(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, object: Value): Value {
     if (e.name === "length" && typeof object === "string") return BigInt(object.length);
     if (object && typeof object === "object" && object.kind === "array" && e.name === "length") return BigInt(object.items.length);
     if (object && typeof object === "object" && object.kind === "map" && e.name === "size") return BigInt(object.entries.size);
@@ -859,7 +1006,7 @@ class Interpreter {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private callExpr(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "call" }>, type: Type): Value | typeof SHORT {
+  private callExpr(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "call" }>, type: Type): Value | typeof SHORT {
     const callee = e.callee;
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") this.refuse("printing", e);
     if (this.clocks.get(e) === "Math.random") this.random("'Math.random'", e);
@@ -873,13 +1020,12 @@ class Interpreter {
       throw new Stop(e.args[1] ? String(this.unwrap(this.expr(f, e.args[1]))) : `assertion failed: ${this.asserts.get(e)}`, e, true, true);
     }
     const target = this.calledAt(f, e);
-    if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return this.call(target, this.args(f, target, e.args), f.self, e);
+    if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return this.call(target, this.args(f, target, e.args), this.frames[f]!.self, e);
     if (target && callee.kind === "member" && bodyOf(this.arenas, target).self) {
-      const linked = this.link(f, callee.object);
-      if (isShort(linked)) return SHORT;
-      const object = this.unwrap(linked);
-      if (object === null && (callee.optional || e.optional)) return SHORT;
-      return this.call(target, this.args(f, target, e.args), object as Record, e);
+      const self = this.receiver(f, callee.object);
+      if (isShort(self)) return SHORT;
+      if ((callee.optional || e.optional) && this.unwrap(this.read(self)) === null) return SHORT;
+      return this.call(target, this.args(f, target, e.args), self, e);
     }
     if (target) return this.call(target, this.args(f, target, e.args), undefined, e);
     if (callee.kind === "ident" && callee.name === "String" && e.args.length === 1) return display(this.expr(f, e.args[0]!), this.typeOf(f, e.args[0]!));
@@ -893,45 +1039,59 @@ class Interpreter {
       return String.fromCodePoint(...items);
     }
     // A static call on something that isn't a value, like `TcpListener.bind`, is std's own.
-    if (callee.kind === "member" && !f.instance.types.has(callee.object)) return this.refuse(`'${callee.name}'`, e);
+    if (callee.kind === "member" && !this.frames[f]!.instance.types.has(callee.object)) return this.refuse(`'${callee.name}'`, e);
     if (callee.kind === "member") {
-      const linked = this.link(f, callee.object);
-      if (isShort(linked)) return SHORT;
-      const held = this.unwrap(linked);
+      const self = this.receiver(f, callee.object);
+      if (isShort(self)) return SHORT;
+      const held = this.unwrap(this.read(self));
       if (held === null && (callee.optional || e.optional)) return SHORT;
       if (this.integerCalls.has(e)) return this.integerValue(callee.name, held as bigint, e.args[0] ? (this.unwrap(this.expr(f, e.args[0])) as bigint) : 0n, this.typing.lower(this.typeOf(f, callee.object)) as Integer, type, e);
       if (typeof held === "string") return this.stringMethod(callee.name, held, e.args.map((a) => this.unwrap(this.expr(f, a))), e);
       if (callee.name === "clone") return cloned(this.tables, held);
       if (held && typeof held === "object" && held.kind === "array") {
-        if (callee.name === "push") return void held.items.push(this.expr(f, e.args[0]!));
-        if (callee.name === "pop") return held.items.length > 0 ? held.items.pop()! : null;
+        if (callee.name === "push") {
+          held.items.push(this.expr(f, e.args[0]!));
+          this.write(self, held, true);
+          return undefined;
+        }
+        if (callee.name === "pop") {
+          const last = held.items.length > 0 ? held.items.pop()! : null;
+          this.write(self, held, true);
+          return last;
+        }
       }
-      if (held && typeof held === "object" && held.kind === "map") return this.tableMethod(f, callee.name, held, e, type);
+      if (held && typeof held === "object" && held.kind === "map") return this.tableMethod(f, callee.name, self, held, e);
       return this.unsupported(`calling '${callee.name}' here`, e);
     }
     return this.refuse(`'${this.timerNames.get(e) ?? (callee.kind === "ident" ? callee.name : "this call")}'`, e);
   }
 
-  // A Map's or a Set's method; `get` and the arrays of entries hand out clones, as at run time.
+  // A Map's or a Set's method, on the table `self` holds; `get` and the arrays of entries hand
+  // out clones, as at run time, and `set` and `add` hand back the table's place, to chain.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private tableMethod(this: Mut<this>, f: Frame, name: string, table: Table, e: Extract<Expr, { kind: "call" }>, type: Type): Value {
+  private tableMethod(this: Mut<this>, f: usize, name: string, self: Place, table: Table, e: Extract<Expr, { kind: "call" }>): Value {
     const args = e.args.map((a) => this.expr(f, a));
     const key = () => this.keyName(args[0]);
     switch (name) {
       case "set":
       case "add":
         this.put(table, args[0], args[1]);
-        return table;
+        this.write(self, table, true);
+        return self;
       case "get": {
         const found = table.entries.get(key());
         return found ? cloned(this.tables, found[1]) : null;
       }
       case "has":
         return table.entries.has(key());
-      case "delete":
-        return table.entries.delete(key());
+      case "delete": {
+        const had = table.entries.delete(key());
+        this.write(self, table, true);
+        return had;
+      }
       case "clear":
         table.entries.clear();
+        this.write(self, table, true);
         return undefined;
       case "keys":
       case "values":
@@ -1068,7 +1228,7 @@ class Interpreter {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private unary(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "unary" }>): Value {
+  private unary(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "unary" }>): Value {
     if (e.op === "await") this.refuse("'await'", e);
     const held = this.expr(f, e.operand);
     const v = this.unwrap(held);
@@ -1092,7 +1252,7 @@ class Interpreter {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private binary(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "binary" }>): Value {
+  private binary(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "binary" }>): Value {
     if (e.op === "&&") return this.unwrap(this.expr(f, e.left)) ? this.expr(f, e.right) : false;
     if (e.op === "||") return this.unwrap(this.expr(f, e.left)) ? true : this.expr(f, e.right);
     if (e.op === "??") {
@@ -1109,14 +1269,14 @@ class Interpreter {
     }
     if (e.op === "instanceof") {
       const v = this.unwrap(this.expr(f, e.left));
-      return v !== null && typeof v === "object" && v.kind === "record" && this.typing.isSubclass(v.type, f.instance.types.get(e.right)!);
+      return v !== null && typeof v === "object" && v.kind === "record" && this.typing.isSubclass(v.type, this.frames[f]!.instance.types.get(e.right)!);
     }
     const [a, b] = [this.expr(f, e.left), this.expr(f, e.right)];
     switch (e.op) {
       case "===":
-        return equal(this.typing, a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), this.byEquals(e));
+        return this.equal(a, this.frames[f]!.instance.types.get(e.left), b, this.frames[f]!.instance.types.get(e.right), e);
       case "!==":
-        return !equal(this.typing, a, f.instance.types.get(e.left), b, f.instance.types.get(e.right), this.byEquals(e));
+        return !this.equal(a, this.frames[f]!.instance.types.get(e.left), b, this.frames[f]!.instance.types.get(e.right), e);
       case "<":
         return (this.unwrap(a) as f64) < (this.unwrap(b) as f64);
       case "<=":
@@ -1133,7 +1293,7 @@ class Interpreter {
 
   // The place is found first, then the value; a compound assignment reads the place once.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private assign(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "assign" }>): Value {
+  private assign(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "assign" }>): Value {
     const at = this.place(f, e.target);
     if (e.op === "=") {
       const v = this.expr(f, e.value);
@@ -1158,31 +1318,38 @@ class Interpreter {
   // Where an expression's value lives: a variable, a `Mut` parameter's place, an object's field,
   // or an array's element, its index read once.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private place(this: Mut<this>, f: Frame, target: Expr, object?: Value): Place {
+  private place(this: Mut<this>, f: usize, target: Expr, object?: Value): Place {
     if (target.kind === "nonNull" && redundantBang(target)) return this.place(f, target.expr, object);
-    if (target.kind === "this") return { kind: "place", of: "this", frame: f, at: target };
-    if (target.kind === "ident") {
-      const local = f.instance.locals.get(target);
-      if (!local || !f.locals.has(local)) throw new Stop(`'${target.name}' is only known when the program runs, so comptime code can't use it here`, target, false);
-      const held = f.locals.get(local);
-      if (isPlace(held)) return held;
-      return { kind: "place", of: "local", frame: f, local };
+    if (target.kind === "this") {
+      const self = this.frames[f]!.self;
+      return self === undefined ? this.unsupported("'this'", target) : self;
     }
-    if (target.kind === "member" && f.instance.setters.has(target)) {
-      const self = this.unwrap(this.expr(f, target.object)) as Record;
+    if (target.kind === "ident") {
+      const local = this.frames[f]!.instance.locals.get(target);
+      if (!local || !this.frames[f]!.locals.has(local)) throw new Stop(`'${target.name}' is only known when the program runs, so comptime code can't use it here`, target, false);
+      const held = this.frames[f]!.locals.get(local);
+      if (isPlace(held)) return held;
+      return { kind: "place", of: "local", frame: f, local, path: [] };
+    }
+    if (target.kind === "member" && this.frames[f]!.instance.setters.has(target)) {
+      const self = this.holder(f, target.object);
       const getter = this.calledAt(f, target);
-      return { kind: "place", of: "accessor", self, name: target.name, getter, setter: this.arenas.instanceOf(f.instance.setters.get(target)!), at: target };
+      return { kind: "place", of: "accessor", self, name: target.name, getter, setter: this.arenas.instanceOf(this.frames[f]!.instance.setters.get(target)!), at: target };
     }
     if (target.kind === "member") {
-      const holder = this.unwrap(this.expr(f, target.object));
+      const base = this.holder(f, target.object);
+      const holder = this.unwrap(this.read(base));
       if (holder && typeof holder === "object" && holder.kind === "record") {
         const held = holder.fields.get(target.name);
         if (isPlace(held)) return held;
-        return { kind: "place", of: "field", holder, name: target.name };
+        return this.extend(base, { kind: "field", name: target.name });
       }
+      // A part of a value that isn't an object's, like an array's length, which is only read.
+      if (typeof holder === "string" || (holder && typeof holder === "object" && (holder.kind === "array" || holder.kind === "map"))) return this.temp(f, this.memberValue(target, holder));
     }
     if (target.kind === "index") {
-      const held = this.unwrap(object ?? this.expr(f, target.object));
+      const base = object === undefined ? this.holder(f, target.object) : isPlace(object) ? object : this.temp(f, object);
+      const held = this.unwrap(this.read(base));
       const i = this.unwrap(this.expr(f, target.index)) as bigint;
       const length = typeof held === "string" ? held.length : held && typeof held === "object" && held.kind === "array" ? held.items.length : this.unsupported("indexing this", target);
       // A rest tuple's array is named as the tuple, its fixed elements counted in.
@@ -1190,13 +1357,52 @@ class Interpreter {
       // The bounds are checked where the place is taken, as a borrow of an element checks them.
       checkedIndex(i, BigInt(length), before, target);
       if (typeof held === "string") return { kind: "place", of: "char", text: held, index: i, length: BigInt(length), before, at: target };
-      return { kind: "place", of: "element", array: held as Items, index: i, length: BigInt(length), before, at: target };
+      return this.extend(base, { kind: "element", index: i });
     }
     return this.unsupported("changing this", target);
   }
 
+  // Whether an expression names where a value lives, so its place can be taken without reading
+  // it first. A FixedArray's isn't, so reading it refuses it.
+  private placeable(f: usize, e: Expr): boolean {
+    const held = deref(this.typing, this.frames[f]!.instance.types.get(e));
+    if (held !== undefined && typeof held !== "string" && this.typing.rec(held).kind === "fixed") return false;
+    switch (e.kind) {
+      case "nonNull":
+        return redundantBang(e) && this.placeable(f, e.expr);
+      case "this":
+        return this.frames[f]!.self !== undefined;
+      case "ident": {
+        const local = this.frames[f]!.instance.locals.get(e);
+        return local !== undefined && this.frames[f]!.locals.has(local);
+      }
+      case "member":
+        return !e.optional && this.frames[f]!.instance.calls.get(e) === undefined && this.placeable(f, e.object);
+      case "index":
+        return !e.optional && this.placeable(f, e.object);
+    }
+    return false;
+  }
+
+  // A method's receiver: the place it names, or a temporary holding its value, so what the
+  // method changes reaches where the value lives.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private match(this: Mut<this>, f: Frame, e: Extract<Expr, { kind: "match" }>): Value {
+  private receiver(this: Mut<this>, f: usize, e: Expr): Place | typeof SHORT {
+    if (this.placeable(f, e)) return this.place(f, e);
+    const v = this.link(f, e, true);
+    if (isShort(v)) return SHORT;
+    return isPlace(v) ? v : this.temp(f, v);
+  }
+
+  // Where the value a member or an index is read from lives.
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private holder(this: Mut<this>, f: usize, e: Expr): Place {
+    const p = this.receiver(f, e);
+    return isShort(p) ? this.temp(f, this.typed(f, e, null)) : p;
+  }
+
+  /** @throws {CompileError | Jump | Stop | Thrown} */
+  private match(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "match" }>): Value {
     const subject = this.expr(f, e.subject);
     for (const arm of e.arms) {
       if (!this.tests(f, arm.pattern, subject)) continue;
@@ -1216,8 +1422,8 @@ class Interpreter {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private tests(this: Mut<this>, f: Frame, p: Pattern, value: Value): boolean {
-    const info = f.instance.patterns.get(p)!;
+  private tests(this: Mut<this>, f: usize, p: Pattern, value: Value): boolean {
+    const info = this.frames[f]!.instance.patterns.get(p)!;
     const tag = value && typeof value === "object" && value.kind === "member" ? value.type : undefined;
     const v = this.unwrap(value);
     const r = typeof info.type === "string" ? undefined : this.typing.rec(info.type);
@@ -1226,7 +1432,7 @@ class Interpreter {
       case "any":
         return true;
       case "literal":
-        return info.member ? same(this.typing, v, literalValue(this.typing, info.member) ?? this.typing.rec(info.member).value) : same(this.typing, v, this.expr(f, (p as Extract<Pattern, { kind: "literal" }>).value));
+        return info.member ? this.same(v, literalValue(this.typing, info.member) ?? this.typing.rec(info.member).value, undefined) : this.same(v, this.expr(f, (p as Extract<Pattern, { kind: "literal" }>).value), undefined);
       case "none":
         return v === null;
       case "some":
@@ -1251,10 +1457,10 @@ class Interpreter {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private bind(f: Frame, p: Pattern, value: Value) {
-    const info = f.instance.patterns.get(p)!;
+  private bind(f: usize, p: Pattern, value: Value) {
+    const info = this.frames[f]!.instance.patterns.get(p)!;
     const v = this.unwrap(value);
-    if (info.kind === "any" && p.kind === "ident") return void f.locals.set(f.instance.locals.get(p as Expr)!, value);
+    if (info.kind === "any" && p.kind === "ident") return void this.frames[f]!.locals.set(this.frames[f]!.instance.locals.get(p as Expr)!, value);
     if (info.kind === "variant") info.args.forEach((arg, i) => this.bind(f, arg, (v as Variant).args[i]));
     if (info.kind === "object") for (const [key, sub] of info.fields) this.bind(f, sub, (v as Record).fields.get(key));
     if (info.kind === "array") info.items.forEach((item, i) => this.bind(f, item, (v as Items).items[i]));
@@ -1443,9 +1649,9 @@ function deref(typing: Typing, t: Type | undefined): Type | undefined {
   return r.kind === "ref" ? r.to : t;
 }
 
-// A value without a union's tag, read through a `Mut`'s place, outside a run of the interpreter.
+// A value without a union's tag, outside a run of the interpreter, which alone reads places.
 function unwrap(v: Value): Value {
-  if (isPlace(v)) return unwrap(readPlace(v));
+  assert(!isPlace(v), "internal error: a place was read outside a run of the interpreter");
   return v && typeof v === "object" && v.kind === "member" ? unwrap(v.value) : v;
 }
 
@@ -1454,24 +1660,6 @@ function unwrap(v: Value): Value {
 /** @throws {Stop} */
 function checkedIndex(i: bigint, length: bigint, before: bigint, at: Span) {
   if (i < 0n || i >= length) throw new Stop(`index out of bounds: the len is ${length + before} but the index is ${i + before}`, at, true);
-}
-
-// What a place holds, for any place but an accessor's, whose getter only the interpreter runs.
-function readPlace(p: Place): Value {
-  switch (p.of) {
-    case "this":
-      return p.frame.self;
-    case "local":
-      return p.frame.locals.get(p.local) as Value;
-    case "field":
-      return p.holder.fields.get(p.name);
-    case "accessor":
-      assert(false, "internal error: an accessor's place was read outside a run of the interpreter");
-    case "char":
-      return p.text[Number(p.index)];
-    case "element":
-      return p.array.items[Number(p.index)];
-  }
 }
 
 function mutable(typing: Typing, t: Type | undefined): boolean {
@@ -1511,32 +1699,10 @@ function retag(typing: Typing, value: Value, from: Type | undefined, to: Type | 
   return v;
 }
 
-// Which member of its union a value is: its tag, or else the type it is written as, a literal
-// standing for its base type.
-function memberType(typing: Typing, v: Value, t: Type | undefined): Type | undefined {
-  if (v && typeof v === "object" && v.kind === "member") return memberType(typing, v.value, v.type);
-  const own = deref(typing, t);
-  const r = own === undefined || typeof own === "string" ? undefined : typing.rec(own);
-  if (r?.kind === "union") return memberOf(typing, v, own as UnionType);
-  if (r?.kind === "literal") return typing.baseOf(own as LiteralType) ?? own;
-  return own;
-}
-
-// `===` on two values of the types they are written as: a union compares its member, then the
-// value it holds.
-// A class instance's comparison through its `equals`, or nothing for other records.
-type Equals = (a: Record, b: Record) => boolean | undefined;
-
-function equal(typing: Typing, a: Value, ta: Type | undefined, b: Value, tb: Type | undefined, eq?: Equals): boolean {
-  const [ma, mb] = [memberType(typing, a, ta), memberType(typing, b, tb)];
-  // A literal stands for its base type: members of two enums that share a value are equal, as
-  // they are at run time.
-  const plain = (t: Type | undefined) => {
-    const r = t === undefined || typeof t === "string" ? undefined : typing.rec(t);
-    return r?.kind === "literal" ? (typing.baseOf(t as LiteralType) ?? t) : t;
-  };
-  if (ma !== undefined && mb !== undefined && plain(ma) !== plain(mb)) return false;
-  return same(typing, a, b, eq);
+// A literal type as its base type, which `===` compares by.
+function plainType(typing: Typing, t: Type): Type {
+  const r = typeof t === "string" ? undefined : typing.rec(t);
+  return r?.kind === "literal" ? (typing.baseOf(t as LiteralType) ?? t) : t;
 }
 
 // The value an enum member's literal type stands for, or undefined for any other type.
@@ -1548,32 +1714,6 @@ function literalValue(typing: Typing, type: Type | undefined): Value {
 // Whether an expression names an enum rather than a value.
 function enumName(e: Expr): boolean {
   return e.kind === "ident" || (e.kind === "member" && enumName(e.object));
-}
-
-// Values compare as `===` compares them: primitives by value, variants by member and payload.
-function same(typing: Typing, x: Value, y: Value, eq?: Equals): boolean {
-  // Two members of a union are equal when they are the same member holding equal values.
-  if (x && y && typeof x === "object" && typeof y === "object" && x.kind === "member" && y.kind === "member") {
-    const plain = (t: Type) => {
-      const r = typeof t === "string" ? undefined : typing.rec(t);
-      return r?.kind === "literal" ? (typing.baseOf(t as LiteralType) ?? t) : t;
-    };
-    if (plain(x.type) !== plain(y.type)) return false;
-  }
-  const [a, b] = [unwrap(x), unwrap(y)];
-  if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "variant" && b.kind === "variant") {
-    return a.type === b.type && a.args.every((v, i) => same(typing, v, b.args[i], eq));
-  }
-  // Objects and arrays compare part by part.
-  if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "record" && b.kind === "record") {
-    const written = eq?.(a, b);
-    if (written !== undefined) return written;
-    return a.fields.size === b.fields.size && [...a.fields].every(([k, v]) => b.fields.has(k) && same(typing, v, b.fields.get(k), eq));
-  }
-  if (a && b && typeof a === "object" && typeof b === "object" && a.kind === "array" && b.kind === "array") {
-    return a.items.length === b.items.length && a.items.every((v, i) => same(typing, v, b.items[i], eq));
-  }
-  return a === b;
 }
 
 function typeofValue(v: Value): string {
@@ -1588,7 +1728,7 @@ function cloned(tables: Tables, v: Value): Value {
   const { quoteScopes: scopes, quoteFrees: frees, quotedSpans } = tables;
   const copied = (x: Value) => cloned(tables, x);
   if (!v || typeof v !== "object" || v.kind === "interior") return v;
-  if (v.kind === "place") return copied(readPlace(v));
+  assert(v.kind !== "place", "internal error: a place was cloned outside a run of the interpreter");
   if (v.kind === "member") return { kind: "member", type: v.type, value: copied(v.value) };
   if (v.kind === "array") return { kind: "array", items: v.items.map(copied) };
   if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(copied) };
