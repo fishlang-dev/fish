@@ -643,9 +643,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         for (const p of t.typeParams) typeParams.push(cloneTypeParam(p));
         let written: Param[] = [];
         for (const p of t.params) written.push(cloneParam(p));
-        let node: FamilyNode = { typeParams, params: written, returns: cloneTypeNode(t.returns) };
-        const thrown = t.throws;
-        if (thrown !== undefined) node.throws = cloneTypeNode(thrown);
+        const node: FamilyNode = { typeParams, params: written, returns: cloneTypeNode(t.returns) };
         let ownTypes: Type[] = [];
         for (const x of own.values()) ownTypes.push(x);
         let r = this.host.tables.typing.rec(fn);
@@ -1228,9 +1226,14 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (args.length > 0) {
       const noted = isInline ? this.sameShape(res) : res;
       this.host.tables.typing.noteInterfaceInstance(i.name, key, noted);
-      if (args.some((a) => this.host.tables.typing.lower(a) !== a)) {
-        this.interfaceOf(i, args.map((a) => this.host.tables.typing.lower(a)), at);
+      let lowered: Type[] = [];
+      let changed = false;
+      for (const a of args) {
+        const l = this.host.tables.typing.lower(a);
+        if (l !== a) changed = true;
+        lowered.push(l);
       }
+      if (changed) this.interfaceOf(i, lowered, at);
     }
     return res;
   }
@@ -1418,7 +1421,13 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     // Inside a generic alias checked before any use, another alias given its placeholders is only
     // checked for its arguments: following it could recurse without end.
-    const open = this.host.resolverState.deferring > 0 && this.host.resolverState.resolving.size > 0 ? args.map((t) => openParam(this.host.tables.typing, t, true)).find((t) => t) : undefined;
+    let open: ParamType | undefined = undefined;
+    if (this.host.resolverState.deferring > 0 && this.host.resolverState.resolving.size > 0) {
+      for (const t of args) {
+        const found = openParam(this.host.tables.typing, t, true);
+        if (open === undefined) open = found;
+      }
+    }
     if (open !== undefined) return open;
     if (this.host.resolverState.layouts.some((s) => s.has(key))) {
       throw new CompileError("E0113", `type '${a.name}' reads a class's fields while that class's own field types are being worked out from it, so it can't be computed yet`, at.start, at.end);
@@ -1476,7 +1485,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       this.resolveIn(bound, t.type);
       return held;
     }
-    const source = homomorphic ? this.typeFns().fieldsOf(homomorphic, "a mapped type", t.constraint) : [];
+    const source = homomorphic !== undefined ? this.typeFns().fieldsOf(homomorphic, "a mapped type", spanOf(t.constraint)) : [];
     const fields: Field[] = [];
     for (const key of keys === "never" ? [] : this.typeFns().keysOf(keys, "a mapped type", t.constraint)) {
       let bound = this.scopeCopy();
@@ -1521,18 +1530,24 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const held = standIn(this.host.tables.typing, [check], "a conditional type", spanOf(t.check), true, this.host.resolverState.deferring > 0);
     if (held !== undefined) return this.branches(t, held);
     try {
-      if (naked && check === "never") return "never";
+      if (naked !== undefined && check === "never") return "never";
       const r = this.recOf(check);
-      if (naked && r?.kind === "union") {
-        const outer = this.host.resolverState.scope;
+      if (naked !== undefined && r?.kind === "union") {
+        let members: Type[] = [];
+        for (const m of r.members) members.push(m);
+        const outer = this.scopeCopy();
+        let decided: Type[] = [];
         try {
-          return this.host.tables.typing.unionType(r.members.map((m) => {
-            this.host.resolverState.scope = new Map([...outer, [naked, m]]);
-            return this.decide(t, m);
-          }));
+          for (const m of members) {
+            let bound = scopes(outer, new Map<string, Type>());
+            bound.set(naked, m);
+            this.host.resolverState.scope = bound;
+            decided.push(this.decide(t, m));
+          }
         } finally {
           this.host.resolverState.scope = outer;
         }
+        return this.host.tables.typing.unionType(decided);
       }
       return this.decide(t, check);
     } catch (e) {
@@ -1603,7 +1618,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         if (!this.conforms(t, against, spanOf(p.constraint))) return false;
       }
       const prior = found.get(p.name);
-      found.set(p.name, prior ? this.host.tables.typing.unionType([prior, t]) : t);
+      found.set(p.name, prior !== undefined ? this.host.tables.typing.unionType([prior, t]) : t);
       return true;
     }
     if (p.kind === "array" || (p.kind === "ref" && p.name === "Array" && p.args.length === 1)) {
@@ -1676,7 +1691,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   private dictionary(this: Mut<this>, index: Extract<TypeMember, { kind: "index" }>, members: usize): MapType {
     if (members > 1) throw unsupported("index signatures beside other members", index);
     if (index.readonly) throw unsupported("readonly index signatures", index);
-    const key = index.params[0]!;
+    const key: Ref<Param> = index.params[0]!;
     const keyType = key.type !== undefined ? this.resolveType(key.type) : undefined;
     const keyAt: Span = key.type !== undefined ? spanOf(key.type) : { start: key.start, end: key.end };
     if (keyType !== "string") throw new CompileError("E0116", `an index signature is keyed by 'string' so far; for keys of another type use a 'Map'${keyType !== undefined && isInteger(this.host.tables.typing.lower(keyType)) ? ", or an array for consecutive numbers" : ""}`, keyAt.start, keyAt.end);
