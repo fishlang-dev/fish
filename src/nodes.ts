@@ -495,6 +495,11 @@ export class NodeMap<K extends Id, V> {
     return this.table.has(idOf(node));
   }
 
+  // The value for a node by its id, for a reader holding a node of a wider type than `K`.
+  getById(id: usize): V | undefined {
+    return this.table.get(id)?.value;
+  }
+
   set(this: Mut<this>, node: K, value: V): Mut<this> {
     this.table.set(idOf(node), { node, value });
     return this;
