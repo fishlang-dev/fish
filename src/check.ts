@@ -2422,7 +2422,8 @@ class BodyChecker implements Context, GuardHost {
     // From here on the body is read as a plain tree, its replacements in place.
     for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam(this.f.params[i]!, this.cx.rewrites);
     rebuiltStmts(this.f.body, this.cx.rewrites);
-    timed(this.cx.tables.timings, "moves", () => checkMoves(this.cx.tables, this.f, this.instance, origins));
+    const movedOut = timed(this.cx.tables.timings, "moves", () => checkMoves(this.cx.tables, this.f, this.instance, origins));
+    for (const id of movedOut) this.instance.moved!.add(id);
     // A class's own `clone()` replaces the compiler's copy, so it has to make one.
     if (this.self && this.cx.registry().classOf(this.self.type).methods.get("clone") === this.f.bodyId && (this.f.params.length > 0 || type !== this.self.type)) {
       throw new CompileError("E0213", `a 'clone' method must take no parameters and return '${this.cx.typing.show(this.self.type)}', since it replaces the compiler's copy`, this.f.start, this.f.end);
