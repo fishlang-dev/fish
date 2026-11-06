@@ -964,6 +964,16 @@ export class Typing {
 
   // Whether a value has a part `found` picks anywhere in it, or with `throughRefs` also behind a
   // reference it holds. What a `shared` holds isn't its own part: copies of it are the same value.
+  // Every part of a type, in the order `holdsPart` visits them.
+  partsOf(t: Type, throughRefs = false): Type[] {
+    let out: Type[] = [];
+    this.holdsPart(t, (u) => {
+      out.push(u);
+      return false;
+    }, throughRefs);
+    return out;
+  }
+
   holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false): boolean {
     let seen = new TypeSet<Type>();
     return this.holdsPartIn(t, found, throughRefs, seen);

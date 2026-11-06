@@ -476,7 +476,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     // A parameter with a default is optional to callers, and holds its declared type in the body.
     const lowered = this.host.tables.defaulted.get(p);
     if (lowered !== undefined) {
-      const declared = this.resolveType(p.type);
+      const declared = this.resolveType(p.type!);
       const low = this.host.tables.typing.lower(declared);
       const kind = this.recOf(low)?.kind;
       if (kind !== undefined && ["function", "closure", "dyn", "interface", "param", "ref", "future", "generator", "handle"].includes(kind)) {
@@ -490,7 +490,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (p.optional) {
       const member = this.unionMember(p.type);
       type = this.host.tables.typing.unionType([member, "null"]);
-    } else type = this.resolveType(p.type);
+    } else type = this.resolveType(p.type!);
     const r = this.recOf(type);
     if (p.rest && r?.kind !== "array") throw new CompileError("E0408", `a rest parameter takes an array of the values, as in '...${name}: ${this.host.tables.typing.show(type)}[]'`, p.type.start, p.type.end);
     // A comptime parameter makes an instance per value, so its type is one whose values compare.
@@ -571,12 +571,11 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const preset = this.host.tables.presetTypes.get(t);
     if (preset !== undefined) {
       let swap = new TypeMap<Type, Type>();
-      this.host.tables.typing.holdsPart(preset, (u) => {
+      for (const u of this.host.tables.typing.partsOf(preset, true)) {
         const r = this.recOf(u);
         const bound = r?.kind === "param" ? this.host.resolverState.scope.get(r.name) : undefined;
         if (bound !== undefined && bound !== u) swap.set(u, bound);
-        return false;
-      }, true);
+      }
       return swap.size > 0 ? this.host.replaced(preset, swap) : preset;
     }
     // `readonly T[]` is a shared borrow of an array.
@@ -645,7 +644,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         let written: Param[] = [];
         for (const p of t.params) written.push(cloneParam(p));
         let node: FamilyNode = { typeParams, params: written, returns: cloneTypeNode(t.returns) };
-        if (t.throws !== undefined) node.throws = cloneTypeNode(t.throws);
+        if (t.throws !== undefined) node.throws = cloneTypeNode(t.throws!);
         let ownTypes: Type[] = [];
         for (const x of own.values()) ownTypes.push(x);
         let r = this.host.tables.typing.rec(fn);
@@ -901,7 +900,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (typeof base !== "string" || base === "void" || base === "null" || base === "never") {
       throw new CompileError("E0116", `a brand's base is a number, boolean, string or bigint type, not '${this.host.tables.typing.show(base)}'`, baseNode.start, baseNode.end);
     }
-    if (this.host.tables.typing.holdsPart(tag, (u) => this.recOf(u)?.kind === "param")) throw unsupported("brand tags holding type parameters", tagNode);
+    for (const u of this.host.tables.typing.partsOf(tag)) if (this.recOf(u)?.kind === "param") throw unsupported("brand tags holding type parameters", tagNode);
     return this.host.tables.typing.brandType(base, tag, how);
   }
 
@@ -1076,7 +1075,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (same.omittable === true && m.omittable !== true) {
         // A side requiring the method makes the whole require it.
         let replaced = this.host.tables.typing.rec(found);
-        replaced.methods[at] = m;
+        replaced.methods[at] = copyMethod(m);
         this.host.tables.typing.setRec(found, replaced);
       }
     }
@@ -1201,7 +1200,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const found = this.host.resolverState.traits.get(owner)!.get(key);
     if (found !== undefined) return found;
     if (this.host.resolverState.traits.get(owner)!.size > 64) throw new CompileError("E0113", `instantiating interface '${i.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
-    const t = this.host.tables.typing.interfaceType(args.length > 0 ? `${i.name}<${args.map((t) => this.host.tables.typing.show(t)).join(", ")}>` : i.name);
+    let shown: string[] = [];
+    for (const a of args) shown.push(this.host.tables.typing.show(a));
+    const t = this.host.tables.typing.interfaceType(args.length > 0 ? `${i.name}<${shown.join(", ")}>` : i.name);
     if (args.length > 0) {
       let r = this.host.tables.typing.rec(t);
       r.generic = { name: i.name, args };
@@ -1332,7 +1333,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (m.optional && i.js !== undefined) throw unsupported("optional methods", m);
       if (m.returns === undefined) throw new CompileError("E0104", `method '${m.name}' implicitly returns 'any'; add a return type`, m.start, m.end);
       this.noteMember(i, t, inherited, m.name, m, true, m.optional);
-      const self = m.params.length > 0 && m.params[0]!.pattern.kind === "ident" && m.params[0]!.pattern.name === "this";
+      const self = m.params.length > 0 && isThisParam(m.params[0]!);
       for (const p of m.params) if (p.rest) throw unsupported("rest parameters in interface methods", p);
       // A generic method's own type parameters stand for themselves in its signature.
       const around = this.scopeCopy();
@@ -1406,7 +1407,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const exprName = `Expr${a.name.slice(prefix.length as i64)}`;
       const exprKey = `${exprName}<>`;
       const exprAlias = this.host.decls.aliases.get(exprName);
-      if (exprAlias && exprAlias.typeParams.length === 0 && !this.host.resolverState.resolving.has(exprKey) && !this.host.resolverState.resolved.has(exprKey)) {
+      if (exprAlias !== undefined && exprAlias.typeParams.length === 0 && !this.host.resolverState.resolving.has(exprKey) && !this.host.resolverState.resolved.has(exprKey)) {
         this.aliasType(exprAlias, [], exprAlias);
         const nowDone = this.host.resolverState.resolved.get(key);
         if (nowDone) return nowDone;
@@ -1464,7 +1465,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const homomorphic = t.constraint.kind === "operator" && t.constraint.op === "keyof" ? this.resolveType(t.constraint.type) : undefined;
     const keys = this.resolveType(t.constraint);
     if (t.type === undefined) throw new CompileError("E0114", `a mapped type needs the type of its fields, like '{ [${t.name} in keyof T]: i64 }'`, t.start, t.end);
-    const held = standIn(this.host.tables.typing, homomorphic !== undefined ? [homomorphic, keys] : [keys], "a mapped type", t.constraint, false, this.host.resolverState.deferring > 0);
+    const held = standIn(this.host.tables.typing, homomorphic !== undefined ? [homomorphic, keys] : [keys], "a mapped type", spanOf(t.constraint), false, this.host.resolverState.deferring > 0);
     if (held) {
       let bound = this.scopeCopy();
       bound.set(t.name, held);
@@ -1514,7 +1515,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     let check = this.resolveType(t.check);
     const c = this.recOf(check);
     if (c?.kind === "param" && c.concrete !== undefined) check = c.concrete;
-    const held = standIn(this.host.tables.typing, [check], "a conditional type", t.check, true, this.host.resolverState.deferring > 0);
+    const held = standIn(this.host.tables.typing, [check], "a conditional type", spanOf(t.check), true, this.host.resolverState.deferring > 0);
     if (held) return this.branches(t, held);
     try {
       if (naked && check === "never") return "never";
@@ -1556,7 +1557,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   private decide(this: Mut<this>, t: Ref<Extract<TypeNode, { kind: "conditional" }>>, check: Type): Type {
     const names = inferNames(t.extends);
     if (names.size === 0) {
-      const extended = this.resolveType(t.extends);
+      const extended = this.resolveType(t.extends!);
       const against = this.comparable(extended, spanOf(t.extends));
       if (this.conforms(check, against, spanOf(t.extends))) return this.resolveType(t.then);
       return this.resolveType(t.else);
@@ -1590,7 +1591,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       return this.conforms(t, against, spanOf(p));
     }
     const r = this.recOf(t);
-    if (r?.kind === "param" && r.concrete) return this.matches(p, r.concrete, found);
+    if (r?.kind === "param" && r.concrete !== undefined) return this.matches(p, r.concrete, found);
     if (p.kind === "infer") {
       if (p.constraint && !this.conforms(t, this.comparable(this.resolveType(p.constraint), p.constraint), p.constraint)) return false;
       const prior = found.get(p.name);
@@ -1684,8 +1685,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (m.optional) {
       const member = this.unionMember(m.type!);
       f = this.host.tables.typing.optionalField(m.name, member);
-    } else if (spellsUndefined(m.type)) f = { name: m.name, type: this.resolveType(m.type), optional: "undefined" };
-    else f = { name: m.name, type: this.resolveType(m.type) };
+    } else if (spellsUndefined(m.type)) f = { name: m.name, type: this.resolveType(m.type!), optional: "undefined" };
+    else f = { name: m.name, type: this.resolveType(m.type!) };
     let out = copyField(f);
     out.type = storable(this.host.tables.typing, f.type, m);
     if (m.readonly) out.readonly = true;
@@ -1719,6 +1720,11 @@ function keyed(typing: Ref<Typing>, t: Type): boolean {
   if (k.kind !== "union") return false;
   for (const m of k.members) if (!keyed(typing, m)) return false;
   return true;
+}
+
+// Whether a parameter is a method's `this`.
+function isThisParam(p: Ref<Param>): boolean {
+  return p.pattern.kind === "ident" && p.pattern.name === "this";
 }
 
 // The name a member is written with, when it is a string.
@@ -1850,7 +1856,7 @@ function objectTypeOf(typing: Ref<Typing>, t: Type): ObjectType | undefined {
 }
 
 // Whether every recursive type `t` is, or holds as a union member, knows the type it stands for.
-function settled(typing: Typing, t: Type): boolean {
+function settled(typing: Ref<Typing>, t: Type): boolean {
   const r = typing.recOf(t);
   const parts = r?.kind === "union" ? r.members : [t];
   return parts.every((m) => { const p = typing.recOf(m); return p?.kind !== "recursive" || p.of !== "never"; });
@@ -1900,14 +1906,9 @@ export function interior(typing: Typing, which: InteriorRecord["which"], given: 
 // shared value and a lock hold theirs.
 /** @throws {CompileError} */
 function abstractless(typing: Mut<Typing>, of: Type, holder: string, at: Ref<Span>) {
-  let parts: Type[] = [];
   const lowered = typing.lower(of);
-  typing.holdsPart(lowered, (u) => {
-    if (typeof u === "string" || !["interface", "function"].includes(typing.rec(u).kind)) return false;
-    parts.push(u);
-    return true;
-  });
-  const found = parts.length > 0 ? parts[0] : undefined;
+  let found: Type | undefined = undefined;
+  for (const u of typing.partsOf(lowered)) if (found === undefined && typeof u !== "string" && ["interface", "function"].includes(typing.rec(u).kind)) found = u;
   if (found !== undefined) throw new CompileError("E0801", `${holder} can't hold a '${typing.show(found)}' yet: name a concrete type`, at.start, at.end);
 }
 
@@ -1920,14 +1921,10 @@ export function shareable(typing: Typing, given: Type, at: Span): SharedType {
   const of = typing.heldArgument(given);
   const held = typing.lower(of);
   abstractless(typing, of, "a 'shared' value", at);
-  let blocker: Type | undefined;
-  typing.holdsPart(held, (u) => {
-    if (!unlocked(typing, u)) return false;
-    blocker = u;
-    return true;
-  });
+  let blocker: Type | undefined = undefined;
+  for (const u of typing.partsOf(held)) if (blocker === undefined && unlocked(typing, u)) blocker = u;
   if (typing.holdsHandle(held)) throw new CompileError("E0303", "a 'shared' value can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only", at.start, at.end);
-  if (blocker) {
+  if (blocker !== undefined) {
     const why = kindOf(blocker) === "interior" ? "changes without a lock; use an 'Atomic' or a 'Lock' instead" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from one place, which other threads can't keep alive";
     throw new CompileError("E0303", `a 'shared' value is used from many threads at once, so it can't hold a '${typing.show(blocker)}', which ${why}`, at.start, at.end);
   }
@@ -1942,7 +1939,8 @@ export function counted(typing: Typing, given: Type, which: "Rc" | "Weak", at: S
   const of = typing.heldArgument(given);
   abstractless(typing, of, `an '${which}'`, at);
   if (typing.holdsRef(of)) throw new CompileError("E0801", `an '${which}' can't hold a reference ('${typing.show(of)}'), which borrows from one place that every clone would outlive`, at.start, at.end);
-  if (typing.holdsHandle(typing.lower(of))) throw new CompileError("E0303", `an '${which}' can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only`, at.start, at.end);
+  const lowered = typing.lower(of);
+  if (typing.holdsHandle(lowered)) throw new CompileError("E0303", `an '${which}' can't hold a JoinHandle: every clone could await it, and a task's result can be awaited in one place only`, at.start, at.end);
   return typing.sharedType(of, which);
 }
 
@@ -1960,13 +1958,10 @@ export function channel(typing: Typing, given: Type, at: Span): BlockType {
   }
   abstractless(typing, of, "a 'Channel'", at);
   if (typing.holdsPattern(of)) throw unsupported("template literal pattern types in channels", at);
-  let blocker: Type | undefined;
-  typing.holdsPart(typing.lower(of), (u) => {
-    if (!unlocked(typing, u)) return false;
-    blocker = u;
-    return true;
-  });
-  if (blocker) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made"}`, at.start, at.end);
+  const lowered = typing.lower(of);
+  let blocker: Type | undefined = undefined;
+  for (const u of typing.partsOf(lowered)) if (blocker === undefined && unlocked(typing, u)) blocker = u;
+  if (blocker !== undefined) throw new CompileError("E0303", `a 'Channel' carries values to other tasks, so it can't carry a '${typing.show(blocker)}', which ${kindOf(blocker) === "interior" ? "changes without a lock" : kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for" : kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made"}`, at.start, at.end);
   return typing.blockType("Channel", of);
 }
 
@@ -1975,7 +1970,7 @@ export const COUNTED_UNLOCKED = "counts its owners without atomics, so only one 
 
 // Whether a part of a value can't cross to another thread: a reference, a raw pointer, a Cell,
 // an Rc or a Weak.
-function unlocked(typing: Typing, u: Type): boolean {
+function unlocked(typing: Ref<Typing>, u: Type): boolean {
   if (typeof u === "string") return false;
   const r = typing.rec(u);
   return r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "shared" && r.which !== "shared");
@@ -2015,7 +2010,9 @@ export function collection(typing: Mut<Typing>, key: Type, value: Type, set: boo
   if ((v?.kind === "closure" || v?.kind === "function") && v.generic !== undefined) throw unsupported("maps of generic functions", at);
   if (v?.kind === "interface") throw new CompileError("E0115", `a 'Map' can't hold the interface type '${v.name}' directly, since its values may each be a different type; use 'Dyn<${v.name}>'`, at.start, at.end);
   unboxedClosure(typing, value, at);
-  return typing.mapType(key, typing.stored(typing.heldArgument(value)), set, dict);
+  const held = typing.heldArgument(value);
+  const stored = typing.stored(held);
+  return typing.mapType(key, stored, set, dict);
 }
 
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
