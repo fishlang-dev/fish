@@ -57,7 +57,7 @@ export function typeName(name: string, at: Span, ...namespaces: Map<string, unkn
 // A field holds a value, and an interface type describes values without being one. A
 // function type in a field would be a boxed callable, which needs the heap.
 /** @throws {CompileError} */
-export function storable(typing: Typing, written: Type, at: Span): Type {
+export function storable(typing: Mut<Typing>, written: Type, at: Ref<Span>): Type {
   const w = typeof written === "string" ? undefined : typing.rec(written);
   if (w?.kind === "function" && w.generic) throw new CompileError("E0115", familyHeld("a field"), at.start, at.end);
   const type = typing.stored(written);

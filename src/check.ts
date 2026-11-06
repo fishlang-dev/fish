@@ -758,7 +758,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (!this.main && !this.library && !this.macros && !this.module) throw new CompileError("E0405", "no main() function; execution starts there", 0, 0);
     this.assuming = new Set<string>();
     this.registryState = new RegistryState();
-    this.classes.forEach((c) => this.registry().register(this.arenas.classOf(c)));
+    this.classes.forEach((c) => this.registry().register(c));
     this.genericClassesState = new GenericClassesState();
     this.resolverState = new ResolverState();
     this.done = new Set<InstanceId>();
@@ -847,6 +847,18 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
+  resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type {
+    return this.withScope(scope ?? new Map<string, Type>(), () => this.resolveType(t));
+  }
+
+  /** @throws {CompileError} */
+  initializerType(this: Mut<this>, body: BodyId): Type {
+    const instance = this.instanceOf(this.arenas.bodyOf(body));
+    this.checkBody(instance);
+    return this.typing.widenEnum(instance.branded?.returns ?? instance.returns);
+  }
+
+  /** @throws {CompileError} */
   paramType(this: Mut<this>, p: Param, property?: boolean): Type {
     return this.resolver().paramType(p, property);
   }
@@ -866,12 +878,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   register(this: Mut<this>, c: ClassInfo) {
-    this.registry().register(c);
+    this.registry().register(c.classId);
   }
 
   /** @throws {CompileError} */
   layout(this: Mut<this>, c: ClassInfo) {
-    this.registry().layout(c);
+    this.registry().layout(c.classId);
   }
 
   /** @throws {CompileError} */
@@ -881,7 +893,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   /** @throws {CompileError} */
   fieldsLaid(this: Mut<this>, c: ClassType): boolean {
-    return this.registry().layout(this.registry().classOf(c));
+    return this.registry().layout(this.registry().classOf(c).classId);
   }
 
   /** @throws {CompileError} */
@@ -960,11 +972,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   /** @throws {CompileError} */
   run(this: Mut<this>): Checked {
 
-    this.classes.forEach((c) => this.registry().link(this.arenas.classOf(c), new TypeSet()));
+    this.classes.forEach((c) => this.registry().link(c, new TypeSet()));
     this.typing.setJsError(this.arenas.classOf(this.classes.get("JsError"))?.type);
     // Classes are laid out before any body is checked, since checking one may need another's
     // fields. Until the resolver exists, a generic class's instance waits for `start`.
-    this.registryState.infoOf.forEach((c) => this.registry().layout(this.arenas.classOf(c)));
+    this.registryState.infoOf.forEach((c) => this.registry().layout(c));
     this.genericClasses().start();
     this.genericClasses().define();
     // Aliases are checked once classes are laid out, since one may read a class's fields or a
@@ -984,7 +996,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // reported at the class rather than at each use.
     for (const c of declaredClasses) {
       try {
-        this.registry().claims(this.arenas.classOf(c));
+        this.registry().claims(c);
       } catch (e) {
         if (e instanceof CompileError) this.claimErrors.push(e);
         this.recover(e);
@@ -1032,13 +1044,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       }
       try {
         if (unsettled.length > 0) {
-          this.registry().settle(this.arenas.classOf(unsettled.shift()!), (run) => {
+          for (const f of this.registry().settle(unsettled.shift()!)) {
             try {
-              run();
+              this.checkBody(this.definition(this.arenas.bodyOf(f)));
             } catch (e) {
               this.recover(e);
             }
-          });
+          }
         } else this.checkBody(this.arenas.instanceOf(pending.shift()!));
       } catch (e) {
         this.recover(e);
@@ -1053,7 +1065,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (this.library) this.funcs.filter((f) => (f as Body).exported).forEach((f) => this.exportable(this.instancing().definition(f)));
     if (this.library && !this.funcs.some((f) => (f as Body).exported)) throw new CompileError("E1003", "a library has nothing for C to call; mark functions with 'export'", 0, 0);
     // An abstract member and a template are checked but never compiled; each concrete class's copy is.
-    const compiled = new NodeSet([...this.funcs.filter((f) => !f.macro || this.macros), ...[...this.registryState.infoOf.values()].flatMap((c) => this.registry().bodiesOf(this.arenas.classOf(c))).filter((f) => !f.abstract && !f.template)]);
+    const compiled = new NodeSet([...this.funcs.filter((f) => !f.macro || this.macros), ...[...this.registryState.infoOf.values()].flatMap((c) => this.registry().bodiesOf(c).map((b) => this.arenas.bodyOf(b))).filter((f) => !f.abstract && !f.template)]);
     // So is an instance made for an abstract class, which only a template's check makes.
     const checkedOnly = (i: Instance): boolean => bodyOf(i).template === true || [...i.bindings.values()].some((t) => abstractPart(this.typing, t)) || (bodyOf(i).closure !== undefined && checkedOnly(this.arenas.instanceOf(bodyOf(i).closure!.parent)));
     const compiledInstances = [...this.instancing().all().filter((i) => i.concrete && compiled.has(bodyOf(i)) && !bodyOf(i).js && !checkedOnly(i)), ...this.closures.map((c) => this.arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
@@ -1452,7 +1464,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const owner = bodyOf(target).owner;
     const to = owner && (this.typing.lower(owner) as ClassType);
     if (!owner || to === owner) return target;
-    const body = this.registry().bodiesOf(this.registry().classOf(to!))[this.registry().bodiesOf(this.registry().classOf(owner)).indexOf(bodyOf(target))]!;
+    const body = this.arenas.bodyOf(this.registry().bodiesOf(this.registry().classOf(to!).classId)[this.registry().bodiesOf(this.registry().classOf(owner).classId).indexOf(target.body)]!);
     const implicit = [...this.instancing().implicitOf(body).keys()].map((i): [string, Type] => [`#${i}`, target.bindings.get(`#${i}`)!]);
     // Its comptime parameters' values carry over too, as do a generic method's own type
     // arguments.
@@ -1729,7 +1741,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (f.closure) return this.asWritten(this.arenas.instanceOf(f.closure.parent));
     const generic = f.scope && f.owner ? this.typing.rec(f.owner).generic : undefined;
     const template = generic ? this.genericClasses().definedClass(generic.name) : undefined;
-    if (template) f = this.registry().bodiesOf(template).find((b) => b.start === f.start && b.end === f.end) ?? f;
+    if (template) f = this.registry().bodiesOf(template.classId).map((b) => this.arenas.bodyOf(b)).find((b) => b.start === f.start && b.end === f.end) ?? f;
     const written = this.instancing().definition(f);
     if (written !== instance && !this.inProgress.has(written.id)) this.checkBody(written);
   }
@@ -4050,7 +4062,7 @@ class BodyChecker implements Context, GuardHost {
     const union = this.cx.recOf(this.errorType);
     const classes = (union?.kind === "union" ? union.members : [this.errorType])
       .filter((m): m is ClassType => typeof m !== "string" && this.cx.typing.rec(m).kind === "class");
-    const wrappers = classes.flatMap((c) => this.cx.registry().wrapsOf(this.cx.registry().classOf(c)).filter(([x]) => this.cx.typing.fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: this.cx.instancing().instanceOf(this.cx.arenas.bodyOf(body)).id })));
+    const wrappers = classes.flatMap((c) => this.cx.registry().wrapsOf(this.cx.registry().classOf(c).classId).filter(([x]) => this.cx.typing.fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: this.cx.instancing().instanceOf(this.cx.arenas.bodyOf(body)).id })));
     const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${this.cx.typing.show(type)}'` : `${what} can throw '${this.cx.typing.show(type)}'`;
     if (wrappers.length === 0) {
       const hint = classes.length > 0 ? `convert it, or have '${this.cx.typing.rec(classes[0]!).name}' implement 'From<${this.cx.typing.show(type)}>'` : `convert it to '${this.cx.typing.show(this.errorType)}'`;

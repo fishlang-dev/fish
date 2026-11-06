@@ -301,7 +301,7 @@ function fieldOf(ids: Mut<Ids>, name: string, written: TypeNode | undefined, opt
   return f;
 }
 
-function cloneFieldDecl(f: Ref<FieldDecl>): FieldDecl {
+export function cloneFieldDecl(f: Ref<FieldDecl>): FieldDecl {
   let out: FieldDecl = { name: f.name, type: f.type !== undefined ? cloneTypeNode(f.type) : undefined, init: f.init !== undefined ? cloneExpr(f.init) : undefined, access: f.access, readonly: f.readonly, start: f.start, end: f.end };
   if (f.written !== undefined) out.written = cloneTypeNode(f.written);
   if (f.undefinedSpelled !== undefined) out.undefinedSpelled = true;
@@ -586,11 +586,10 @@ export const shownName = (name: string) => (name.startsWith("#") ? name.replace(
 // Links a derived class to the base it embeds. Its constructor must start with
 // `super(...)`, which fills the embedded base, and then assigns its own initializers. Without
 // a constructor of its own it passes its arguments on to the base's.
+// `globals` holds what each name of the class's scope means as one of the program's types, and
+// `failed` why a name that isn't one couldn't be resolved, for when it is needed after all.
 /** @throws {CompileError} */
-export type GlobalType = (name: string) => Type;
-
-/** @throws {CompileError} */
-export function extend(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, global: GlobalType): void {
+export function extend(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, globals: Map<string, Type>, failed: Ref<Map<string, CompileError>>): void {
   let linked = tables.arenas.classMut(classId);
   linked.base = baseId;
   const classType = tables.arenas.classOf(classId).type;
@@ -598,18 +597,6 @@ export function extend(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, g
   record.base = tables.arenas.classOf(baseId).type;
   tables.typing.setRec(classType, record);
   // A name that isn't one of the program's types hides nothing.
-  let globals = new Map<string, Type>();
-  let names: string[] = [];
-  for (const n of tables.arenas.classOf(classId).scope.keys()) names.push(n);
-  for (const n of names) {
-    let t: Type;
-    try {
-      t = global(n);
-    } catch {
-      continue;
-    }
-    globals.set(n, t);
-  }
   let named = tables.arenas.classMut(classId);
   named.globals = globals;
   const c = tables.arenas.classOf(classId);
@@ -637,12 +624,22 @@ export function extend(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, g
     ctor.body = body;
     return;
   }
-  inheritConstructor(tables, classId, baseId, global);
+  inheritConstructor(tables, classId, baseId, failed);
+}
+
+// What a name of a class's scope means as one of the program's types, or why it means none.
+/** @throws {CompileError} */
+function globalOf(c: Ref<ClassInfo>, failed: Ref<Map<string, CompileError>>, name: string): Type {
+  const t = c.globals !== undefined ? c.globals.get(name) : undefined;
+  if (t !== undefined) return t;
+  const error = failed.get(name);
+  assert(error !== undefined, "internal error: a class's scope name was never resolved");
+  throw error;
 }
 
 // A derived class without a constructor of its own passes its arguments on to the base's.
 /** @throws {CompileError} */
-function inheritConstructor(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, global: GlobalType): void {
+function inheritConstructor(tables: Mut<Tables>, classId: ClassId, baseId: ClassId, failed: Ref<Map<string, CompileError>>): void {
   const c = tables.arenas.classOf(classId);
   const base = tables.arenas.classOf(baseId);
   const ctorId = c.constructor;
@@ -663,7 +660,7 @@ function inheritConstructor(tables: Mut<Tables>, classId: ClassId, baseId: Class
     for (const [n, t] of c.scope) s.set(n, t);
     for (const [n, to] of names) {
       const there = baseCtor.scope !== undefined ? baseCtor.scope.get(n) : undefined;
-      s.set(to, there !== undefined ? there : global(n));
+      s.set(to, there !== undefined ? there : globalOf(c, failed, n));
     }
     scope = s;
   }
