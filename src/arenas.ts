@@ -10,8 +10,8 @@ export type LocalId = Brand<usize, "local">;
 export type ClassId = Brand<usize, "class">;
 
 // The body an instance checks, from its compilation's arena.
-export function bodyOf(instance: Ref<Instance>): Ref<Body> {
-  return instance.tables.arenas.bodyOf(instance.body);
+export function bodyOf<A extends Lifetime>(arenas: Ref<Arenas, A>, instance: Ref<Instance>): Ref<Body, A> {
+  return arenas.bodyOf(instance.body);
 }
 
 // A compilation's instances, bodies, locals and classes, each kept where it is made and named by

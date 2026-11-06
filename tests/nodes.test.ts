@@ -168,7 +168,8 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
       expandMacros(compilation, loaded, false, (macros) => check(compilation, macros, false, true));
       written = flatten(compilation, loaded, false);
       problems.push(...audit([written, stdFor(compilation, written)], ids, p.name));
-      const bodies = compiledOf(check(compilation, written)).map((i) => [bodyOf(i).params, bodyOf(i).body]);
+      const checked = check(compilation, written);
+      const bodies = compiledOf(checked).map((i) => [bodyOf(checked.tables.arenas, i).params, bodyOf(checked.tables.arenas, i).body]);
       problems.push(...stale(bodies, `${p.name}, compiled`));
     } catch (e) {
       if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);

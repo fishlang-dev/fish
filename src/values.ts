@@ -1795,7 +1795,7 @@ export class Expressions<C extends Context> implements Union {
     const error = this.ctx.errorOf(instance) ?? (declared && this.ctx.errorOf(this.ctx.instanceOf(declared)));
     if (error && !target.async && !target.generator) this.ctx.raise(e, error, `'${target.name}'`);
     const type = this.ctx.resultOf(declared ? this.ctx.instanceOf(declared) : instance, e);
-    const object = callee.kind === "member" && bodyOf(instance).self ? callee.object : undefined;
+    const object = callee.kind === "member" && bodyOf(this.arenas, instance).self ? callee.object : undefined;
     // A returned reference borrows what its lifetime says; a value holding references, what
     // was lent to the call, its receiver included.
     if (this.typing.holdsRef(type)) this.borrowsFrom.set(e, this.ctx.sourcesOf(instance, e.args, object, e, (a) => this.lends(a)));
@@ -2147,7 +2147,7 @@ export class Expressions<C extends Context> implements Union {
       return got;
     }
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `${name} takes no type arguments`, e.start, e.end);
-    const written = type.kind === "closure" ? bodyOf(this.ctx.closureBody((this.boundFunction(held) ?? held) as ClosureType)).params : undefined;
+    const written = type.kind === "closure" ? bodyOf(this.arenas, this.ctx.closureBody((this.boundFunction(held) ?? held) as ClosureType)).params : undefined;
     if (written) this.arity(e.args.length, written, e);
     else if (e.args.length !== type.params.length) {
       throw new CompileError("E0501", `expected ${type.params.length} argument${type.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
@@ -5531,14 +5531,14 @@ export class Expressions<C extends Context> implements Union {
   private args(this: Mut<this>, list: Expr[], argTypes: Type[], target: Instance, at: Span) {
     // A package's function takes a callback or a Promise as its signature made it for JS, a
     // stored one JS keeps.
-    if (bodyOf(target).js && target.concrete) this.ctx.returnOf(target, at);
-    const signature = bodyOf(target).js && target.concrete ? target.signature : undefined;
+    if (bodyOf(this.arenas, target).js && target.concrete) this.ctx.returnOf(target, at);
+    const signature = bodyOf(this.arenas, target).js && target.concrete ? target.signature : undefined;
     const params = signature && signature.length > 0 ? signature : this.ctx.paramTypes(target);
-    this.arity(list.length, bodyOf(target).params, at);
+    this.arity(list.length, bodyOf(this.arenas, target).params, at);
     list.forEach((a, i) => {
       const [type, expected] = [argTypes[i]!, params[i]!];
       if (this.isRefType(expected) && this.typing.rec(expected).mutable) this.readOnlySubarray(a);
-      const shown = this.defaultedArg(a, type, bodyOf(target).params[i]!) ?? expected;
+      const shown = this.defaultedArg(a, type, bodyOf(this.arenas, target).params[i]!) ?? expected;
       this.coerce(a, type, expected, `argument of type '${this.typing.show(type)}' is not assignable to parameter of type '${this.typing.show(shown)}'`);
     });
   }
@@ -7499,7 +7499,7 @@ export class Expressions<C extends Context> implements Union {
     if (!this.typing.fits(type, fn)) throw new CompileError("E0101", message, e.start, e.end);
     const body = this.ctx.closureBody(type as ClosureType);
     // A call through a stored callable passes every argument, with no default to fall back on.
-    if (bodyOf(body).params.some((p) => this.defaulted.has(p))) throw new CompileError("E0801", "a closure with default parameter values can't be stored as a value yet, since calls through it pass every argument; give the parameters no defaults", e.start, e.end);
+    if (bodyOf(this.arenas, body).params.some((p) => this.defaulted.has(p))) throw new CompileError("E0801", "a closure with default parameter values can't be stored as a value yet, since calls through it pass every argument; give the parameters no defaults", e.start, e.end);
     const capture = (name: string) => `'${name}'`;
     const borrowed = c.fields.find((f) => this.isRefType(f.type));
     if (borrowed) throw new CompileError("E0210", `this closure borrows ${capture(borrowed.name)}, but a stored callable owns what it captures; write the closure where it is stored, so it captures by move, or as 'move (...) => ...'`, e.start, e.end);
@@ -7512,7 +7512,7 @@ export class Expressions<C extends Context> implements Union {
       const r = this.recOf(u);
       return (r?.kind === "interior" && r.which !== "Cell") || (r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit")) || r?.kind === "handle";
     };
-    const held = bodyOf(body).async ? c.fields.find((f) => this.typing.holdsPart(f.type, pinned)) : undefined;
+    const held = bodyOf(this.arenas, body).async ? c.fields.find((f) => this.typing.holdsPart(f.type, pinned)) : undefined;
     if (held) throw new CompileError("E0303", `this async function captures ${capture(held.name)}, which holds an Atomic, a Lock, a Semaphore or a JoinHandle; each call works on its own copy of what it captures, which would split that state, so capture a shared value holding it instead, like 'shared({ count: new Atomic(0) })'`, e.start, e.end);
   }
 
@@ -7570,7 +7570,7 @@ export class Expressions<C extends Context> implements Union {
     const made = this.typing.lower(target.future ?? this.ctx.returnOf(target, at));
     const fr = this.recOf(made);
     if (fr?.kind !== "future") throw unsupported("Dyn methods giving a Promise that isn't an async function's future", at);
-    if (fr.throws) throw new CompileError("E0602", `'${bodyOf(target).name}' can throw '${this.typing.show(fr.throws)}', and a Promise given through a Dyn or a stored function can't throw yet`, at.start, at.end);
+    if (fr.throws) throw new CompileError("E0602", `'${bodyOf(this.arenas, target).name}' can throw '${this.typing.show(fr.throws)}', and a Promise given through a Dyn or a stored function can't throw yet`, at.start, at.end);
     const boxed = lent ? this.typing.lentPromise(gives) : this.typing.stored(returns);
     this.dynMembers.set(`${this.typing.keyOf(made)} ${this.typing.keyOf(boxed)}`, { methods: [], fields: [], clone: undefined });
   }

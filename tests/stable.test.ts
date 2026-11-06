@@ -64,9 +64,10 @@ const FILE = join(mkdtempSync(join(tmpdir(), "fish-stable-")), "main.fsh");
 // bodies are its own.
 function compiled(src: string): { ir: string; std: string[]; own: string[] } {
   writeFileSync(FILE, src);
-  const instances = compiledOf(analyze(session, src, FILE).checked).filter((i) => !bodyOf(i).foreign);
+  const checked = analyze(session, src, FILE).checked;
+  const instances = compiledOf(checked).filter((i) => !bodyOf(checked.tables.arenas, i).foreign);
   const quoted = (name: string) => `"fsh.${name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`)}"`;
-  const symbols = (std: boolean) => instances.filter((i) => bodyOf(i).start >= STD_BASE === std).map((i) => quoted(i.symbol));
+  const symbols = (std: boolean) => instances.filter((i) => bodyOf(checked.tables.arenas, i).start >= STD_BASE === std).map((i) => quoted(i.symbol));
   return { ir: compile(session, src, FILE), std: symbols(true), own: symbols(false) };
 }
 

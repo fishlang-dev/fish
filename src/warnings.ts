@@ -1,4 +1,4 @@
-import { bodyOf, type InstanceId, type LocalId } from "./arenas.ts";
+import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Body, Instance } from "./check.ts";
 import type { Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
@@ -40,7 +40,7 @@ export function warnings(tables: Ref<Tables>, compiled: Ref<InstanceId[]>, requi
   let found = new Map<usize, { warning: CompileError; used: boolean }>();
   for (const id of compiled) {
     const i = tables.arenas.instanceOf(id);
-    const b = bodyOf(i);
+    const b = bodyOf(tables.arenas, i);
     if (b.start >= STD_BASE || tables.generated.has(b)) continue;
     for (const [node, lid] of i.locals) {
       if (!tables.declarations.has(node)) continue;
@@ -60,8 +60,8 @@ export function warnings(tables: Ref<Tables>, compiled: Ref<InstanceId[]>, requi
   let unreachable = new Map<usize, CompileError>();
   for (const id of compiled) {
     const i = tables.arenas.instanceOf(id);
-    const b = bodyOf(i);
-    if (b.start < STD_BASE && !tables.generated.has(b)) unreachableIn(tables.generated, b.body, i, unreachable);
+    const b = bodyOf(tables.arenas, i);
+    if (b.start < STD_BASE && !tables.generated.has(b)) unreachableIn(tables, b.body, i, unreachable);
   }
   let all: CompileError[] = [];
   for (let entries = [...found.values()]; entries.length > 0; ) {
@@ -95,15 +95,15 @@ function variable(s: Ref<Expr | Stmt | Param | ObjectProp>): Ref<Pattern> | unde
 
 // Reports the first statement after one control never passes, once per such run, in these
 // statements and the blocks inside them.
-function unreachableIn(generated: Ref<Tables["generated"]>, stmts: Ref<Stmt[]>, i: Ref<Instance>, out: Mut<Map<usize, CompileError>>) {
+function unreachableIn(tables: Ref<Tables>, stmts: Ref<Stmt[]>, i: Ref<Instance>, out: Mut<Map<usize, CompileError>>) {
   for (let k: usize = 0; k < stmts.length; k++) {
     const s: Ref<Stmt> = stmts[k]!;
-    unreachableInBlocks(generated, s, i, out);
-    const why = leaves(s, i);
+    unreachableInBlocks(tables, s, i, out);
+    const why = leaves(tables.arenas, s, i);
     if (why === undefined) continue;
     for (let j = k + 1; j < stmts.length; j++) {
       const x: Ref<Stmt> = stmts[j]!;
-      if (HOISTED.has(x.kind) || (x.kind === "let" && variable(x) === undefined) || generated.has(x)) continue;
+      if (HOISTED.has(x.kind) || (x.kind === "let" && variable(x) === undefined) || tables.generated.has(x)) continue;
       if (x.start < STD_BASE) out.set(x.start, new CompileError("W0002", `unreachable code after ${why}`, x.start, x.end));
       break;
     }
@@ -115,11 +115,11 @@ function unreachableIn(generated: Ref<Tables["generated"]>, stmts: Ref<Stmt[]>, 
 const HOISTED = new Set(["empty", "function", "typeAlias", "interface", "class", "enum", "declare"]);
 
 // What leaves a statement for good: a jump, or a call typed `never`.
-function leaves(s: Ref<Stmt>, i: Ref<Instance>): string | undefined {
+function leaves(arenas: Ref<Arenas>, s: Ref<Stmt>, i: Ref<Instance>): string | undefined {
   if (s.kind === "return" || s.kind === "throw" || s.kind === "break" || s.kind === "continue") return `'${s.kind}'`;
   if (s.kind === "expr" && s.expr.kind === "call") {
     const t = i.types.get(s.expr);
-    const callee = i.tables.arenas.instanceOf(i.calls.get(s.expr));
+    const callee = arenas.instanceOf(i.calls.get(s.expr));
     const returns = t !== undefined ? t : callee !== undefined ? callee.returns : undefined;
     if (returns === "never") return "a call that never returns";
   }
@@ -127,11 +127,11 @@ function leaves(s: Ref<Stmt>, i: Ref<Instance>): string | undefined {
 }
 
 // Reports unreachable code in the statement lists directly inside a statement.
-function unreachableInBlocks(generated: Ref<Tables["generated"]>, s: Ref<Stmt>, i: Ref<Instance>, out: Mut<Map<usize, CompileError>>): void {
+function unreachableInBlocks(tables: Ref<Tables>, s: Ref<Stmt>, i: Ref<Instance>, out: Mut<Map<usize, CompileError>>): void {
   switch (s.kind) {
     case "if":
-      unreachableIn(generated, s.then, i, out);
-      if (s.else !== undefined) unreachableIn(generated, s.else, i, out);
+      unreachableIn(tables, s.then, i, out);
+      if (s.else !== undefined) unreachableIn(tables, s.else, i, out);
       return;
     case "block":
     case "unsafe":
@@ -141,18 +141,18 @@ function unreachableInBlocks(generated: Ref<Tables["generated"]>, s: Ref<Stmt>, 
     case "for":
     case "forOf":
     case "forIn":
-      unreachableIn(generated, s.body, i, out);
+      unreachableIn(tables, s.body, i, out);
       return;
     case "labeled":
-      unreachableInBlocks(generated, s.body, i, out);
+      unreachableInBlocks(tables, s.body, i, out);
       return;
     case "try":
-      unreachableIn(generated, s.block, i, out);
-      if (s.handler !== undefined) unreachableIn(generated, s.handler, i, out);
-      if (s.finalizer !== undefined) unreachableIn(generated, s.finalizer, i, out);
+      unreachableIn(tables, s.block, i, out);
+      if (s.handler !== undefined) unreachableIn(tables, s.handler, i, out);
+      if (s.finalizer !== undefined) unreachableIn(tables, s.finalizer, i, out);
       return;
     case "switch":
-      for (const c of s.cases) unreachableIn(generated, c.body, i, out);
+      for (const c of s.cases) unreachableIn(tables, c.body, i, out);
       return;
     default:
       return;

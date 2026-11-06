@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { bodyOf } from "./arenas.ts";
 import { C_KEYWORDS, check, compiledOf } from "./check.ts";
 import { codegen, symbol } from "./codegen.ts";
-import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newTimings, objectsNote, timed, type Compilation, type Session } from "./compilation.ts";
+import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newTimings, objectsNote, timed, type Compilation, type Session, type Tables } from "./compilation.ts";
 import { cachedSession } from "./stdcache.ts";
 import { CompileError, formatError, named, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
@@ -188,7 +188,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
       if (shim && process.platform === "darwin") run(["libtool", "-static", "-o", at(`lib${name}.a`), archive, shim.lib]);
       else if (shim) run(["ar", "-M"], `CREATE ${at(`lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
     }
-    writeFileSync(at(`${name}.h`), header(name, compiledOf(checked).filter((i) => bodyOf(i).exported)));
+    writeFileSync(at(`${name}.h`), header(name, checked.tables, compiledOf(checked).filter((i) => bodyOf(checked.tables.arenas, i).exported)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -198,16 +198,16 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
 
 // A C header declaring a library's exports, usable from C and C++. A parameter named like a C
 // keyword is left unnamed, as C allows.
-function header(name: string, exports: Instance[]): string {
+function header(name: string, tables: Tables, exports: Instance[]): string {
   const guard = `${/^[A-Za-z]/.test(name) ? "" : "FISH_"}${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
   const lines = exports.map((i) => {
-    const params = bodyOf(i).params.map((p) => {
-      const { type, name } = i.tables.arenas.localOf(i.locals.get(p)!);
-      const c = cType(i.tables.typing, type);
+    const params = bodyOf(tables.arenas, i).params.map((p) => {
+      const { type, name } = tables.arenas.localOf(i.locals.get(p)!);
+      const c = cType(tables.typing, type);
       const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
       return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;
     });
-    return `${cType(i.tables.typing, i.returns)} ${bodyOf(i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
+    return `${cType(tables.typing, i.returns)} ${bodyOf(tables.arenas, i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
   });
   return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "", ...lines, "", "#ifdef __cplusplus", "}", "#endif", "", `#endif`, ""].join("\n");
 }
@@ -255,8 +255,9 @@ function refuseForeignRust(target: Target) {
 // the cache keeps between builds.
 function parts(ir: string, checked: Checked, release: boolean, target: Target = HOST_TARGET): { std: Unit[]; program: string } {
   if (release) return { std: [], program: ir };
-  const bodies = compiledOf(checked).filter((i) => !bodyOf(i).foreign && !bodyOf(i).rust);
-  const named = (std: boolean) => bodies.filter((i) => bodyOf(i).start >= STD_BASE === std).map(symbol);
+  const arenas = checked.tables.arenas;
+  const bodies = compiledOf(checked).filter((i) => !bodyOf(arenas, i).foreign && !bodyOf(arenas, i).rust);
+  const named = (std: boolean) => bodies.filter((i) => bodyOf(arenas, i).start >= STD_BASE === std).map((i) => symbol(arenas, i));
   const { std, program } = split(ir, named(true), named(false));
   return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"], stdin: std, inputs: [] }], program };
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import type { Instance } from "./check.ts";
-import { bodyOf, type LocalId } from "./arenas.ts";
+import { bodyOf, type Arenas, type LocalId } from "./arenas.ts";
 import { CompileError } from "./diag.ts";
 import { nextId } from "./ids.ts";
 import { fileAt, stdModuleAt } from "./program.ts";
@@ -106,20 +106,20 @@ type Frame = { instance: Instance; locals: Map<LocalId, Value>; self: Record | u
 
 // The value of `comptime expr`, written in `instance`.
 /** @throws {CompileError} */
-export function comptimeValue(instance: Instance, site: Expr & { kind: "comptime" }): Value {
-  return guarded(instance.tables, site, (run) => run.expr(seeded(instance), site.expr));
+export function comptimeValue(tables: Tables, instance: Instance, site: Expr & { kind: "comptime" }): Value {
+  return guarded(tables, site, (run) => run.expr(seeded(tables, instance), site.expr));
 }
 
 // Runs a `comptime { }` block written in `instance`, for what it checks.
 /** @throws {CompileError} */
-export function comptimeBlock(instance: Instance, site: Stmt & { kind: "comptime" }) {
-  guarded(instance.tables, site, (run) => run.block(seeded(instance), site.body));
+export function comptimeBlock(tables: Tables, instance: Instance, site: Stmt & { kind: "comptime" }) {
+  guarded(tables, site, (run) => run.block(seeded(tables, instance), site.body));
 }
 
 // A comptime parameter's argument at a call written in `instance`.
 /** @throws {CompileError} */
-export function comptimeArgument(instance: Instance, arg: Expr): Value {
-  return guarded(instance.tables, arg, (run) => run.expr(seeded(instance), arg));
+export function comptimeArgument(tables: Tables, instance: Instance, arg: Expr): Value {
+  return guarded(tables, arg, (run) => run.expr(seeded(tables, instance), arg));
 }
 
 // Renames, in a quote's value, the names spelled `from` in nodes its quotes made.
@@ -146,8 +146,8 @@ function renameQuoted({ quotedSpans }: Tables, v: Value, from: string, to: strin
 // A function run while compiling with the given arguments, as a macro runs on a declaration;
 // a failure is reported at `site`.
 /** @throws {CompileError} */
-export function comptimeCall(instance: Instance, args: Value[], site: Span): Value {
-  return guarded(instance.tables, site, (run) => run.call(instance, args, undefined, site));
+export function comptimeCall(tables: Tables, instance: Instance, args: Value[], site: Span): Value {
+  return guarded(tables, site, (run) => run.call(instance, args, undefined, site));
 }
 
 // How a quoted tree, or a declaration a macro takes, becomes a value while compiling. Each
@@ -223,28 +223,28 @@ export function stringsType({ typing, stringArrays }: Tables, items: string[]): 
 }
 
 // The value an instance's comptime parameter was given, from the literal type it is keyed by.
-export function comptimeParameter(instance: Instance, p: Param): Value {
+export function comptimeParameter(tables: Tables, instance: Instance, p: Param): Value {
   const t = instance.bindings.get(`comptime ${(p.pattern as { name: string }).name}`);
-  const r = t === undefined || typeof t === "string" ? undefined : instance.tables.typing.rec(t);
+  const r = t === undefined || typeof t === "string" ? undefined : tables.typing.rec(t);
   if (r?.kind !== "literal") return undefined;
-  const strings = instance.tables.stringArrays.get(t as LiteralType);
+  const strings = tables.stringArrays.get(t as LiteralType);
   if (strings) return { kind: "array", items: [...strings] };
   // An enum's member keeps which enum it is, as members of two enums may share a value.
   return r.owner ? { kind: "member", type: t!, value: r.value } : r.value;
 }
 
 // A frame for comptime code in an instance, which knows the instance's comptime parameters.
-function seeded(instance: Instance): Frame {
-  return { instance, locals: known(instance), self: undefined };
+function seeded(tables: Tables, instance: Instance): Frame {
+  return { instance, locals: known(tables, instance), self: undefined };
 }
 
 // The comptime parameters an instance can read, by local: its own, and in a closure, those of
 // the functions it is written in, through what it captures.
-function known(instance: Instance): Map<LocalId, Value> {
-  const parent = bodyOf(instance).closure?.parent;
-  const outer = parent ? known(instance.tables.arenas.instanceOf(parent)) : new Map<LocalId, Value>();
+function known(tables: Tables, instance: Instance): Map<LocalId, Value> {
+  const parent = bodyOf(tables.arenas, instance).closure?.parent;
+  const outer = parent ? known(tables, tables.arenas.instanceOf(parent)) : new Map<LocalId, Value>();
   const locals = new Map<LocalId, Value>();
-  for (const p of bodyOf(instance).params) if (p.comptime) locals.set(instance.locals.get(p)!, comptimeParameter(instance, p));
+  for (const p of bodyOf(tables.arenas, instance).params) if (p.comptime) locals.set(instance.locals.get(p)!, comptimeParameter(tables, instance, p));
   for (const [alias, from] of instance.captures ?? []) if (from !== "this" && outer.has(from)) locals.set(alias, outer.get(from));
   return locals;
 }
@@ -264,10 +264,10 @@ export function comptimeChecks(tables: Tables, check: InstanceCheck) {
 
 // A top-level const's value, or a `comptime { }` block run at the top level: its body.
 /** @throws {CompileError} */
-export function comptimeBody(instance: Instance): Value {
-  const { constants } = instance.tables;
+export function comptimeBody(tables: Tables, instance: Instance): Value {
+  const { constants } = tables;
   if (constants.has(instance.id)) return constants.get(instance.id);
-  const v = guarded(instance.tables, bodyOf(instance), (run) => run.constant(instance, bodyOf(instance)));
+  const v = guarded(tables, bodyOf(tables.arenas, instance), (run) => run.constant(instance, bodyOf(tables.arenas, instance)));
   constants.set(instance.id, v);
   return v;
 }
@@ -293,7 +293,7 @@ function guarded(tables: Tables, site: Span, go: ComptimeGo): Value {
   });
 }
 
-const constName = (c: Instance) => bodyOf(c).name.slice("const ".length);
+const constName = (arenas: Ref<Arenas>, c: Instance) => bodyOf(arenas, c).name.slice("const ".length);
 
 class Interpreter {
   tables: Tables;
@@ -358,7 +358,7 @@ class Interpreter {
   /** @throws {CompileError | Jump | Stop | Thrown} */
   constant(this: Mut<this>, c: Instance, at: Span): Value {
     if (this.constants.has(c.id)) return this.constants.get(c.id);
-    if (this.computing.has(c.id)) throw new Stop(`'${constName(c)}' needs its own value to compute its value${this.cycle([...this.computing].slice([...this.computing].indexOf(c.id)).map((i) => this.arenas.instanceOf(i)))}`, at, false);
+    if (this.computing.has(c.id)) throw new Stop(`'${constName(this.arenas, c)}' needs its own value to compute its value${this.cycle([...this.computing].slice([...this.computing].indexOf(c.id)).map((i) => this.arenas.instanceOf(i)))}`, at, false);
     this.computing.add(c.id);
     try {
       const v = this.call(c, [], undefined, at);
@@ -372,8 +372,8 @@ class Interpreter {
   // How consts reading each other in a ring do it, naming their files when they are in several.
   private cycle(ring: Instance[]): string {
     if (ring.length < 2) return "";
-    const ringFiles = new Set(ring.map((c) => fileAt(this.files, bodyOf(c).start)));
-    const named = [...ring, ring[0]!].map((c) => `'${constName(c)}'${ringFiles.size > 1 ? ` in '${fileAt(this.files, bodyOf(c).start)}'` : ""}`);
+    const ringFiles = new Set(ring.map((c) => fileAt(this.files, bodyOf(this.arenas, c).start)));
+    const named = [...ring, ring[0]!].map((c) => `'${constName(this.arenas, c)}'${ringFiles.size > 1 ? ` in '${fileAt(this.files, bodyOf(this.arenas, c).start)}'` : ""}`);
     return `: ${named[0]} reads ${named.slice(1).join(", which reads ")}`;
   }
 
@@ -456,15 +456,15 @@ class Interpreter {
   call(this: Mut<this>, callee: Instance, args: Value[], self: Record | undefined, at: Span): Value {
     if (++this.depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
-      if (RANDOM.has(bodyOf(callee).name) && stdModuleAt(this.files, bodyOf(callee).start) === "node:crypto") this.random(`'crypto.${bodyOf(callee).name}'`, at);
-      if (bodyOf(callee).async) this.refuse("an async function", at);
-      if (bodyOf(callee).generator) this.unsupported("a generator", at);
-      if (bodyOf(callee).foreign) this.refuse(`the ${bodyOf(callee).rust ? "Rust" : "C"} function '${bodyOf(callee).name}'`, at);
-      if (bodyOf(callee).js) this.refuse(`'${bodyOf(callee).name}' from the package '${bodyOf(callee).js!.module}'`, at);
-      if (!this.ensureChecked(callee.id)) throw new Stop(`this comptime code calls '${bodyOf(callee).name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
+      if (RANDOM.has(bodyOf(this.arenas, callee).name) && stdModuleAt(this.files, bodyOf(this.arenas, callee).start) === "node:crypto") this.random(`'crypto.${bodyOf(this.arenas, callee).name}'`, at);
+      if (bodyOf(this.arenas, callee).async) this.refuse("an async function", at);
+      if (bodyOf(this.arenas, callee).generator) this.unsupported("a generator", at);
+      if (bodyOf(this.arenas, callee).foreign) this.refuse(`the ${bodyOf(this.arenas, callee).rust ? "Rust" : "C"} function '${bodyOf(this.arenas, callee).name}'`, at);
+      if (bodyOf(this.arenas, callee).js) this.refuse(`'${bodyOf(this.arenas, callee).name}' from the package '${bodyOf(this.arenas, callee).js!.module}'`, at);
+      if (!this.ensureChecked(callee.id)) throw new Stop(`this comptime code calls '${bodyOf(this.arenas, callee).name}', which is still being checked, so it can't run yet; compute the value without it`, at, false);
       const frame: Frame = { instance: callee, locals: new Map(), self };
-      bodyOf(callee).params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!, args[i] ?? null));
-      this.statements(frame, bodyOf(callee).body ?? []);
+      bodyOf(this.arenas, callee).params.forEach((p, i) => frame.locals.set(callee.locals.get(p)!, args[i] ?? null));
+      this.statements(frame, bodyOf(this.arenas, callee).body ?? []);
       return undefined;
     } catch (e) {
       if (e instanceof Return) return e.value;
@@ -710,7 +710,7 @@ class Interpreter {
         const literal = literalValue(this.typing, type);
         if (literal !== undefined && !f.instance.locals.has(e)) return literal;
         const read = this.calledAt(f, e);
-        if (read && bodyOf(read).comptime === "const") return this.constant(read, e);
+        if (read && bodyOf(this.arenas, read).comptime === "const") return this.constant(read, e);
         const local = f.instance.locals.get(e);
         if (!local && e.name === "undefined") return null;
         if (!local || !f.locals.has(local)) throw new Stop(`'${e.name}' is only known when the program runs, so comptime code can't read it`, e, false);
@@ -874,7 +874,7 @@ class Interpreter {
     }
     const target = this.calledAt(f, e);
     if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return this.call(target, this.args(f, target, e.args), f.self, e);
-    if (target && callee.kind === "member" && bodyOf(target).self) {
+    if (target && callee.kind === "member" && bodyOf(this.arenas, target).self) {
       const linked = this.link(f, callee.object);
       if (isShort(linked)) return SHORT;
       const object = this.unwrap(linked);

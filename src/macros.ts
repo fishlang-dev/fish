@@ -399,14 +399,14 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const nearest = ready.linked;
   const macro = macroOf(nearest, macros);
   const before = pending.where === "own" ? 1 : 2;
-  const instance = compiledOf(checked).find((i) => bodyOf(i).name === macro.name && bodyOf(i).start === macro.start);
+  const instance = compiledOf(checked).find((i) => bodyOf(checked.tables.arenas, i).name === macro.name && bodyOf(checked.tables.arenas, i).start === macro.start);
   // A parameter of an object or interface type makes a function generic, with no instance until
   // it is called.
   if (!instance) throw new CompileError("E1103", "a macro's parameters can't be object types or interfaces yet, which make it generic; use a class", macro.start, macro.end);
   const param = macro.params[0]!;
   const returns = instance.returns;
-  if (typeof returns === "string" || instance.tables.typing.rec(returns).kind === "literal") throw new CompileError("E1103", `a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${instance.tables.typing.show(returns)}'`, macro.start, macro.end);
-  const input = instance.tables.arenas.localOf(instance.locals.get(param)!).type;
+  if (typeof returns === "string" || checked.tables.typing.rec(returns).kind === "literal") throw new CompileError("E1103", `a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${checked.tables.typing.show(returns)}'`, macro.start, macro.end);
+  const input = checked.tables.arenas.localOf(instance.locals.get(param)!).type;
   const { bare, restore } = stripped(ids, decl, pending);
   const types: Categories = { AstExpr: input, AstStmt: input, AstType: input };
   let value: Value;
@@ -430,15 +430,15 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
   // Computed in the macro's hygiene, so a quote in an argument or a default means its file's names.
   const values = () => ready.args.map((a, i) => {
-    const t = instance.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
+    const t = checked.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
     if (a.none) return null;
-    if (!a.syntax) return comptimeBody(compiledOf(checked).find((c) => bodyOf(c).name === `const ${a.name}`)!);
+    if (!a.syntax) return comptimeBody(checked.tables, compiledOf(checked).find((c) => bodyOf(checked.tables.arenas, c).name === `const ${a.name}`)!);
     return built<Value>(checked.tables, { tree: { of: "expr", node: original[i] ?? a.expr }, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, new AstValues(undefined), new Map(), new Map());
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
   let result: Value;
   try {
-    result = withHygiene(checked.tables, hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
+    result = withHygiene(checked.tables, hygiene, () => comptimeCall(checked.tables, instance, [value, ...index, ...values()], nearest));
   } finally {
     // An error the expansion throws names them as written too.
     for (const n of hygiene.made) compilation.names.local.add(n);

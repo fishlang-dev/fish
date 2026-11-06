@@ -1,3 +1,4 @@
+import type { Tables } from "./compilation.ts";
 import assert from "node:assert";
 import { bodyOf, type LocalId } from "./arenas.ts";
 import type { Instance, Local, Origin } from "./check.ts";
@@ -54,9 +55,9 @@ type Exit = ({ kind: "raise" } | { kind: "return" } | { kind: "jump"; target: St
 type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits: Exit[] };
 
 
-export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
+export function checkMoves(tables: Tables, f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
-  const { kindTests, asserts, computed, jsCrossings, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts, typing, ids, arenas } = instance.tables;
+  const { kindTests, asserts, computed, jsCrossings, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts, typing, ids, arenas } = tables;
   const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
   const isRef = (t: Type): t is RefType => typeof t !== "string" && typing.rec(t).kind === "ref";
   const isUnion = (t: Type): t is UnionType => typeof t !== "string" && typing.rec(t).kind === "union";
@@ -88,7 +89,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
   const arms = new NodeMap<Stmt, [Consumer | undefined, boolean]>();
   // The pass each enclosing loop is on.
   const passes = new NodeMap<Stmt, usize>();
-  const last = lastUses(body, instance);
+  const last = lastUses(tables, body, instance);
   const byId = new Map([...locals.values()].map((l) => arenas.localOf(l)).map((l) => [l.id, l]));
   // What `this` keeps stays held to the end of the body, and after it.
   const kept = arenas.addLocal({ name: "this", type: "void", mutable: false, param: false, id: -1 });
@@ -566,7 +567,7 @@ export function checkMoves(f: Body, instance: Instance, origins: Origin[]) {
           const fieldCall = h?.kind === "closure" || (h?.kind === "dyn" && typing.callableOf.has(h.of));
           const object = e.callee.kind === "member" ? (fieldCall ? e.callee : e.callee.object) : dyn?.callable;
           const place = object && key(object);
-          const self: { mutable: boolean; owned?: boolean } | undefined = (calls.has(e) ? bodyOf(arenas.instanceOf(calls.get(e)!)).self : undefined) ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
+          const self: { mutable: boolean; owned?: boolean } | undefined = (calls.has(e) ? bodyOf(arenas, arenas.instanceOf(calls.get(e)!)).self : undefined) ?? (dyn && { mutable: dyn.mutable || dyn.owned, owned: dyn.owned });
           // An owning method takes its receiver over, as an argument it is handed.
           if (object && self?.owned) {
             expr(object, (p) => `'${p}' moved here: ${name} takes its object over; call it on '${p}.clone()' to keep a copy`);
@@ -1655,7 +1656,7 @@ function overlaps(a: string, b: string): boolean {
 // Where each reference variable is used last: a use as an argument or receiver lasts until
 // the call ends, and a use inside a loop the variable was declared outside of lasts until the
 // loop ends, since the loop may come round to an earlier use.
-function lastUses(body: Stmt[], { locals, types, coercions, calls, envs, made, tables }: Instance): Map<LocalId, f64> {
+function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, calls, envs, made }: Instance): Map<LocalId, f64> {
   const { arenas, typing } = tables;
   const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
   // An argument lent to the call, as a reference or a value holding references, is in use

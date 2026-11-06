@@ -1,3 +1,4 @@
+import type { Tables } from "./compilation.ts";
 import { bodyOf } from "./arenas.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -21,14 +22,15 @@ const LIBRARY = "fsh_rust_shim";
 
 // The shim the instances' Rust functions need, built by cargo; none when the program has none.
 export function rustShim(crates: RustCrate[], checked: Checked): Shim | undefined {
+  const tables = checked.tables;
   const instances = compiledOf(checked);
   // One shim function per Rust function, however many declarations name it.
   // The first declaration of each, as code generation declares it; the checker makes the rest agree.
-  const called = [...instances.filter((i) => bodyOf(i).rust).reduce((seen, i) => (seen.has(trusted(bodyOf(i).rust!).symbol) ? seen : seen.set(bodyOf(i).rust!.symbol, i)), new Map<string, Instance>()).values()];
+  const called = [...instances.filter((i) => bodyOf(tables.arenas, i).rust).reduce((seen, i) => (seen.has(trusted(bodyOf(tables.arenas, i).rust!).symbol) ? seen : seen.set(bodyOf(tables.arenas, i).rust!.symbol, i)), new Map<string, Instance>()).values()];
   if (called.length === 0) return undefined;
   const cargo = Bun.which("cargo");
   if (!cargo) throw new Error("this program calls Rust, which needs cargo to build, and cargo isn't on PATH; install Rust with rustup, from https://rustup.rs");
-  const files = { "Cargo.toml": manifest(crates), "src/lib.rs": source(called) };
+  const files = { "Cargo.toml": manifest(crates), "src/lib.rs": source(tables, called) };
   const h = createHash("sha256");
   for (const [name, text] of Object.entries(files)) h.update(`${name}\0${text}\0`);
   const dir = join(cacheDir(), "rust", h.digest("hex").slice(0, 16));
@@ -229,22 +231,22 @@ function classesIn(c: Crossing): RustClass[] {
 // The shim's source: each function calls its Rust function inside `caught`, its parameters
 // converted to what Rust's inference picks among the forms each crossing allows; each Rust type
 // gets a drop function and an assertion that it is Send.
-function source(called: Instance[]): string {
+function source(tables: Tables, called: Instance[]): string {
   const types = new Map<string, RustClass>();
   const note = (c: RustClass) => types.set(typePath(c), c);
   const wrappers = called.map((i) => {
-    const { crate, path, symbol } = trusted(bodyOf(i).rust!);
-    const b = bodyOf(i);
-    const owner = b.owner && rustClassOf(i.tables.typing, b.owner);
+    const { crate, path, symbol } = trusted(bodyOf(tables.arenas, i).rust!);
+    const b = bodyOf(tables.arenas, i);
+    const owner = b.owner && rustClassOf(tables.typing, b.owner);
     const self = owner && b.self && !b.self.constructor ? b.self : undefined;
-    const constructor = owner && bodyOf(i).self?.constructor;
+    const constructor = owner && bodyOf(tables.arenas, i).self?.constructor;
     if (owner) note(owner);
-    const crossings = i.signature!.map((t) => crossed(i.tables.typing, t));
-    const gives = constructor ? crossed(i.tables.typing, bodyOf(i).owner!, true) : i.returns === "void" ? undefined : crossed(i.tables.typing, i.returns, true);
+    const crossings = i.signature!.map((t) => crossed(tables.typing, t));
+    const gives = constructor ? crossed(tables.typing, bodyOf(tables.arenas, i).owner!, true) : i.returns === "void" ? undefined : crossed(tables.typing, i.returns, true);
     [...crossings, ...(gives ? [gives] : [])].flatMap(classesIn).forEach(note);
     const { returns, out } = rustGives(gives);
     // A `Result`'s `Err` goes to its own slot, as Fish's text for an `Error`, or as the Rust value.
-    const error = i.throws && rustClassOf(i.tables.typing, i.throws);
+    const error = i.throws && rustClassOf(tables.typing, i.throws);
     if (error) note(error);
     const err = i.throws ? `err: *mut *mut u8` : undefined;
     const params = [...(self ? [`this: *mut ${typePath(owner!)}`] : []), ...crossings.flatMap((c, k) => rustParams(c, `a${k}`)), ...(out ? [out] : []), ...(err ? [err] : []), "panicked: *mut *mut c_char"];

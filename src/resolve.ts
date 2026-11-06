@@ -334,7 +334,6 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     return instance;
   }
 
-  /** @throws {CompileError} */
   // A type resolved with `scope`, or no type parameters, in scope.
   /** @throws {CompileError} */
   resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type {
@@ -343,6 +342,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     return this.withScope(bindings, () => this.resolveType(t));
   }
 
+  /** @throws {CompileError} */
   withScope<T>(this: Mut<this>, bindings: Map<string, Type>, f: InScope<T>): T {
     const outer = this.host.resolverState.scope;
     this.host.resolverState.scope = bindings;

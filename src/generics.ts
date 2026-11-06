@@ -711,7 +711,7 @@ export class Instancing<H extends InstancingHost> {
     const checking = this.host.checking();
     const depth = generic && checking !== undefined ? checking.depth + 1 : 0;
     const found = this.host.tables.arenas.addInstance({
-      tables: this.host.tables, body, symbol, bindings, concrete: isConcrete,
+      body, symbol, bindings, concrete: isConcrete,
       depth, returns: "void",
       ...emptyTables(),
     });
@@ -848,7 +848,7 @@ export class Instancing<H extends InstancingHost> {
   /** @throws {CompileError} */
   paramTypes(this: Mut<this>, instance: Ref<Instance>, given?: Map<string, Type>): Type[] {
     const scope = given !== undefined ? given : merged(instance.bindings, undefined);
-    const f = bodyOf(instance);
+    const f = bodyOf(this.host.tables.arenas, instance);
     const implicit = this.implicitOf(f);
     // A generic class's instance gives its parameters what they stand for there, in an implicit
     // parameter's bound too, as a call decides the function's own.
@@ -874,7 +874,7 @@ export class Instancing<H extends InstancingHost> {
   // concrete type for codegen.
   /** @throws {CompileError} */
   scopeOf(this: Mut<this>, instance: Ref<Instance>): Map<string, Type> {
-    const f = bodyOf(instance);
+    const f = bodyOf(this.host.tables.arenas, instance);
     const outer = this.host.classParams(f);
     const outerCount = outer.length;
     let scope = new Map<string, Type>();
