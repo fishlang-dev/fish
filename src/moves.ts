@@ -7,7 +7,7 @@ import { CompileError } from "./diag.ts";
 import type { Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
-import { indexText, restText, MAP_CHANGES } from "./values.ts";
+import { indexText, MAP_CHANGES, restBase, restSuffix } from "./values.ts";
 import { holdsNode } from "./check.ts";
 import { EMBEDDED, redundantBang, bare, type ObjectType, type RefType, type Type, type UnionType } from "./typing.ts";
 import { nextId, NodeMap } from "./nodes.ts";
@@ -880,7 +880,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
     const lentAs = coercionOf(e);
     e = unwrapped(e);
     if (e.kind === "conditional") return [...(types.has(e.then) ? lent(e.then) : []), ...(types.has(e.else) ? lent(e.else) : [])];
-    if (choosing(e)) return [...lent(e.left), ...lent(e.right)];
+    if (e.kind === "binary" && choosing(e)) return [...lent(e.left), ...lent(e.right)];
     // A literal lends what each of its parts does, nested literals included.
     if (e.kind === "object") return e.props.flatMap((p) => (p.kind === "property" ? lent(p.value) : []));
     // A closure made for a call lends what it captures for the call.
@@ -1054,7 +1054,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
       if (types.has(e.else)) hold(holder, e.else);
       return;
     }
-    if (choosing(e)) {
+    if (e.kind === "binary" && choosing(e)) {
       hold(holder, e.left);
       hold(holder, e.right);
       return;
@@ -1155,10 +1155,23 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   }
 
   // What an awaited future borrows from: a combinator's are those of each future in its list.
-  function awaitedSources(e: Expr): Expr[] {
-    const list = combinedCalls.has(e) ? (e as Extract<Expr, { kind: "call" }>).args[0] : undefined;
-    if (list?.kind === "array") return (list.elements as Expr[]).flatMap((x) => awaitedSources(x));
+  function awaitedSources(e: Ref<Expr>): Expr[] {
+    if (combinedCalls.has(e) && e.kind === "call" && e.args.length > 0) {
+      let out: Expr[] = [];
+      if (awaitedIn(e.args[0]!, out)) return out;
+    }
     return borrowsFrom.get(e) ?? [];
+  }
+
+  // A combinator's list of futures: what each borrows from, and whether it is a list written out.
+  function awaitedIn(list: Ref<Expr>, out: Mut<Expr[]>): boolean {
+    if (list.kind !== "array") return false;
+    for (const x of list.elements) {
+      if (x === undefined) continue;
+      let found = awaitedSources(x);
+      while (found.length > 0) out.push(found.shift()!);
+    }
+    return true;
   }
 
   // A borrow kept past its statement can't point at a temporary, which is gone once the
@@ -1254,7 +1267,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
     const pointsAs = coercionOf(e);
     e = unwrapped(e);
     if (e.kind === "conditional") return [...(types.has(e.then) ? pointsInto(e.then) : []), ...(types.has(e.else) ? pointsInto(e.else) : [])];
-    if (choosing(e)) return [...pointsInto(e.left), ...pointsInto(e.right)];
+    if (e.kind === "binary" && choosing(e)) return [...pointsInto(e.left), ...pointsInto(e.right)];
     // A closure points at what it borrows, and wherever what it holds points.
     if (e.kind === "arrow" || instance.envs?.has(e)) return captured(e).flatMap(([place, , from, , held]) => (held ? (from && typing.holdsRef(from.type) ? heldBy(from) : []) : [place]));
     const from = borrowsFrom.get(e);
@@ -1410,7 +1423,8 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   // The place an expression names: a variable or `this`, then fields, but not through a getter.
   function key(e: Named): string | undefined {
     // `x!` is what `x` holds, so it is borrowed and changed as `x` is, as is `x as T`.
-    if (projection(e)) return key(e.expr);
+    const inner = operandOf(e);
+    if (inner !== undefined) return key(inner);
     if (e.kind === "shorthand" || e.kind === "ident") {
       const local = localRecord(arenas, localAt(e));
       return local && String(local.id);
@@ -1418,7 +1432,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
     if (e.kind === "this" || e.kind === "super") return "this";
     // Every element of an array is one place inside it: borrowing any borrows the array.
     if (e.kind === "index") {
-      const object = element(e) ? key(e.object) : undefined;
+      const object = e.kind === "index" && element(e) ? key(e.object) : undefined;
       return object === undefined ? undefined : `${object}.[]`;
     }
     if (e.kind !== "member" || calls.has(e) || instance.copiesOut.has(e) || computed.has(e) || !types.has(e.object)) return undefined;
@@ -1499,12 +1513,13 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   }
 
   // `a ?? b` holding a reference gives the one either side holds.
-  function choosing(e: Named): e is Extract<Expr, { kind: "binary" }> {
+  function choosing(e: Ref<Named>): boolean {
     return e.kind === "binary" && e.op === "??" && typing.holdsRef(types.get(e)!);
   }
 
   function rootOf(e: Named): Named {
-    if (projection(e)) return rootOf(e.expr);
+    const inner = operandOf(e);
+    if (inner !== undefined) return rootOf(inner);
     return e.kind === "member" || e.kind === "index" ? rootOf(e.object) : e;
   }
 
@@ -1512,7 +1527,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   function fromCall(e: Expr): boolean {
     e = unwrapped(e);
     if (e.kind === "conditional") return (types.has(e.then) && fromCall(projected(e.then))) || (types.has(e.else) && fromCall(projected(e.else)));
-    if (choosing(e)) return fromCall(projected(e.left)) || fromCall(projected(e.right));
+    if (e.kind === "binary" && choosing(e)) return fromCall(projected(e.left)) || fromCall(projected(e.right));
     return borrowsFrom.has(e);
   }
 
@@ -1546,30 +1561,40 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
     return from !== undefined && to !== undefined && isUnion(typing.lower(from)) && typing.lower(from) !== typing.lower(to) && !typing.fits(typing.lower(from), typing.lower(to));
   }
 
-  function transparent(e: Named): e is Extract<Expr, { kind: "as" | "satisfies" | "unsafe" }> {
+  function transparent(e: Ref<Named>): boolean {
     return (e.kind === "as" && !narrowsUnion(e)) || e.kind === "satisfies" || e.kind === "unsafe";
   }
 
   // Forms that read the place their operand names: `x!`, whatever the Option holds, and the
   // transparent ones. `unwrapped` follows fewer, since it reads a value's own type and coercion.
-  function projection(e: Named): e is Extract<Expr, { kind: "nonNull" | "as" | "satisfies" | "unsafe" }> {
+  function projection(e: Ref<Named>): boolean {
     return e.kind === "nonNull" || e.kind === "as" || transparent(e);
   }
 
-  function through(e: Expr): Expr {
-    while (projection(e)) e = e.expr;
-    return e;
+  // What a projection reads the place of: its operand.
+  function operandOf(e: Ref<Named>): Ref<Expr> | undefined {
+    if (!projection(e)) return undefined;
+    if (e.kind === "nonNull") return e.expr;
+    if (e.kind === "as" || e.kind === "satisfies") return e.expr;
+    if (e.kind === "unsafe") return e.expr;
+    return undefined;
+  }
+
+  function through(e: Ref<Expr>): Ref<Expr> {
+    let at = e;
+    for (let inner = operandOf(at); inner !== undefined; inner = operandOf(at)) at = inner;
+    return at;
   }
 
   // The indexes into arrays along a place's path, outermost first.
   function indexes(e: Expr): Expr[] {
     const found: Expr[] = [];
-    for (e = bare(e); e.kind === "member" || e.kind === "index"; e = bare(e.object)) if (element(e)) found.unshift(e.index);
+    for (e = bare(e); e.kind === "member" || e.kind === "index"; e = bare(e.object)) if (e.kind === "index" && element(e)) found.unshift(e.index);
     return found;
   }
 
   // Whether an expression is an index into an array.
-  function element(e: Named): e is Extract<Expr, { kind: "index" }> {
+  function element(e: Ref<Named>): boolean {
     return e.kind === "index" && array(e.object);
   }
 
@@ -1624,10 +1649,12 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   }
 
   // How a place reads in a message.
-  function text(e: Named): string {
+  function text(e: Ref<Named>): string {
     // A tuple's element reads as it is written, `t[0]`.
-    const rest = restText(restStarts, e as Expr, (x) => text(x as Named));
-    if (rest) return rest;
+    if (e.kind !== "shorthand") {
+      const base = restBase(restStarts, e);
+      if (base !== undefined) return `${text(base)}${restSuffix(restStarts, e)}`;
+    }
     if (e.kind === "member" && e.name === EMBEDDED) return text(e.object);
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${text(e.object)}[${e.name}]` : `${text(e.object)}.${e.name}`;
     if (e.kind === "index") return `${text(e.object)}[${indexText(e.index)}]`;
@@ -1659,62 +1686,72 @@ function overlaps(a: string, b: string): boolean {
 // loop ends, since the loop may come round to an earlier use.
 function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, calls, envs, made }: Instance): Map<LocalId, f64> {
   const { arenas, typing } = tables;
-  const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
+  const localAt = (n: Expr | Stmt | Param | ObjectProp): LocalId | undefined => locals.get(n);
   // An argument lent to the call, as a reference or a value holding references, is in use
   // until the call ends.
   const lentTo = (a: Expr) => {
     const t = coercions.get(a) ?? types.get(a);
     return t !== undefined && typing.holdsRef(t);
   };
-  const last = new Map<LocalId, f64>();
-  const loops: Stmt[] = [];
-  const declared = new Map<LocalId, Stmt[]>();
-  const used = (local: Local | undefined, at: usize) => {
-    if (!local || !typing.holdsRef(local.type)) return;
-    const outer = loops.find((l) => !(declared.get(local.localId) ?? []).includes(l));
-    last.set(local.localId, Math.max(last.get(local.localId) ?? -1, at as f64, (outer?.end ?? at) as f64));
+  let last = new Map<LocalId, f64>();
+  // The loops around the statement being read, innermost last, each by its id and end; and the
+  // loops each variable was declared inside, by their ids.
+  let loops: { id: usize; end: usize }[] = [];
+  let declared = new Map<LocalId, usize[]>();
+  const used = (id: LocalId | undefined, at: usize) => {
+    if (id === undefined || !typing.holdsRef(arenas.localOf(id).type)) return;
+    const inside = declared.get(id);
+    let outer: usize = at;
+    for (const l of loops) {
+      if (inside !== undefined && inside.includes(l.id)) continue;
+      outer = l.end;
+      break;
+    }
+    last.set(id, Math.max(last.get(id) ?? -1, at as f64, outer as f64));
   };
-  const stmts = (list: Stmt[]) => list.forEach(stmt);
   function stmt(s: Stmt) {
     switch (s.kind) {
       case "expr":
         return expr(s.expr);
       case "let":
-        declared.set(locals.get(s)!, [...loops]);
+        declared.set(locals.get(s)!, loopIds(loops));
         return s.declarations[0]!.init && expr(s.declarations[0]!.init);
       case "if":
         expr(s.cond);
-        stmts(s.then);
-        if (s.else) stmts(s.else);
+        for (const x of s.then) stmt(x);
+        if (s.else) for (const x of s.else) stmt(x);
         return;
       case "try":
-        stmts(s.block);
-        if (s.handler) stmts(s.handler);
-        if (s.finalizer) stmts(s.finalizer);
+        for (const x of s.block) stmt(x);
+        if (s.handler) for (const x of s.handler) stmt(x);
+        if (s.finalizer) for (const x of s.finalizer) stmt(x);
         return;
       case "block":
       case "comptime":
       case "unsafe":
-        return stmts(s.body);
+        {
+          for (const x of s.body) stmt(x);
+          return;
+        }
       case "while":
       case "doWhile":
-        loops.push(s);
+        loops.push({ id: s.id, end: s.end });
         expr(s.cond);
-        stmts(s.body);
+        for (const x of s.body) stmt(x);
         loops.pop();
         return;
       case "for":
         if (s.init) stmt(s.init);
-        loops.push(s);
+        loops.push({ id: s.id, end: s.end });
         if (s.test) expr(s.test);
         if (s.update) expr(s.update);
-        stmts(s.body);
+        for (const x of s.body) stmt(x);
         loops.pop();
         return;
       case "forOf":
         expr(s.right);
-        loops.push(s);
-        stmts(s.body);
+        loops.push({ id: s.id, end: s.end });
+        for (const x of s.body) stmt(x);
         loops.pop();
         return;
       case "labeled":
@@ -1723,7 +1760,7 @@ function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, call
         expr(s.discriminant);
         for (const c of s.cases) {
           if (c.test) expr(c.test);
-          stmts(c.body);
+          for (const x of c.body) stmt(x);
         }
         return;
       case "return":
@@ -1736,7 +1773,7 @@ function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, call
     switch (e.kind) {
       case "ident":
         // A nested function used as a value uses what its closure lends from here.
-        for (const l of envs?.get(e)?.env ?? []) used(arenas.localOf(l), call ?? e.end);
+        for (const l of envs?.get(e)?.env ?? []) used(l, call ?? e.end);
         return used(localAt(e), call ?? e.end);
       case "member":
         return expr(e.object, call);
@@ -1754,7 +1791,7 @@ function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, call
         // A closure called through a variable is in use until the call ends, as is what a
         // nested function called by name uses.
         if (e.callee.kind === "ident") expr(e.callee, e.end);
-        for (const l of envs?.get(e)?.env ?? []) used(arenas.localOf(l), e.end);
+        for (const l of envs?.get(e)?.env ?? []) used(l, e.end);
         for (const a of e.args) expr(a, lentTo(a) ? e.end : undefined);
         return;
       case "unary":
@@ -1787,8 +1824,8 @@ function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, call
         return;
       // A closure uses what it captures where it is made; whatever holds it holds that after.
       case "arrow":
-        for (const from of arenas.instanceOf(calls.get(e)!).captures!.values()) if (from !== "this") used(arenas.localOf(from), call ?? e.end);
-        for (const { env } of made?.get(e) ?? []) for (const l of env) used(arenas.localOf(l), call ?? e.end);
+        for (const from of arenas.instanceOf(calls.get(e)!).captures!.values()) if (from !== "this") used(from, call ?? e.end);
+        for (const { env } of made?.get(e) ?? []) for (const l of env) used(l, call ?? e.end);
         return;
       case "throw":
         return expr(e.value);
@@ -1811,7 +1848,7 @@ function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, call
       // A pipe's topic is declared where the pipe runs, as a `let` is.
       case "pipe":
         expr(e.value);
-        if (locals.has(e)) declared.set(locals.get(e)!, [...loops]);
+        if (locals.has(e)) declared.set(locals.get(e)!, loopIds(loops));
         return expr(e.body, call);
       case "int":
       case "float":
@@ -1827,8 +1864,14 @@ function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, call
         assert(false, `the last-use walk has no case for '${e.kind}' expressions`);
     }
   }
-  stmts(body);
+  for (const x of body) stmt(x);
   return last;
+}
+
+function loopIds(loops: Ref<{ id: usize; end: usize }[]>): usize[] {
+  let out: usize[] = [];
+  for (const l of loops) out.push(l.id);
+  return out;
 }
 
 // The local an id names, or nothing without one.

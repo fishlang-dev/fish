@@ -346,11 +346,17 @@ export const MATH_CONSTANTS: Record<string, f64> = {
 };
 
 
-// How a rest tuple's element or its array reads in a message, as written: `t[2]` and `t[1...]`.
-export function restText(restStarts: Tables["restStarts"], e: Expr, text: (e: Expr) => string): string | undefined {
-  if (e.kind === "index" && e.index.kind === "int" && restStarts.has(e.object)) return `${text((e.object as Extract<Expr, { kind: "member" }>).object)}[${BigInt(restStarts.get(e.object)!) + e.index.value}]`;
-  if (e.kind === "member" && restStarts.has(e)) return `${text(e.object)}[${restStarts.get(e)}...]`;
+// How a rest tuple's element or its array reads in a message, as written: `t[2]` and `t[1...]`,
+// the tuple read printed before `restSuffix`; nothing for any other read.
+export function restBase<A extends Lifetime>(restStarts: Ref<Tables["restStarts"]>, e: Ref<Expr, A>): Ref<Expr, A> | undefined {
+  if (e.kind === "index" && e.index.kind === "int" && restStarts.has(e.object) && e.object.kind === "member") return e.object.object;
+  if (e.kind === "member" && restStarts.has(e)) return e.object;
   return undefined;
+}
+
+export function restSuffix(restStarts: Ref<Tables["restStarts"]>, e: Ref<Expr>): string {
+  if (e.kind === "index" && e.index.kind === "int") return `[${BigInt(restStarts.get(e.object)!) + e.index.value}]`;
+  return `[${restStarts.get(e)}...]`;
 }
 
 // What a type's Dyn runs: each method's instance, each field's getter (none for a field), and
@@ -7753,8 +7759,8 @@ export class Expressions<C extends Context> implements Union {
 
   // How a place reads in a message, like `p.inner.x`.
   private placeText(e: Expr): string {
-    const rest = restText(this.restStarts, e, (x) => this.placeText(x));
-    if (rest) return rest;
+    const base = restBase(this.restStarts, e);
+    if (base !== undefined) return `${this.placeText(base)}${restSuffix(this.restStarts, e)}`;
     // The collection a class extending Map or Set embeds reads as the object itself.
     if (e.kind === "member" && e.name === EMBEDDED) return this.placeText(e.object);
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${this.placeText(e.object)}[${e.name}]` : `${this.placeText(e.object)}.${shownName(e.name)}`;
@@ -8029,6 +8035,6 @@ const collectionMember = (c: ClassInfo, name: string) => name === "size" || (c.e
 const shownPath = (path: string) => path.replaceAll(`.${EMBEDDED}`, "");
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
-export function indexText(e: Expr): string {
+export function indexText(e: Ref<Expr>): string {
   return e.kind === "ident" ? e.name : e.kind === "int" ? String(e.value) : "...";
 }
