@@ -1509,7 +1509,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       return held;
     }
     const source: Field[] = homomorphic !== undefined ? this.typeFns().fieldsOf(homomorphic, "a mapped type", spanOf(t.constraint)) : [];
-    const fields: Field[] = [];
+    let fields: Field[] = [];
     const names: string[] = keys === "never" ? [] : this.typeFns().keysOf(keys, "a mapped type", spanOf(t.constraint));
     for (const key of names) {
       let bound = this.scopeCopy();
@@ -1519,15 +1519,19 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const names: string[] = renamed === "never" ? [] : this.typeFns().keysOf(renamed, "a mapped type's 'as' clause", asAt);
       const resolved = this.resolveIn(bound, t.type);
       const value = storable(this.host.tables.typing, resolved, spanOf(t.type));
-      const from = source.find((f) => f.name === key);
-      const readonly = t.readonly !== undefined ? t.readonly === "+" : from?.readonly === true;
+      let from: Field | undefined = undefined;
+      for (const f of source) if (from === undefined && f.name === key) from = copyField(f);
+      const readonly = t.readonly !== undefined ? t.readonly === "+" : from !== undefined && from.readonly === true;
+      const optional = from !== undefined ? from.optional : undefined;
       for (const name of names) {
-        if (fields.some((f) => f.name === name)) throw new CompileError("E0114", `two keys of this mapped type are both renamed '${name}', and an object type has each field once`, (t.as ?? t).start, (t.as ?? t).end);
-        const field = t.optional === "+" ? this.host.tables.typing.optionalField(name, value)
-          : t.optional === "-" ? { name, type: from?.optional === "added" ? this.host.tables.typing.withoutNull(value) : value }
-          : from?.optional && from.optional !== "undefined" ? this.kept(name, value, from.optional)
-          : { name, type: value };
-        fields.push({ ...field, ...(readonly && { readonly: true }) });
+        for (const f of fields) if (f.name === name) throw new CompileError("E0114", `two keys of this mapped type are both renamed '${name}', and an object type has each field once`, asAt.start, asAt.end);
+        let field: Field;
+        if (t.optional === "+") field = this.host.tables.typing.optionalField(name, value);
+        else if (t.optional === "-") field = { name, type: optional === "added" ? this.host.tables.typing.withoutNull(value) : value };
+        else if (optional === "added" || optional === "held") field = this.kept(name, value, optional);
+        else field = { name, type: value };
+        if (readonly) field.readonly = true;
+        fields.push(field);
       }
     }
     return this.host.tables.typing.objectType(fields);
@@ -2175,7 +2179,7 @@ const MEMBER_FORMS = new Map<string, string>([
 
 // Fields with their source spans, checked for a name given twice.
 /** @throws {CompileError} */
-export function fields(list: Field[], at: Ref<Span>[]): Field[] {
+export function fields(list: Field[], at: Ref<Span[]>): Field[] {
   for (let i: usize = 0; i < list.length; i++) {
     for (let k: usize = 0; k < i; k++) if (list[k]!.name === list[i]!.name) throw new CompileError("E0402", `duplicate property '${list[i]!.name}'`, at[i]!.start, at[i]!.end);
   }
