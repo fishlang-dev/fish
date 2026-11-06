@@ -265,7 +265,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   /** @throws {CompileError} */
   validate(this: Mut<this>) {
     this.aliases.forEach((a) => {
-      const scope = placeholders(this.typing, a.typeParams, (t, s) => this.withScope(s, () => this.resolveType(t)));
+      const scope = placeholders(this, a.typeParams, undefined, undefined);
       if (a.typeParams.length > 0) this.host.resolverState.deferring++;
       try {
         this.aliasType(a, [...scope.values()], a);
@@ -274,7 +274,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       }
     });
     // A generic interface is checked once with placeholders for its parameters.
-    this.interfaces.forEach((i) => this.interfaceOf(i, [...placeholders(this.typing, i.typeParams, (t, s) => this.withScope(s, () => this.resolveType(t))).values()]));
+    this.interfaces.forEach((i) => this.interfaceOf(i, [...placeholders(this, i.typeParams, undefined, undefined).values()]));
   }
 
   // A data-carrying enum made with these type arguments: a variant per member, its payload
@@ -335,6 +335,14 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   }
 
   /** @throws {CompileError} */
+  // A type resolved with `scope`, or no type parameters, in scope.
+  /** @throws {CompileError} */
+  resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type {
+    let bindings = new Map<string, Type>();
+    if (scope !== undefined) for (const [n, x] of scope) bindings.set(n, x);
+    return this.withScope(bindings, () => this.resolveType(t));
+  }
+
   withScope<T>(this: Mut<this>, bindings: Map<string, Type>, f: InScope<T>): T {
     const outer = this.host.resolverState.scope;
     this.host.resolverState.scope = bindings;
@@ -477,7 +485,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (t.typeParams.length > 0) {
         if (t.throws) throw unsupported("generic function types that throw", t.throws);
         const around = new Map(this.host.resolverState.scope);
-        const own = placeholders(this.typing, t.typeParams, (n, s) => this.withScope(new Map([...around, ...s]), () => this.resolveType(n)));
+        const own = placeholders(this, t.typeParams, around, undefined);
         const fn = this.withScope(new Map([...around, ...own]), () => this.typing.functionType(t.params.map(paramName), t.params.map((p) => this.callbackParam(p)), this.resolveType(t.returns)));
         this.typing.rec(fn).name = `<${t.typeParams.map((p) => p.name).join(", ")}>${this.typing.rec(fn).name}`;
         this.typing.rec(fn).generic = { names: t.typeParams.map((p) => p.name), node: t, scope: around, own: [...own.values()] };
@@ -931,7 +939,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         if (rest) throw unsupported("rest parameters in interface methods", rest);
         // A generic method's own type parameters stand for themselves in its signature.
         const around = new Map(this.host.resolverState.scope);
-        const own = m.typeParams.length > 0 ? placeholders(this.typing, m.typeParams, (n, s) => this.withScope(new Map([...around, ...s]), () => this.resolveType(n))) : new Map<string, Type>();
+        const own = m.typeParams.length > 0 ? placeholders(this, m.typeParams, around, undefined) : new Map<string, Type>();
         const returns = m.returns;
         const [params, result, throws] = this.withScope(new Map([...around, ...own]), () => [(self ? m.params.slice(1) : m.params).map((p) => this.paramType(p)), this.resolveType(returns), m.throws && this.resolveType(m.throws)] as const);
         if (throws === "void") throw new CompileError("E0118", "a function can't throw 'void'; throw a value", m.throws!.start, m.throws!.end);

@@ -7,36 +7,47 @@ import { literalValue } from "./narrow.ts";
 import { unsupported } from "./unsupported.ts";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Expr, Id, Param, Span, TypeNode, TypeParam } from "./parser.ts";
-import { paramName, unboxedClosure, type InScope } from "./resolve.ts";
+import { paramName, unboxedClosure } from "./resolve.ts";
 import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.ts";
-import { NodeMap, NodeSet, forEachChild, type AnyNode } from "./nodes.ts";
+import { NodeMap, NodeSet, forEachChild, nextId, renumberTypeNode, Rewrites, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
+import { cloneTypeNode, cloneTypeParam, rebuiltTypeNode } from "./rebuild.ts";
 
 // Generic functions: the placeholders a generic body is checked with at its definition, the
 // type arguments a call infers, and the bounds those arguments must satisfy.
 
-/** @throws {CompileError} */
-export type ResolveScoped = (t: TypeNode, scope: Map<string, Type>) => Type;
+// What resolving a type parameter's bound needs: the program's types, and a type resolved in a
+// scope of type parameters.
+export interface BoundResolver {
+  tables: Tables;
+  /** @throws {CompileError} */
+  resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type;
+}
 
 // A bound is an interface or an object type, offering its members, or a type naming values, as
 // `K extends "a" | "b"` does. Classes are nominal and embed rather than subclass, so a class
-// bound could only ever mean that one class. In an instance, each parameter also holds the
-// concrete type `concrete` gives it.
+// bound could only ever mean that one class. Each bound is resolved with `around` in scope and the
+// parameters before it. In an instance, each parameter also holds the concrete type `concrete`
+// gives it.
 /** @throws {CompileError} */
-export function placeholders(typing: Typing, params: TypeParam[], resolve: ResolveScoped, concrete?: (name: string) => Type): Map<string, Type> {
-  const scope = new Map<string, Type>();
+export function placeholders<R extends BoundResolver>(r: Mut<R>, params: TypeParam[], around: Ref<Map<string, Type>> | undefined, concrete: Ref<Map<string, Type>> | undefined): Map<string, Type> {
+  let scope = new Map<string, Type>();
   for (const p of params) {
     if (p.modifiers.length > 0) throw new CompileError("E0801", `'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);
-    if (p.default) throw new CompileError("E0801", "default type arguments are not supported yet", p.default.start, p.default.end);
-    let bound: ObjectType | InterfaceType | undefined;
-    let within: Type | undefined;
-    if (p.constraint) {
-      const t = resolve(p.constraint, scope);
-      const r = typeof t === "string" ? undefined : typing.rec(t);
-      if (r?.kind === "interface" || r?.kind === "object") bound = t as ObjectType | InterfaceType;
-      else if (valueBound(typing, t)) within = t;
-      else throw new CompileError("E0107", `a type parameter's bound must be an interface, an object type, or a union, primitive, literal or brand type, not '${typing.show(t)}'`, p.constraint.start, p.constraint.end);
+    if (p.default !== undefined) throw new CompileError("E0801", "default type arguments are not supported yet", p.default.start, p.default.end);
+    let bound: ObjectType | InterfaceType | undefined = undefined;
+    let within: Type | undefined = undefined;
+    if (p.constraint !== undefined) {
+      let seen = new Map<string, Type>();
+      if (around !== undefined) for (const [n, t] of around) seen.set(n, t);
+      for (const [n, t] of scope) seen.set(n, t);
+      const t = r.resolveIn(seen, p.constraint);
+      const kind = typeof t === "string" ? undefined : r.tables.typing.rec(t).kind;
+      if (kind === "interface" || kind === "object") bound = t as ObjectType | InterfaceType;
+      else if (valueBound(r.tables.typing, t)) within = t;
+      else throw new CompileError("E0107", `a type parameter's bound must be an interface, an object type, or a union, primitive, literal or brand type, not '${r.tables.typing.show(t)}'`, p.constraint.start, p.constraint.end);
     }
-    scope.set(p.name, concrete ? typing.wrapped(p.name, bound, concrete(p.name)) : typing.typeParameter(p.name, bound, within));
+    const stands = concrete !== undefined ? concrete.get(p.name) : undefined;
+    scope.set(p.name, stands !== undefined ? r.tables.typing.wrapped(p.name, bound, stands) : r.tables.typing.typeParameter(p.name, bound, within));
   }
   return scope;
 }
@@ -46,15 +57,22 @@ export function placeholders(typing: Typing, params: TypeParam[], resolve: Resol
 function valueBound(typing: Typing, t: Type): boolean {
   if (typeof t === "string") return t !== "void" && t !== "never";
   const r = typing.rec(t);
-  if (r.kind === "union") return r.members.every((m) => { const k = typing.recOf(m)?.kind; return k !== "interface" && k !== "param"; });
+  if (r.kind === "union") {
+    for (const m of r.members) {
+      const mr = typing.recOf(m);
+      if (mr !== undefined && (mr.kind === "interface" || mr.kind === "param")) return false;
+    }
+    return true;
+  }
   return r.kind === "literal" || r.kind === "pattern" || r.kind === "brand";
 }
 
 // The literal type of the first literal argument given for a parameter typed `name`.
-function literalArgument(typing: Typing, f: Body, name: string, args: Expr[]): Type | undefined {
-  for (const [i, p] of f.params.entries()) {
-    const value = args[i] && literalValue(args[i]);
-    if (p.type?.kind === "ref" && p.type.name === name && p.type.args.length === 0 && value !== undefined) return typing.literalType(value);
+function literalArgument(typing: Mut<Typing>, f: Ref<Body>, name: string, args: Ref<Expr[]>): Type | undefined {
+  for (let i: usize = 0; i < f.params.length; i++) {
+    const value = i < args.length ? literalValue(args[i]!) : undefined;
+    const t = f.params[i]!.type;
+    if (t !== undefined && t.kind === "ref" && t.name === name && t.args.length === 0 && value !== undefined) return typing.literalType(value);
   }
   return undefined;
 }
@@ -63,17 +81,21 @@ function literalArgument(typing: Typing, f: Body, name: string, args: Expr[]): T
 // since each new set would name another instance of the class. They are kept by the class's
 // first type parameter, which only its own list holds; a list of none has nothing to share.
 /** @throws {CompileError} */
-function classPlaceholders({ typing, classScopes }: Tables, params: TypeParam[], resolve: ResolveScoped): Map<string, Type> {
-  const first = params[0];
-  if (first === undefined) return placeholders(typing, params, resolve);
-  let found = classScopes.get(first);
-  if (!found) classScopes.set(first, found = placeholders(typing, params, resolve));
-  return found;
+function classPlaceholders<R extends BoundResolver>(r: Mut<R>, params: TypeParam[]): Map<string, Type> {
+  if (params.length === 0) return new Map<string, Type>();
+  const first = cloneTypeParam(params[0]!);
+  const found = r.tables.classScopes.get(first);
+  if (found !== undefined) return found;
+  const made = placeholders(r, params, undefined, undefined);
+  r.tables.classScopes.set(first, made);
+  return r.tables.classScopes.get(first)!;
 }
 
 // A body's type parameters, leaving out its lifetimes.
-export function typeParamsOf(f: Body): TypeParam[] {
-  return (f.typeParams ?? []).filter((p) => !isLifetime(p));
+export function typeParamsOf(f: Ref<Body>): TypeParam[] {
+  let out: TypeParam[] = [];
+  if (f.typeParams !== undefined) for (const p of f.typeParams) if (!isLifetime(p)) out.push(cloneTypeParam(p));
+  return out;
 }
 
 // Binds the type parameters `node` names by matching it against an argument's type, looking
@@ -85,13 +107,16 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
   // `Pair<T>` naming a generic alias matches what the alias stands for, its parameters given
   // as written.
   const alias = node.kind === "ref" && node.args.length > 0 && !names.has(node.name) ? aliases.get(node.name) : undefined;
-  if (node.kind === "ref" && alias && alias.typeParams.length === node.args.length && !expanding.has(alias.name)) {
-    const given = new Map(alias.typeParams.map((p, i) => [p.name, node.args[i]!]));
-    expanding.add(alias.name);
+  if (node.kind === "ref" && alias !== undefined && alias.typeParams.length === node.args.length && !expanding.has(alias.name)) {
+    let given = new Map<string, TypeNode>();
+    for (let i: usize = 0; i < alias.typeParams.length; i++) given.set(alias.typeParams[i]!.name, cloneTypeNode(node.args[i]!));
+    const name = alias.name;
+    const body = substituted(tables.ids, alias.type, given);
+    expanding.add(name);
     try {
-      return infer(tables, substituted(alias.type, given), arg, names, bindings, at);
+      return infer(tables, body, arg, names, bindings, at);
     } finally {
-      expanding.delete(alias.name);
+      expanding.delete(name);
     }
   }
   if (node.kind === "ref" && node.args.length === 0 && names.has(node.name)) {
@@ -241,27 +266,33 @@ export function infer(tables: Tables, node: TypeNode, arg: Type, names: Set<stri
 
 // A type written with some names standing for other types, as an alias's body with its
 // parameters given.
-function substituted(node: TypeNode, given: Map<string, TypeNode>): TypeNode {
-  const walk = (n: unknown): unknown => {
-    if (Array.isArray(n)) return n.map(walk);
-    if (!n || typeof n !== "object") return n;
-    const t = n as { kind?: string; name?: unknown; args?: unknown[] };
-    if (t.kind === "ref" && typeof t.name === "string" && t.args?.length === 0 && given.has(t.name)) return given.get(t.name);
-    return Object.fromEntries(Object.entries(t).map(([k, v]) => [k, walk(v)]));
-  };
-  return walk(node) as TypeNode;
+// The copy is renumbered before its names are replaced, so what the replacing records is the
+// copy's, never the alias's own nodes.
+function substituted(ids: Mut<Ids>, node: Ref<TypeNode>, given: Ref<Map<string, TypeNode>>): TypeNode {
+  const copy = renumberTypeNode(cloneTypeNode(node), () => nextId(ids));
+  let rewrites = new Rewrites();
+  walkWhile({ of: "typeNode", node: copy }, (n) => {
+    if (n.of !== "typeNode") return true;
+    const t = n.node;
+    if (t.kind !== "ref" || t.args.length !== 0) return true;
+    const by = given.get(t.name);
+    if (by === undefined) return true;
+    rewrites.replaceTypeNode(t, by);
+    return false;
+  });
+  return rebuiltTypeNode(copy, rewrites);
 }
 
 // A type argument must satisfy its parameter's bound: an interface by shape, an object type
 // by fitting it.
 /** @throws {CompileError} */
-export function checkBound(type: Type, bound: Type, members: Members, at: Span) {
-  const typing = members.typing;
-  const trait = typeof bound === "string" ? undefined : typing.rec(bound);
-  const reason = trait?.kind === "interface" ? unsatisfied(type, bound as InterfaceType, members, at)
-    : typing.fits(type, bound) ? undefined : "";
+export function checkBound(type: Type, bound: Type, members: Mut<Members>, at: Ref<Span>) {
+  const trait = typeof bound === "string" ? undefined : members.typing.rec(bound);
+  const interfaced = trait !== undefined && trait.kind === "interface";
+  const reason = interfaced ? unsatisfied(type, bound as InterfaceType, members, { start: at.start, end: at.end })
+    : members.typing.fits(type, bound) ? undefined : "";
   if (reason === undefined) return;
-  throw new CompileError("E0107", `type '${typing.show(type)}' does not satisfy the constraint '${typing.show(bound)}'${reason ? `: ${reason}` : ""}`, at.start, at.end);
+  throw new CompileError("E0107", `type '${members.typing.show(type)}' does not satisfy the constraint '${members.typing.show(bound)}'${reason !== "" ? `: ${reason}` : ""}`, at.start, at.end);
 }
 
 // Whether a type has no type parameter in it, so its instance can be compiled. A class's
@@ -289,7 +320,8 @@ class Concreteness {
       if (this.visiting.has(t as ClassType)) return true;
       this.visiting.add(t as ClassType);
       try {
-        return (r.generic?.args.every((t) => this.concrete(t)) ?? true) && (!r.base || this.concrete(r.base));
+        if (r.generic !== undefined) for (const a of r.generic.args) if (!this.concrete(a)) return false;
+        return r.base === undefined || this.concrete(r.base);
       } finally {
         this.visiting.delete(t as ClassType);
       }
@@ -325,10 +357,13 @@ export interface InstancingHost {
   /** @throws {CompileError} */
   paramType(p: Param, property?: boolean): Type;
   /** @throws {CompileError} */
-  withScope<T>(bindings: Map<string, Type>, f: InScope<T>): T;
-  // Resolves a body's own signature, where its parameter names shadow top-level ones.
+  resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type;
+  // A type in a body's own signature, where its parameter names shadow top-level ones.
   /** @throws {CompileError} */
-  signing<T>(f: Body, run: InScope<T>): T;
+  resolveSigned(this: Mut<this>, f: BodyId, scope: Ref<Map<string, Type>>, t: Ref<TypeNode>): Type;
+  // A body's parameter's type, in its signature.
+  /** @throws {CompileError} */
+  paramTypeIn(this: Mut<this>, f: BodyId, scope: Ref<Map<string, Type>>, i: usize): Type;
   members(this: Mut<this>): Members;
   instancingState: InstancingState;
   // The instance being checked, which new instantiations count their depth from.
@@ -418,8 +453,11 @@ export class Instancing<H extends InstancingHost> {
     // Inferred from a literal, a type parameter types the arrow as its base type; written, as the
     // instance has it, so a callable the arrow is given fits the instance's own.
     const explicit = typeArgs.length === params.length;
-    const scope = new Map([...(f.scope ?? []), ...this.explicitPlaceholders(f), ...[...bindings].map(([n, t]): [string, Type] => [n, explicit ? this.typing.lowerKeepingBrands(t) : this.typing.widenLet(this.typing.lowerKeepingBrands(t))])]);
-    const resolved = this.host.withScope(scope, () => this.host.resolveType(written));
+    let scope = new Map<string, Type>();
+    if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
+    for (const [n, t] of this.explicitPlaceholders(f)) scope.set(n, t);
+    for (const [n, t] of bindings) scope.set(n, explicit ? this.typing.lowerKeepingBrands(t) : this.typing.widenLet(this.typing.lowerKeepingBrands(t)));
+    const resolved = this.host.resolveIn(scope, written);
     const t = typeof resolved === "string" ? undefined : this.typing.rec(resolved);
     if (t?.kind !== "function") return undefined;
     // A parameter only the callback itself could decide is left for the call to report.
@@ -448,7 +486,7 @@ export class Instancing<H extends InstancingHost> {
   // to what that parameter points at, which may be wider, so a caller reads it as it is.
   /** @throws {CompileError} */
   returnTypeOf(this: Mut<this>, f: Body, scope: Map<string, Type>): Type | undefined {
-    return this.host.signing(f, () => this.writtenReturn(f, scope));
+    return this.writtenReturn(f, scope);
   }
   /** @throws {CompileError} */
   private writtenReturn(this: Mut<this>, f: Body, scope: Map<string, Type>): Type | undefined {
@@ -460,7 +498,8 @@ export class Instancing<H extends InstancingHost> {
       if (p.name === "this") throw unsupported("'this' type predicates", p);
       const param = f.params.find((x) => x.pattern.kind === "ident" && x.pattern.name === p.name);
       if (!param) throw new CompileError("E0114", `a type predicate names one of the function's parameters, and '${p.name}' isn't one`, p.start, p.end);
-      const [narrowed, declared] = this.host.withScope(scope, () => [p.type && this.host.resolveType(p.type), param.type && this.host.resolveType(param.type)]);
+      const narrowed = p.type !== undefined ? this.host.resolveSigned(f.bodyId, scope, p.type) : undefined;
+      const declared = param.type !== undefined ? this.host.resolveSigned(f.bodyId, scope, param.type) : undefined;
       // A predicate on a borrowed parameter says what the value it points to is.
       const ref = declared && typeof declared !== "string" ? this.typing.rec(declared) : undefined;
       const held = ref?.kind === "ref" ? ref.to : declared;
@@ -470,8 +509,10 @@ export class Instancing<H extends InstancingHost> {
     // A function type returned is a stored callable, and a `Promise<T>` a boxed future, except
     // as an async function's own result, which its `Promise<T>` describes.
     // In a method's return type, `this` is the class of the receiver: each subclass checks its own copy.
-    const self = f.self && !f.self.constructor ? new Map([...scope, ["this", f.self.type as Type]]) : scope;
-    const written = this.host.withScope(self, () => this.host.resolveType(f.returnType!));
+    let self = new Map<string, Type>();
+    for (const [n, t] of scope) self.set(n, t);
+    if (f.self !== undefined && !f.self.constructor) self.set("this", f.self.type);
+    const written = this.host.resolveSigned(f.bodyId, self, f.returnType);
     const returned = f.async ? written : this.typing.stored(written);
     if (typeof returned === "string") return returned;
     const t = this.typing.rec(returned);
@@ -479,7 +520,7 @@ export class Instancing<H extends InstancingHost> {
     // Only the one parameter the result borrows from, by its lifetime or by elision.
     const implicit = this.implicitOf(f);
     const refs = f.params.flatMap((p, i) => {
-      const type = this.host.instancingState.lent.get(f.bodyId)?.get(i) ?? (p.type && this.host.withScope(scope, () => this.host.resolveType(p.type!)));
+      const type = this.host.instancingState.lent.get(f.bodyId)?.get(i) ?? (p.type && this.host.resolveSigned(f.bodyId, scope, p.type));
       const r = type && typeof type !== "string" ? this.typing.rec(type) : undefined;
       return r?.kind === "ref" && (!t.life || r.life === t.life) ? [i] : [];
     });
@@ -493,7 +534,14 @@ export class Instancing<H extends InstancingHost> {
   /** @throws {CompileError} */
   declaredParams(this: Mut<this>, f: Body): Type[] {
     const implicit = this.implicitOf(f);
-    return this.host.signing(f, () => this.host.withScope(f.scope ?? new Map(), () => f.params.map((p, i) => this.implicitParam(f, i, implicit.get(i)) ?? this.host.paramType(p, f.self?.constructor))));
+    let scope = new Map<string, Type>();
+    if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
+    let out: Type[] = [];
+    for (let i: usize = 0; i < f.params.length; i++) {
+      const implicitType = this.implicitParam(f, i, implicit.get(i));
+      out.push(implicitType !== undefined ? implicitType : this.host.paramTypeIn(f.bodyId, scope, i));
+    }
+    return out;
   }
 
   // An implicit parameter's type as the body and its callers see it: borrowed when it is a
@@ -605,15 +653,19 @@ export class Instancing<H extends InstancingHost> {
       if ((r?.kind === "closure" || r?.kind === "function") && heldInArgument(f, p.name)) bindings.set(p.name, this.typing.heldArgument(type));
     }
     // A bound may name the class's parameters too, as this instance of it holds them.
-    this.host.withScope(new Map([...(f.scope ?? []), ...bindings]), () => params.forEach((p) => {
-      if (!p.constraint) return;
-      const bound = this.host.resolveType(p.constraint);
+    let bounded = new Map<string, Type>();
+    if (f.scope !== undefined) for (const [n, t] of f.scope) bounded.set(n, t);
+    for (const [n, t] of bindings) bounded.set(n, t);
+    for (const p of params) {
+      if (p.constraint === undefined) continue;
+      const bound = this.host.resolveIn(bounded, p.constraint);
       // A number literal argument is that literal where the bound takes it and not its type, as
       // `lt(1)` with `K extends 1 | 2` infers `1` in TypeScript.
       const literal = typeArgs.length === 0 && !this.typing.fits(bindings.get(p.name)!, bound) ? literalArgument(this.typing, f, p.name, args) : undefined;
       if (literal !== undefined && this.typing.fits(literal, bound)) bindings.set(p.name, literal);
-      checkBound(bindings.get(p.name)!, bound, this.host.members(), at);
-    }));
+      let members = this.host.members();
+      checkBound(bindings.get(p.name)!, bound, members, at);
+    }
     // A type parameter only an arrow's own parameters decided is still the definition's
     // placeholder, which the arrow was typed with; a body calling itself passes its placeholder
     // on in an argument of its own.
@@ -638,7 +690,7 @@ export class Instancing<H extends InstancingHost> {
     // call has just decided, so the argument is checked against what they stand for.
     // So does a function type's, and the class's own parameters stand for what this class
     // instance gives them.
-    const outer = classPlaceholders(this.host.tables, this.host.classParams(f), (t, s) => this.host.withScope(s, () => this.host.resolveType(t)));
+    const outer = classPlaceholders(this.host, this.host.classParams(f));
     const decided = new TypeMap([
       ...[...this.explicitPlaceholders(f)].flatMap(([name, held]): [Type, Type][] => (bindings.has(name) ? [[held, bindings.get(name)!]] : [])),
       ...[...outer].flatMap(([name, held]): [Type, Type][] => (f.scope?.has(name) ? [[held, f.scope.get(name)!]] : [])),
@@ -690,7 +742,7 @@ export class Instancing<H extends InstancingHost> {
       if (!param?.constraint || given === undefined) return;
       const r = typeof given === "string" ? undefined : this.typing.rec(given);
       const held = r?.kind === "ref" ? r.to : given;
-      const bound = this.host.withScope(bindings, () => this.host.resolveType(param.constraint!));
+      const bound = this.host.resolveIn(bindings, param.constraint);
       const unlocked = this.typing.unlocks(held, bound);
       if (unlocked) throw new CompileError("E0206", `'${unlocked}' is read-only here, but '${name}' takes it mutably as '${this.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
     });
@@ -704,10 +756,15 @@ export class Instancing<H extends InstancingHost> {
     const implicit = this.implicitOf(f);
     // A generic class's instance gives its parameters what they stand for there, in an implicit
     // parameter's bound too, as a call decides the function's own.
-    const outer = classPlaceholders(this.host.tables, this.host.classParams(f), (t, s) => this.host.withScope(s, () => this.host.resolveType(t)));
+    const outer = classPlaceholders(this.host, this.host.classParams(f));
     const decided = new TypeMap([...outer].flatMap(([name, held]): [Type, Type][] => (scope.has(name) && scope.get(name) !== held ? [[held, scope.get(name)!]] : [])));
-    return this.host.signing(f, () => this.host.withScope(scope, () => f.params.map((p, i) =>
-      this.implicitParam(f, i, scope.get(`#${i}`) ?? (implicit.has(i) ? this.rebound(implicit.get(i)!, decided) : undefined)) ?? this.host.paramType(p, f.self?.constructor))));
+    let out: Type[] = [];
+    for (let i: usize = 0; i < f.params.length; i++) {
+      const given = scope.get(`#${i}`);
+      const implicitType = this.implicitParam(f, i, given !== undefined ? given : implicit.has(i) ? this.rebound(implicit.get(i)!, decided) : undefined);
+      out.push(implicitType !== undefined ? implicitType : this.host.paramTypeIn(f.bodyId, scope, i));
+    }
+    return out;
   }
 
   // An implicit parameter's bound with the type parameters a call or a class instance decided
@@ -732,9 +789,8 @@ export class Instancing<H extends InstancingHost> {
   scopeOf(this: Mut<this>, instance: Instance): Map<string, Type> {
     const f = bodyOf(instance);
     const known = (names: string[]) => names.every((n) => instance.bindings.has(n) && this.host.instancingState.concreteness.concrete(instance.bindings.get(n)!));
-    const stands = (name: string) => instance.bindings.get(name)!;
     const outer = this.host.classParams(f);
-    const scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(this.typing, outer, (t, s) => this.host.withScope(s, () => this.host.resolveType(t)), stands) : new Map(f.scope);
+    let scope = outer.length > 0 && known(outer.map((p) => p.name)) ? placeholders(this.host, outer, undefined, instance.bindings) : new Map(f.scope);
     // A constructor taking its base's parameters also holds the base's type arguments.
     for (const [name, t] of f.scope ?? []) if (!scope.has(name)) scope.set(name, t);
     const names = [...typeParamsOf(f).map((p) => p.name), ...[...this.implicitOf(f).keys()].map((i) => `#${i}`)];
@@ -744,11 +800,11 @@ export class Instancing<H extends InstancingHost> {
       if (outer.length === 0) return instance.bindings;
       // A generic method's own parameters are open here too, offering their bounds.
       for (const [name, t] of this.explicitPlaceholders(f)) if (!scope.has(name)) scope.set(name, instance.bindings.get(name) ?? t);
-      for (const [i, bound] of this.implicitOf(f)) if (this.typing.rec(bound).kind === "function" && instance.bindings.has(`#${i}`)) scope.set(`#${i}`, this.typing.wrapped(this.typing.show(bound), this.sameParams(f, i, bound, scope), stands(`#${i}`)));
+      for (const [i, bound] of this.implicitOf(f)) if (this.typing.rec(bound).kind === "function" && instance.bindings.has(`#${i}`)) scope.set(`#${i}`, this.typing.wrapped(this.typing.show(bound), this.sameParams(f, i, bound, scope), instance.bindings.get(`#${i}`)!));
       return scope;
     }
-    for (const [name, t] of placeholders(this.typing, typeParamsOf(f), (t, s) => this.host.withScope(new Map([...scope, ...s]), () => this.host.resolveType(t)), stands)) scope.set(name, t);
-    for (const [i, bound] of this.implicitOf(f)) scope.set(`#${i}`, this.typing.wrapped(this.typing.show(bound), this.sameParams(f, i, bound, scope), stands(`#${i}`)));
+    for (const [name, t] of placeholders(this.host, typeParamsOf(f), scope, instance.bindings)) scope.set(name, t);
+    for (const [i, bound] of this.implicitOf(f)) scope.set(`#${i}`, this.typing.wrapped(this.typing.show(bound), this.sameParams(f, i, bound, scope), instance.bindings.get(`#${i}`)!));
     return scope;
   }
 
@@ -756,8 +812,7 @@ export class Instancing<H extends InstancingHost> {
   // parameters the body itself holds, so calling it with one of them fits.
   /** @throws {CompileError} */
   private sameParams(f: Body, i: usize, bound: Bound, scope: Map<string, Type>): Bound {
-    const written = f.params[i]!.type!;
-    const t = this.host.withScope(scope, () => this.host.resolveType(written));
+    const t = this.host.resolveIn(scope, f.params[i]!.type!);
     const r = typeof t === "string" ? undefined : this.typing.rec(t);
     const own = r?.kind === "ref" ? r.to : t;
     return typeof own !== "string" && this.typing.rec(own).kind === this.typing.rec(bound).kind ? (own as Bound) : bound;
@@ -781,7 +836,7 @@ export class Instancing<H extends InstancingHost> {
       const shared = f.owner !== undefined && own.length > 0 && !own.some((p) => p.constraint && holdsNode({ of: "typeNode", node: p.constraint }, (n) => n.of === "typeNode" && n.node.kind === "ref" && outer.includes(n.node.name)));
       made = shared ? this.host.instancingState.sharedPlaceholders.get(f.typeParams![0]!) : undefined;
       // A bound may name the class's own parameters, as this instance holds them.
-      if (!made) made = placeholders(this.typing, own, (t, scope) => this.host.withScope(new Map([...(f.scope ?? []), ...scope]), () => this.host.resolveType(t)));
+      if (!made) made = placeholders(this.host, own, f.scope, undefined);
       if (shared) this.host.instancingState.sharedPlaceholders.set(f.typeParams![0]!, made);
       this.host.instancingState.explicit.set(f.bodyId, made);
     }
@@ -816,12 +871,12 @@ export class Instancing<H extends InstancingHost> {
     this.host.instancingState.implicits.set(f.bodyId, found);
     // A generic class's member decides this as its definition does: a parameter of the class's
     // type parameter is one in every instance, whatever that parameter stands for.
-    const outer = classPlaceholders(this.host.tables, this.host.classParams(f), (t, s) => this.host.withScope(s, () => this.host.resolveType(t)));
+    const outer = classPlaceholders(this.host, this.host.classParams(f));
     const scope = new Map([...(f.scope ?? []), ...outer, ...this.explicitPlaceholders(f)]);
     const borrows = new Map<usize, RefType>();
     this.host.instancingState.lent.set(f.bodyId, borrows);
-    this.host.withScope(scope, () => f.params.forEach((p, i) => {
-      const written = p.type && this.host.resolveType(p.type);
+    f.params.forEach((p, i) => {
+      const written = p.type && this.host.resolveIn(scope, p.type);
       // A reference to an interface or object type is one over what it borrows.
       const w = written && typeof written !== "string" ? this.typing.rec(written) : undefined;
       const type = w?.kind === "ref" ? w.to : written;
@@ -844,7 +899,7 @@ export class Instancing<H extends InstancingHost> {
         found!.set(i, type as FunctionType | InterfaceType | ObjectType | RegexType);
         if (written !== type) borrows.set(i, written as RefType);
       }
-    }));
+    });
     return found;
   }
 
@@ -976,7 +1031,7 @@ export interface GenericClassesHost {
   /** @throws {CompileError} */
   resolveType(t: TypeNode): Type;
   /** @throws {CompileError} */
-  withScope<T>(bindings: Map<string, Type>, f: InScope<T>): T;
+  resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type;
 }
 
 // Whether a body's signature or code writes its type parameter `name` inside a type argument, as
@@ -1030,7 +1085,7 @@ export class GenericClasses<H extends GenericClassesHost> {
   // placeholders for its type parameters, whether or not anything instantiates it.
   /** @throws {CompileError} */
   define(this: Mut<this>) {
-    this.host.templates.forEach((t) => this.host.genericClassesState.defined.set(t.name, this.classInstance(t, [...classPlaceholders(this.host.tables, t.typeParams, (n, s) => this.host.withScope(s, () => this.host.resolveType(n))).values()], t).classId));
+    this.host.templates.forEach((t) => this.host.genericClassesState.defined.set(t.name, this.classInstance(t, [...classPlaceholders(this.host, t.typeParams).values()], t).classId));
   }
 
   /** @throws {CompileError} */
@@ -1087,7 +1142,14 @@ export class GenericClasses<H extends GenericClassesHost> {
   /** @throws {CompileError} */
   private bounded(c: ClassInfo) {
     const { at, derived } = this.host.genericClassesState.uses.get(c.type)!;
-    if (!derived) this.host.withScope(c.scope, () => c.node.typeParams.forEach((p) => p.constraint && checkBound(c.scope.get(p.name)!, this.host.resolveType(p.constraint), this.host.members(), at)));
+    if (!derived) {
+      for (const p of c.node.typeParams) {
+        if (p.constraint === undefined) continue;
+        const bound = this.host.resolveIn(c.scope, p.constraint);
+        let members = this.host.members();
+        checkBound(c.scope.get(p.name)!, bound, members, at);
+      }
+    }
     this.host.layout(c);
   }
 

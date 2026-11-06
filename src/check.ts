@@ -852,6 +852,17 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
+  resolveSigned(this: Mut<this>, f: BodyId, scope: Ref<Map<string, Type>>, t: Ref<TypeNode>): Type {
+    return this.signing(this.arenas.bodyOf(f), () => this.resolveIn(scope, t));
+  }
+
+  /** @throws {CompileError} */
+  paramTypeIn(this: Mut<this>, f: BodyId, scope: Ref<Map<string, Type>>, i: usize): Type {
+    const body = this.arenas.bodyOf(f);
+    return this.signing(body, () => this.withScope(scope, () => this.paramType(body.params[i]!, body.self?.constructor)));
+  }
+
+  /** @throws {CompileError} */
   initializerType(this: Mut<this>, body: BodyId): Type {
     const instance = this.instanceOf(this.arenas.bodyOf(body));
     this.checkBody(instance);
