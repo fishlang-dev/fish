@@ -1162,7 +1162,7 @@ export interface GenericClassesHost {
   decls: Ref<Declarations>;
   classes: Map<string, ClassId>;
   templates: Map<string, ClassNode & { name: string }>;
-  register(c: ClassInfo): void;
+  register(c: ClassId): void;
   /** @throws {CompileError} */
   /** @throws {CompileError} */
   layout(this: Mut<this>, c: ClassId): void;
@@ -1326,8 +1326,8 @@ function generatorLike(typing: Mut<Typing>, t: Type): boolean {
 export class GenericClassesState {
   // Where each instance was first used, and each template's instances by their arguments.
   uses = new TypeMap<ClassType, { c: ClassId; at: Span; derived?: boolean }>();
-  instancesOf = new NodeMap<ClassNode, Map<string, ClassId>>();
-  shapesOf = new NodeMap<ClassNode, Set<string>>();
+  instancesOf = new Map<usize, Map<string, ClassId>>();
+  shapesOf = new Map<usize, Set<string>>();
   // An instance made while the resolver is still being built waits for `start` to check its
   // bounds and lay it out, since both need the resolver.
   ready = false;
@@ -1368,7 +1368,7 @@ export class GenericClasses<H extends GenericClassesHost> {
       for (const a of classPlaceholders(this.host, params).values()) args.push(a);
       const name = t.name;
       const at = { start: t.start, end: t.end };
-      const made = this.classInstance(t, args, at).classId;
+      const made = this.classInstance(t, args, at, false);
       this.host.genericClassesState.defined.set(name, made);
     }
   }
@@ -1379,46 +1379,64 @@ export class GenericClasses<H extends GenericClassesHost> {
     if (c !== undefined && args.length > 0) throw new CompileError("E0106", `type '${name}' is not generic`, at.start, at.end);
     if (c !== undefined) return c.type;
     const template = this.host.templates.get(name);
-    return template !== undefined ? this.classInstance(named(template), args, at, derived).type : undefined;
+    if (template === undefined) return undefined;
+    const id = this.classInstance(named(template), args, at, derived);
+    return this.host.tables.arenas.classOf(id).type;
   }
 
   // The class a generic class's type arguments make, declared on first use, checked for its
   // bounds, and named like `Box<i64>`.
   /** @throws {CompileError} */
-  private classInstance(this: Mut<this>, template: ClassNode & { name: string }, given: Type[], at: Span, derived = false): Ref<ClassInfo> {
-    if (given.some((a) => {
-      const r = typeof a === "string" ? undefined : this.host.tables.typing.rec(a);
-      return r !== undefined && (r.kind === "function" || r.kind === "closure") && r.generic !== undefined;
-    })) throw unsupported("generic function types as type arguments", at);
-    given.forEach((a) => unboxedClosure(this.host.tables.typing, a, at));
-    const args = given.map((t) => this.host.tables.typing.heldArgument(t));
-    const params = template.typeParams;
-    if (args.length !== params.length) {
-      throw new CompileError("E0106", `type '${template.name}' expects ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+  private classInstance(this: Mut<this>, template: ClassNode & { name: string }, given: Ref<Type[]>, at: Span, derived: boolean): ClassId {
+    for (const a of given) {
+      if (typeof a === "string") continue;
+      const r = this.host.tables.typing.rec(a);
+      if ((r.kind === "function" || r.kind === "closure") && r.generic !== undefined) throw unsupported("generic function types as type arguments", at);
     }
-    let byKey = this.host.genericClassesState.instancesOf.get(template);
-    if (!byKey) this.host.genericClassesState.instancesOf.set(template, byKey = new Map());
-    const key = args.map((t) => this.host.tables.typing.keyOf(t)).join(",");
-    const found = byKey.get(key);
-    if (found !== undefined) return this.host.tables.arenas.classOf(found);
+    for (const a of given) unboxedClosure(this.host.tables.typing, a, at);
+    let args: Type[] = [];
+    for (const t of given) args.push(this.host.tables.typing.heldArgument(t));
+    const count = template.typeParams.length;
+    if (args.length !== count) {
+      throw new CompileError("E0106", `type '${template.name}' expects ${count} type argument${count === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
+    }
+    if (!this.host.genericClassesState.instancesOf.has(template.id)) this.host.genericClassesState.instancesOf.set(template.id, new Map<string, ClassId>());
+    let keys: string[] = [];
+    for (const t of args) keys.push(this.host.tables.typing.keyOf(t));
+    const key = keys.join(",");
+    const found = this.host.genericClassesState.instancesOf.get(template.id)!.get(key);
+    if (found !== undefined) return found;
     // Spellings of one value shape, like `{ a?: T }` and `{ a: T | null }`, count once.
-    let shapes = this.host.genericClassesState.shapesOf.get(template);
-    if (!shapes) this.host.genericClassesState.shapesOf.set(template, shapes = new Set());
-    const shape = args.map((t) => this.host.tables.typing.shapeKey(t)).join(",");
-    if (!shapes.has(shape) && shapes.size > 64) throw new CompileError("E0113", `instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
-    if (args.some((a) => typeof a !== "string" && this.host.tables.typing.rec(a).kind === "interface")) throw new CompileError("E0115", "an interface can't be a type argument, since it describes values without being one", at.start, at.end);
-    const scope = new Map(params.map((p, i) => [p.name, args[i]!]));
-    const c = this.host.tables.arenas.classOf(declareClass(this.host.tables, template, `${template.name}<${args.map((t) => this.host.tables.typing.show(t)).join(", ")}>`, scope));
-    byKey.set(key, c.classId);
-    this.host.tables.typing.noteClassInstance(template.name, key, c.type);
-    shapes.add(shape);
-    this.host.register(c);
-    this.host.genericClassesState.uses.set(c.type, { c: c.classId, at, derived });
-    if (args.some((a) => this.host.tables.typing.lowerKeepingBrands(a) !== a)) {
-      this.classInstance(template, args.map((a) => this.host.tables.typing.lowerKeepingBrands(a)), at, true);
+    if (!this.host.genericClassesState.shapesOf.has(template.id)) this.host.genericClassesState.shapesOf.set(template.id, new Set<string>());
+    let shapes: string[] = [];
+    for (const t of args) shapes.push(this.host.tables.typing.shapeKey(t));
+    const shape = shapes.join(",");
+    const seen = this.host.genericClassesState.shapesOf.get(template.id)!;
+    if (!seen.has(shape) && seen.size > 64) throw new CompileError("E0113", `instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
+    for (const a of args) if (typeof a !== "string" && this.host.tables.typing.rec(a).kind === "interface") throw new CompileError("E0115", "an interface can't be a type argument, since it describes values without being one", at.start, at.end);
+    let scope = new Map<string, Type>();
+    for (let i: usize = 0; i < count; i++) scope.set(template.typeParams[i]!.name, args[i]!);
+    let shown: string[] = [];
+    for (const t of args) shown.push(this.host.tables.typing.show(t));
+    const id = declareClass(this.host.tables, template, `${template.name}<${shown.join(", ")}>`, scope);
+    let byKey = this.host.genericClassesState.instancesOf.get(template.id)!;
+    byKey.set(key, id);
+    const type = this.host.tables.arenas.classOf(id).type;
+    this.host.tables.typing.noteClassInstance(template.name, key, type);
+    let shapeSet = this.host.genericClassesState.shapesOf.get(template.id)!;
+    shapeSet.add(shape);
+    this.host.register(id);
+    this.host.genericClassesState.uses.set(type, { c: id, at: { start: at.start, end: at.end }, derived });
+    let lowered: Type[] = [];
+    let changed = false;
+    for (const a of args) {
+      const l = this.host.tables.typing.lowerKeepingBrands(a);
+      if (l !== a) changed = true;
+      lowered.push(l);
     }
-    if (this.host.genericClassesState.ready) this.bounded(c.classId);
-    return c;
+    if (changed) this.classInstance(template, lowered, at, true);
+    if (this.host.genericClassesState.ready) this.bounded(id);
+    return id;
   }
 
   // A generic class's type arguments must satisfy their bounds, checked where it is first used.
@@ -1454,15 +1472,18 @@ export class GenericClasses<H extends GenericClassesHost> {
     if (typeArgs.length > 0) {
       let args: Type[] = [];
       for (const t of typeArgs) args.push(this.host.resolveType(cloneTypeNode(t)));
-      return this.classInstance(named(template), args, at);
+      const made = this.classInstance(named(template), args, at, false);
+      return this.host.tables.arenas.classOf(made);
     }
     const bindings = this.inferred(named(template), argTypes, { start: at.start, end: at.end }, new NodeSet<ClassNode>());
-    const args = template.typeParams.map((p) => {
+    let args: Type[] = [];
+    for (const p of template.typeParams) {
       const type = bindings.get(p.name);
       if (type === undefined) throw new CompileError("E0104", `can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
-      return type;
-    });
-    return this.classInstance(template, args, at);
+      args.push(type);
+    }
+    const made = this.classInstance(template, args, at, false);
+    return this.host.tables.arenas.classOf(made);
   }
 
   // A class with no constructor of its own takes its base's parameters, so its type arguments

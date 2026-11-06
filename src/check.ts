@@ -816,6 +816,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       this.checkBody(callee);
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
+      // Checked early here, out of its turn, it is checked again in its turn, which reports why.
+      this.failed.delete(f.bodyId);
     }
   }
 
@@ -928,8 +930,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return this.reached([...this.classes.keys(), ...this.templates.keys()], at);
   }
 
-  register(this: Mut<this>, c: ClassInfo) {
-    this.registry().register(c.classId);
+  register(this: Mut<this>, c: ClassId) {
+    this.registry().register(c);
   }
 
   /** @throws {CompileError} */
@@ -938,8 +940,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
-  classNamed(this: Mut<this>, name: string, args: Type[], at: Span): ClassType | undefined {
-    return this.genericClasses().classNamed(name, args, at);
+  classNamed(this: Mut<this>, name: string, args: Ref<Type[]>, at: Ref<Span>): ClassType | undefined {
+    let given: Type[] = [];
+    for (const a of args) given.push(a);
+    return this.genericClasses().classNamed(name, given, at);
   }
 
   /** @throws {CompileError} */
