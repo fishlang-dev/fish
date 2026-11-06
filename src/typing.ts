@@ -1,6 +1,7 @@
 import type { CompileError } from "./diag.ts";
 import type { Expr, Param, TypeNode, TypeParam } from "./parser.ts";
 import { NodeMap, type Id } from "./nodes.ts";
+import { cloneParam, cloneTypeNode, cloneTypeParam } from "./rebuild.ts";
 import type { RustClass } from "./rust.ts";
 
 // The checker's types: a primitive's name, or the id of a record in its program's arena, read
@@ -23,6 +24,39 @@ export type Field = { name: string; type: Type; access?: Access; readonly?: bool
 
 // How a brand is made: loose, from an idiom's field, or a unit with its powers.
 export type BrandHow = { loose?: true; field?: string; unit?: Record<string, i64> };
+
+export function copyFamily(g: Ref<Family>): Family {
+  let typeParams: TypeParam[] = [];
+  for (const p of g.node.typeParams) typeParams.push(cloneTypeParam(p));
+  let params: Param[] = [];
+  for (const p of g.node.params) params.push(cloneParam(p));
+  let node: FamilyNode = { typeParams, params, returns: cloneTypeNode(g.node.returns) };
+  if (g.node.throws !== undefined) node.throws = cloneTypeNode(g.node.throws);
+  let names: string[] = [];
+  for (const n of g.names) names.push(n);
+  let scope = new Map<string, Type>();
+  for (const [n, t] of g.scope) scope.set(n, t);
+  let own: Type[] = [];
+  for (const t of g.own) own.push(t);
+  return { names, node, scope, own };
+}
+
+export function copyMethod(m: Ref<Method>): Method {
+  let params: Type[] = [];
+  for (const p of m.params) params.push(p);
+  let out: Method = { name: m.name, params, returns: m.returns };
+  if (m.throws !== undefined) out.throws = m.throws;
+  if (m.mutable !== undefined) out.mutable = m.mutable;
+  if (m.owned !== undefined) out.owned = m.owned;
+  if (m.generic !== undefined) out.generic = copyFamily(m.generic);
+  if (m.optional !== undefined) {
+    let optional: boolean[] = [];
+    for (const o of m.optional) optional.push(o);
+    out.optional = optional;
+  }
+  if (m.omittable !== undefined) out.omittable = m.omittable;
+  return out;
+}
 
 export function copyField(f: Ref<Field>): Field {
   let out: Field = { name: f.name, type: f.type };
