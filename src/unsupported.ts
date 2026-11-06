@@ -61,6 +61,6 @@ export function unsupportedDeclaration(s: Stmt): CompileError | undefined {
   return undefined;
 }
 
-export function unsupported(what: string, at: Ref<Span>): CompileError {
+export function unsupported<S extends Span>(what: string, at: Ref<S>): CompileError {
   return new CompileError("E0801", `${what} are not supported yet`, at.start, at.end);
 }

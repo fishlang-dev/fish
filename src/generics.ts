@@ -29,7 +29,7 @@ export interface BoundResolver {
 // parameters before it. In an instance, each parameter also holds the concrete type `concrete`
 // gives it.
 /** @throws {CompileError} */
-export function placeholders<R extends BoundResolver>(r: Mut<R>, params: TypeParam[], around: Map<string, Type> | undefined, concrete: Map<string, Type> | undefined): Map<string, Type> {
+export function placeholders<R extends BoundResolver>(r: Mut<R>, params: Ref<TypeParam[]>, around: Map<string, Type> | undefined, concrete: Map<string, Type> | undefined): Map<string, Type> {
   let scope = new Map<string, Type>();
   for (const p of params) {
     if (p.modifiers.length > 0) throw new CompileError("E0801", `'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);

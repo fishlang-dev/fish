@@ -21,6 +21,9 @@ export type TypePred = (t: ClassType | VariantType) => boolean;
 // and which printing and JSON leave out while it is empty.
 export type Field = { name: string; type: Type; access?: Access; readonly?: boolean; optional?: "added" | "held" | "undefined" };
 
+// How a brand is made: loose, from an idiom's field, or a unit with its powers.
+export type BrandHow = { loose?: true; field?: string; unit?: Record<string, i64> };
+
 export function copyField(f: Ref<Field>): Field {
   let out: Field = { name: f.name, type: f.type };
   if (f.access !== undefined) out.access = f.access;
@@ -1137,7 +1140,7 @@ export class Typing {
   }
 
   private brands = new Map<string, BrandType>();
-  brandType(this: Mut<this>, base: Type, tag: Type, how: { loose?: true; field?: string; unit?: Record<string, i64> } = {}): BrandType {
+  brandType(this: Mut<this>, base: Type, tag: Type, how: BrandHow = {}): BrandType {
     const key = `brand ${this.keyOf(base)} ${this.keyOf(tag)} ${how.loose !== undefined ? "?" : ""}${how.field ?? ""} ${how.unit !== undefined ? JSON.stringify(how.unit) : ""}`;
     let t = this.brands.get(key);
     if (t === undefined) {
