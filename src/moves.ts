@@ -1,10 +1,10 @@
 import type { Tables } from "./compilation.ts";
 import assert from "node:assert";
-import { bodyOf, type LocalId } from "./arenas.ts";
+import { bodyOf, type Arenas, type LocalId } from "./arenas.ts";
 import type { Instance, Local, Origin } from "./check.ts";
 import type { Body } from "./classes.ts";
 import { CompileError } from "./diag.ts";
-import type { Expr, ObjectProp, Param, Stmt } from "./parser.ts";
+import type { Expr, ObjectProp, Param, Pattern, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
 import { indexText, restText, MAP_CHANGES } from "./values.ts";
@@ -29,7 +29,7 @@ type MoveStep = () => void;
 // A place lent to references: shared or mutable, where it was lent, and who holds it, the
 // reference variables or, for an argument or receiver, the call it was lent to.
 // A `for...of` loop lends its array for as long as it runs, as a call lends for its duration.
-type Loan = { place: string; mutable: boolean; start: usize; end: usize; holders: Set<LocalId>; call?: string; callAt?: Expr; loop?: boolean; guard?: boolean };
+type Loan = { place: string; mutable: boolean; start: usize; end: usize; holders: Set<LocalId>; call?: string; callAt?: usize; loop?: boolean; guard?: boolean };
 
 // The places moved, and the loans made, on the way here, or null where control can't reach.
 // Loans are keyed by where they were made.
@@ -58,7 +58,8 @@ type Frame = { kind: "catch"; acc: State } | { kind: "finally"; at: Stmt; exits:
 export function checkMoves(tables: Tables, f: Body, instance: Instance, origins: Origin[]) {
   const { types, locals, calls, setters, jumps, borrowsFrom } = instance;
   const { kindTests, asserts, computed, jsCrossings, dynCalls, joinCalls, printCalls, formatCalls, inspectCalls, combinedCalls, jsonCalls, regexStringCalls, nestedFunctions, selfCalls, restStarts, typing, ids, arenas } = tables;
-  const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
+  // The local a name, declaration, parameter or shorthand property refers to.
+  const localAt = (n: Expr | Stmt | Param | ObjectProp): LocalId | undefined => locals.get(n);
   const isRef = (t: Type): t is RefType => typeof t !== "string" && typing.rec(t).kind === "ref";
   const isUnion = (t: Type): t is UnionType => typeof t !== "string" && typing.rec(t).kind === "union";
   // What a reference refers to, or the type itself.
@@ -96,16 +97,16 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   last.set(kept.localId, Infinity);
   // A reference parameter holds a borrow its caller made, of something outside this function.
   f.params.forEach((p, i) => {
-    const local = localAt(p);
-    if (local && typing.holdsRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: isRef(local.type) && typing.rec(local.type).mutable, start: p.start, end: p.end, holders: new Set([local.localId]) });
+    const local = localRecord(arenas, localAt(p));
+    if (local !== undefined && typing.holdsRef(local.type)) state!.loans.set(-1 - i, { place: `param ${i}`, mutable: isRef(local.type) && typing.rec(local.type).mutable, start: p.start, end: p.end, holders: new Set([local.localId]) });
   });
   statements(body);
 
   // The reference variables declared anywhere inside a statement.
-  function inside(s: Stmt): Local[] {
+  function inside(s: Stmt): LocalId[] {
     switch (s.kind) {
       case "let":
-        return typing.holdsRef(localAt(s)!.type) ? [localAt(s)!] : [];
+        return typing.holdsRef(arenas.localOf(localAt(s)!).type) ? [localAt(s)!] : [];
       case "if":
         return [...s.then, ...(s.else ?? [])].flatMap(inside);
       case "block":
@@ -118,7 +119,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
         return [...(s.init ? [s.init] : []), ...s.body].flatMap(inside);
       case "forOf": {
         const each = localAt(s.left as Stmt)!;
-        return [...(typing.holdsRef(each.type) ? [each] : []), ...s.body.flatMap(inside)];
+        return [...(typing.holdsRef(arenas.localOf(each).type) ? [each] : []), ...s.body.flatMap(inside)];
       }
       case "labeled":
         return inside(s.body);
@@ -132,7 +133,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   // A reference declared in a list of statements lets go of what it holds as the list ends.
   function statements(list: Stmt[]) {
     for (const s of list) statement(s);
-    for (const s of list) if (s.kind === "let" && typing.holdsRef(localAt(s)!.type)) release(localAt(s)!);
+    for (const s of list) if (s.kind === "let" && typing.holdsRef(arenas.localOf(localAt(s)!).type)) release(arenas.localOf(localAt(s)!));
     ended(list);
   }
 
@@ -147,13 +148,13 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   // variable from outside, and used after. A variable that is itself a reference only copies a
   // pointer to what it borrows, whose own loans are checked where that ends.
   /** @throws {CompileError} */
-  function dropped(gone: Local[], end: usize) {
+  function dropped(gone: LocalId[], end: usize) {
     if (!state || gone.length === 0) return;
-    const ids = new Map(gone.map((l) => [String(l.id), l]));
-    const goneIds = new Set(gone.map((l) => l.localId));
+    const ids = new Map(gone.map((l) => [String(arenas.localOf(l).id), l]));
+    const goneIds = new Set(gone);
     for (const loan of state.loans.values()) {
-      const root = ids.get(loan.place.split(".")[0]!);
-      if (!root || isRef(root.type)) continue;
+      const root = localRecord(arenas, ids.get(loan.place.split(".")[0]!));
+      if (root === undefined || isRef(root.type)) continue;
       const outside = [...loan.holders].filter((h) => !goneIds.has(h) && (last.get(h) ?? -1) > (end as f64));
       if (outside.length === 0) continue;
       const lent = pathOf(loan.place);
@@ -166,7 +167,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
 
   // Every variable a statement declares, at any depth, which are gone once it has run, however
   // control left it: `let`s, a loop's own variables and a catch's parameter.
-  function scoped(s: Stmt): Local[] {
+  function scoped(s: Stmt): LocalId[] {
     switch (s.kind) {
       case "let":
         return [localAt(s)!];
@@ -187,7 +188,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
       case "switch":
         return s.cases.flatMap((c) => c.body.flatMap(scoped));
       case "try": {
-        const caught = s.param && localAt(s);
+        const caught = s.param !== undefined ? localAt(s) : undefined;
         return [...s.block.flatMap(scoped), ...(caught ? [caught] : []), ...(s.handler ?? []).flatMap(scoped), ...(s.finalizer ?? []).flatMap(scoped)];
       }
       default:
@@ -202,7 +203,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
       case "let": {
         const d = s.declarations[0]!;
         const name = d.target.kind === "ident" ? d.target.name : "";
-        const local = localAt(s)!;
+        const local = arenas.localOf(localAt(s)!);
         // A declaration run again by a loop makes a fresh variable, which holds nothing yet.
         release(local);
         if (!d.init) {
@@ -245,8 +246,8 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
           state = handler.acc;
           // A raise left the block wherever it was, its variables gone by the catch.
           dropped(s.block.flatMap(scoped), s.block.at(-1)?.end ?? s.start);
-          const caught = s.param && localAt(s);
-          if (caught) revive(String(caught.id));
+          const caught = s.param !== undefined ? localAt(s) : undefined;
+          if (caught !== undefined) revive(String(arenas.localOf(caught).id));
           statements(s.handler);
           if (caught) dropped([caught], s.handler.at(-1)?.end ?? s.start);
           state = join(after, state);
@@ -299,7 +300,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
           if (key(s.right) !== undefined) inherit(holder, s.right);
           else hold(holder, s.right);
           // Each pass gives the variable a new value, which it owns.
-          const each = localAt(s.left as Stmt)!;
+          const each = arenas.localOf(localAt(s.left as Stmt)!);
           loop(s, () => ({ id: nextId(ids), kind: "bool", value: false, start: s.start, end: s.start }), () => {
             revive(String(each.id));
             statements(s.body);
@@ -308,7 +309,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
         }
         expr(s.right);
         const place = key(s.right);
-        const each = localAt(s.left as Stmt)!;
+        const each = arenas.localOf(localAt(s.left as Stmt)!);
         // A string's loop holds a reference of its own, so its variable stays free to change.
         const text = (coercions.get(s.right) ?? types.get(s.right)) === "string";
         // An `Iterable<T>` parameter's loop gives owned values, through the `[Symbol.iterator]()`
@@ -427,7 +428,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
       dropped(s.kind === "for" ? s.body.flatMap(scoped) : scoped(s), s.end - 1);
       // References declared in the body are gone by the time the loop comes round or ends,
       // however it left the body; a `for` loop's initializer outlives every pass.
-      for (const local of s.kind === "for" ? s.body.flatMap(inside) : inside(s)) release(local);
+      for (const local of s.kind === "for" ? s.body.flatMap(inside) : inside(s)) release(arenas.localOf(local));
       if (bodyFirst) cond();
       else update?.();
       leaving = join(leaving, exits.get(s)!);
@@ -435,7 +436,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
       state = leaving;
       // However the loop ended, `break` included, its variables are gone.
       dropped(scoped(s), s.end);
-      for (const local of inside(s)) release(local);
+      for (const local of inside(s)) release(arenas.localOf(local));
       leaving = state;
       state = after;
       const next = join(back, state);
@@ -677,7 +678,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
         if (held !== undefined) state?.loans.delete(hold);
         // The target changes once the value is ready, after the value's reads.
         assign(target, e.end);
-        const local = target.kind === "ident" ? localAt(target) : undefined;
+        const local = target.kind === "ident" ? localRecord(arenas, localAt(target)) : undefined;
         // Pointing a reference elsewhere lets go of what it held; a value holding references
         // given another one to hold adds it.
         if (local && instance.captures?.has(local.localId) && typing.holdsRef(coercions.get(e.value) ?? types.get(e.value)!)) keep(target, [e.value]);
@@ -707,9 +708,10 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
           state = join(entry, null);
           const bound = bindings(arm.pattern).flatMap((b) => localAt(b as Expr) ?? []);
           // Each time an arm is entered, its bindings are new, as a loop's `let` is.
-          for (const local of bound) revive(String(local.id));
-          const borrowing = bound.filter((l) => isRef(l.type));
-          for (const holder of borrowing) {
+          for (const local of bound) revive(String(arenas.localOf(local).id));
+          const borrowing = bound.filter((l) => isRef(arenas.localOf(l).type));
+          for (const holderId of borrowing) {
+            const holder = arenas.localOf(holderId);
             if (place !== undefined && state) state.loans.set(-holder.id - 1_000_000, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holder.localId]) });
             // Through a reference, the binding holds what that reference borrows, a reference a
             // call gave included.
@@ -725,7 +727,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
             state?.loans.delete(at);
             const passed = state;
             state = join(passed, null);
-            for (const holder of borrowing) release(holder);
+            for (const holder of borrowing) release(arenas.localOf(holder));
             entry = join(entry, state);
             state = passed;
           }
@@ -739,7 +741,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
             expr(arm.body, consume, discarded);
             dropped(bound, arm.body.end);
           }
-          for (const holder of borrowing) release(holder);
+          for (const holder of borrowing) release(arenas.localOf(holder));
           after = join(after, state);
         }
         state = after;
@@ -793,7 +795,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
       // A pipe over a value hands it to the topic, new each time the pipe runs.
       // Like a `let`, the topic holds what its value borrows, until the pipe ends.
       case "pipe": {
-        const local = localAt(e)!;
+        const local = arenas.localOf(localAt(e)!);
         release(local);
         expr(e.value, (place) => `'${place}' moved here into the pipe's '%'; use '${place}.clone()' to keep a copy`);
         revive(String(local.id));
@@ -840,7 +842,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
     }
     const root = rootOf(target);
     // What a closure captures outlives the call that keeps it, like what a reference points to.
-    const capture = localAt(root as never);
+    const capture = localRecord(arenas, localAt(root as never));
     if (capture && instance.captures?.has(capture.localId)) {
       throw new CompileError("E0801", `keeping references in '${capture.name}', which this closure captures, is not supported yet; keep them in a variable of the closure's own`, target.start, target.end);
     }
@@ -851,7 +853,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
       }
       return;
     }
-    const owner = localAt(root as never);
+    const owner = localRecord(arenas, localAt(root as never));
     if (owner && typing.holdsRef(owner.type) && !isRef(owner.type)) for (const v of values) hold(owner, v);
   }
 
@@ -926,20 +928,20 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   function during(call: Expr, run: MoveStep) {
     run();
     if (!state) return;
-    for (const [at, loan] of state.loans) if (loan.call && loan.callAt === call && loan.holders.size === 0) state.loans.delete(at);
+    for (const [at, loan] of state.loans) if (loan.call !== undefined && loan.callAt === call.id && loan.holders.size === 0) state.loans.delete(at);
   }
 
   // Reads or hands over a place, which must still hold its value and not be lent so as to
   // forbid it.
   /** @throws {CompileError} */
-  function use(e: Named, consume?: Consumer, type: Type = e.kind === "shorthand" ? localAt(e)!.type : types.get(e)!) {
+  function use(e: Named, consume?: Consumer, type: Type = e.kind === "shorthand" ? arenas.localOf(localAt(e)!).type : types.get(e)!) {
     const place = key(e)!;
     usable(e, place);
     const moving = consume !== undefined && !typing.isCopy(type);
     if (moving && place.includes(".[]")) throw elementMove(e, type);
     free(place, e, moving ? "move" : "read");
     if (!moving || !state) return;
-    const root = localAt(rootOf(e) as never);
+    const root = localRecord(arenas, localAt(rootOf(e) as never));
     if (root && (isRef(root.type) || typing.optionRef(root.type))) {
       throw new CompileError("E0202", hinted(type, `'${text(e)}' can't be moved out of '${root.name}', which only borrows it; use '${text(e)}.clone()'`), e.start, e.end);
     }
@@ -1028,7 +1030,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   // call's captures and an assignment's hold below take other fractions of an offset, which
   // never equal those.
   function partKey(part: Named, i: usize): f64 {
-    return part.start + (i + 1) / 8192;
+    return (part.start as f64) + ((i as f64) + 1) / 8192;
   }
 
   // Lends a place, which must be free to lend so, to a reference variable or for a call.
@@ -1036,7 +1038,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   function lend(place: string, mutable: boolean, e: Named, holder?: Local, call?: string, callAt?: Expr, at: usize = e.start, key: f64 = e.start as f64) {
     free(place, e, mutable ? "lend mutably" : "lend", at);
     if (!state) return;
-    state.loans.set(key, { place, mutable, start: e.start, end: e.end, holders: new Set(holder ? [holder.localId] : []), call, callAt });
+    state.loans.set(key, { place, mutable, start: e.start, end: e.end, holders: new Set(holder ? [holder.localId] : []), call, callAt: callAt !== undefined ? callAt.id : undefined });
   }
 
   // A reference variable given a value holds what it borrows: a place lent to it, or what
@@ -1094,8 +1096,8 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
       if (e.kind === "object") {
         for (const p of e.props) {
           if (p.kind === "property") hold(holder, p.value);
-          else if (p.kind === "shorthand" && localAt(p)) {
-            const local = localAt(p)!;
+          else if (p.kind === "shorthand" && localAt(p) !== undefined) {
+            const local = arenas.localOf(localAt(p)!);
             // A shorthand lent to a reference field lends its variable; a mutable reference copied
             // lends itself mutably, as `{ m: m }` does, so only one of them is used at a time.
             // Meeting a union, the literal's own type is the member it went into.
@@ -1123,7 +1125,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
 
   // Through a reference, or a value holding references, what it holds stays held.
   function inherit(holder: Local, e: Expr) {
-    const root = localAt(rootOf(e) as never);
+    const root = localRecord(arenas, localAt(rootOf(e) as never));
     if (root && typing.holdsRef(root.type)) inheritFrom(holder, root);
   }
 
@@ -1177,7 +1179,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   // to the same type or to one member of a union.
   function inPlace(e: Expr, to: RefType): boolean {
     const type = types.get(e)!;
-    const local = e.kind === "ident" ? localAt(e) : undefined;
+    const local = e.kind === "ident" ? localRecord(arenas, localAt(e)) : undefined;
     const narrowed = (t: Type) => local !== undefined && local.type !== type && isUnion(t);
     const target = typing.rec(to).to;
     if (isRef(type)) {
@@ -1272,12 +1274,12 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
         return e.props.flatMap((p) => {
           if (p.kind === "property") return pointsInto(p.value);
           if (p.kind !== "shorthand") return [];
-          const local = localAt(p);
+          const local = localRecord(arenas, localAt(p));
           if (!local) return [];
           return isRef(typing.field(to as Exclude<Type, string>, p.name)!.type) && !isRef(local.type) ? [String(local.id)] : heldBy(local);
         });
       }
-      const root = localAt(rootOf(e) as never);
+      const root = localRecord(arenas, localAt(rootOf(e) as never));
       return root && typing.holdsRef(root.type) ? heldBy(root) : [];
     }
     if (!inPlace(e, to)) return [TEMPORARY];
@@ -1294,14 +1296,13 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
   // Where a place lives: itself, or, reached through a reference variable, what that holds; a
   // reference read out of a value holding references points where that value's loans are.
   function within(e: Expr): string[] {
-    const root = localAt(rootOf(e) as never);
+    const root = localRecord(arenas, localAt(rootOf(e) as never));
     if (!root || !(isRef(root.type) || typing.optionRef(root.type) || (isRef(types.get(e)!) && typing.holdsRef(root.type)))) return [key(e)!];
     return heldBy(root);
   }
 
   function paramName(i: usize): string {
-    const p = f.params[i]!.pattern;
-    return p.kind === "ident" ? p.name : `parameter ${i + 1}`;
+    return f.params[i]!.pattern.kind === "ident" ? identName(f.params[i]!.pattern) : `parameter ${i + 1}`;
   }
 
   // A holder given a new value lets go of what it held and holds what the value does, which
@@ -1411,7 +1412,7 @@ export function checkMoves(tables: Tables, f: Body, instance: Instance, origins:
     // `x!` is what `x` holds, so it is borrowed and changed as `x` is, as is `x as T`.
     if (projection(e)) return key(e.expr);
     if (e.kind === "shorthand" || e.kind === "ident") {
-      const local = localAt(e);
+      const local = localRecord(arenas, localAt(e));
       return local && String(local.id);
     }
     if (e.kind === "this" || e.kind === "super") return "this";
@@ -1830,22 +1831,77 @@ function lastUses(tables: Tables, body: Stmt[], { locals, types, coercions, call
   return last;
 }
 
-// What has moved, and what is lent, on either of two ways here.
-function join(a: State, b: State): State {
-  if (!a) return b && { moves: new Map(b.moves), loans: new Map(b.loans) };
-  if (!b) return { moves: new Map(a.moves), loans: new Map(a.loans) };
-  const moves = new Map(a.moves);
-  for (const [k, v] of b.moves) if (!moves.has(k)) moves.set(k, v);
-  const loans = new Map(a.loans);
+// The local an id names, or nothing without one.
+function localRecord<A extends Lifetime>(arenas: Ref<Arenas, A>, id: LocalId | undefined): Ref<Local, A> | undefined {
+  return id !== undefined ? arenas.localOf(id) : undefined;
+}
+
+// What has moved, and what is lent, on either of two ways here. Moves and loans are never changed
+// where they are, only replaced, so each state gets copies of its own.
+function join(a: Ref<State>, b: Ref<State>): State {
+  if (a === null) return b === null ? null : copyState(b);
+  if (b === null) return copyState(a);
+  let joined = copyState(a);
+  for (const [k, v] of b.moves) if (!joined.moves.has(k)) joined.moves.set(k, copyMove(v));
   for (const [k, v] of b.loans) {
-    const mine = loans.get(k);
-    loans.set(k, mine ? { ...mine, holders: new Set([...mine.holders, ...v.holders]) } : v);
+    const mine = joined.loans.get(k);
+    if (mine === undefined) {
+      joined.loans.set(k, copyLoan(v));
+      continue;
+    }
+    let both = copyLoan(mine);
+    for (const h of v.holders) both.holders.add(h);
+    joined.loans.set(k, both);
   }
+  return joined;
+}
+
+function copyState(s: Ref<NonNullable<State>>): NonNullable<State> {
+  let moves = new Map<string, Move>();
+  for (const [k, v] of s.moves) moves.set(k, copyMove(v));
+  let loans = new Map<f64, Loan>();
+  for (const [k, v] of s.loans) loans.set(k, copyLoan(v));
   return { moves, loans };
 }
 
-function same(a: State, b: State): boolean {
-  if (!a || !b) return a === b;
-  const loans = (s: NonNullable<State>) => [...s.loans].map(([k, l]) => `${k}:${[...l.holders].sort().join(",")}`).sort().join(";");
-  return a.moves.size === b.moves.size && [...a.moves.keys()].every((k) => b.moves.has(k)) && loans(a) === loans(b);
+function copyMove(m: Ref<Move>): Move {
+  let passes = new NodeMap<Stmt, usize>();
+  for (const [loop, pass] of m.passes) passes.set(loop, pass);
+  let out: Move = { start: m.start, end: m.end, note: m.note, passes };
+  if (m.unassigned !== undefined) out.unassigned = m.unassigned;
+  return out;
+}
+
+function copyLoan(l: Ref<Loan>): Loan {
+  let holders = new Set<LocalId>();
+  for (const h of l.holders) holders.add(h);
+  let out: Loan = { place: l.place, mutable: l.mutable, start: l.start, end: l.end, holders };
+  if (l.call !== undefined) out.call = l.call;
+  if (l.callAt !== undefined) out.callAt = l.callAt;
+  if (l.loop !== undefined) out.loop = l.loop;
+  if (l.guard !== undefined) out.guard = l.guard;
+  return out;
+}
+
+function same(a: Ref<State>, b: Ref<State>): boolean {
+  if (a === null || b === null) return a === null && b === null;
+  if (a.moves.size !== b.moves.size) return false;
+  for (const k of a.moves.keys()) if (!b.moves.has(k)) return false;
+  return loansKey(a) === loansKey(b);
+}
+
+function loansKey(s: Ref<NonNullable<State>>): string {
+  let parts: string[] = [];
+  for (const [k, l] of s.loans) {
+    let holders: string[] = [];
+    for (const h of l.holders) holders.push(`${h}`);
+    holders.sort();
+    parts.push(`${k}:${holders.join(",")}`);
+  }
+  parts.sort();
+  return parts.join(";");
+}
+
+function identName(p: Ref<Pattern>): string {
+  return p.kind === "ident" ? p.name : "";
 }
