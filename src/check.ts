@@ -344,12 +344,36 @@ function frameOf(tables: Mut<Tables>, instance: Mut<Instance>, generator: Genera
     return x < y ? -1 : x > y ? 1 : 0;
   });
   for (const l of kept) addSlot(tables.arenas.localOf(l), fields, locals);
+  // What the walk meets, in order: each `for...of` loop and each await. They are laid out after
+  // it, since laying one out changes the types the walked body is lent from.
+  let loopsMet: Stmt[] = [];
+  let awaitsMet: Expr[] = [];
+  let isLoop: boolean[] = [];
   walkWhile({ of: "stmts", node: bodyOf(tables.arenas, instance).body }, (n) => {
     if (n.of === "expr" && n.node.kind === "arrow") return false;
     if (n.of === "stmt" && n.node.kind === "forOf") {
-      const s = n.node;
-      loops.set({ ...s }, fields.length);
-      const kept = iterated(tables.typing, instance, instance.iterators?.get(s) ?? s.right);
+      loopsMet.push({ ...n.node });
+      isLoop.push(true);
+    }
+    if (n.of === "expr" && isAwait(n.node)) {
+      awaitsMet.push({ ...n.node });
+      isLoop.push(false);
+    }
+    return true;
+  });
+  for (const loop of isLoop) {
+    if (!loop) {
+      const e = awaitsMet.shift()!;
+      const awaited = e.kind === "unary" ? instance.types.get(e.operand)! : "void";
+      awaits.set(e, fields.length);
+      fields.push({ name: "await", type: awaited });
+      continue;
+    }
+    const s = loopsMet.shift()!;
+    const at = fields.length;
+    if (s.kind === "forOf") {
+      const viaIterator = instance.iterators === undefined ? undefined : instance.iterators.get(s);
+      const kept = viaIterator !== undefined ? iterated(tables.typing, instance, viaIterator) : iterated(tables.typing, instance, s.right);
       const ref = typeof kept === "string" ? undefined : tables.typing.rec(kept);
       const held = ref?.kind === "ref" ? ref.to : kept;
       const h = typeof held === "string" ? undefined : tables.typing.rec(held);
@@ -376,13 +400,8 @@ function frameOf(tables: Mut<Tables>, instance: Mut<Instance>, generator: Genera
         fields.push({ name: "at", type: "i64" });
       }
     }
-    if (n.of === "expr" && isAwait(n.node)) {
-      const e = n.node;
-      awaits.set({ ...e }, fields.length);
-      fields.push({ name: "await", type: instance.types.get(e.operand)! });
-    }
-    return true;
-  });
+    loops.set(s, at);
+  }
   tables.typing.setFrame(generator, fields);
   instance.frame = { locals, loops, awaits };
 }
@@ -505,8 +524,8 @@ function arrowFunction(ids: Ids, name: string, arrow: Extract<Expr, { kind: "arr
 // A const's function type gives the arrow it holds the parameter, result and error types the
 // arrow leaves unwritten, as TypeScript's contextual typing does.
 /** @throws {CompileError} */
-function typedBy(arrow: Extract<Expr, { kind: "arrow" }>, fn: TypeNode | undefined): Extract<Expr, { kind: "arrow" }> {
-  if (fn?.kind !== "function") return arrow;
+function typedBy(arrow: Extract<Expr, { kind: "arrow" }>, fn: Signature | undefined): Extract<Expr, { kind: "arrow" }> {
+  if (fn === undefined) return arrow;
   if (arrow.params.length > fn.params.length && !fn.params.some((p) => p.rest)) {
     const extra: Ref<Param> = arrow.params[fn.params.length]!;
     const name = extra.pattern.kind === "ident" ? `'${extra.pattern.name}'` : "this parameter";
@@ -680,7 +699,7 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
           if (d.init.kind === "arrow") {
             const generic = d.init.typeParams.some((p) => !isLifetime(p));
             const signature = signatureIn(program, d.type);
-            const genericType = signature?.kind === "function" && signature.typeParams.some((p) => !isLifetime(p));
+            const genericType = signature !== undefined && signature.typeParams.some((p) => !isLifetime(p));
             if (d.type && (generic || genericType)) throw new CompileError("E0801", "a const holding a generic arrow takes its type from the arrow; drop the const's written type", d.type.start, d.type.end);
             const body = addBodyTo(tables, arrowFunction(tables.ids, d.target.name, typedBy(d.init, signature), d));
             top.funcs.push(body);
@@ -739,16 +758,37 @@ function recoverInto(top: Mut<TopLevel>, e: CompileError): void {
   top.errors.push(e);
 }
 
-// The function type a const's written type is, through an alias taking no type parameters.
-function signatureIn(program: Ref<Stmt[]>, type: TypeNode | undefined): TypeNode | undefined {
-  if (type?.kind === "query" && type.target.kind === "ref") return declaredSignatureIn(program, type.target.name) ?? type;
-  if (type?.kind !== "ref" || type.args.length > 0) return type;
-  const alias = program.find((s) => s.kind === "typeAlias" && s.name === type.name && s.typeParams.length === 0);
-  return alias?.kind === "typeAlias" ? alias.type : type;
+// The parts of a function type a const's written type gives an arrow; a declared function's
+// result type may be left unwritten.
+type Signature = { typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined; throws: TypeNode | undefined };
+
+// The function type a const's written type is, through an alias taking no type parameters, or
+// through `typeof` a top-level function or arrow const.
+function signatureIn(program: Ref<Stmt[]>, type: Ref<TypeNode | undefined>): Signature | undefined {
+  if (type === undefined) return undefined;
+  if (type.kind === "query") {
+    const target = identTypeName(type.target);
+    return target !== undefined ? declaredSignatureIn(program, target) : undefined;
+  }
+  if (type.kind === "function") return signatureFrom(type.typeParams, type.params, type.returns, type.throws);
+  if (type.kind !== "ref" || type.args.length > 0) return undefined;
+  for (const s of program) {
+    if (s.kind !== "typeAlias" || s.name !== type.name || s.typeParams.length > 0) continue;
+    return functionSignature(s.type);
+  }
+  return undefined;
+}
+
+function identTypeName(t: Ref<TypeNode>): string | undefined {
+  return t.kind === "ref" ? t.name : undefined;
+}
+
+function functionSignature(t: Ref<TypeNode>): Signature | undefined {
+  return t.kind === "function" ? signatureFrom(t.typeParams, t.params, t.returns, t.throws) : undefined;
 }
 
 // The parameter, result and error types a top-level function or arrow const writes, for `typeof`.
-function declaredSignatureIn(program: Ref<Stmt[]>, name: string): TypeNode | undefined {
+function declaredSignatureIn(program: Ref<Stmt[]>, name: string): Signature | undefined {
   for (const s of program) {
     const found = s.kind === "export" ? signatureNamed(s.body, name) : signatureNamed(s, name);
     if (found !== undefined) return found;
@@ -758,8 +798,8 @@ function declaredSignatureIn(program: Ref<Stmt[]>, name: string): TypeNode | und
 
 // What `typeof name` reads in one statement: a function of that name, or a const of that name
 // holding a function or an arrow.
-function signatureNamed(d: Ref<Stmt>, name: string): TypeNode | undefined {
-  if (d.kind === "function") return d.name === name ? signatureFrom(d.typeParams, d.params, d.returnType, d.throws, d.start, d.end) : undefined;
+function signatureNamed(d: Ref<Stmt>, name: string): Signature | undefined {
+  if (d.kind === "function") return d.name === name ? signatureFrom(d.typeParams, d.params, d.returnType, d.throws) : undefined;
   if (d.kind !== "let" || d.keyword !== "const") return undefined;
   for (const x of d.declarations) {
     if (boundName(x.target) !== name) continue;
@@ -768,9 +808,9 @@ function signatureNamed(d: Ref<Stmt>, name: string): TypeNode | undefined {
   return undefined;
 }
 
-function valueSignature(e: Ref<Expr>): TypeNode | undefined {
-  if (e.kind === "arrow") return signatureFrom(e.typeParams, e.params, e.returnType, e.throws, e.start, e.end);
-  if (e.kind === "function") return signatureFrom(e.typeParams, e.params, e.returnType, undefined, e.start, e.end);
+function valueSignature(e: Ref<Expr>): Signature | undefined {
+  if (e.kind === "arrow") return signatureFrom(e.typeParams, e.params, e.returnType, e.throws);
+  if (e.kind === "function") return signatureFrom(e.typeParams, e.params, e.returnType, undefined);
   return undefined;
 }
 
@@ -778,13 +818,11 @@ function boundName(p: Ref<Pattern>): string | undefined {
   return p.kind === "ident" ? p.name : undefined;
 }
 
-// A function type written from a declaration's parts, as copies.
-function signatureFrom(typeParams: Ref<TypeParam[]>, params: Ref<Param[]>, returns: Ref<TypeNode | undefined>, throws: Ref<TypeNode | undefined>, start: usize, end: usize): TypeNode {
+// A signature made of copies of a function type's or a declaration's parts.
+function signatureFrom(typeParams: Ref<TypeParam[]>, params: Ref<Param[]>, returns: Ref<TypeNode | undefined>, throws: Ref<TypeNode | undefined>): Signature {
   let copied: TypeParam[] = [];
   for (const p of typeParams) copied.push(cloneTypeParam(p));
-  // A function without a written return type gives none here, as it was read before.
-  const node: TypeNode = { id: 0, kind: "function", typeParams: copied, params: cloneParams(params), returns: returns !== undefined ? cloneTypeNode(returns) : returns!, throws: throws !== undefined ? cloneTypeNode(throws) : undefined, construct: false, abstract: false, start, end };
-  return node;
+  return { typeParams: copied, params: cloneParams(params), returns: returns !== undefined ? cloneTypeNode(returns) : undefined, throws: throws !== undefined ? cloneTypeNode(throws) : undefined };
 }
 
 /** @throws {CompileError} */
