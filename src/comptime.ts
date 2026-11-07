@@ -757,19 +757,20 @@ class Interpreter<H extends ComptimeHost> {
         do if (!this.loopBody(f, s, s.body)) break; while (this.valueOf(f, s.cond) === true);
         return;
       case "for":
-        if (s.init) this.statement(f, s.init);
+        if (s.init !== undefined) this.statement(f, s.init);
         while (s.test === undefined || this.valueOf(f, s.test) === true) {
           this.step(s);
           if (!this.loopBody(f, s, s.body)) break;
-          if (s.update) this.expr(f, s.update);
+          if (s.update !== undefined) this.expr(f, s.update);
         }
         return;
       case "forOf": {
         const over = this.valueOf(f, s.right);
-        const local = this.inst(f).locals.get(s.left as Stmt)!;
+        const local = this.inst(f).locals.getById(s.left.id)!;
+        // Under Bun the items may be the very array a constant holds, so they are copied, not taken.
         const items = this.iterated(over, s.right);
-        for (const item of [...items]) {
-          this.frames[f]!.locals.set(local, item);
+        for (let i: usize = 0; i < items.length; i++) {
+          this.frames[f]!.locals.set(local, copyValue(items[i]!));
           if (!this.loopBody(f, s, s.body)) break;
         }
         return;
@@ -777,11 +778,17 @@ class Interpreter<H extends ComptimeHost> {
       case "switch": {
         const v = this.expr(f, s.discriminant);
         const subject = this.inst(f).types.get(s.discriminant);
-        let at = s.cases.findIndex((c) => c.test !== undefined && this.equal(v, subject, this.expr(f, c.test), this.inst(f).types.get(c.test), undefined));
-        if (at < 0) at = s.cases.findIndex((c) => c.test === undefined);
-        if (at < 0) return;
+        let at: usize = s.cases.length;
+        for (let i: usize = 0; i < s.cases.length && at === s.cases.length; i++) {
+          if (s.cases[i]!.test === undefined) continue;
+          const tested = this.expr(f, s.cases[i]!.test!);
+          const testType = this.inst(f).types.get(s.cases[i]!.test!);
+          if (this.equal<Span>(copyValue(v), subject, tested, testType, undefined)) at = i;
+        }
+        for (let i: usize = 0; i < s.cases.length && at === s.cases.length; i++) if (s.cases[i]!.test === undefined) at = i;
+        if (at === s.cases.length) return;
         try {
-          for (const c of s.cases.slice(at)) this.statements(f, c.body);
+          for (let i = at; i < s.cases.length; i++) this.statements(f, s.cases[i]!.body);
         } catch (e) {
           if (!(e instanceof Jump) || e.target !== s.id) throw e;
         }
@@ -996,8 +1003,7 @@ class Interpreter<H extends ComptimeHost> {
         const from = this.host.tables.typing.lower(this.inst(f).coercions.get(e.expr) ?? this.typeOf(f, e.expr));
         if (typeof from !== "string" && this.host.tables.typing.rec(from).kind === "union" && from !== type && !this.host.tables.typing.fits(from, type)) {
           const held = this.expr(f, e.expr);
-          const r = typeof type === "string" ? undefined : this.host.tables.typing.rec(type);
-          const kept = r?.kind === "union" ? r.members : [type];
+          const kept = kindOf(this.host.tables.typing, type) === "union" ? membersOf(this.host.tables.typing, type) : [type];
           const actual = this.memberType(held, from);
           if (actual === undefined || (!kept.includes(actual) && !kept.includes(this.host.tables.typing.unfold(actual)))) {
             const shown = this.host.tables.typing.show(type);
@@ -1011,14 +1017,14 @@ class Interpreter<H extends ComptimeHost> {
         return this.expr(f, e.expr);
       case "nonNull": {
         // An overload's body narrows the implementation's value to the signature's return type.
-        if (e.narrows) {
-          const [from, to] = [this.inst(f).types.get(e.expr), type];
+        if (e.narrows !== undefined) {
+          const from = this.inst(f).types.get(e.expr);
           const held = this.expr(f, e.expr);
-          if (from === to) return held;
-          const r = typeof to === "string" ? undefined : this.host.tables.typing.rec(to);
-          const kept = r?.kind === "union" ? r.members : [to];
-          if (!kept.includes(this.memberType(held, from)!)) this.panic("the implementation returned a value this overload signature doesn't declare", e);
-          return retag(this.host.tables.typing, held, from, to);
+          if (from === type) return held;
+          const kept = kindOf(this.host.tables.typing, type) === "union" ? membersOf(this.host.tables.typing, type) : [type];
+          const actual = this.memberType(held, from);
+          if (actual === undefined || !kept.includes(actual)) this.panic("the implementation returned a value this overload signature doesn't declare", e);
+          return retag(this.host.tables.typing, held, from, type);
         }
         if (redundantBang(e)) return this.expr(f, e.expr);
         const v = this.valueOf(f, e.expr);
@@ -1078,9 +1084,9 @@ class Interpreter<H extends ComptimeHost> {
       if (e.args !== undefined && e.args.length > 0) {
         const from = this.valueOf(f, e.args[0]!);
         if (from !== null && from !== undefined) {
-          let items = this.iterated(from, e.args[0]!);
-          while (items.length > 0) {
-            const item: Value = items.shift() ?? null;
+          const items = this.iterated(from, e.args[0]!);
+          for (let i: usize = 0; i < items.length; i++) {
+            const item = copyValue(items[i]!);
             if (isSet) this.put(made, item, undefined);
             else {
               const [k, v] = this.pair(item);
@@ -1100,7 +1106,7 @@ class Interpreter<H extends ComptimeHost> {
     let fields = new Map<string, Value>();
     const made: Value = { kind: "record", type: classType, fields };
     const self = this.temp(f, made);
-    const args = e.args !== undefined ? this.args(f, ctor, e.args) : [];
+    const args: Value[] = e.args !== undefined ? this.args(f, ctor, e.args) : [];
     this.call(ctor, args, copyPlace(self), e);
     return this.read(self);
   }
@@ -1151,7 +1157,7 @@ class Interpreter<H extends ComptimeHost> {
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private callExpr(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "call" }>>, type: Type): Value | Short {
-    const callee = e.callee;
+    const callee: Ref<Expr> = e.callee;
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") this.refuse("printing", e);
     if (this.host.tables.clocks.get(e) === "Math.random") this.random("'Math.random'", e);
     // A data-carrying enum's member, as `Shape.Circle(2)`.
@@ -1198,10 +1204,19 @@ class Interpreter<H extends ComptimeHost> {
     if (callee.kind === "member") {
       const self = this.receiver(f, callee.object);
       if (isShort(self)) return short();
-      const held = this.readValue(self);
+      let held = this.readValue(self);
       if (held === null && (callee.optional || e.optional)) return short();
-      if (this.host.tables.integerCalls.has(e)) return this.integerValue(callee.name, held as bigint, e.args[0] ? (this.valueOf(f, e.args[0]) as bigint) : 0n, this.host.tables.typing.lower(this.typeOf(f, callee.object)) as Integer, type, e);
-      if (typeof held === "string") return this.stringMethod(callee.name, held, e.args.map((a) => this.valueOf(f, a)), e);
+      if (this.host.tables.integerCalls.has(e)) {
+        const by = e.args.length > 0 ? bigOfValue(this.valueOf(f, e.args[0]!)) : 0n;
+        const objectType = this.typeOf(f, callee.object);
+        const integer = this.host.tables.typing.lower(objectType) as Integer;
+        return this.integerValue(callee.name, bigOfValue(held), by, integer, type, e);
+      }
+      if (typeof held === "string") {
+        let args: Value[] = [];
+        for (const a of e.args) args.push(this.valueOf(f, a));
+        return this.stringMethod(callee.name, held, args, e);
+      }
       if (callee.name === "clone") return cloned(this.host.tables, held);
       if (isItems(held)) {
         if (callee.name === "push") {
@@ -1218,7 +1233,9 @@ class Interpreter<H extends ComptimeHost> {
       if (isTable(held)) return this.tableMethod(f, callee.name, self, held, e);
       return this.unsupported(`calling '${callee.name}' here`, e);
     }
-    return this.refuse(`'${this.host.tables.timerNames.get(e) ?? (callee.kind === "ident" ? callee.name : "this call")}'`, e);
+    const timer = this.host.tables.timerNames.get(e);
+    const called = timer !== undefined ? timer : callee.kind === "ident" ? callee.name : "this call";
+    return this.refuse(`'${called}'`, e);
   }
 
   // A Map's or a Set's method, on the table `self` holds; `get` and the arrays of entries hand
@@ -1427,7 +1444,7 @@ class Interpreter<H extends ComptimeHost> {
         const count = bigArg(args, 0);
         if (count < 0n) this.panic("Invalid count value: " + count.toString(), at);
         if (BigInt(s.length) * count > BigInt(LONGEST)) this.tooLong(at);
-        return s.repeat(intArg(args, 0));
+        return s.repeat(intArg(args, 0) as usize);
       }
       case "slice":
         return more ? s.slice(intArg(args, 0), intArg(args, 1)) : s.slice(intArg(args, 0));
@@ -1851,7 +1868,9 @@ class Interpreter<H extends ComptimeHost> {
   // the wrapped value, the nearest bound, or the wrapped value and whether it overflowed.
   /** @throws {Stop} */
   private integerValue<S extends Span>(this: Mut<this>, name: string, a: bigint, b: bigint, type: Integer, result: Type, at: Ref<S>): Value {
-    const [family, operation] = integerMethod(name)!;
+    const method = integerMethod(name)!;
+    const family = method[0];
+    const operation = method[1];
     const { bits, signed } = integerInfo(type);
     const [min, max] = range(type);
     let exact: bigint;
