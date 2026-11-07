@@ -9,7 +9,7 @@ import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } fro
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
-import { cloneExpr, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
+import { cloneExpr, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots, patternNames } from "./flow.ts";
@@ -51,7 +51,7 @@ export type Local = { name: string; type: Type; mutable: boolean; param: boolean
 // A checked program: the functions to compile, the tables its check filled in, and the
 // compilation it was checked in.
 // `warnings`: what the build reports without failing, in source order.
-export type Checked = { instances: InstanceId[]; tables: Tables; compilation: Compilation; warnings: CompileError[] };
+export type Checked = { instances: InstanceId[]; tables: Tables; warnings: CompileError[] };
 
 // The instances a checked program compiles, read from its arena.
 // The tables a new instance starts with, each empty.
@@ -63,8 +63,6 @@ export function emptyTables(): Pick<Instance, "types" | "locals" | "calls" | "se
     consumes: new Set<usize>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
   };
 }
-
-export const compiledOf = ({ instances, tables }: Checked): Instance[] => instances.map((i) => tables.arenas.instanceOf(i));
 
 // One compiled function: a body checked with concrete types, and the tables codegen reads
 // to lower it. `symbol` names it in the IR.
@@ -316,20 +314,20 @@ function madeBy<T extends ClosureType | FutureType | GeneratorType>(typing: Mut<
 
 function frameOf(tables: Tables, instance: Instance, generator: GeneratorType | FutureType) {
   const { typing, arenas } = tables;
-  const fields: Field[] = [{ name: "state", type: "i32" }];
-  const locals = new Map<LocalId, usize>();
-  const loops = new NodeMap<Stmt, usize>();
+  let fields: Field[] = [{ name: "state", type: "i32" }];
+  let locals = new Map<LocalId, usize>();
+  let loops = new NodeMap<Stmt, usize>();
   // Each `await` keeps the future it awaits in the frame while it is pending.
-  const awaits = new NodeMap<Expr, usize>();
+  let awaits = new NodeMap<Expr, usize>();
   const add = (l: Local) => {
     if (locals.has(l.localId)) return;
     locals.set(l.localId, fields.length);
     fields.push({ name: `${l.name}.${l.id}`, type: l.type });
   };
   // An async arrow's frame holds what it captured, first, and an async method's its object.
-  if (bodyOf(arenas, instance).closure) fields.push({ name: "env", type: "void" });
+  if (bodyOf(arenas, instance).closure !== undefined) fields.push({ name: "env", type: "void" });
   const self = bodyOf(arenas, instance).self;
-  if (self && !self.constructor) fields.push(receiverField(typing, self, instance.concrete));
+  if (self !== undefined && !self.constructor) fields.push(receiverField(typing, self, instance.concrete));
   bodyOf(arenas, instance).params.forEach((p) => add(arenas.localOf(instance.locals.get(p)!)));
   // A local generic function's name holds nothing.
   [...new Set(instance.locals.values())].map((l) => arenas.localOf(l)).filter((l) => l.generic === undefined).sort((a, b) => a.id - b.id).forEach(add);
@@ -373,16 +371,23 @@ export const C_KEYWORDS = new Set(["auto", "break", "case", "char", "const", "co
 
 // A program setting timers runs on the async runtime, as Node's does, so a sync `main` runs as
 // an async one, its timers firing once it returns.
-function timersRunAsync(ids: Ids, written: Stmt[], timerMains: Tables["timerMains"]) {
-  const top = written.map((s) => (s.kind === "function" ? s : (s as { declaration?: Stmt }).declaration)).filter((s): s is Func => s?.kind === "function");
-  const main = top.find((f) => f.name === "main");
-  if (!main || main.async) return;
-  const declared = new Set(top.map((f) => f.name));
+function timersRunAsync(ids: Mut<Ids>, written: Mut<Stmt[]>, timerMains: Mut<Tables["timerMains"]>) {
+  let main: Declared | undefined = undefined;
+  let declared = new Set<string>();
+  for (const s of written) {
+    const d = s.kind === "exportDefault" ? s.declaration : s;
+    if (d === undefined || d.kind !== "function") continue;
+    declared.add(d.name);
+    if (main !== undefined || d.name !== "main") continue;
+    const copy = cloneStmt(d);
+    if (copy.kind === "function") main = copy;
+  }
+  if (main === undefined || main.async) return;
   const timers = holdsNode({ of: "stmts", node: written }, (n) => n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && TIMER_GLOBALS.has(n.node.callee.name) && !declared.has(n.node.callee.name));
   if (!timers) return;
   const returns = main.returnType;
   const returnType: TypeNode | undefined = returns?.kind === "ref" && returns.name === "void" ? { id: nextId(ids), kind: "ref", name: "Promise", args: [returns], start: returns.start, end: returns.end } : returns;
-  const rewrites = new Rewrites();
+  let rewrites = new Rewrites();
   timerMains.add(rewrites.replaceFunc(main, { ...main, async: true, returnType }) as Func);
   rebuiltStmts(written, rewrites);
 }
@@ -391,8 +396,8 @@ const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
 // Whether a piece of syntax holds a node `found` picks out.
 // A node shared by several parents is tried once.
 export function holdsNode(root: AnyNode | undefined, found: (n: AnyNode) => boolean): boolean {
-  if (!root) return false;
-  const seen = new Set<usize>();
+  if (root === undefined) return false;
+  let seen = new Set<usize>();
   let hit = false;
   walkWhile(root, (n) => {
     if (hit) return false;
@@ -410,14 +415,16 @@ export function holdsNode(root: AnyNode | undefined, found: (n: AnyNode) => bool
 
 // Every name the body of a function declares anywhere, as a variable, a function, a class or a
 // parameter, and the type parameters it is generic over.
-function declaredIn(f: { params: Param[]; body?: Stmt[]; typeParams?: TypeParam[] }): Set<string> {
-  const names = new Set<string>(f.params.flatMap((p) => patternNames(p.pattern)));
-  for (const p of f.typeParams ?? []) names.add(p.name);
-  if (f.body) holdsNode({ of: "stmts", node: f.body }, (n) => {
+function declaredIn(f: Ref<{ params: Param[]; body?: Stmt[]; typeParams?: TypeParam[] }>): Set<string> {
+  let names = new Set<string>();
+  for (const p of f.params) for (const x of patternNames(p.pattern)) names.add(x);
+  if (f.typeParams !== undefined) for (const p of f.typeParams) names.add(p.name);
+  if (f.body !== undefined) holdsNode({ of: "stmts", node: f.body }, (n) => {
     if (n.of === "stmt") {
       const s = n.node;
       if (s.kind === "let") for (const d of s.declarations) for (const x of patternNames(d.target)) names.add(x);
-      if ((s.kind === "function" || s.kind === "class") && typeof s.name === "string") names.add(s.name);
+      if (s.kind === "function") names.add(s.name);
+      if (s.kind === "class" && s.name !== undefined) names.add(s.name);
       if (s.kind === "function") {
         for (const p of s.params) for (const x of patternNames(p.pattern)) names.add(x);
         for (const p of s.typeParams) names.add(p.name);
@@ -437,8 +444,15 @@ function declaredIn(f: { params: Param[]; body?: Stmt[]; typeParams?: TypeParam[
 
 // An arrow held by a const, as the function declaration it amounts to.
 function arrowFunction(ids: Ids, name: string, arrow: Extract<Expr, { kind: "arrow" }>, at: Span): Func {
-  const body: Stmt[] = Array.isArray(arrow.body) ? arrow.body : [{ id: nextId(ids), kind: "return", value: arrow.body, start: arrow.body.start, end: arrow.body.end }];
-  return { id: nextId(ids), kind: "function", name, async: arrow.async, generator: false, macro: false, typeParams: arrow.typeParams, params: arrow.params, returnType: arrow.returnType, throws: arrow.throws, body, start: at.start, end: at.end } as Func;
+  let body: Stmt[] = [];
+  if (Array.isArray(arrow.body)) body = arrow.body;
+  else {
+    const start = arrow.body.start;
+    const end = arrow.body.end;
+    body = [{ id: nextId(ids), kind: "return", value: arrow.body, start, end }];
+  }
+  const f: Func = { id: nextId(ids), kind: "function", name, async: arrow.async, generator: false, macro: false, typeParams: arrow.typeParams, params: arrow.params, returnType: arrow.returnType, throws: arrow.throws, body, start: at.start, end: at.end };
+  return f;
 }
 
 // A const's function type gives the arrow it holds the parameter, result and error types the
@@ -446,8 +460,8 @@ function arrowFunction(ids: Ids, name: string, arrow: Extract<Expr, { kind: "arr
 /** @throws {CompileError} */
 function typedBy(arrow: Extract<Expr, { kind: "arrow" }>, fn: TypeNode | undefined): Extract<Expr, { kind: "arrow" }> {
   if (fn?.kind !== "function") return arrow;
-  const extra = arrow.params[fn.params.length];
-  if (extra && !fn.params.some((p) => p.rest)) {
+  if (arrow.params.length > fn.params.length && !fn.params.some((p) => p.rest)) {
+    const extra = arrow.params[fn.params.length]!;
     const name = extra.pattern.kind === "ident" ? `'${extra.pattern.name}'` : "this parameter";
     throw new CompileError("E0506", `the const's type passes ${fn.params.length} argument${fn.params.length === 1 ? "" : "s"}, so this arrow can't take ${name}`, extra.start, extra.end);
   }
@@ -459,11 +473,11 @@ const MEMBERS = new Set(["field", "method", "constructor", "get", "set", "index"
 
 // A macro takes the declaration it is applied to, and no type parameters.
 /** @throws {CompileError} */
-function macroShape(f: Func) {
+function macroShape(f: Ref<Func>) {
   const shape = `as in 'macro function ${f.name.replace(/-fsh\d+$/, "")}(input: Ast): Ast'`;
   if (f.typeParams.length > 0) throw new CompileError("E1103", `a macro takes no type parameters, ${shape}`, f.typeParams[0]!.start, f.typeParams[0]!.end);
   if (f.params.length === 0 || f.params.some((p) => p.rest)) throw new CompileError("E1103", `a macro takes the declaration it is applied to, then any arguments, ${shape}`, f.start, f.end);
-  const t = f.params[0]!.type;
+  const t = cloneParam(f.params[0]!).type;
   if (t?.kind !== "ref" || (t.name !== "Ast" && t.name !== "AstStmt") || t.args.length > 0) {
     throw new CompileError("E1103", "a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", f.params[0]!.start, f.params[0]!.end);
   }
@@ -477,23 +491,26 @@ function macroShape(f: Func) {
 // An error it throws names local declarations as they were written.
 /** @throws {CompileError} */
 export function check(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false = false, macros = false, module = false): Checked {
-  try {
-    const checked = checkAll(compilation, written, exportsToC, macros, module);
-    for (const w of checked.warnings) named(w, compilation.names);
-    return checked;
-  } catch (e) {
-    throw e instanceof CompileError ? named(e, compilation.names) : e;
-  }
+  let checked = checkAll(compilation, written, exportsToC, macros, module);
+  let renamed: CompileError[] = [];
+  while (checked.warnings.length > 0) renamed.push(named(checked.warnings.shift()!, { local: new Set(checked.tables.names.local), madeUp: new Map(checked.tables.names.madeUp) }));
+  for (const w of renamed) checked.warnings.push(w);
+  return checked;
 }
 
 /** @throws {CompileError} */
 function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): Checked {
   let declared = newDeclarations();
-  return new Checker(compilation, written, exportsToC, macros, module, declared).run();
+  let checker = new Checker(compilation, written, exportsToC, macros, module, declared);
+  try {
+    checker.prepare();
+    return checker.run();
+  } catch (e) {
+    throw e instanceof CompileError ? named(e, { local: new Set(checker.tables.names.local), madeUp: new Map(checker.tables.names.madeUp) }) : e;
+  }
 }
 
 class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost, EnumHost {
-  compilation: Compilation;
   written: Stmt[];
   library: boolean;
   // The C names a library's exports can't take.
@@ -501,7 +518,6 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   macros: boolean;
   module: boolean;
   tables: Tables;
-  files: Map<usize, Map<string, string>> | undefined;
   program: Stmt[];
   funcs: (Func & Body)[];
   // Arrows held by consts with a written type, checked against it.
@@ -510,7 +526,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // Generic classes, declared again for each set of type arguments they are used with.
   templates: Map<string, ClassNode & { name: string }>;
   // The program's aliases, interfaces and lifetimes, which nothing changes once declared.
-  decls: Ref<Declarations>;
+  decls: Mut<Declarations>;
   enums: Map<string, EnumInfo>;
   byName: Map<string, BodyId>;
   main: Body | undefined;
@@ -560,21 +576,47 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // The error each failed body's check gave, which a call of it gives again rather than another.
   failed = new Map<BodyId, CompileError>();
 
-  /** @throws {CompileError} */
   constructor(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean, declarations: Mut<Declarations>) {
-    this.compilation = compilation;
+    this.tables = newTables(compilation);
     this.decls = declarations;
     this.written = written;
     this.library = exportsToC !== false;
     this.takenInC = exportsToC !== false ? exportsToC : new Set<string>();
     this.macros = macros;
     this.module = module;
-    const rustNames: Compilation["rust"]["names"] = this.compilation.rust.names;
-    const rustClassNodes: Compilation["rust"]["classNodes"] = this.compilation.rust.classNodes;
-    this.tables = newTables(this.compilation);
-    const jsBodies: Tables["jsBodies"] = this.tables.jsBodies;
-    const jsClasses: Tables["jsClasses"] = this.tables.jsClasses;
-    this.files = this.macros ? undefined : this.compilation.fileNames;
+    this.program = [];
+    this.funcs = [];
+    this.typedArrows = [];
+    this.classes = new Map<string, ClassId>();
+    this.templates = new Map<string, ClassNode & { name: string }>();
+    this.enums = new Map<string, EnumInfo>();
+    this.byName = new Map<string, BodyId>();
+    this.main = undefined;
+    this.beingChecked = undefined;
+    this.assuming = new Set<string>();
+    this.registryState = new RegistryState();
+    this.genericClassesState = new GenericClassesState();
+    this.resolverState = new ResolverState();
+    this.done = new Set<InstanceId>();
+    this.rustTypes = new Map<string, string>();
+    this.views = new Map<InstanceId, Type>();
+    this.demands = new NodeMap<Stmt, Integer>();
+    this.candidates = new Map<LocalId, Stmt>();
+    this.demanded = 0;
+    this.instancingState = new InstancingState();
+    this.querying = new Set<string>();
+    this.placeholders = new NodeMap<Expr, Type>();
+    this.broken = new NodeSet<Stmt>();
+    this.continued = new NodeSet<Stmt>();
+    this.inProgress = new Set<InstanceId>();
+    this.nextLocal = 0;
+    this.closures = [];
+    this.closureBodies = new TypeMap<ClosureType, InstanceId>();
+  }
+
+  // Lowers the program and declares what it holds, before any body is checked.
+  /** @throws {CompileError} */
+  prepare(this: Mut<this>): void {
     // A macro applies only to a top-level declaration; the top-level ones are expanded already.
     walk({ of: "stmts", node: this.written }, (n) => {
       if (n.of === "stmt") {
@@ -588,7 +630,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     });
     this.written = lowerOverloads(this.tables.ids, this.written);
     localKeys(this.written);
-    this.written = [...this.written, ...hoistLocals(this.compilation, this.written)];
+    this.written = [...this.written, ...hoistLocals(this.tables, this.written)];
     lowerKeys(this.written);
     this.tables.topKeys = topKeys(this.written);
     holdsNode({ of: "stmts", node: this.written }, (n) => {
@@ -598,50 +640,44 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     });
     lowerDefaults(this.tables, this.written);
     if (!this.library) timersRunAsync(this.tables.ids, this.written, this.tables.timerMains);
-    this.program = [...lowerOverloads(this.tables.ids, stdFor(this.compilation, this.written)), ...this.written];
-    this.funcs = [];
-    this.typedArrows = [];
-    const aliases = declarations.aliases;
-    this.classes = new Map<string, ClassId>();
-    this.templates = new Map<string, ClassNode & { name: string }>();
-    this.enums = new Map<string, EnumInfo>();
+    this.program = [...lowerOverloads(this.tables.ids, stdFor(this.tables, this.written)), ...this.written];
     separatePrivateNames(this.program);
     for (const s of this.program) {
       try {
         // A `declare const enum` writes its values, so it is an enum like any other.
         const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
         if (e.kind === "enum") {
-          typeName(e.name, e, aliases.has(e.name) || this.typeNamed(e.name));
-          this.enums.set(e.name, declareEnum(this.compilation, e));
+          typeName(e.name, e, this.decls.aliases.has(e.name) || this.typeNamed(e.name));
+          this.enums.set(e.name, declareEnum(this.tables, e));
           continue;
         }
         const trait = s.kind === "typeAlias" ? traitAlias(this.tables.ids, s) : undefined;
         if (s.kind === "typeAlias" && !trait) {
           // An alias's lifetimes, like a class's, are checked and erased.
-          if (s.typeParams.some(isLifetime)) declarations.slots.set(s.name, s.typeParams.map(isLifetime));
-          addAlias(aliases, s.typeParams.some(isLifetime) ? { ...s, typeParams: s.typeParams.filter((p) => !isLifetime(p)) } : s, this.typeNamed(s.name));
+          if (s.typeParams.some(isLifetime)) this.decls.slots.set(s.name, s.typeParams.map(isLifetime));
+          addAlias(this.decls.aliases, s.typeParams.some(isLifetime) ? { ...s, typeParams: s.typeParams.filter((p) => !isLifetime(p)) } : s, this.typeNamed(s.name));
           continue;
         }
         if (trait) {
-          typeName(trait.name, s, aliases.has(trait.name) || this.typeNamed(trait.name));
-          declarations.interfaces.set(trait.name, trait);
+          typeName(trait.name, s, this.decls.aliases.has(trait.name) || this.typeNamed(trait.name));
+          this.decls.interfaces.set(trait.name, trait);
           continue;
         }
         if (s.kind === "interface") {
-          typeName(s.name, s, aliases.has(s.name) || this.typeNamed(s.name));
-          declarations.interfaces.set(s.name, s);
-          if (s.jsClass) jsClasses.set(s.name, s);
+          typeName(s.name, s, this.decls.aliases.has(s.name) || this.typeNamed(s.name));
+          this.decls.interfaces.set(s.name, s);
+          if (s.jsClass) this.tables.jsClasses.set(s.name, s);
           continue;
         }
         if (s.kind === "class" && s.name !== undefined) {
-          typeName(s.name, s, aliases.has(s.name) || this.typeNamed(s.name));
+          typeName(s.name, s, this.decls.aliases.has(s.name) || this.typeNamed(s.name));
           // A class's lifetimes are checked and erased, never instanced, so they are set aside.
           const node = { ...s, id: nextId(this.tables.ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
-          if (s.typeParams.some(isLifetime)) declarations.slots.set(s.name, s.typeParams.map(isLifetime));
+          if (s.typeParams.some(isLifetime)) this.decls.slots.set(s.name, s.typeParams.map(isLifetime));
           if (node.typeParams.length > 0) this.templates.set(s.name, node);
           else this.classes.set(s.name, declareClass(this.tables, node));
           const declared = this.tables.arenas.classOf(this.classes.get(s.name));
-          const rust = rustClassNodes.get(s);
+          const rust = this.tables.rust.classNodes.get(s);
           if (rust) this.tables.typing.rec(declared!.type).rust = rust;
           // A Rust type declaring no constructor is never made with `new`, so its handle needs no
           // assigning in the empty one it is given.
@@ -702,14 +738,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         if (s.kind === "let") throw new CompileError("E0404", "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
         // Top-level code with side effects belongs in main(); the migration lint moves it there.
         if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
-        const rust = rustNames.get(s);
+        const rust = this.tables.rust.names.get(s);
         if (rust) {
           this.funcs.push(this.addBody(Object.assign({ ...s, id: nextId(this.tables.ids), body: [] }, { foreign: true, rust })));
           continue;
         }
         if (s.js) {
           const body = this.addBody({ ...s, id: nextId(this.tables.ids), body: [] });
-          jsBodies.set(s, body.bodyId);
+          this.tables.jsBodies.set(s, body.bodyId);
           this.funcs.push(body);
           continue;
         }
@@ -721,7 +757,6 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
-    this.byName = new Map<string, BodyId>();
     for (const f of this.funcs) {
       try {
         // A tag takes its strings, then its values as a rest parameter.
@@ -748,26 +783,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.stopOnErrors();
     this.main = this.bodyNamed("main");
     if (!this.main && !this.library && !this.macros && !this.module) throw new CompileError("E0405", "no main() function; execution starts there", 0, 0);
-    this.assuming = new Set<string>();
-    this.registryState = new RegistryState();
     this.classes.forEach((c) => this.registry().register(c));
-    this.genericClassesState = new GenericClassesState();
-    this.resolverState = new ResolverState();
-    this.done = new Set<InstanceId>();
-    this.rustTypes = new Map<string, string>();
-    this.views = new Map<InstanceId, Type>();
-    this.demands = new NodeMap<Stmt, Integer>();
-    this.candidates = new Map<LocalId, Stmt>();
-    this.demanded = 0;
-    this.instancingState = new InstancingState(this.tables.typing);
-    this.querying = new Set<string>();
-    this.placeholders = new NodeMap<Expr, Type>();
-    this.broken = new NodeSet<Stmt>();
-    this.continued = new NodeSet<Stmt>();
-    this.inProgress = new Set<InstanceId>();
-    this.nextLocal = 0;
-    this.closures = [];
-    this.closureBodies = new TypeMap<ClosureType, InstanceId>();
   }
 
   // Checks a method changing an object that holds references, unless it is being checked or
@@ -903,7 +919,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const outerSight = this.resolver().enterSight(sight);
     const outerScope = this.resolver().enterScope(copyScope(scope));
     try {
-      return this.paramType(sig.params[i]!, sig.self?.constructor);
+      return this.paramType(sig.params[i]!, sig.self !== undefined && sig.self.constructor);
     } finally {
       this.resolverState.scope = outerScope;
       this.resolverState.sight = outerSight;
@@ -919,7 +935,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
-  paramType(this: Mut<this>, p: Param, property?: boolean): Type {
+  paramType(this: Mut<this>, p: Ref<Param>, property = false): Type {
     return this.resolver().paramType(p, property);
   }
 
@@ -1056,7 +1072,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.tables.typing.setJsError(this.tables.arenas.classOf(this.classes.get("JsError"))?.type);
     // Classes are laid out before any body is checked, since checking one may need another's
     // fields. Until the resolver exists, a generic class's instance waits for `start`.
-    this.registryState.infoOf.forEach((c) => this.registry().layout(c));
+    // Laying out a class may register another, which is laid out in turn, as the map's order has it.
+    let laid: usize = 0;
+    while (true) {
+      let infos: ClassId[] = [];
+      for (const c of this.registryState.infoOf.values()) infos.push(c);
+      if (laid >= infos.length) break;
+      for (let i = laid; i < infos.length; i++) this.registry().layout(infos[i]!);
+      laid = infos.length;
+    }
     this.genericClasses().start();
     this.genericClasses().define();
     // Aliases are checked once classes are laid out, since one may read a class's fields or a
@@ -1192,7 +1216,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.tables.typing.closeUnknown();
     this.unknownJson();
     this.tables.typing.layOutForCodegen();
-    return { instances: compiledIds, tables: this.tables, compilation: this.compilation, warnings: warnings(this.tables, compiledIds, required) };
+    return { instances: compiledIds, tables: this.tables, warnings: warnings(this.tables, compiledIds, required) };
   }
 
   // A value given to `JSON.stringify` holding an `unknown` needs each type stored in one to have a
@@ -1237,11 +1261,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // The name the file holding `at` writes for a top-level name, or nothing when that file can't
   // reach it. Std's prelude is in no file's table and reaches every file, but for its internals.
   reachedAs(name: string, at: usize): string | undefined {
-    if (this.files !== undefined) {
-      const file = this.files.get(at - (at % (FILE_SPAN as usize)));
+    const files = this.macros ? undefined : this.tables.fileNames;
+    if (files !== undefined) {
+      const file = files.get(at - (at % (FILE_SPAN as usize)));
       const written = file !== undefined ? file.get(name) : undefined;
       if (written !== undefined) return written;
-      for (const f of this.files.values()) if (f.has(name)) return undefined;
+      for (const f of files.values()) if (f.has(name)) return undefined;
     }
     return STD_INTERNAL.has(name) || name.startsWith("__") ? undefined : name;
   }
@@ -1958,7 +1983,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         const declared = this.tables.arenas.bodyOf(id);
         if (declared.abstract !== true) continue;
         let ownType: Type | undefined = undefined;
-        for (const x of this.tables.typing.rec(this.tables.arenas.classOf(c).type).fields) {
+        const own = this.tables.typing.rec(this.tables.arenas.classOf(c).type).fields;
+        for (const x of own) {
           if (x.name === name) {
             ownType = x.type;
             break;
@@ -1988,7 +2014,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const why = (text: string) => new CompileError("E0701", `'${declared.name.slice((base.length + 1) as i64)}' ${text}, as '${base}' declares it abstract`, f.start, f.end);
     const want = this.instancing().declaredParams(declared);
     const rest = f.params.find((p) => p.rest);
-    if (rest !== undefined && !declared.params.some((p) => p.rest)) throw new CompileError("E0801", `'${f.name.slice(this.tables.typing.rec(f.owner!).name.length + 1)}' can't gather its arguments into a rest parameter yet where '${base}' declares it abstract with separate ones`, rest.start, rest.end);
+    if (rest !== undefined && !declared.params.some((p) => p.rest)) throw new CompileError("E0801", `'${f.name.slice((this.tables.typing.rec(f.owner!).name.length + 1) as i64)}' can't gather its arguments into a rest parameter yet where '${base}' declares it abstract with separate ones`, rest.start, rest.end);
     // A generic implementation is the instance its type parameters take from the declaration's.
     const names = new Set(typeParamsOf(f).map((p) => p.name));
     const bindings = new Map<string, Type>();
@@ -2131,13 +2157,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     instance.patterns.clear();
     instance.copiesOut.clear();
     instance.returns = "void";
-    delete instance.throws;
-    delete instance.envs;
-    delete instance.dyns;
-    delete instance.made;
-    delete instance.predicates;
-    delete instance.narrowedFields;
-    delete instance.absent;
+    instance.throws = undefined;
+    instance.envs = undefined;
+    instance.dyns = undefined;
+    instance.made = undefined;
+    instance.predicates = undefined;
+    instance.narrowedFields = undefined;
+    instance.absent = undefined;
     // A closure checked within a discarded pass isn't in progress any more either.
     let inside: InstanceId[] = [];
     for (const c of this.inProgress) if (this.within(c, id)) inside.push(c);
@@ -2170,7 +2196,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       this.foreignSignature(id);
       return;
     }
-    if (f.abstract) {
+    if (f.abstract === true) {
       const returns = this.instancing().returnTypeOf(f, instance.bindings) ?? "void";
       {
         let made = this.tables.arenas.instanceMut(id);
@@ -2193,21 +2219,29 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 // A class's members, for interface satisfaction, read through the checker.
 class ClassMembers implements Members {
   cx: Mut<Checker>;
-  typing: Typing;
-  arenas: Arenas;
-  assuming: Set<string>;
-  refused: Refused[];
 
   constructor(cx: Mut<Checker>) {
     this.cx = cx;
-    this.typing = cx.tables.typing;
-    this.arenas = cx.tables.arenas;
-    this.assuming = cx.assuming;
-    this.refused = cx.refused;
+  }
+
+  typing(this: Mut<this>): Mut<Typing> {
+    return this.cx.tables.typing;
+  }
+
+  arenas(): Ref<Arenas> {
+    return this.cx.tables.arenas;
+  }
+
+  assuming(this: Mut<this>): Mut<Set<string>> {
+    return this.cx.assuming;
+  }
+
+  refused(this: Mut<this>): Mut<Refused[]> {
+    return this.cx.refused;
   }
 
   /** @throws {CompileError} */
-  classOf(t: ClassType): ClassInfo {
+  classOf(this: Mut<this>, t: ClassType): ClassInfo {
     return this.cx.registry().classOf(t);
   }
 
@@ -2228,6 +2262,7 @@ class ClassMembers implements Members {
   }
 
   // A generic method's, with its own type parameters standing for themselves.
+  /** @throws {CompileError} */
   paramTypesOf(this: Mut<this>, id: BodyId): Type[] {
     const b = cloneSignature(this.cx.tables.arenas.bodyOf(id));
     if (!hasOwnTypeParams(b)) return this.cx.instancing().declaredParams(b);
@@ -2236,7 +2271,7 @@ class ClassMembers implements Members {
     return this.cx.instancing().paramTypes(def, scope);
   }
 
-  bodyNamed(name: string): Body | undefined {
+  bodyNamed(this: Mut<this>, name: string): Body | undefined {
     return this.cx.bodyNamed(name);
   }
 
@@ -2268,7 +2303,7 @@ class BodyChecker implements Context, GuardHost {
   calls: Instance["calls"];
   jumps: Instance["jumps"];
   declared: Type | undefined;
-  decls: Ref<Declarations>;
+  decls: Mut<Declarations>;
   // A generator's declared `Generator<T>`, or an async one's `AsyncGenerator<T>`, says what it
   // yields; calling it gives its own type.
   generatorType: GeneratorType | undefined;
@@ -4455,7 +4490,10 @@ class BodyChecker implements Context, GuardHost {
   raise(this: Mut<this>, at: Expr | Stmt, type: Type, what: string) {
     if (this.cx.tables.typing.holdsRef(type)) throw unsupported("errors holding references", at);
     const handler = this.handlers.at(-1);
-    if (handler !== undefined) return void handler.push([at, type]);
+    if (handler !== undefined) {
+      handler.push([at, type]);
+      return;
+    }
     // An error comptime code doesn't catch is a compile error where it runs, so it may throw any.
     if (this.f.comptime || this.comptimeDepth > 0) return;
     if (this.built) throw new CompileError("E0602", "a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", at.start, at.end);
@@ -4555,7 +4593,7 @@ function abstractPart(typing: Typing, t: Type): ClassType | undefined {
     const r = typing.rec(u);
     if (r.kind !== "class") return false;
     if (r.base !== undefined) bases.add(r.base);
-    if (r.abstract && !bases.has(u)) found = u as ClassType;
+    if (r.abstract === true && !bases.has(u)) found = u as ClassType;
     return found !== undefined;
   }, true);
   return found;
@@ -4566,7 +4604,8 @@ function abstractPart(typing: Typing, t: Type): ClassType | undefined {
 // class's own type, which escaped where no rule saw it, could reach one.
 /** @throws {CompileError} */
 export function unreached(typing: Typing, equalities: Tables["equalities"], arenas: Arenas, compiled: InstanceId[], dropped: (i: Instance) => boolean) {
-  for (const i of compiled.map((id) => arenas.instanceOf(id))) {
+  for (const each of compiled) {
+    const i = arenas.instanceOf(each);
     const reached: [Expr, InstanceId, string][] = [
       ...[...i.calls, ...i.setters].map(([at, target]): [Expr, InstanceId, string] => [at, target, ""]),
       ...[...(i.dyns ?? [])].flatMap(([at, table]) => [...table.methods, ...table.fields, table.clone].flatMap((target): [Expr, InstanceId, string][] => (target && target !== "copy" ? [[at, target, " through a 'Dyn'"]] : []))),

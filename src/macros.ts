@@ -1,5 +1,6 @@
 import { bodyOf } from "./arenas.ts";
-import { compiledOf, type Checked } from "./check.ts";
+import type { Checked } from "./check.ts";
+import { compiledOf } from "./codegen.ts";
 import { AstValues, CheckedHost, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import type { Compilation, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";

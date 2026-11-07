@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bodyOf } from "../src/arenas.ts";
-import { check, compiledOf } from "../src/check.ts";
+import { check } from "../src/check.ts";
+import { compiledOf } from "../src/codegen.ts";
 import { newCompilation } from "../src/compilation.ts";
 import { cachedSession } from "../src/stdcache.ts";
 import { CompileError } from "../src/diag.ts";
@@ -222,7 +223,7 @@ test("every type of the checked test programs is in its arena", () => {
       const { checked } = analyze(session, p.src, p.file);
       const roots: Type[] = compiledOf(checked).flatMap((i) => [...i.types.values(), ...i.coercions.values(), ...i.bindings.values(), i.returns, ...(i.throws ? [i.throws] : [])]);
       types += roots.length;
-      problems.push(...auditTypes(roots, checked.compilation.typing, p.name));
+      problems.push(...auditTypes(roots, checked.tables.typing, p.name));
     } catch (e) {
       if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
     }
@@ -264,7 +265,7 @@ test("no two types of the checked test programs share a Field array or Field", (
     versions.clear();
     if (p.src.includes("// mode: parse")) continue;
     try {
-      problems.push(...sharedFields(analyze(session, p.src, p.file).checked.compilation.typing, p.name));
+      problems.push(...sharedFields(analyze(session, p.src, p.file).checked.tables.typing, p.name));
     } catch (e) {
       if (!(e instanceof CompileError)) throw new Error(`${p.name}: ${e instanceof Error ? e.message : e}`);
     }

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bodyOf } from "../src/arenas.ts";
-import { compiledOf } from "../src/check.ts";
+import { compiledOf } from "../src/codegen.ts";
 import { analyze, compile } from "../src/main.ts";
 import { STD_BASE } from "../src/std.ts";
 import { cachedSession } from "../src/stdcache.ts";

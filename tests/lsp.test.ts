@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError } from "../src/diag.ts";
-import { compiledOf } from "../src/check.ts";
+import { compiledOf } from "../src/codegen.ts";
 import { analyze } from "../src/main.ts";
 import { frames } from "../src/lsp.ts";
 import { load } from "../src/modules.ts";

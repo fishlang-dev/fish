@@ -1,4 +1,4 @@
-import type { Compilation } from "./compilation.ts";
+import type { Compilation, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import type { EnumMember, Expr, Span, TypeParam } from "./parser.ts";
 import { nextId, renumberExpr, Rewrites, walkWhile, type Ids } from "./nodes.ts";
@@ -29,7 +29,7 @@ type EnumNode = Span & { name: string; const: boolean; typeParams: TypeParam[]; 
 // is read again by name at each step, since computing a value may read any enum, this one too.
 export interface EnumHost {
   enums: Map<string, EnumInfo>;
-  compilation: Compilation;
+  tables: Tables;
   /** @throws {CompileError} */
   enumMemberValue(this: Mut<this>, owner: string, member: string, init: Expr): unknown;
 }
@@ -64,7 +64,7 @@ export function settleEnum<H extends EnumHost>(host: Mut<H>, name: string): void
   if (info === undefined || info.pending === undefined) return;
   const p = info.pending;
   if (p.settling) {
-    const [start, end] = innermost(host.compilation, p.node);
+    const [start, end] = innermost(host.tables, p.node);
     throw new CompileError("E0707", `enum '${p.node.name}' is used while its members are being computed; give its members values that don't depend on the enum itself`, start, end);
   }
   host.enums.set(name, { type: info.type, members: new Map(), pending: { node: cloneEnumNode(p.node), id: p.id, names: new Set([...p.names]), settling: true } });
@@ -75,10 +75,10 @@ export function settleEnum<H extends EnumHost>(host: Mut<H>, name: string): void
       let value = m.init !== undefined ? literal(m.init) : next;
       if (m.init !== undefined && value === undefined) value = computed(host, p.node, m, m.init);
       let now = host.enums.get(name)!;
-      next = member(host.compilation, p.node, p.id, m, value, now.members);
+      next = member(host.tables, p.node, p.id, m, value, now.members);
       host.enums.set(name, now);
     }
-    host.enums.set(name, finished(host.compilation, p.node.name, host.enums.get(name)!.members));
+    host.enums.set(name, finished(host.tables, p.node.name, host.enums.get(name)!.members));
     done = true;
   } finally {
     // A failed settle starts again from nothing, since the checker may retry the pass that read it.
@@ -104,7 +104,7 @@ export function enumMemberOf<H extends EnumHost>(host: Mut<H>, name: string, mem
     return host.enums.get(name)!.members.get(member);
   }
   if (p.names.has(member) && !info.members.has(member)) {
-    const [start, end, inner] = innermost(host.compilation, p.node);
+    const [start, end, inner] = innermost(host.tables, p.node);
     throw new CompileError("E0707", `enum member '${inner}' uses '${p.node.name}.${member}', which isn't computed yet; an initializer can only use members declared before it, and no value can depend on itself`, start, end);
   }
   return info.members.get(member);
@@ -157,12 +157,12 @@ function finished(compilation: Mut<Compilation>, name: string, members: Ref<Map<
 function computed<H extends EnumHost>(host: Mut<H>, node: Ref<EnumNode>, m: Ref<EnumMember>, init: Ref<Expr>): bigint | string {
   let names = new Set<string>();
   for (const x of node.members) names.add(x.name);
-  host.compilation.enumInits.push([init.start, init.end, m.name]);
+  host.tables.enumInits.push([init.start, init.end, m.name]);
   let value: unknown = undefined;
   try {
-    value = host.enumMemberValue(node.name, m.name, qualified(host.compilation.ids, init, node.name, names));
+    value = host.enumMemberValue(node.name, m.name, qualified(host.tables.ids, init, node.name, names));
   } finally {
-    host.compilation.enumInits.pop();
+    host.tables.enumInits.pop();
   }
   if (typeof value === "bigint" || typeof value === "string") return value;
   if (typeof value === "number") throw new CompileError("E0707", `enum member '${m.name}' is ${value}, a float; a numeric enum holds i64 values, so give it an integer`, init.start, init.end);

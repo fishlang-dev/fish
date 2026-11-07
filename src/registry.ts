@@ -427,7 +427,8 @@ export class Registry<H extends RegistryHost> {
       const reason = named !== undefined && named.kind === "interface" ? unsatisfied(type, trait as InterfaceType, members, { start: node.start, end: node.end })
         : this.host.tables.typing.fits(type, trait) ? undefined : `type '${name}' doesn't fit '${this.host.tables.typing.show(trait)}'`;
       if (reason === undefined) continue;
-      members.refused.push({ type: this.host.tables.typing.show(type), trait: this.host.tables.typing.show(trait), reason });
+      let refused = members.refused();
+      refused.push({ type: this.host.tables.typing.show(type), trait: this.host.tables.typing.show(trait), reason });
       throw new CompileError("E0702", `class '${name}' incorrectly implements '${this.host.tables.typing.show(trait)}': ${reason}`, node.start, node.end);
     }
   }

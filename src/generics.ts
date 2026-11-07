@@ -435,12 +435,12 @@ function substituted(ids: Mut<Ids>, node: Ref<TypeNode>, given: Ref<Map<string, 
 // by fitting it.
 /** @throws {CompileError} */
 export function checkBound(type: Type, bound: Type, members: Mut<Members>, at: Ref<Span>) {
-  const trait = typeof bound === "string" ? undefined : members.typing.rec(bound);
+  const trait = typeof bound === "string" ? undefined : members.typing().rec(bound);
   const interfaced = trait !== undefined && trait.kind === "interface";
   const reason = interfaced ? unsatisfied(type, bound as InterfaceType, members, { start: at.start, end: at.end })
-    : members.typing.fits(type, bound) ? undefined : "";
+    : members.typing().fits(type, bound) ? undefined : "";
   if (reason === undefined) return;
-  throw new CompileError("E0107", `type '${members.typing.show(type)}' does not satisfy the constraint '${members.typing.show(bound)}'${reason !== "" ? `: ${reason}` : ""}`, at.start, at.end);
+  throw new CompileError("E0107", `type '${members.typing().show(type)}' does not satisfy the constraint '${members.typing().show(bound)}'${reason !== "" ? `: ${reason}` : ""}`, at.start, at.end);
 }
 
 // Whether a type has no type parameter in it, so its instance can be compiled. A class's
@@ -448,18 +448,13 @@ export function checkBound(type: Type, bound: Type, members: Mut<Members>, at: R
 // answer is kept, since its fields never change: walking nested types afresh at every level
 // would take time exponential in their depth. Each variant's answer is kept too.
 class Concreteness {
-  typing: Typing;
   private concreteVariants = new TypeMap<VariantType, boolean>();
   private concreteObjects = new TypeMap<ObjectType, boolean>();
   private visiting = new TypeSet<ClassType>();
 
-  constructor(typing: Typing) {
-    this.typing = typing;
-  }
-
-  concrete(this: Mut<this>, t: Type): boolean {
+  concrete(this: Mut<this>, typing: Ref<Typing>, t: Type): boolean {
     if (typeof t === "string") return true;
-    const r = this.typing.rec(t);
+    const r = typing.rec(t);
     if (r.kind === "literal" || r.kind === "pattern") return true;
     // An interface describes values without being one, so only a definition check holds one.
     if (r.kind === "param" || r.kind === "interface" || r.kind === "function") return false;
@@ -468,39 +463,44 @@ class Concreteness {
       if (this.visiting.has(t as ClassType)) return true;
       this.visiting.add(t as ClassType);
       try {
-        if (r.generic !== undefined) for (const a of r.generic.args) if (!this.concrete(a)) return false;
-        return r.base === undefined || this.concrete(r.base);
+        if (r.generic !== undefined) for (const a of r.generic.args) if (!this.concrete(typing, a)) return false;
+        return r.base === undefined || this.concrete(typing, r.base);
       } finally {
         this.visiting.delete(t as ClassType);
       }
     }
     // A type holding itself through an array is as concrete as the type arguments it was made with.
-    const tied = this.typing.tiedBy(t);
-    if (tied !== undefined) return this.typing.rec(tied).args.every((t) => this.concrete(t));
-    if (r.kind === "union") return r.members.every((t) => this.concrete(t));
-    if (r.kind === "ref" || r.kind === "pointer") return this.concrete(r.to);
-    if (r.kind === "handle") return this.concrete(r.gives) && (r.throws === undefined || this.concrete(r.throws));
-    if (r.kind === "interior" || r.kind === "shared" || r.kind === "block") return this.concrete(r.of);
+    const tied = typing.tiedBy(t);
+    if (tied !== undefined) return this.allConcrete(typing, typing.rec(tied).args);
+    if (r.kind === "union") return this.allConcrete(typing, r.members);
+    if (r.kind === "ref" || r.kind === "pointer") return this.concrete(typing, r.to);
+    if (r.kind === "handle") return this.concrete(typing, r.gives) && (r.throws === undefined || this.concrete(typing, r.throws));
+    if (r.kind === "interior" || r.kind === "shared" || r.kind === "block") return this.concrete(typing, r.of);
     if (r.kind === "dyn" || r.kind === "regex") return true;
     if (r.kind === "closure" || r.kind === "generator" || r.kind === "future") return r.concrete;
-    if (r.kind === "array" || r.kind === "fixed") return this.concrete(r.element);
-    if (r.kind === "map") return this.concrete(r.key) && this.concrete(r.value);
-    if (r.kind === "recursive") return r.args.every((t) => this.concrete(t));
+    if (r.kind === "array" || r.kind === "fixed") return this.concrete(typing, r.element);
+    if (r.kind === "map") return this.concrete(typing, r.key) && this.concrete(typing, r.value);
+    if (r.kind === "recursive") return this.allConcrete(typing, r.args);
     if (r.kind === "variant") {
       const known = this.concreteVariants.get(t as VariantType);
       if (known !== undefined) return known;
       let all = true;
-      for (const a of r.args) if (all && !this.concrete(a)) all = false;
-      for (const f of r.fields) if (all && !this.concrete(f.type)) all = false;
+      for (const a of r.args) if (all && !this.concrete(typing, a)) all = false;
+      for (const f of r.fields) if (all && !this.concrete(typing, f.type)) all = false;
       this.concreteVariants.set(t as VariantType, all);
       return all;
     }
     const known = this.concreteObjects.get(t as ObjectType);
     if (known !== undefined) return known;
     let all = true;
-    for (const f of r.fields) if (all && !this.concrete(f.type)) all = false;
+    for (const f of r.fields) if (all && !this.concrete(typing, f.type)) all = false;
     this.concreteObjects.set(t as ObjectType, all);
     return all;
+  }
+
+  private allConcrete(this: Mut<this>, typing: Ref<Typing>, ts: Ref<Type[]>): boolean {
+    for (const t of ts) if (!this.concrete(typing, t)) return false;
+    return true;
   }
 }
 
@@ -561,8 +561,8 @@ export class InstancingState {
   // the instance's own.
   sites = new NodeMap<Span & Id, Map<string, Type>>();
 
-  constructor(typing: Typing) {
-    this.concreteness = new Concreteness(typing);
+  constructor() {
+    this.concreteness = new Concreteness();
   }
 }
 
@@ -772,7 +772,7 @@ export class Instancing<H extends InstancingHost> {
     if (known !== undefined) return this.host.tables.arenas.instanceOf(known);
     // Every type parameter, implicit ones included, needs a concrete binding to compile.
     const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...this.implicitOf(f.bodyId).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
-    const isConcrete = complete && [...bindings].every(([name, t]) => isApart(name) || this.host.instancingState.concreteness.concrete(t));
+    const isConcrete = complete && [...bindings].every(([name, t]) => isApart(name) || this.host.instancingState.concreteness.concrete(this.host.tables.typing, t));
     const generic = bindings.size > 0;
     const body = this.host.tables.arenas.addBody(cloneBody(f)).bodyId;
     const symbol = generic && isConcrete ? instanceSymbol(this.host, f.name, bindings, byKey) : f.name;
@@ -906,7 +906,7 @@ export class Instancing<H extends InstancingHost> {
     // one holding no type parameter keeps how its fields were spelled, which printing and JSON
     // read.
     let lowered = new Map<string, Type>();
-    for (const [name, t] of own) lowered.set(name, this.host.tables.typing.holdsPattern(t) || this.host.instancingState.concreteness.concrete(t) ? t : this.host.tables.typing.lowerKeepingBrands(t));
+    for (const [name, t] of own) lowered.set(name, this.host.tables.typing.holdsPattern(t) || this.host.instancingState.concreteness.concrete(this.host.tables.typing, t) ? t : this.host.tables.typing.lowerKeepingBrands(t));
     // Every instance of the calling body shares the call's node, so each call resets it.
     if ([...own].some(([name, t]) => lowered.get(name) !== t)) this.host.instancingState.sites.set({ id: at.id, start: at.start, end: at.end }, own);
     else this.host.instancingState.sites.delete(at);
@@ -989,7 +989,7 @@ export class Instancing<H extends InstancingHost> {
   private known(this: Mut<this>, bindings: Ref<Map<string, Type>>, names: string[]): boolean {
     for (const n of names) {
       const t = bindings.get(n);
-      if (t === undefined || !this.host.instancingState.concreteness.concrete(t)) return false;
+      if (t === undefined || !this.host.instancingState.concreteness.concrete(this.host.tables.typing, t)) return false;
     }
     return true;
   }
@@ -1058,7 +1058,7 @@ export class Instancing<H extends InstancingHost> {
     const held = r?.kind === "ref" ? r.to : t;
     if (this.host.tables.typing.recOf(held)?.kind !== "class") return t;
     const members = this.host.members();
-    const method = inherited(members.arenas, members.classOf(held as ClassType), "methods", ITERATOR);
+    const method = inherited(members.arenas(), members.classOf(held as ClassType), "methods", ITERATOR);
     if (method === undefined) return t;
     const gives = members.returnOf(method.bodyId, at);
     return r?.kind === "ref" ? this.host.tables.typing.refType(gives, r.mutable) : gives;
@@ -1107,7 +1107,7 @@ export class Instancing<H extends InstancingHost> {
       // A tuple's elements are inferred like any other type's parts, so it is no bound of its own.
       // A package's function or object parameter is a callback JS keeps or a JS object, its type
       // the same for every call, not a bound.
-      if (f.accessor !== true && ((t.kind === "interface" && !(f.js !== undefined && this.host.tables.typing.promiseElement(type) !== undefined)) || (t.kind === "function" && f.js === undefined) || (t.kind === "regex" && t.any === true) || (t.kind === "object" && t.tuple !== true && this.host.instancingState.concreteness.concrete(type) && f.js === undefined))) {
+      if (f.accessor !== true && ((t.kind === "interface" && !(f.js !== undefined && this.host.tables.typing.promiseElement(type) !== undefined)) || (t.kind === "function" && f.js === undefined) || (t.kind === "regex" && t.any === true) || (t.kind === "object" && t.tuple !== true && this.host.instancingState.concreteness.concrete(this.host.tables.typing, type) && f.js === undefined))) {
         found.set(i, type as FunctionType | InterfaceType | ObjectType | RegexType);
         if (written !== type) borrows.set(i, written as RefType);
       }

@@ -1,5 +1,5 @@
 import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.ts";
-import { compiledOf, selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
+import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern } from "./regex.ts";
@@ -14,6 +14,9 @@ import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { EMBEDDED, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walkWhile } from "./nodes.ts";
+
+// Every instance to compile, as records.
+export const compiledOf = ({ instances, tables }: Checked): Instance[] => instances.map((i) => tables.arenas.instanceOf(i));
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",

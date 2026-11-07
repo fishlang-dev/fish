@@ -73,7 +73,13 @@ export function newCompilation(session: Session): Compilation {
 export type Tables = {
   // What every check of the program shares: its types, its instances, bodies, locals and classes,
   // the upcasts its macros wrote, the counter for the nodes checking makes, its counts, its regex
-  // tables, files and Rust names, the nodes lowering replaced, and the session's timings.
+  // tables, files and Rust names, the nodes lowering replaced, and the session's timings; and the
+  // rest of the compilation it was made from, so the tables stand for the whole of it.
+  session: Session;
+  names: Names;
+  enumInits: Compilation["enumInits"];
+  fileNames?: Compilation["fileNames"];
+  looked: string[];
   typing: Typing;
   arenas: Arenas;
   upcasts: Set<string>;
@@ -330,9 +336,14 @@ export type TopKeys = (e: Expr) => string;
 /** @throws {CompileError} */
 export type Timed<T> = () => T;
 
-export function newTables({ session, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ session, names, enumInits, fileNames, looked, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
     timings: session.timings,
+    session,
+    names,
+    enumInits,
+    fileNames,
+    looked,
     typing,
     arenas,
     upcasts,
