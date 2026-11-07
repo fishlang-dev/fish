@@ -7847,12 +7847,12 @@ export class Expressions<C extends Context> implements Union<C> {
     if (typeof object !== "string" && this.ctx.tables.typing.rec(object).kind === "union") {
       throw new CompileError("E0109", `can't assign to '${target.name}' through '${this.ctx.tables.typing.show(object)}'; narrow it to one member first`, target.start, target.end);
     }
-    const found = typeof object !== "string" && (this.ctx.tables.typing.field(object, target.name)?.type !== undefined);
+    const found = typeof object !== "string" ? this.ctx.tables.typing.field(object, target.name)?.type : undefined;
     // A pattern or brand the field was declared with is what a write must match, though lowering
     // made it a string or the brand's base.
     const declared = this.ctx.types.get(target)!;
-    if (found && (this.ctx.tables.typing.holdsPattern(declared) || this.ctx.tables.typing.holdsBrand(declared)) && this.ctx.tables.typing.lower(declared) === this.ctx.tables.typing.lower(found)) return declared;
-    return found || declared;
+    if (found !== undefined && (this.ctx.tables.typing.holdsPattern(declared) || this.ctx.tables.typing.holdsBrand(declared)) && this.ctx.tables.typing.lower(declared) === this.ctx.tables.typing.lower(found)) return declared;
+    return found !== undefined ? found : declared;
   }
 
   // The setter an assignment to a class member runs, if it is an accessor. A getter alone
