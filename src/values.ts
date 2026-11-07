@@ -1660,7 +1660,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.kind === "member" && callee.object.kind === "ident" && isTypedName(callee.object.name) && (this.ctx.lookup(callee.object.name, undefined) === undefined) && !this.ctx.classes.has(callee.object.name)) return this.typedStatic(e, callee, callee.object.name);
     // `u8.fromBase64(s, options?)` and `u8.fromHex(s)`, TC39's Uint8Array statics on the byte type.
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "u8" && (this.ctx.lookup("u8", undefined) === undefined) && !this.ctx.byName.has("u8") && !this.ctx.byName.has("const u8")) {
-      const helper = Object.hasOwn(BYTE_DECODERS, callee.name) ? BYTE_DECODERS[callee.name] : undefined;
+      const helper = Object.keys(BYTE_DECODERS).includes(callee.name) ? BYTE_DECODERS[callee.name] : undefined;
       if (!helper) throw new CompileError("E0502", `'u8' has no static '${callee.name}'; decode text into a 'u8[]' with 'u8.fromBase64' or 'u8.fromHex'`, callee.start, callee.end);
       if (callee.optional || e.optional) throw new CompileError("E0505", `'u8.${callee.name}' is always there, so it is called without '?.'`, e.start, e.end);
       if (e.typeArgs.length > 0) throw new CompileError("E0106", `'u8.${callee.name}' takes no type arguments`, e.start, e.end);
@@ -2059,8 +2059,10 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private targetFor(this: Mut<this>, e: Ref<Call>, foundId: BodyId | undefined): BodyId | undefined {
     if (foundId === undefined) return undefined;
-    if (this.ctx.tables.arenas.bodyOf(foundId).js?.overloads !== undefined) return this.jsOverload(e, this.ctx.tables.arenas.bodyOf(foundId)).bodyId;
-    if (this.ctx.tables.arenas.bodyOf(foundId).overloads !== undefined && e.implementation !== true) return this.overload(e, this.ctx.tables.arenas.bodyOf(foundId)).bodyId;
+    // A copy, since checking the arguments may change the arenas.
+    const body = { ...this.ctx.tables.arenas.bodyOf(foundId) };
+    if (body.js !== undefined && body.js.overloads !== undefined) return this.jsOverload(e, body).bodyId;
+    if (body.overloads !== undefined && e.implementation !== true) return this.overload(e, body).bodyId;
     return foundId;
   }
 
@@ -2703,10 +2705,10 @@ export class Expressions<C extends Context> implements Union<C> {
   private stringCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, receiver: Type): { type: Type; what: string } {
     this.text(callee.object, receiver, this.linked(callee));
     // A method that may take a regex looks at its first argument to see which it was given.
-    const first = REGEX_METHODS.has(callee.name) && e.args[0] ? this.value(e.args[0]) : undefined;
+    const first = REGEX_METHODS.has(callee.name) && e.args.length > 0 ? this.value(e.args[0]!) : undefined;
     const rx = first === undefined ? undefined : this.asRegex(first);
-    if (rx) return this.regexStringCall(e, callee, rx, this.ctx.tables.typing.lower(first!) !== rx);
-    if (first !== undefined && !stringMethods(this.ctx.tables.typing)[callee.name]) throw new CompileError("E0508", `'${callee.name}' takes a regex, like '${callee.name}(/x/${callee.name === "matchAll" ? "g" : ""})'; Fish doesn't turn a string into one`, e.args[0]!.start, e.args[0]!.end);
+    if (rx !== undefined) return this.regexStringCall(e, callee, rx, this.ctx.tables.typing.lower(first!) !== rx);
+    if (first !== undefined && stringMethods(this.ctx.tables.typing)[callee.name] === undefined) throw new CompileError("E0508", `'${callee.name}' takes a regex, like '${callee.name}(/x/${callee.name === "matchAll" ? "g" : ""})'; Fish doesn't turn a string into one`, e.args[0]!.start, e.args[0]!.end);
     // `concat` takes any number of strings, as `+` joins them.
     if (callee.name === "concat") {
       for (const a of e.args) {
@@ -2718,16 +2720,16 @@ export class Expressions<C extends Context> implements Union<C> {
       return { type: "string", what: "'concat'" };
     }
     const method = stringMethods(this.ctx.tables.typing)[callee.name];
-    if (!method) throw new CompileError("E0502", `strings have no method '${callee.name}' yet${didYouMean(callee.name, Object.keys(stringMethods(this.ctx.tables.typing)))}`, callee.start, callee.end);
+    if (method === undefined) throw new CompileError("E0502", `strings have no method '${callee.name}' yet${didYouMean(callee.name, Object.keys(stringMethods(this.ctx.tables.typing)))}`, callee.start, callee.end);
     const [params, returns, required] = method;
     if (e.args.length < required || e.args.length > params.length) {
       const count = required === params.length ? `${required}` : `${required} or ${params.length}`;
       throw new CompileError("E0504", `'${callee.name}' takes ${count} argument${params.length === 1 ? "" : "s"}`, e.start, e.end);
     }
-    e.args.forEach((a, i) => {
-      const t = i === 0 && first !== undefined ? first : this.value(a);
-      this.coerce(a, t, params[i]!, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(params[i]!)}'`);
-    });
+    for (let i: usize = 0; i < e.args.length; i++) {
+      const t = i === 0 && first !== undefined ? first : this.value(e.args[i]!);
+      this.coerce(e.args[i]!, t, params[i]!, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(params[i]!)}'`);
+    }
     return { type: returns, what: `'${callee.name}'` };
   }
 
@@ -2864,16 +2866,22 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.name === "flat" && this.isArray(this.ctx.tables.typing.lower(this.ctx.tables.typing.rec(array).element))) this.clonable(this.ctx.tables.typing.rec(this.ctx.tables.typing.lower(this.ctx.tables.typing.rec(array).element) as ArrayType).element, callee, "flat");
     // `entries()`, `keys()` and `values()` call the prelude's generators, which borrow the array
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
-    if (Object.hasOwn(ITERATORS, callee.name)) {
+    if (Object.keys(ITERATORS).includes(callee.name)) {
       if (e.args.length > 0) throw new CompileError("E0504", `'${callee.name}' takes no arguments`, e.start, e.end);
-      return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: ITERATORS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] }));
+      const helper: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: ITERATORS[callee.name]!, start: callee.start, end: callee.end };
+      const none: TypeNode[] = [];
+      const by: Expr = { ...e, callee: helper, args: [callee.object], typeArgs: none };
+      return this.callMade(this.ctx.tables.rewrites.replace(e, by));
     }
     // `toBase64(options?)` and `toHex()` on bytes call the prelude's encoders, which borrow them.
-    if (Object.hasOwn(BYTE_METHODS, callee.name)) {
+    if (Object.keys(BYTE_METHODS).includes(callee.name)) {
       if (this.ctx.tables.typing.lower(this.ctx.tables.typing.rec(array).element) !== "u8") throw new CompileError("E0504", `'${callee.name}' encodes bytes, a 'u8[]', not '${this.ctx.tables.typing.show(array)}'`, callee.start, callee.end);
-      const most = callee.name === "toBase64" ? 1 : 0;
+      const most: usize = callee.name === "toBase64" ? 1 : 0;
       if (e.args.length > most) throw new CompileError("E0504", most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
-      return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] }));
+      const helper: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end };
+      const none: TypeNode[] = [];
+      const by: Expr = { ...e, callee: helper, args: [callee.object, ...e.args], typeArgs: none };
+      return this.callMade(this.ctx.tables.rewrites.replace(e, by));
     }
     if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"].includes(callee.name)) {
       throw new CompileError("E0211", `'${callee.name}' changes its array, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
@@ -2894,7 +2902,7 @@ export class Expressions<C extends Context> implements Union<C> {
       return { type: this.ctx.tables.typing.unionType([this.ctx.tables.typing.rec(array).element, "null"]), what: "'at'" };
     }
     if (CHANGING_METHODS.has(callee.name)) return this.changingCall(e, callee, array);
-    const count = callee.name === "push" ? 1 : 0;
+    const count: usize = callee.name === "push" ? 1 : 0;
     if (e.args.length !== count) throw new CompileError("E0504", `'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     if (!this.place(callee.object)) throw new CompileError("E0212", `'${callee.name}' changes its array, so call it on a variable or a field`, callee.start, callee.end);
     this.changeable(callee.object, callee.name === "push" ? "push to" : "pop from");
@@ -3355,17 +3363,16 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private filled(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
     if (callee.name !== "filled") throw new CompileError("E0502", `'FixedArray' has no '${callee.name}'; make one with 'FixedArray.filled<T, N>(value)' or a literal`, callee.start, callee.end);
-    const written = e.typeArgs.length > 0 ? this.ctx.resolveType({ id: nextId(this.ctx.tables.ids), kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : this.ctx.exprsState.wanted.get(e);
+    const written = e.typeArgs.length > 0 ? this.ctx.resolveType({ id: nextId(this.ctx.tables.ids), kind: "ref", name: "FixedArray", args: cloneTypeNodes(e.typeArgs), start: e.start, end: e.end }) : this.ctx.exprsState.wanted.get(e);
     if ((written === undefined) || !this.isFixed(written)) throw new CompileError("E0104", "say which fixed array to fill, as in 'FixedArray.filled<i64, 4>(0)'", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("E0504", "'FixedArray.filled' takes the value to fill it with", e.start, e.end);
     this.clonable(this.ctx.tables.typing.rec(written).element, { start: e.start, end: e.end }, "FixedArray.filled");
-    const v = e.args[0]!;
-    this.expect(v, this.ctx.tables.typing.rec(written).element);
-    const t = this.value(v);
-    this.coerce(v, t, this.ctx.tables.typing.rec(written).element, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(this.ctx.tables.typing.rec(written).element)}'`);
+    this.expect(e.args[0]!, this.ctx.tables.typing.rec(written).element);
+    const t = this.value(e.args[0]!);
+    this.coerce(e.args[0]!, t, this.ctx.tables.typing.rec(written).element, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(this.ctx.tables.typing.rec(written).element)}'`);
     // Each instance's own type, as a generic body's differ, and a statement keeps it too.
-    this.ctx.tables.fixedFills.add(e);
-    this.ctx.types.set(e, written);
+    this.ctx.tables.fixedFills.add(cloneExpr(e));
+    this.ctx.types.set(cloneExpr(e), written);
     return { type: written, what: "'FixedArray.filled'" };
   }
 
@@ -3457,7 +3464,7 @@ export class Expressions<C extends Context> implements Union<C> {
       if (!stringLike(this.ctx.tables.typing, t)) throw new CompileError("E0504", `an assertion's message is a string, not '${this.ctx.tables.typing.show(t)}'`, e.args[1]!.start, e.args[1]!.end);
       if (t !== "string") this.coerce(e.args[1]!, t, "string", "");
     }
-    this.ctx.tables.asserts.set(cloneExpr(e), textAt(this.ctx.tables.files, e.args[0]!));
+    this.ctx.tables.asserts.set(cloneExpr(e), textAt(this.ctx.tables.files, { start: e.args[0]!.start, end: e.args[0]!.end }));
     return { type: "void", what: "'assert'" };
   }
 
@@ -4182,7 +4189,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (!any) return undefined;
     let parts: Expr[] = [];
     for (let i: usize = 0; i < args.length; i++) this.spreadParts(args[i]!, tuples[i], parts);
-    return this.ctx.tables.rewrites.replace(e, withArgs(e, parts));
+    return this.ctx.tables.rewrites.replace({ id: e.id }, withArgs(e, parts));
   }
 
   // An argument as `spreadTuples` passes it: itself, or a tuple's elements read from its variable.
@@ -6008,8 +6015,8 @@ export class Expressions<C extends Context> implements Union<C> {
     const returns = c.returns;
     if (c.params.length > 0) {
       const written = c.params[0]!;
-      const p = callback.kind === "arrow" && callback.params.length > 0 ? callback.params[0]! : undefined;
-      this.passedExactly(method, held, written, p, callback);
+      if (callback.kind === "arrow" && callback.params.length > 0) this.passedExactly(method, held, written, callback.params[0]!, { start: callback.start, end: callback.end });
+      else this.passedExactly(method, held, written, undefined, { start: callback.start, end: callback.end });
     }
     return { type: returns, what: `'${method}'` };
   }
@@ -6272,7 +6279,6 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private helperWith(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, yields: Type, callback: Ref<Expr>, params: Ref<Type[]>, acc: Type | undefined): { type: Type; what: string } {
     const name = callee.name;
-    const source = callee.object;
     const reducing = name === "reduce";
     const lent = PREDICATES.has(name);
     const names = acc !== undefined ? ["accumulator", "value", "index"] : ["value", "index"];
@@ -6285,10 +6291,10 @@ export class Expressions<C extends Context> implements Union<C> {
     this.ctx.exprsState.once.add(cloneExpr(callback));
     if (c?.kind !== "closure") throw new CompileError("E0506", `'${name}' takes a callback like 'x => ...'`, callback.start, callback.end);
     for (let i: usize = 0; i < c.params.length; i++) {
-      const written = callback.kind === "arrow" && i < callback.params.length ? callback.params[i] : undefined;
-      this.passedExactly(name, params[i]!, c.params[i]!, written, { start: callback.start, end: callback.end }, i + 1 !== params.length);
+      if (callback.kind === "arrow" && i < callback.params.length) this.passedExactly(name, params[i]!, c.params[i]!, callback.params[i]!, { start: callback.start, end: callback.end }, i + 1 !== params.length);
+      else this.passedExactly(name, params[i]!, c.params[i]!, undefined, { start: callback.start, end: callback.end }, i + 1 !== params.length);
     }
-    this.runsOften(called as ClosureType, name, "its callback once per value", callback);
+    this.runsOften(called as ClosureType, name, "its callback once per value", { start: callback.start, end: callback.end });
     const gives = c.returns;
     if (lent && gives !== "boolean") {
       throw new CompileError("E0506", `'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${this.ctx.tables.typing.show(gives)}'`, callback.start, callback.end);
@@ -6297,19 +6303,23 @@ export class Expressions<C extends Context> implements Union<C> {
     if (name === "map" && (gives === "void" || this.ctx.tables.typing.holdsRef(gives))) throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.ctx.tables.typing.show(gives)}'`, callback.start, callback.end);
     let target = GENERATOR_HELPERS[name]!;
     if (name === "flatMap") {
-      if (this.ctx.tables.typing.yieldsOf(this.ctx.tables.typing.lower(gives)) !== undefined) target = "iter flat map generator";
-      else if (!this.isArray(this.ctx.tables.typing.lower(gives))) throw new CompileError("E0506", `'flatMap''s callback gives a generator or an array for each value, whose values make up the result; this one gives '${this.ctx.tables.typing.show(gives)}'`, callback.start, callback.end);
-      else this.clonable(this.ctx.tables.typing.rec(this.ctx.tables.typing.lower(gives) as ArrayType).element, callback, "flatMap");
+      const lowered = this.ctx.tables.typing.lower(gives);
+      if (this.ctx.tables.typing.yieldsOf(lowered) !== undefined) target = "iter flat map generator";
+      else if (!this.isArray(lowered)) throw new CompileError("E0506", `'flatMap''s callback gives a generator or an array for each value, whose values make up the result; this one gives '${this.ctx.tables.typing.show(gives)}'`, callback.start, callback.end);
+      else this.clonable(this.ctx.tables.typing.rec(lowered as ArrayType).element, { start: callback.start, end: callback.end }, "flatMap");
     }
     const at = { start: e.start, end: e.end };
     if (reducing && e.args.length < 2) {
       // std gives the fold in a one-element tuple, or nothing when the generator was empty.
-      const folded = this.panicking(this.stdHelper(name, "iter reduce first", [cloneExpr(source), cloneExpr(callback)], e), "reduce of empty generator with no initial value", e);
+      const first = this.stdHelper(name, "iter reduce first", [cloneExpr(callee.object), cloneExpr(callback)], e);
+      const folded = this.panicking(first, "reduce of empty generator with no initial value", e);
       const index: Expr = { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, start: at.start, end: at.end };
-      return { type: this.typeOf(this.ctx.tables.rewrites.replace(e, { id: 0, kind: "index", object: folded, index, optional: false, start: at.start, end: at.end })), what: "'reduce'" };
+      const read = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "index", object: folded, index, optional: false, start: at.start, end: at.end });
+      return { type: this.typeOf(read), what: "'reduce'" };
     }
-    const args: Expr[] = e.args.length > 1 ? [cloneExpr(source), cloneExpr(callback), cloneExpr(e.args[1]!)] : [cloneExpr(source), cloneExpr(callback)];
-    return this.callMade(this.ctx.tables.rewrites.replace(e, this.stdHelper(name, target, args, e)));
+    const args: Expr[] = e.args.length > 1 ? [cloneExpr(callee.object), cloneExpr(callback), cloneExpr(e.args[1]!)] : [cloneExpr(callee.object), cloneExpr(callback)];
+    const helper = this.stdHelper(name, target, args, e);
+    return this.callMade(this.ctx.tables.rewrites.replace(e, helper));
   }
 
   // Whether an expression is an index into an array, a place inside it.

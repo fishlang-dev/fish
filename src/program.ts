@@ -21,7 +21,7 @@ export function stdModuleAt(files: Ref<Compilation["files"]>, offset: usize): st
 }
 
 // The source text a span covers in the program last loaded; std's prelude is in none of its files.
-export function textAt(files: Compilation["files"], at: Span): string {
+export function textAt(files: Ref<Compilation["files"]>, at: Ref<Span>): string {
   const f = files.findLast((f) => at.start >= f.base);
   return f !== undefined && at.end - f.base <= f.src.length ? f.src.slice((at.start - f.base) as i64, (at.end - f.base) as i64) : "";
 }
