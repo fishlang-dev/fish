@@ -1493,7 +1493,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const sync = "'spawnBlocking' runs a synchronous function on a thread of its own; run async work with 'spawn' instead";
     const declared = (this.ctx.lookup(callee.name, undefined) === undefined) ? this.bodyNamed(callee.name) : undefined;
     let wrong: string | undefined;
-    if (declared) {
+    if ((declared !== undefined)) {
       const needed = declared.params.filter((p) => !p.optional && !p.default && !p.rest).length;
       wrong = declared.async ? sync : needed > 0 ? `'spawnBlocking' calls its function with no arguments, but this one takes ${needed}; wrap it, as in 'spawnBlocking(() => f(x))'` : undefined;
     } else {
@@ -1602,7 +1602,7 @@ export class Expressions<C extends Context> implements Union<C> {
       if (e.typeArgs.length > 0) throw new CompileError("E0106", `'u8.${callee.name}' takes no type arguments`, e.start, e.end);
       const most = callee.name === "fromBase64" ? 2 : 1;
       if (e.args.length < 1 || e.args.length > most) throw new CompileError("E0504", most === 1 ? "'u8.fromHex' takes one string of hex digits" : "'u8.fromBase64' takes a string and an optional options object, as in '{ alphabet: \"base64url\" }'", e.start, e.end);
-      return this.call(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: helper, start: callee.start, end: callee.end } }) as Call);
+      return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: helper, start: callee.start, end: callee.end } }));
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Object" && (this.ctx.lookup("Object", undefined) === undefined) && !this.ctx.classes.has("Object") && !this.ctx.byName.has("Object") && !this.ctx.byName.has("const Object") && !this.ctx.enums.has("Object")) return this.objectStatic(e, callee);
     if (callee.kind === "member" && this.isString(callee.object)) return this.stringStatic(e, callee);
@@ -1663,11 +1663,11 @@ export class Expressions<C extends Context> implements Union<C> {
       return { type: "i64", what: "an array length" };
     }
     // `super.m(...)` the bases don't declare runs on the Map or Set the class embeds.
-    if (callee.kind === "member" && callee.object.kind === "super" && this.superDelegated(callee.name)) return this.call(this.become(e, { ...e, callee: this.throughEmbedded(callee) }) as Call);
+    if (callee.kind === "member" && callee.object.kind === "super" && this.superDelegated(callee.name)) return this.callMade(this.become(e, { ...e, callee: this.throughEmbedded(callee) }));
     // The receiver is checked once, however its call is resolved.
     const receiver = callee.kind === "member" ? this.receiverType(callee) : undefined;
     // A method a class extending Map or Set doesn't declare is the embedded collection's.
-    if (callee.kind === "member" && this.delegated(receiver, callee.name)) return this.call(this.become(e, { ...e, callee: this.throughEmbedded(callee) }) as Call);
+    if (callee.kind === "member" && this.delegated(receiver, callee.name)) return this.callMade(this.become(e, { ...e, callee: this.throughEmbedded(callee) }));
     if (callee.kind === "member" && callee.name === "clone" && receiver && this.copies(receiver)) return this.cloned(e, callee, receiver);
     if (callee.kind === "member" && receiver !== undefined && stringLike(this.ctx.tables.typing, receiver)) return this.stringCall(e, callee, receiver);
     // A bigint's digits, in base 10 or the radix given.
@@ -1799,7 +1799,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const arrow: Expr = { id: nextId(this.ctx.tables.ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: run, start: f.start, end: f.end };
       const task: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: arrow, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
       const spawned: Expr = made ? { id: nextId(this.ctx.tables.ids), kind: "pipe", value: f, body: task, start: f.start, end: f.end } : arrow;
-      return this.call(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "blocking spawn", start: callee.start, end: callee.end }, args: [spawned] }) as Call);
+      return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "blocking spawn", start: callee.start, end: callee.end }, args: [spawned] }));
     }
     // std's `timer spawn` is `spawn` with the task's first poll run at once; `blocking spawn` is
     // what `spawnBlocking` becomes.
@@ -1953,7 +1953,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const found = this.ctx.tables.arenas.bodyOf(foundId);
     // A package's function declared with several signatures is checked against the first that
     // takes the arguments, as TypeScript picks one.
-    const target = found?.js?.overloads ? this.jsOverload(e, found) : found?.overloads && e.implementation !== true ? this.overload(e, found) : found;
+    const target = (found?.js?.overloads !== undefined) ? this.jsOverload(e, found) : found?.overloads && e.implementation !== true ? this.overload(e, found) : found;
     // A package's const is a value; one holding a function would be a function crossing from JS.
     if (target?.js?.const) {
       const held = this.ctx.resolveType(target.returnType!);
@@ -2108,7 +2108,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (tag.kind === "member" && tag.name === "raw" && this.isString(tag.object)) {
       if (e.typeArgs.length > 0) throw new CompileError("E0106", "'String.raw' takes no type arguments", e.start, e.end);
       if (template.kind !== "template") throw new CompileError("E1107", "a tag is followed by a template literal", template.start, template.end);
-      return this.ctx.tables.rewrites.replace(e, rawTemplate(template.raw, template.exprs, e));
+      return this.ctx.tables.rewrites.replace(e, rawTemplate(template.raw, template.exprs, { start: e.start, end: e.end }));
     }
     const target = tag.kind === "ident" && (this.ctx.lookup(tag.name, undefined) === undefined) ? this.bodyNamed(tag.name) : undefined;
     if (tag.kind === "ident" && !target && (this.ctx.lookup(tag.name, undefined) === undefined)) throw new CompileError("E0401", `unknown function '${tag.name}'${didYouMean(tag.name, this.ctx.names(tag.start))}`, tag.start, tag.end);
@@ -2284,7 +2284,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // A generic function named as a value: its own type, each call of which instantiates it.
   /** @throws {CompileError} */
   private genericValue(f: Ref<Body>, e: Ref<Expr>): Type {
-    if (f.foreign) throw unsupported(`${f.rust ? "Rust" : "C"} functions used as values`, e);
+    if ((f.foreign === true)) throw unsupported(`${f.rust ? "Rust" : "C"} functions used as values`, e);
     return this.ctx.tables.typing.genericFunctionType(f.name, "a generic function");
   }
 
@@ -2296,9 +2296,9 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.kind === "ident") {
       const localId = this.ctx.lookup(callee.name, undefined);
       const local = localId === undefined ? undefined : this.lc(localId);
-      if (!local) return undefined;
+      if ((local === undefined)) return undefined;
       held = local.type;
-      this.ctx.locals.set(callee, local.localId);
+      this.ctx.locals.set(cloneExpr(callee), local.localId);
     } else if (callee.kind === "member" && this.pure(callee) && receiver !== undefined && (this.recOf(receiver)?.kind === "class" || this.recOf(receiver)?.kind === "object")) {
       if (this.ctx.tables.typing.rec(receiver as ClassType).kind === "class" && inherited(this.ctx.tables.arenas, this.cls(receiver as ClassType as ClassType), "methods", callee.name)) return undefined;
       held = this.ctx.tables.typing.field(receiver as ObjectType | ClassType as ClassType | ObjectType, callee.name)?.type;
@@ -2467,7 +2467,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const kinds: Record<string, ["units" | "points", Type]> = { fromCharCode: ["units", "u16"], fromCodePoint: ["points", "u32"] };
     if (callee.name === "raw") return this.rawCall(e);
     const kind = kinds[callee.name];
-    if (!kind) throw new CompileError("E0502", `'String' has no '${callee.name}' yet; it has 'fromCharCode', 'fromCodePoint' and 'raw'`, callee.start, callee.end);
+    if ((kind === undefined)) throw new CompileError("E0502", `'String' has no '${callee.name}' yet; it has 'fromCharCode', 'fromCodePoint' and 'raw'`, callee.start, callee.end);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'String.${callee.name}' takes no type arguments`, e.start, e.end);
     const at = { start: e.args[0]?.start ?? e.end, end: e.args.at(-1)?.end ?? e.end };
     const gathered: Expr = e.args.length === 1 && this.ctx.tables.stringBuilds.has(e) ? e.args[0]! : { id: nextId(this.ctx.tables.ids), kind: "array", elements: e.args, ...at };
@@ -2540,7 +2540,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const name = callee.name;
     const what = `'${name}'`;
     const global = this.ctx.tables.typing.rec(rx).flags.includes("g");
-    const typed = !this.ctx.tables.typing.rec(rx).any || generic;
+    const typed = (this.ctx.tables.typing.rec(rx).any === undefined) || generic;
     const unknown = () => new CompileError("E0508", `${what} types its matches from the regex's pattern, which isn't known for a 'RegExp' kept here; call it where the regex is written, or pass the regex as a parameter`, e.start, e.end);
     if (e.optional || callee.optional) throw new CompileError("E0508", `${what} with a regex is called without '?.'`, e.start, e.end);
     const most = name === "search" || name === "match" || name === "matchAll" ? 1 : 2;
@@ -2620,7 +2620,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const same = root(written) !== undefined && root(written) === root(callee.object);
       const source: Expr = same ? { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: written, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at } : written;
       this.expect(source, array);
-      return this.call(this.become(e, this.typedCall(`array typed set ${TYPED_ARRAYS[typed]}`, [source, callee.object, offset ? this.arrayLength(offset, false) : { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, ...at }, { id: nextId(this.ctx.tables.ids), kind: "int", value: BigInt(typedSize(typed)), ...at }], at)) as Call);
+      return this.callMade(this.become(e, this.typedCall(`array typed set ${TYPED_ARRAYS[typed]}`, [source, callee.object, offset ? this.arrayLength(offset, false) : { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, ...at }, { id: nextId(this.ctx.tables.ids), kind: "int", value: BigInt(typedSize(typed)), ...at }], at)));
     }
     if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, ARRAY_METHODS)}`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
@@ -2632,14 +2632,14 @@ export class Expressions<C extends Context> implements Union<C> {
     // while they live and give `[i, element]` pairs, indexes and elements, each element a clone.
     if (Object.hasOwn(ITERATORS, callee.name)) {
       if (e.args.length > 0) throw new CompileError("E0504", `'${callee.name}' takes no arguments`, e.start, e.end);
-      return this.call(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: ITERATORS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] }) as Call);
+      return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: ITERATORS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object], typeArgs: [] }));
     }
     // `toBase64(options?)` and `toHex()` on bytes call the prelude's encoders, which borrow them.
     if (Object.hasOwn(BYTE_METHODS, callee.name)) {
       if (this.ctx.tables.typing.lower(this.ctx.tables.typing.rec(array).element) !== "u8") throw new CompileError("E0504", `'${callee.name}' encodes bytes, a 'u8[]', not '${this.ctx.tables.typing.show(array)}'`, callee.start, callee.end);
       const most = callee.name === "toBase64" ? 1 : 0;
       if (e.args.length > most) throw new CompileError("E0504", most === 0 ? `'${callee.name}' takes no arguments` : "'toBase64' takes an optional options object, as in '{ alphabet: \"base64url\", omitPadding: true }'", e.start, e.end);
-      return this.call(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] }) as Call);
+      return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: BYTE_METHODS[callee.name]!, start: callee.start, end: callee.end }, args: [callee.object, ...e.args], typeArgs: [] }));
     }
     if (this.readCopy(callee.object) && ["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "reserve", "shrinkToFit"].includes(callee.name)) {
       throw new CompileError("E0211", `'${callee.name}' changes its array, and this one is read through a Dyn, which gives a copy; change it through a method`, callee.start, callee.end);
@@ -2875,7 +2875,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // A const type with its literals widened to their base types, so parts that agree on it join.
   private constWide(this: Mut<this>, t: Type): Type {
     const r = this.recOf(t);
-    if (r?.kind === "literal" && !r.owner) return this.ctx.tables.typing.baseOf(t as LiteralType);
+    if (r?.kind === "literal" && (r.owner === undefined)) return this.ctx.tables.typing.baseOf(t as LiteralType);
     if (r?.kind === "object" && r.tuple) return this.ctx.tables.typing.tupleType(this.ctx.tables.typing.elementsOf(t as ObjectType).map((p) => this.constWide(p)));
     if (r?.kind === "object") return this.ctx.tables.typing.objectType(r.fields.map((f) => ({ ...f, type: this.constWide(f.type) })));
     return t;
@@ -2933,7 +2933,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // parts past the fixed ones its rest.
   private shapedTuple(e: Ref<Expr>, parts: Type[]): ObjectType {
     const node = this.ctx.exprsState.shapedBy.get(e);
-    if (!node) return this.ctx.tables.typing.tupleType(parts);
+    if ((node === undefined)) return this.ctx.tables.typing.tupleType(parts);
     // Checked once already, the literal's last part is its rest's array.
     const again = e.kind === "object" && node.elements.some((n) => n.rest);
     const given = again ? parts.slice(0, -1) : parts;
@@ -3013,9 +3013,9 @@ export class Expressions<C extends Context> implements Union<C> {
   private filled(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
     if (callee.name !== "filled") throw new CompileError("E0502", `'FixedArray' has no '${callee.name}'; make one with 'FixedArray.filled<T, N>(value)' or a literal`, callee.start, callee.end);
     const written = e.typeArgs.length > 0 ? this.ctx.resolveType({ id: nextId(this.ctx.tables.ids), kind: "ref", name: "FixedArray", args: e.typeArgs, start: e.start, end: e.end }) : this.ctx.exprsState.wanted.get(e);
-    if (!written || !this.isFixed(written)) throw new CompileError("E0104", "say which fixed array to fill, as in 'FixedArray.filled<i64, 4>(0)'", e.start, e.end);
+    if ((written === undefined) || !this.isFixed(written)) throw new CompileError("E0104", "say which fixed array to fill, as in 'FixedArray.filled<i64, 4>(0)'", e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("E0504", "'FixedArray.filled' takes the value to fill it with", e.start, e.end);
-    this.clonable(this.ctx.tables.typing.rec(written).element, e, "FixedArray.filled");
+    this.clonable(this.ctx.tables.typing.rec(written).element, { start: e.start, end: e.end }, "FixedArray.filled");
     const v = e.args[0]!;
     this.expect(v, this.ctx.tables.typing.rec(written).element);
     const t = this.value(v);
@@ -3036,7 +3036,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const digits = e.args[0];
     const receiver = (e.callee as Extract<Expr, { kind: "member" }>).object;
     this.loaded(receiver, this.ctx.types.get(receiver)!);
-    this.ctx.tables.fixedPrints.add(e);
+    this.ctx.tables.fixedPrints.add(cloneExpr(e));
     if (!digits) return { type: "string", what: "'toFixed'" };
     const t = this.value(digits);
     if (t !== "i64" && !this.adapt(digits, "i64")) throw new CompileError("E0504", `'toFixed' takes its digits as an 'i64', not '${this.ctx.tables.typing.show(t)}'`, digits.start, digits.end);
@@ -3132,7 +3132,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (known.some((k) => k === undefined)) {
       throw new CompileError("E0508", "a regex is compiled while compiling, so 'new RegExp' takes its pattern and flags as string literals; for a pattern known only when the program runs, Fish has no regex", e.start, e.end);
     }
-    this.ctx.tables.regexNews.add(e);
+    this.ctx.tables.regexNews.add(cloneExpr(e));
     return this.regexLiteral(known[0]!, known[1] ?? "", e, this.shownSource(known[0]!));
   }
 
@@ -3307,7 +3307,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `${what} takes no type argument`, e.start, e.end);
     if (name === "random") {
       if (e.args.length > 0) throw new CompileError("E0504", "'Math.random' takes no arguments", e.start, e.end);
-      this.ctx.tables.clocks.set(e, "Math.random");
+      this.ctx.tables.clocks.set(cloneExpr(e), "Math.random");
       return { type: "f64", what };
     }
     const arity = MATH_FLOAT[name];
@@ -3475,7 +3475,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const inner = this.embeddedIterated(source, held);
       if (inner) {
         const listed: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: inner, name: this.embeddedOf(held)!.embedded === "Set" ? "values" : "entries", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
-        return this.call(this.ctx.tables.rewrites.replace(e, { ...e, args: [listed, ...e.args.slice(1)] }) as Call);
+        return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, args: [listed, ...e.args.slice(1)] }));
       }
       if (this.isArray(held)) made = f ? source : { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
       else if (stringLike(this.ctx.tables.typing, held)) made = prelude("array chars", [source]);
@@ -3484,7 +3484,7 @@ export class Expressions<C extends Context> implements Union<C> {
       else throw new CompileError("E0119", `'Array.from' makes an array from an array, a string, a generator, an iterable class or '{ length: n }', not '${this.ctx.tables.typing.show(t)}'`, source.start, source.end);
     }
     if (f) made = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
-    return this.call(this.ctx.tables.rewrites.replace(e, { ...made, start: e.start, end: e.end }) as Call);
+    return this.callMade(this.ctx.tables.rewrites.replace(e, { ...made, start: e.start, end: e.end }));
   }
 
   // An object literal meeting a dictionary: the Map it is, made from its entries in order.
@@ -3515,7 +3515,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'Object.${name}' takes no type arguments`, e.start, e.end);
     const o = e.args[0];
     if (!o || e.args.length > 1 || o.kind === "spread") throw new CompileError("E0504", `'Object.${name}' takes the object to read`, e.start, e.end);
-    if (this.dictOf(this.value(this.spanned(renumberExpr(cloneExpr(o), () => nextId(this.ctx.tables.ids)), o)))) return this.call(this.dictCall(e, o, name, []));
+    if (this.dictOf(this.value(this.spanned(renumberExpr(cloneExpr(o), () => nextId(this.ctx.tables.ids)), o)))) return this.callMade(this.dictCall(e, o, name, []));
     const fields = this.objectRead(name, o).fields;
     const at = { start: e.start, end: e.end };
     const key = (f: Field): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "string", value: f.name, ...at });
@@ -3594,7 +3594,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const at = { start: source.start, end: source.end };
     const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
     let from: Expr | undefined;
-    if (this.dictOf(held)) throw this.notIterable(source);
+    if ((this.dictOf(held) !== undefined)) throw this.notIterable(source);
     if (this.ctx.tables.typing.iterableElement(held) !== undefined) throw unsupported("spreads of an 'Iterable' parameter", source);
     const inner = this.embeddedIterated(source, held);
     if (inner) return this.spreadElements(this.ctx.tables.rewrites.replace(x, { ...x, value: inner }) as typeof x);
@@ -3706,7 +3706,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // again and again can't allow.
   /** @throws {CompileError} */
   private runsOften(c: ClosureType, name: string, calls: string, at: Span) {
-    if (this.ctx.tables.typing.rec(c).once) throw new CompileError("E0210", `'${name}' calls ${calls}, but this closure moves '${this.ctx.tables.typing.rec(c).once}' out, so it can run only once; clone it inside instead`, at.start, at.end);
+    if ((this.ctx.tables.typing.rec(c).once !== undefined)) throw new CompileError("E0210", `'${name}' calls ${calls}, but this closure moves '${this.ctx.tables.typing.rec(c).once}' out, so it can run only once; clone it inside instead`, at.start, at.end);
   }
 
   // `includes` and `indexOf` compare elements by value, as `===` does; `join` writes each as
@@ -3722,7 +3722,7 @@ export class Expressions<C extends Context> implements Union<C> {
         const given = this.isRefType(t) ? this.ctx.tables.typing.rec(t).to : t;
         // A literal, `[]` and `[2]` among them, takes the element type as an annotated one does.
         if (!(a.kind === "array" && this.literalArray(a, t, array)) && !this.ctx.tables.typing.fits(given, array)) throw new CompileError("E0504", `'concat' joins arrays of the same element type, '${this.ctx.tables.typing.show(array)}', not '${this.ctx.tables.typing.show(t)}'; to add single values, push them`, a.start, a.end);
-        this.ctx.coercions.set(a, this.ctx.tables.typing.refType(array, false));
+        this.ctx.coercions.set(cloneExpr(a), this.ctx.tables.typing.refType(array, false));
       }
       return { type: array, what: "'concat'" };
     }
@@ -3779,7 +3779,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private pointerCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, p: PointerType): { type: Type; what: string } {
     const counts: Record<string, usize> = { read: 0, write: 1, offset: 1, isNull: 0 };
     if (!(callee.name in counts)) throw new CompileError("E1006", `raw pointers have no method '${callee.name}'; they have 'read', 'write', 'offset' and 'isNull'`, callee.start, callee.end);
-    this.needsUnsafe(`'${callee.name}' on a raw pointer`, callee);
+    this.needsUnsafe(`'${callee.name}' on a raw pointer`, { start: callee.start, end: callee.end });
     if (this.linked(callee)) throw unsupported("optional chains calling raw pointer methods", callee);
     const held = this.ctx.types.get(callee.object)!;
     if (this.isRefType(held)) this.ctx.coercions.set(callee.object, p);
@@ -4048,7 +4048,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // `handle.join()`: the task's handle, awaited as giving its value or throwing a TaskPanic.
   /** @throws {CompileError} */
   private handleCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, t: HandleType): { type: Type; what: string } {
-    if (callee.name !== "join") throw new CompileError("E0305", `'${this.ctx.tables.typing.show(t)}' has no method '${callee.name}'; ${this.ctx.tables.typing.rec(t).joined ? "await it" : "it has 'join', and awaiting it gives what the task gave"}`, callee.start, callee.end);
+    if (callee.name !== "join") throw new CompileError("E0305", `'${this.ctx.tables.typing.show(t)}' has no method '${callee.name}'; ${(this.ctx.tables.typing.rec(t).joined !== undefined) ? "await it" : "it has 'join', and awaiting it gives what the task gave"}`, callee.start, callee.end);
     if (this.ctx.tables.typing.rec(t).joined) throw new CompileError("E0305", "this is already the task's 'join()'; await it", callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling 'join'", callee);
     if (e.args.length !== 0) throw new CompileError("E0305", "'join' takes no arguments", e.start, e.end);
@@ -4169,7 +4169,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const signal = this.ctx.tables.typing.blockType("AbortSignal");
     if (list.kind === "array") {
       for (const x of list.elements) {
-        if (!x || x.kind === "spread") throw new CompileError("E0504", `'AbortSignal.any' takes its signals listed one by one, ${example}`, (x ?? list).start, (x ?? list).end);
+        if ((x === undefined) || x.kind === "spread") throw new CompileError("E0504", `'AbortSignal.any' takes its signals listed one by one, ${example}`, (x ?? list).start, (x ?? list).end);
         this.signalArgument(x, "'AbortSignal.any'");
       }
     } else {
@@ -4351,7 +4351,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callback.kind !== "ident") return false;
     const localId = this.ctx.lookup(callback.name, undefined);
     const local = localId === undefined ? undefined : this.lc(localId);
-    if (!local) {
+    if ((local === undefined)) {
       const f = this.bodyNamed(callback.name);
       return f?.async === true || (f?.returnType?.kind === "ref" && f.returnType.name === "Promise");
     }
@@ -4498,7 +4498,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (r.kind === "array") return source?.kind === "array" && this.passesJs(source.element, r.element);
     // A nested object becomes a new JS object as the one holding it does, so it takes a Fish value
     // of its shape the same way.
-    const shape = this.ctx.tables.typing.jsShape(to) ?? (r.kind === "object" && !r.tuple ? (to as ObjectType) : undefined);
+    const shape = this.ctx.tables.typing.jsShape(to) ?? (r.kind === "object" && (r.tuple === undefined) ? (to as ObjectType) : undefined);
     if (shape) return this.takesShape(from, shape);
     return r.kind === "block" && r.which === "JsValue" && this.ctx.tables.typing.uncrossable(from) === undefined;
   }
@@ -4524,7 +4524,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // A generic body's definition holds placeholders, which each instance checks as what they are.
     if (this.ctx.tables.typing.holdsPart(t, (p) => this.placeholder(p))) return t;
     const why = t === "void" ? undefined : this.ctx.tables.typing.uncrossable(t);
-    if (why) throw new CompileError("E1005", `${what} '${this.ctx.tables.typing.show(t)}', which can't cross between Fish and JS yet: ${why}`, at.start, at.end);
+    if ((why !== undefined)) throw new CompileError("E1005", `${what} '${this.ctx.tables.typing.show(t)}', which can't cross between Fish and JS yet: ${why}`, at.start, at.end);
     return t;
   }
 
@@ -4577,7 +4577,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const shape = this.ctx.tables.typing.jsShape(t);
     const r = this.recOf(shape);
     const method = r?.kind === "interface" ? r.methods.find((m) => m.name === callee.name) : undefined;
-    if (!method) {
+    if ((method === undefined)) {
       const field = r?.fields.some((f) => f.name === callee.name);
       throw this.untyped(shape, callee.name, callee) ?? new CompileError(field ? "E0503" : "E0502", field ? `'${callee.name}' is a property of '${this.ctx.tables.typing.show(t)}', not a method` : `property '${shownName(callee.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'`, callee.start, callee.end);
     }
@@ -4631,7 +4631,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private overload(this: Mut<this>, e: Ref<Call>, impl: Ref<Body>): Body {
     const spread = e.args.find((a) => a.kind === "spread");
-    if (spread) throw new CompileError("E0801", `spreading arguments into the overloaded '${impl.name}' isn't supported yet; pass them one by one`, spread.start, spread.end);
+    if ((spread !== undefined)) throw new CompileError("E0801", `spreading arguments into the overloaded '${impl.name}' isn't supported yet; pass them one by one`, spread.start, spread.end);
     const given = e.args.map((a) => (a.kind === "arrow" ? undefined : this.tried(a)));
     const overloads = impl.overloads!.map((f) => this.ctx.tables.arenas.bodyOf(f));
     const fitting = overloads.find((f) => {
@@ -4774,7 +4774,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // A value given to JS, which the call or write converts: refused when it has no JS form.
   /** @throws {CompileError} */
   private givenToJs(this: Mut<this>, a: Ref<Expr>, given: Type) {
-    this.ctx.tables.jsGiven.add(a);
+    this.ctx.tables.jsGiven.add(cloneExpr(a));
     // A type parameter is what it stands for in this instance.
     for (let r = this.recOf(given); r?.kind === "param" && r.concrete !== undefined; r = this.recOf(given)) given = r.concrete;
     // A callback given to JS is kept by JS, which may call it later from whichever task calls
@@ -4803,7 +4803,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private jsParams(this: Mut<this>, params: Ref<Param[]>): Type[] {
     return params.map((p) => {
-      const declared = this.ctx.tables.typing.jsTakes(p.type ? this.ctx.resolveType(p.type) : this.ctx.tables.typing.blockType("JsValue"));
+      const declared = this.ctx.tables.typing.jsTakes((p.type !== undefined) ? this.ctx.resolveType(p.type) : this.ctx.tables.typing.blockType("JsValue"));
       return p.optional ? this.ctx.tables.typing.unionType([declared, "null"]) : declared;
     });
   }
@@ -4851,7 +4851,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private blockProperty(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>, t: BlockType): Type {
     if (this.linked(e)) throw unsupported(`optional chains through '${this.ctx.tables.typing.rec(t).which}' values`, e);
-    this.ctx.tables.computed.add(e);
+    this.ctx.tables.computed.add(cloneExpr(e));
     if (this.ctx.tables.typing.rec(t).which === "JsValue") return this.jsProperty(e, t);
     if (this.ctx.tables.typing.rec(t).which === "AbortController" && e.name === "signal") return this.ctx.tables.typing.blockType("AbortSignal");
     if (this.ctx.tables.typing.rec(t).which === "AbortSignal" && e.name === "aborted") return "boolean";
@@ -4947,8 +4947,8 @@ export class Expressions<C extends Context> implements Union<C> {
     const ir = this.recOf(inner);
     if (ir?.kind === "class") this.cls(inner as ClassType);
     const found = ir === undefined || ir.kind === "closure" ? undefined : this.ctx.tables.typing.field(inner as Exclude<Type, string>, e.name);
-    if (!found) throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'${didYouMean(e.name, this.memberNames(inner))}`, e.start, e.end);
-    if (ir?.kind === "class") this.visible(found.access, this.declaring(inner as ClassType, e.name), e.name, e);
+    if ((found === undefined)) throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'${didYouMean(e.name, this.memberNames(inner))}`, e.start, e.end);
+    if (ir?.kind === "class") this.visible(found.access, this.declaring(inner as ClassType, e.name), e.name, { start: e.start, end: e.end });
     // A Rust value is reached only under the lock, and a read here would copy its handle out.
     let rust: RustClass | undefined;
     if (this.ctx.tables.typing.holdsPart(found.type, (u) => (rust ??= rustClassOf(this.ctx.tables.typing, u)) !== undefined)) {
@@ -5069,7 +5069,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const r = this.ctx.tables.typing.rec(t);
     if (r.kind === "ref" || r.kind === "pointer" || (r.kind === "interior" && r.which === "Cell") || (r.kind === "shared" && r.which !== "shared") || (r.kind === "dyn" && this.ctx.tables.typing.borrowing.has(r.of))) return t;
     // A Rust type is Send, which the shim asserts.
-    if (rustClassOf(this.ctx.tables.typing, t)) return undefined;
+    if ((rustClassOf(this.ctx.tables.typing, t) !== undefined)) return undefined;
     const parts = r.kind === "interior" ? [r.of] : r.kind === "future" || r.kind === "generator" ? r.params.map((f) => f.type)
       : r.kind === "union" ? r.members : r.kind === "array" || r.kind === "fixed" ? [r.element] : r.kind === "map" ? [r.key, r.value] : r.kind === "class" && r.base ? [r.base, ...r.fields.map((f) => f.type)] : this.ctx.tables.typing.fieldsOf(t).map((f) => f.type);
     for (const part of parts) {
@@ -5132,8 +5132,8 @@ export class Expressions<C extends Context> implements Union<C> {
       const takes = name === "toArray" ? "no arguments" : counted ? "1 argument, a count" : name === "reduce" ? "a callback and an optional initial value" : "1 argument, a callback like 'x => ...'";
       throw new CompileError("E0504", `'${name}' takes ${takes}`, e.start, e.end);
     }
-    if (name === "toArray") return this.call(this.ctx.tables.rewrites.replace(e, helper("array collect", [source])) as Call);
-    if (counted) return this.call(this.ctx.tables.rewrites.replace(e, helper(GENERATOR_HELPERS[name]!, [source, unwrap(helper("iter count", [e.args[0]!]), `'${name}''s count can't be negative`)])) as Call);
+    if (name === "toArray") return this.callMade(this.ctx.tables.rewrites.replace(e, helper("array collect", [source])));
+    if (counted) return this.callMade(this.ctx.tables.rewrites.replace(e, helper(GENERATOR_HELPERS[name]!, [source, unwrap(helper("iter count", [e.args[0]!]), `'${name}''s count can't be negative`)])));
     const [named, init] = e.args as [Expr, Expr | undefined];
     // A declared function given by name becomes an arrow calling it, as for array methods.
     let callback = this.namedFunction(named);
@@ -5180,7 +5180,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const folded = unwrap(helper("iter reduce first", [source, callback]), "reduce of empty generator with no initial value");
       return { type: this.typeOf(this.ctx.tables.rewrites.replace(e, { id: 0, kind: "index", object: folded, index: { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, ...at }, optional: false, ...at })), what: "'reduce'" };
     }
-    return this.call(this.ctx.tables.rewrites.replace(e, helper(target, init ? [source, callback, init] : [source, callback])) as Call);
+    return this.callMade(this.ctx.tables.rewrites.replace(e, helper(target, init ? [source, callback, init] : [source, callback])));
   }
 
   // Whether an expression is an index into an array, a place inside it.
@@ -5212,7 +5212,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private variant(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>, named: EnumInfo, alone: boolean, given: Type[] = [], typeArgs: TypeNode[] = []): VariantType {
     const data = named.data!;
     const member = data.members.find((m) => m.name === e.name);
-    if (!member) throw new CompileError("E0502", `property '${e.name}' does not exist on enum '${data.name}'${didYouMean(e.name, data.members.map((m) => m.name))}`, e.start, e.end);
+    if ((member === undefined)) throw new CompileError("E0502", `property '${e.name}' does not exist on enum '${data.name}'${didYouMean(e.name, data.members.map((m) => m.name))}`, e.start, e.end);
     if (typeArgs.length > 0 && typeArgs.length !== data.params.length) {
       const n = data.params.length;
       throw new CompileError("E0707", `enum '${data.name}' takes ${n} type argument${n === 1 ? "" : "s"}`, e.start, e.end);
@@ -5269,7 +5269,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (r.kind === "generator") return false;
     if (r.kind === "class") return !this.cls(t as ClassType).methods.has("clone");
     const bound = this.recOf(r.kind === "param" ? r.bound : r.kind === "interface" ? t : undefined);
-    return !bound || bound.kind !== "interface" || !bound.methods.some((m) => m.name === "clone");
+    return (bound === undefined) || bound.kind !== "interface" || !bound.methods.some((m) => m.name === "clone");
   }
 
   // The compiler's copy of a value, or in an instance, the concrete class's own `clone()`.
@@ -5295,7 +5295,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private clonable(this: Mut<this>, type: Type, at: Span, by?: string, dyns: boolean = by !== undefined) {
     const stored = this.ctx.tables.typing.lower(type);
-    const say = (why: string) => new CompileError("E0213", by ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
+    const say = (why: string) => new CompileError("E0213", (by !== undefined) ? `'${by}' gives clones of the array's elements, and ${why}` : why, at.start, at.end);
     const permit = this.ctx.tables.typing.holdsPart(stored, (u) => {
       const r = this.recOf(u);
       return r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit");
@@ -5370,7 +5370,7 @@ export class Expressions<C extends Context> implements Union<C> {
       return option;
     }
     const inner = this.held(option);
-    this.ctx.coercions.set(object, inner);
+    this.ctx.coercions.set(cloneExpr(object), inner);
     return inner;
   }
 
@@ -5382,7 +5382,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const r = this.ctx.tables.typing.rec(receiver);
     const trait = this.recOf(r.kind === "param" ? r.bound : receiver);
     const found = trait?.kind === "interface" ? trait.methods.find((m) => m.name === callee.name) : undefined;
-    if (!found) throw new CompileError("E0502", `property '${shownName(callee.name)}' does not exist on type '${r.name}'${didYouMean(callee.name, this.memberNames(receiver))}`, callee.start, callee.end);
+    if ((found === undefined)) throw new CompileError("E0502", `property '${shownName(callee.name)}' does not exist on type '${r.name}'${didYouMean(callee.name, this.memberNames(receiver))}`, callee.start, callee.end);
     const stored = r.kind === "param" ? r.concrete : undefined;
     this.omittableCall(e, callee, found, r.name);
     // An instance whose type leaves an optional method out never calls it.
@@ -5474,7 +5474,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private concreteMethod(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, c: ClassType, returns: Type, declaredThrows?: Type): Type {
     const target = inherited(this.ctx.tables.arenas, this.cls(c), "methods", callee.name)!;
-    if (target.self!.owned) this.takesOver(callee.object, callee.name);
+    if ((target.self!.owned === true)) this.takesOver(callee.object, callee.name);
     else if (target.self!.mutable) this.mutates(callee.object, callee.name);
     const instance = this.ctx.instantiate(target.bodyId, e.typeArgs, e.args, e.args.map((a) => this.ctx.coercions.get(a) ?? this.ctx.types.get(a)!), e);
     this.ctx.calls.set(e, instance);
@@ -5493,7 +5493,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (typeof type !== "string" && type !== undefined && this.ctx.tables.typing.rec(type).kind === "ref") {
       throw new CompileError("E0202", `can't call '${name}' through the reference '${this.placeText(object)}': it takes its object over, and a reference only borrows it; call it on the value itself`, object.start, object.end);
     }
-    if ((object.kind === "this" || object.kind === "super") && !this.ctx.self?.owned) {
+    if ((object.kind === "this" || object.kind === "super") && (this.ctx.self?.owned !== true)) {
       throw new CompileError("E0202", `can't call '${name}' on 'this' here: it takes its object over, and this method only borrows 'this'; declare 'this: Own<this>' to give it away`, object.start, object.end);
     }
   }
@@ -5510,7 +5510,7 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     // `x!` gives a copy of what x holds, which a change wouldn't reach.
     const through = this.copied(object);
-    if (through) throw new CompileError("E0212", `can't call '${name}' through '${through}', which would change a copy; check '!== null' first, or call it with '?.'`, object.start, object.end);
+    if ((through !== undefined)) throw new CompileError("E0212", `can't call '${name}' through '${through}', which would change a copy; check '!== null' first, or call it with '?.'`, object.start, object.end);
     if (this.readCopy(object)) throw new CompileError("E0211", `'${name}' changes its object, and this one is read through a Dyn, which gives a copy; change it through a method`, object.start, object.end);
     intoMember(this.ctx.tables.typing, object, this.ctx.types, `call '${name}' on`);
     if (this.place(object)) this.changeable(object, `call '${name}' on`);
@@ -5560,7 +5560,7 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   private staticOf(c: ClassInfo, name: string): Static | undefined {
-    for (let b: ClassInfo | undefined = c; b; b = this.ctx.tables.arenas.classOf(b.base)) {
+    for (let b: ClassInfo | undefined = c; (b !== undefined); b = this.ctx.tables.arenas.classOf(b.base)) {
       const field = b.staticFields.get(name);
       if (field) return { field, declaring: b };
       const getter = this.ctx.tables.arenas.bodyOf(b.statics.get(`get ${name}`));
@@ -5583,7 +5583,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private delegated(t: Type | undefined, name: string): boolean {
     const embedding = this.embeddedOf(t);
-    if (!embedding || !collectionMember(embedding, name)) return false;
+    if ((embedding === undefined) || !collectionMember(embedding, name)) return false;
     const c = this.cls(t as ClassType);
     return !this.ctx.tables.typing.field(t as ClassType, name) && !(["methods", "getters", "setters"] as const).some((table) => inherited(this.ctx.tables.arenas, c, table, name));
   }
@@ -5606,8 +5606,15 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // Replaces `e` with `to`, keeping its own span and id.
-  private become(e: Ref<Expr>, to: Ref<Expr>): Expr {
-    return this.ctx.tables.rewrites.replace(e, { ...to, start: e.start, end: e.end });
+  private become(this: Mut<this>, e: Ref<Expr>, to: Expr): Expr {
+    return this.ctx.tables.rewrites.replaceAt(idOfExpr(e), withIdExpr(to, 0, 0, [e.start, e.end]));
+  }
+
+  // Checks a call made in place of another expression.
+  /** @throws {CompileError} */
+  private callMade(this: Mut<this>, made: Ref<Expr>): { type: Type; what: string } {
+    if (made.kind === "call") return this.call(made);
+    return { type: this.typeOf(made), what: "this expression" };
   }
 
   // The dictionary an Option of one holds.
@@ -5625,15 +5632,16 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // `e`, a dictionary's read, write, delete or key test, become the call of its Map method.
-  private dictCall(e: Ref<Expr>, object: Ref<Expr>, name: string, args: Ref<Expr[]>): Call {
-    const call = this.become(e, this.dictMethod(object, name, args, e)) as Call;
-    this.ctx.tables.dictCalls.add(call);
+  private dictCall(this: Mut<this>, e: Ref<Expr>, object: Ref<Expr>, name: string, args: Expr[]): Expr {
+    const call = this.become(e, this.dictMethod(object, name, args, { start: e.start, end: e.end }));
+    this.ctx.tables.dictCalls.add(cloneExpr(call));
     return call;
   }
 
-  private dictMethod(object: Ref<Expr>, name: string, args: Ref<Expr[]>, at: Span): Call {
-    const call: Call = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object, name, optional: false, start: at.start, end: at.end }, args, typeArgs: [], optional: false, start: at.start, end: at.end };
-    this.ctx.tables.dictCalls.add(call);
+  private dictMethod(this: Mut<this>, object: Ref<Expr>, name: string, args: Expr[], at: Span): Call {
+    const id = nextId(this.ctx.tables.ids);
+    const call: Call = { id, kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(object), name, optional: false, start: at.start, end: at.end }, args, typeArgs: [], optional: false, start: at.start, end: at.end };
+    this.ctx.tables.dictCalls.add(cloneExpr(call));
     return call;
   }
 
@@ -5657,7 +5665,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private dictKey(this: Mut<this>, key: Ref<Expr>): Expr {
     const t = this.value(key);
     this.coerce(key, t, "string", `a dictionary's keys are strings, not '${this.ctx.tables.typing.show(t)}'`);
-    this.ctx.exprsState.once.add(key);
+    this.ctx.exprsState.once.add(cloneExpr(key));
     return key;
   }
 
@@ -5704,7 +5712,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.kind !== "index") return false;
     const through = this.value(e.object);
     this.ctx.exprsState.once.add(e.object);
-    if (!this.dictOf(through)) return false;
+    if ((this.dictOf(through) === undefined)) return false;
     if (e.optional) throw unsupported("optional index expressions", e);
     if (this.ctx.exprsState.writing === e.id) throw this.dictWrite(e);
     this.dictCall(e, e.object, "get", [this.dictKey(e.index)]);
@@ -5714,8 +5722,8 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private staticRead(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>, found: Static): Expr {
     const at = { start: e.start, end: e.end };
-    if (found.field) {
-      this.visible(found.field.access, found.declaring!.type, e.name, e);
+    if ((found.field !== undefined)) {
+      this.visible(found.field.access, found.declaring!.type, e.name, { start: e.start, end: e.end });
       return { id: nextId(this.ctx.tables.ids), kind: "ident", name: `${this.ctx.tables.typing.rec(found.declaring!.type).name}.${e.name}`, ...at };
     }
     if (!found.getter) {
@@ -5738,7 +5746,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private staticWrite(this: Mut<this>, e: Ref<Extract<Expr, { kind: "assign" | "update" }>>): boolean {
     const target = e.kind === "assign" ? e.target : e.operand;
     const found = this.staticProperty(target);
-    if (!found) return false;
+    if ((found === undefined)) return false;
     const member = target as Extract<Expr, { kind: "member" }>;
     if (!found.setter) throw new CompileError("E0208", `cannot assign to '${member.name}' because it is a read-only property`, member.start, member.end);
     this.visible(found.setter.access, found.declaring.type, member.name, member);
@@ -5757,7 +5765,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private method(this: Mut<this>, callee: Ref<Extract<Expr, { kind: "member" }>>, receiver: Type | undefined): Body {
     const { object, name } = callee;
     const named = object.kind === "ident" && (this.ctx.lookup(object.name, undefined) === undefined) ? (this.ctx.tables.arenas.classOf(this.ctx.classes.get(object.name) ?? this.ctx.definedClass(object.name))) : undefined;
-    if (named) {
+    if ((named !== undefined)) {
       const found = inherited(this.ctx.tables.arenas, named, "statics", name);
       const property = found ? undefined : this.staticOf(named, name);
       if (property) throw new CompileError("E0706", `'${name}' is a static ${property.field ? "field" : "accessor"} of '${this.ctx.tables.typing.rec(property.declaring.type).name}', not a method; read it as '${this.ctx.tables.typing.rec(named.type).name}.${name}'`, callee.start, callee.end);
@@ -5809,7 +5817,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // members is typed by the declaration, which each implementation's result is converted to.
   /** @throws {CompileError} */
   private abstractDeclaration(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>, table: "methods" | "getters"): Body | undefined {
-    if (e.object.kind !== "this" || !this.recOf(this.ctx.owner)?.abstract) return undefined;
+    if (e.object.kind !== "this" || (this.recOf(this.ctx.owner)?.abstract === undefined)) return undefined;
     const declared = inherited(this.ctx.tables.arenas, this.cls(this.ctx.owner!), table, e.name);
     return declared?.abstract ? declared : undefined;
   }
@@ -5834,7 +5842,7 @@ export class Expressions<C extends Context> implements Union<C> {
 
   /** @throws {CompileError} */
   private accessible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string): boolean {
-    if (!access || access === "public" || (this.ctx.owner && this.sameClass(this.ctx.owner, declaring))) return true;
+    if ((access === undefined) || access === "public" || (this.ctx.owner && this.sameClass(this.ctx.owner, declaring))) return true;
     if (access === "protected" && this.ctx.owner) for (let b: ClassType | undefined = this.ctx.tables.typing.rec(this.ctx.owner).base; b; b = this.ctx.tables.typing.rec(b).base) if (this.sameClass(b, declaring)) return true;
     // A base reaches a subclass's implementation of its abstract member.
     return access === "protected" && this.ctx.owner !== undefined && this.ctx.tables.typing.derives(declaring, this.ctx.owner) && abstractIn(this.ctx.tables.arenas, this.cls(this.ctx.owner), name);
@@ -5866,7 +5874,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private staticNames(this: Mut<this>, c: ClassInfo): string[] {
     const names: string[] = [];
-    for (let b: ClassInfo | undefined = c; b; b = this.ctx.tables.arenas.classOf(b.base)) {
+    for (let b: ClassInfo | undefined = c; (b !== undefined); b = this.ctx.tables.arenas.classOf(b.base)) {
       for (const [name, body] of b.statics) if (this.accessible(this.ctx.tables.arenas.bodyOf(body).access, b.type, name)) names.push(shownName(name.replace(/^[gs]et /, "")));
       for (const [name, f] of b.staticFields) if (this.accessible(f.access, b.type, name)) names.push(shownName(name));
     }
@@ -5876,7 +5884,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // The class whose own fields include `name`: `t` itself or a base it embeds.
   private declaring(t: ClassType, name: string): ClassType {
     const { fields, base } = this.ctx.tables.typing.rec(t);
-    return fields.some((f) => f.name === name) || !base ? t : this.declaring(base, name);
+    return fields.some((f) => f.name === name) || (base === undefined) ? t : this.declaring(base, name);
   }
 
   /** @throws {CompileError} */
@@ -5904,7 +5912,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private defaultedArg(a: Ref<Expr>, type: Type, p: Ref<Param>): Type | undefined {
     const declared = this.ctx.tables.declaredTypes.get(p);
-    if (!declared || holdsNull(this.ctx.tables.typing, declared)) return declared;
+    if ((declared === undefined) || holdsNull(this.ctx.tables.typing, declared)) return declared;
     if (holdsNull(this.ctx.tables.typing, type)) throw new CompileError("E0108", "this parameter has a default, so it takes a value, not null or an Option; leave the argument out to use the default", a.start, a.end);
     return declared;
   }
@@ -5977,7 +5985,7 @@ export class Expressions<C extends Context> implements Union<C> {
     switch (e.kind) {
       // A literal is an i64 unless where it is written gives it another number type.
       case "int":
-        if (e.value > I64_MAX) this.ctx.exprsState.oversized.push(e);
+        if (e.value > I64_MAX) this.ctx.exprsState.oversized.push({ id: e.id, kind: "int", value: e.value, start: e.start, end: e.end });
         return "i64";
       case "float":
         return "f64";
@@ -6646,7 +6654,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private power(this: Mut<this>, base: Ref<Expr>, left: Type, exponent: Ref<Expr>, right: Type, at: Ref<Expr>): Type {
     // A bigint's exponent is a bigint, as in JavaScript.
-    if (left === "bigint" || right === "bigint") return binaryType(this.ctx.tables.typing, "*", left, right, at);
+    if (left === "bigint" || right === "bigint") return binaryType(this.ctx.tables.typing, "*", left, right, { start: at.start, end: at.end });
     if (isFloat(right) && left !== right && this.adapt(base, right)) left = right;
     // A power of literals alone may still become a float where it is written, so an exponent
     // a u32 can't hold waits to see.
@@ -6692,7 +6700,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const inner = unknown ? option : this.held(option as UnionType);
     // A parameter's default is checked as an argument for it would be; a nullable one's is null.
     const declared = this.ctx.tables.fallbacks.get(e);
-    if (declared) {
+    if ((declared !== undefined)) {
       const to = holdsNull(this.ctx.tables.typing, this.ctx.resolveType(declared)) ? option : inner;
       this.expect(e.right, to);
       const fallback = this.value(e.right);
@@ -6710,7 +6718,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // what `Math` gives would lose it.
   private brandBase(t: Type): Type {
     const r = this.recOf(t);
-    return r?.kind === "brand" && !r.unit ? r.base : t;
+    return r?.kind === "brand" && (r.unit === undefined) ? r.base : t;
   }
 
   // Whether an expression of only literals could take this number type.
@@ -6774,7 +6782,7 @@ export class Expressions<C extends Context> implements Union<C> {
     this.ctx.exprsState.once.delete(e.right);
     for (const t of [l, r]) {
       const part = this.ctx.tables.typing.unequal(t, (c) => this.comparesAsValue(c));
-      if (part) throw new CompileError("E0112", `values of type '${this.ctx.tables.typing.show(part)}' can't be compared with '${e.op}': ${this.uncomparable(part)}`, e.start, e.end);
+      if ((part !== undefined)) throw new CompileError("E0112", `values of type '${this.ctx.tables.typing.show(part)}' can't be compared with '${e.op}': ${this.uncomparable(part)}`, e.start, e.end);
     }
     // A comparison over type parameters is checked again in each instance, once they're concrete.
     if (openParam(this.ctx.tables.typing, l, true) || openParam(this.ctx.tables.typing, r, true)) return "boolean";
@@ -6804,7 +6812,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // Why values of a type can't be compared.
   private uncomparable(t: Type): string {
     const rust = rustClassOf(this.ctx.tables.typing, t);
-    if (rust) return `a Rust '${rust.name}' isn't compared from Fish; compare what its methods give`;
+    if ((rust !== undefined)) return `a Rust '${rust.name}' isn't compared from Fish; compare what its methods give`;
     const r = this.recOf(t);
     if (r?.kind === "class") return `a class compares through 'equals(other: Ref<this>): boolean', which '${r.name}' doesn't have; add one, or '@derive(Eq)'`;
     if (r?.kind === "variant") return "an enum holding values compares when it has '@derive(Eq)'";
@@ -6817,7 +6825,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // when it derives Eq.
   /** @throws {CompileError} */
   private comparesAsValue(this: Mut<this>, t: ClassType | VariantType): boolean {
-    if (rustClassOf(this.ctx.tables.typing, t)) return false;
+    if ((rustClassOf(this.ctx.tables.typing, t) !== undefined)) return false;
     const r = this.ctx.tables.typing.rec(t);
     if (r.kind === "variant") return [...this.ctx.enums.values()].some((e) => e.data?.name === r.enum && e.data.eq);
     const known = this.ctx.tables.equalities.get(t as ClassType);
@@ -6850,7 +6858,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const type = a.kind === "string" ? "void" : this.read(a);
       if (this.ctx.tables.typing.holdsPart(type, (u) => rustClassOf(this.ctx.tables.typing, u) !== undefined, true)) throw new CompileError("E1004", `printing a '${this.ctx.tables.typing.show(type)}' isn't supported, since it holds a Rust value; print what its methods give`, a.start, a.end);
       if (this.printable(type)) continue;
-      this.ctx.tables.printed.add(a);
+      this.ctx.tables.printed.add(cloneExpr(a));
       const part = this.ctx.tables.typing.uninspectable(type);
       if (!part) continue;
       throw new CompileError("E0510", typeof part !== "string" && (this.ctx.tables.typing.rec(part).kind === "function" || this.ctx.tables.typing.rec(part).kind === "closure" || this.ctx.tables.typing.rec(part).kind === "dyn") ? "printing a function isn't supported yet" : `printing a '${this.ctx.tables.typing.show(part)}' isn't supported yet`, a.start, a.end);
@@ -6915,7 +6923,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // A tuple's length is a 'usize', and also the literal of its count where that is known, as
     // in 'const n: 2 = t.length'.
     if (tr?.kind === "literal" && this.tupleLength(e) === to) {
-      this.ctx.types.set(e, to);
+      this.ctx.types.set(cloneExpr(e), to);
       return;
     }
     // A reference that changes its value's form points at a copy in a slot of the function,
@@ -7156,7 +7164,7 @@ export class Expressions<C extends Context> implements Union<C> {
         this.ctx.coercions.delete(side);
         this.coerce(side, this.ctx.types.get(side)!, to, message);
       }
-      this.ctx.types.set(e, to);
+      this.ctx.types.set(cloneExpr(e), to);
       return;
     }
     // A literal lent is a temporary: it meets the type referred to, as its own literals do.
@@ -7306,7 +7314,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const lent = this.ctx.tables.typing.rec(own).fields.map((f) => {
       const want = this.ctx.tables.typing.field(to, f.name)?.type;
       const p = this.winner(e, f.name);
-      if (!want || !p || p.kind === "spread" || !this.ctx.tables.typing.holdsRef(want) || this.ctx.tables.typing.fits(f.type, want)) return f;
+      if ((want === undefined) || !p || p.kind === "spread" || !this.ctx.tables.typing.holdsRef(want) || this.ctx.tables.typing.fits(f.type, want)) return f;
       if (p.kind === "property") this.coerce(p.value, this.ctx.types.get(p.value)!, want, message);
       else if (p.kind === "shorthand") {
         // A shorthand lends its variable where it lives, so only as exactly what it holds.
@@ -7520,7 +7528,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (p.kind !== "shorthand") {
       throw unsupported(p.kind === "spread" ? "spread elements" : p.kind === "method" ? "methods in object literals" : "accessors in object literals", p);
     }
-    if (p.default) throw new CompileError("E0004", "'=' in an object literal is only valid in a destructuring pattern", p.start, p.end);
+    if ((p.default !== undefined)) throw new CompileError("E0004", "'=' in an object literal is only valid in a destructuring pattern", p.start, p.end);
     // A shorthand reads its variable like a name does: within its switch case, narrowed, and
     // widened from an enum member to the enum like any property.
     const localId = this.ctx.lookup(p.name, p);
@@ -7891,7 +7899,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (bodyOf(this.ctx.tables.arenas, this.inst(body)).params.some((p) => this.ctx.tables.defaulted.has(p))) throw new CompileError("E0801", "a closure with default parameter values can't be stored as a value yet, since calls through it pass every argument; give the parameters no defaults", e.start, e.end);
     const capture = (name: string) => `'${name}'`;
     const borrowed = c.fields.find((f) => this.isRefType(f.type));
-    if (borrowed) throw new CompileError("E0210", `this closure borrows ${capture(borrowed.name)}, but a stored callable owns what it captures; write the closure where it is stored, so it captures by move, or as 'move (...) => ...'`, e.start, e.end);
+    if ((borrowed !== undefined)) throw new CompileError("E0210", `this closure borrows ${capture(borrowed.name)}, but a stored callable owns what it captures; write the closure where it is stored, so it captures by move, or as 'move (...) => ...'`, e.start, e.end);
     if (c.once) throw new CompileError("E0210", `this closure moves ${capture(c.once)} out of what it captures, so it can run only once, but a stored callable may run any number of times; clone ${capture(c.once)} inside it instead`, e.start, e.end);
     const changed = this.ctx.tables.arenas.localOf([...(this.inst(body).changed ?? [])][0]);
     if (changed) throw new CompileError("E0210", `this closure changes ${capture(changed.name)}, which it captures, but a stored callable can't change what it captures; keep that state in an 'Atomic' or a 'Lock'`, e.start, e.end);
@@ -7994,7 +8002,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private newChecked(this: Mut<this>, e: Ref<Extract<Expr, { kind: "new" }>>, list: Ref<Expr[]>): Type {
     const named = e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.tables.arenas.classOf(this.ctx.classes.get(e.callee.name)) : undefined;
-    if (named) this.expectFrom(this.ctx.tables.arenas.bodyOf(named.constructor), list);
+    if ((named !== undefined)) this.expectFrom(this.ctx.tables.arenas.bodyOf(named.constructor), list);
     // A generic class's written type arguments type the arrows given for parameters they name,
     // as in `new Box<(n: i64) => i64>((n) => n * 2)`.
     const earlyId = !named && e.typeArgs.length > 0 && e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.construct(e.callee.name, e.typeArgs, [], e) : undefined;
@@ -8118,13 +8126,13 @@ export class Expressions<C extends Context> implements Union<C> {
   private dynField(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>, t: DynType): Type {
     if (this.linked(e)) throw unsupported("optional chains through a Dyn", e);
     const f = this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).fields.find((x) => x.name === e.name);
-    if (!f) {
+    if ((f === undefined)) {
       const hint = this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).methods.some((m) => m.name === e.name) ? "; it is a method, so call it" : didYouMean(e.name, this.memberNames(t));
       throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'${hint}`, e.start, e.end);
     }
     // A copy of an Atomic, a Lock or a Dyn would change apart from the original.
     if (this.ctx.tables.typing.interiorMutable(f.type) || this.ctx.tables.typing.holdsHandle(f.type)) throw new CompileError("E0211", `'${e.name}' can't be read through a Dyn, which gives a copy of it, and a copy of a '${this.ctx.tables.typing.show(f.type)}' would change apart from the one the Dyn holds; read it through a method`, e.start, e.end);
-    this.ctx.tables.computed.add(e);
+    this.ctx.tables.computed.add(cloneExpr(e));
     return f.type;
   }
 
@@ -8257,7 +8265,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // A raw pointer converts to another, or to and from an address, only inside `unsafe`.
     const pointer = (t: Type) => typeof t !== "string" && this.ctx.tables.typing.rec(t).kind === "pointer";
     if (pointer(to) || pointer(from)) {
-      this.needsUnsafe("'as' with a raw pointer", e);
+      this.needsUnsafe("'as' with a raw pointer", { start: e.start, end: e.end });
       if (!((pointer(to) && (pointer(from) || isInteger(from))) || (to === "usize" && pointer(from)))) {
         throw new CompileError("E1006", `a raw pointer converts only to another raw pointer or a 'usize', not '${this.ctx.tables.typing.show(pointer(to) ? from : to)}'`, e.start, e.end);
       }
@@ -8323,7 +8331,7 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // The class a name declares, unless a variable shadows it.
   classNamed(this: Mut<this>, name: string): ClassType | undefined {
-    return this.ctx.lookup(name, undefined) ? undefined : this.ctx.tables.arenas.classOf(this.ctx.classes.get(name))?.type;
+    return (this.ctx.lookup(name, undefined) !== undefined) ? undefined : this.ctx.tables.arenas.classOf(this.ctx.classes.get(name))?.type;
   }
 
   // A value that is only read, seen through a reference to it.
@@ -8336,7 +8344,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private loaded(this: Mut<this>, e: Ref<Expr>, type: Type): Type {
     const r = this.recOf(type);
     if (r?.kind !== "ref") return type;
-    this.ctx.coercions.set(e, r.to);
+    this.ctx.coercions.set(cloneExpr(e), r.to);
     return r.to;
   }
 
@@ -8344,7 +8352,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private widen(this: Mut<this>, e: Ref<Expr>, type: Type): Type {
     // A pattern's value is a string, as is a union of patterns and string literals.
     if (this.ctx.tables.typing.holdsPattern(type) && this.ctx.tables.typing.lower(type) === "string") {
-      this.ctx.coercions.set(e, "string");
+      this.ctx.coercions.set(cloneExpr(e), "string");
       return "string";
     }
     const u = this.recOf(type);
