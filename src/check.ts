@@ -381,7 +381,7 @@ function frameOf(tables: Mut<Tables>, instance: Mut<Instance>, generator: Genera
     }
     return true;
   });
-  tables.typing.rec(generator).frame = fields;
+  tables.typing.setFrame(generator, fields);
   instance.frame = { locals, loops, awaits };
 }
 
@@ -635,7 +635,7 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         else top.classes.set(s.name, declareClass(tables, node));
         const declared = tables.arenas.classOf(top.classes.get(s.name));
         const rust = tables.rust.classNodes.get(s);
-        if (rust) tables.typing.rec(declared!.type).rust = rust;
+        if (rust !== undefined) tables.typing.setRust(declared!.type, rust);
         // A Rust type declaring no constructor is never made with `new`, so its handle needs no
         // assigning in the empty one it is given.
         if (rust && !tables.arenas.bodyOf(declared!.constructor).rust) declared!.required.clear();
@@ -796,7 +796,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   decls: Declarations;
   enums: Map<string, EnumInfo>;
   byName: Map<string, BodyId>;
-  main: Body | undefined;
+  main: BodyId | undefined;
   // The pairs of a type and an interface being checked, each taken as satisfied while it is.
   assuming: Set<string>;
   registryState: RegistryState;
@@ -918,8 +918,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     // A body using a declaration that failed would only say it can't find it.
     this.stopOnErrors();
-    this.main = this.bodyNamed("main");
-    if (!this.main && !this.library && !this.macros && !this.module) throw new CompileError("E0405", "no main() function; execution starts there", 0, 0);
+    this.main = this.byName.get("main");
+    if (this.main === undefined && !this.library && !this.macros && !this.module) throw new CompileError("E0405", "no main() function; execution starts there", 0, 0);
     this.classes.forEach((c) => this.registry().register(c));
   }
 
@@ -1297,9 +1297,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // reported.
     while (!this.unending && (unsettled.length > 0 || pending.length > 0)) {
       if (this.errors.length > 0) {
-        pending.length = 0;
+        while (pending.length > 0) pending.pop();
         const kept = unsettled.filter((c) => declaredClasses.has(c));
-        unsettled.length = 0;
+        while (unsettled.length > 0) unsettled.pop();
         unsettled.push(...kept);
         if (unsettled.length === 0 && pending.length === 0) break;
       }
@@ -1321,10 +1321,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     // What follows reads every body's results.
     this.stopOnErrors();
-    if (this.main && this.main.params.length > 0) throw new CompileError("E0405", "main() takes no parameters", this.main.start, this.main.end);
-    const started = this.main && this.instancing().instanceOf(this.main).returns;
-    const future = this.recOf(started);
-    if (this.main && (future?.kind === "future" ? future.gives : started) !== "void") throw new CompileError("E0405", "main() can't return a value yet", this.main.start, this.main.end);
+    if (this.main !== undefined) {
+      const main = cloneSignature(this.tables.arenas.bodyOf(this.main));
+      if (main.params.length > 0) throw new CompileError("E0405", "main() takes no parameters", main.start, main.end);
+      const started = this.tables.arenas.instanceOf(this.instanceOf(this.main)).returns;
+      const future = this.recOf(started);
+      if ((future !== undefined && future.kind === "future" ? future.gives : started) !== "void") throw new CompileError("E0405", "main() can't return a value yet", main.start, main.end);
+    }
     if (this.library) {
       let exported: BodyId[] = [];
       for (const id of this.funcs) if (this.tables.arenas.bodyOf(id).exported === true) exported.push(id);
@@ -1379,13 +1382,30 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   private unknownJson(this: Mut<this>) {
     if (this.tables.unknownJson.length === 0) return;
     const at = this.tables.unknownJson[0]!;
-    const json = (t: ClassType | VariantType): boolean => {
-      const r = this.tables.typing.rec(t);
-      if (r.kind === "variant") return [...this.enums.values()].some((e) => e.data?.name === r.enum && e.data.json);
-      return this.registry().classOf(t as ClassType).node.derives?.includes("Json") ?? false;
-    };
-    const part = this.tables.typing.unjson(this.tables.typing.unknownType(), json);
+    // Whether a class or a data enum derives Json is asked outside the walk, which can't lend the
+    // checker: the walk stops at the first not yet known, which is asked and the walk run again.
+    const unknown = this.tables.typing.unknownType();
+    let known = new TypeMap<ClassType | VariantType, boolean>();
+    let part: Type | undefined = undefined;
+    for (;;) {
+      part = this.tables.typing.unjson(unknown, (c) => known.get(c) === true);
+      const kind = this.recOf(part)?.kind;
+      if (part === undefined || (kind !== "class" && kind !== "variant") || known.has(part as ClassType)) break;
+      known.set(part as ClassType, this.derivesJson(part as ClassType));
+    }
     if (part !== undefined) throw new CompileError("E0509", `this 'unknown' can't be written as JSON, since the program puts a '${this.tables.typing.show(part)}' in one, which has no JSON form`, at.start, at.end);
+  }
+
+  /** @throws {CompileError} */
+  private derivesJson(this: Mut<this>, t: ClassType | VariantType): boolean {
+    const r = this.tables.typing.rec(t);
+    if (r.kind === "variant") {
+      const name = r.enum;
+      for (const info of this.enums.values()) if (info.data !== undefined && info.data!.name === name && info.data!.json) return true;
+      return false;
+    }
+    const derives = this.registry().classOf(t as ClassType).node.derives;
+    return derives !== undefined && derives.includes("Json");
   }
 
   localOf(id: LocalId): Ref<Local> {
@@ -1438,16 +1458,16 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   valueTypeOf(this: Mut<this>, name: string, at: Span, shadowed: boolean): Type {
     if (shadowed) throw new CompileError("E0801", `'typeof' of the local '${name}' isn't supported yet; 'typeof' in a type names a top-level function or const`, at.start, at.end);
     if (this.classes.has(name)) throw new CompileError("E0801", `'typeof' of the class '${name}' isn't supported yet, since classes aren't values in Fish; name the class itself as the type`, at.start, at.end);
-    const constant = this.bodyNamed(`const ${name}`);
-    const f = constant ?? this.bodyNamed(name);
+    const constant = this.byName.get(`const ${name}`);
+    const f = constant !== undefined ? constant : this.byName.get(name);
     if (f === undefined) throw new CompileError("E0114", `'typeof' in a type names a top-level function or const, and there is none named '${name}'`, at.start, at.end);
     if (this.querying.has(name)) throw new CompileError("E0113", `'typeof ${name}' is used in working out ${name}'s own type, so that type would depend on itself; write it out`, at.start, at.end);
     this.querying.add(name);
     try {
-      if (constant === undefined) return this.functionTypeOf(f, at);
-      const declared = this.instancing().returnTypeOf(constant, new Map<string, Type>());
+      if (constant === undefined) return this.functionTypeOf(cloneSignature(this.tables.arenas.bodyOf(f)), at);
+      const declared = this.instancing().returnTypeOf(cloneSignature(this.tables.arenas.bodyOf(constant)), new Map<string, Type>());
       if (declared === undefined || this.isInterface(declared)) this.unlaid(name, at);
-      const id = this.instanceOf(constant.bodyId);
+      const id = this.instanceOf(constant);
       return this.tables.typing.widenLet(this.returnOf(id, at));
     } finally {
       this.querying.delete(name);
@@ -1516,7 +1536,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       result = f.async === true && future !== undefined && future.kind === "future" ? this.tables.typing.promiseInterface(future.gives) : returns;
     }
     const open = openParam(this.tables.typing, result, true);
-    if (open) {
+    if (open !== undefined) {
       const i = f.params.findIndex((_, i) => def.bindings.get(`#${i}`) === open);
       const param = f.params[i]?.pattern;
       throw new CompileError("E0114", `'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : this.tables.typing.rec(open).name}'; write the return type`, at.start, at.end);
@@ -1590,32 +1610,45 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
   // part that isn't a JsValue or a handle where `to` takes only one. An empty array's `never`
   // elements hold nothing.
-  intoJs(this: Mut<this>, from: Type, to: Type): boolean {
-    const held = (t: Type) => {
-      const r = this.recOf(t);
-      return r?.kind === "ref" ? r.to : t;
-    };
-    const js = (t: Type) => {
-      const r = this.recOf(t);
-      return r?.kind === "block" && r.which === "JsValue";
-    };
-    [from, to] = [held(from), held(to)];
-    if (from === to || from === "never" || typeof to === "string" || !this.tables.typing.holdsPart(to, js, true)) return false;
-    if (js(to)) return !js(from);
+  intoJs(this: Mut<this>, given: Type, wanted: Type): boolean {
+    const from = heldThrough(this.tables.typing, given);
+    const to = heldThrough(this.tables.typing, wanted);
+    if (from === to || from === "never" || typeof to === "string" || !holdsJs(this.tables.typing, to)) return false;
+    if (isJs(this.tables.typing, to)) return !isJs(this.tables.typing, from);
     const into = this.tables.typing.rec(to);
     const source = this.recOf(from);
     if (into.kind === "union") {
-      const others = into.members.filter((m) => !js(m));
-      const members = source?.kind === "union" ? source.members : [from];
-      return members.some((m) => !into.members.includes(m) && !js(m) && !others.some((o) => this.tables.typing.fits(m, o) && !this.intoJs(m, o)));
+      const wantedMembers = [...into.members];
+      const members = source !== undefined && source.kind === "union" ? [...source.members] : [from];
+      let others: Type[] = [];
+      for (const m of wantedMembers) if (!isJs(this.tables.typing, m)) others.push(m);
+      for (const m of members) {
+        if (wantedMembers.includes(m) || isJs(this.tables.typing, m)) continue;
+        let taken = false;
+        for (const o of others) if (!taken && this.tables.typing.fits(m, o) && !this.intoJs(m, o)) taken = true;
+        if (!taken) return true;
+      }
+      return false;
     }
     if (source === undefined) return false;
     // An array is never converted element by element where JS values are wanted.
-    if ((into.kind === "array" || into.kind === "fixed") && (source.kind === "array" || source.kind === "fixed")) return source.element !== "never" && !(js(source.element) && js(into.element)) && (source.element !== into.element || this.intoJs(source.element, into.element));
+    if ((into.kind === "array" || into.kind === "fixed") && (source.kind === "array" || source.kind === "fixed")) {
+      const element = source.element;
+      const target = into.element;
+      return element !== "never" && !(isJs(this.tables.typing, element) && isJs(this.tables.typing, target)) && (element !== target || this.intoJs(element, target));
+    }
     // A field the value leaves out is an absent optional one, which turns nothing into JS.
-    if (into.kind === "object" && (source.kind === "object" || source.kind === "class")) return into.fields.some((f) => source.fields.some((g) => g.name === f.name && this.intoJs(g.type, f.type)));
+    if (into.kind === "object" && (source.kind === "object" || source.kind === "class")) {
+      let wantedFields: [string, Type][] = [];
+      for (const f of into.fields) wantedFields.push([f.name, f.type]);
+      let givenFields: [string, Type][] = [];
+      for (const g of source.fields) givenFields.push([g.name, g.type]);
+      for (const [name, type] of wantedFields) for (const [other, held] of givenFields) if (other === name && this.intoJs(held, type)) return true;
+      return false;
+    }
     return false;
   }
+
 
   // What a function's returned reference borrows from: the parameters with its written
   // lifetime, or by elision `this` for a method, or the only reference parameter.
@@ -1717,18 +1750,24 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     let types: TypeNode[] = [];
     for (const p of f.params) if (p.type !== undefined) types.push(cloneTypeNode(p.type!));
     if (f.returnType !== undefined) types.push(cloneTypeNode(f.returnType!));
+    // The first lifetime written that isn't declared.
+    let missing: { name: string; start: usize; end: usize }[] = [];
     for (const root of types) {
       walk({ of: "typeNode", node: root }, (n) => {
-        if (n.of !== "typeNode" || n.node.kind !== "ref") return;
+        if (missing.length > 0 || n.of !== "typeNode" || n.node.kind !== "ref") return;
         const node = n.node;
         const slots = this.decls.slots.get(node.name);
         let lives: TypeNode[] = [];
         if ((node.name === "Ref" || node.name === "Mut") && node.args.length === 2) lives.push(cloneTypeNode(node.args[1]!));
         else if (slots !== undefined && slots!.length === node.args.length) for (let i: usize = 0; i < node.args.length; i++) if (slots![i]!) lives.push(cloneTypeNode(node.args[i]!));
         for (const life of lives) {
-          if (life.kind === "ref" && !declared.has(life.name)) throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
+          if (life.kind === "ref" && !declared.has(life.name) && missing.length === 0) missing.push({ name: life.name, start: life.start, end: life.end });
         }
       });
+    }
+    if (missing.length > 0) {
+      const life = missing[0]!;
+      throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
     }
   }
 
@@ -1835,7 +1874,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         for (const k of instance.predicates.ids()) {
           const pr = instance.predicates.getById(k)!;
           const type = this.tables.typing.lower(pr.type);
-          instance.predicates?.setValueById(k, { ...pr, type });
+          instance.predicates.setValueById(k, { ...pr, type });
         }
       }
       if (instance.throws !== undefined) instance.throws = this.tables.typing.lower(instance.throws);
@@ -2227,7 +2266,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (let i: usize = 0; i < want.length && i < have.length; i++) if (!this.tables.typing.fits(want[i]!, have[i]!)) mismatched = true;
     if (have.length < want.length || extra || mismatched) throw why(`must take (${want.map((t) => this.tables.typing.show(t)).join(", ")})`);
     if ((f.async === true) !== (declared.async === true)) throw why(declared.async === true ? "must be async" : "can't be async");
-    if (!!f.generator !== !!declared.generator) throw why(declared.generator ? "must be a generator" : "can't be a generator");
+    if ((f.generator === true) !== (declared.generator === true)) throw why(declared.generator === true ? "must be a generator" : "can't be a generator");
     if (f.self!.mutable && !declared.self!.mutable) throw why("can't change 'this'; it borrows 'this' read-only");
     if (!!f.self!.owned !== !!declared.self!.owned) throw why(declared.self!.owned ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
     const error = this.errorOf(instance);
@@ -4870,6 +4909,24 @@ function lentNext(typing: Mut<Typing>, held: Type): Type {
 function promisedNext(typing: Mut<Typing>, held: Type): Type {
   const next = nextOf(typing, held);
   return typing.promiseInterface(next);
+}
+
+// What a reference refers to, or the type itself.
+function heldThrough(typing: Ref<Typing>, t: Type): Type {
+  if (typeof t === "string") return t;
+  const r = typing.rec(t);
+  return r.kind === "ref" ? r.to : t;
+}
+
+// Whether a type is a JsValue.
+function isJs(typing: Ref<Typing>, t: Type): boolean {
+  if (typeof t === "string") return false;
+  const r = typing.rec(t);
+  return r.kind === "block" && r.which === "JsValue";
+}
+
+function holdsJs(typing: Ref<Typing>, t: Type): boolean {
+  return typing.holdsPart(t, (u) => isJs(typing, u), true);
 }
 
 function calledName(callee: Ref<Expr>): string | undefined {

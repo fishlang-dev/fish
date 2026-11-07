@@ -632,6 +632,19 @@ export class Typing {
     return this.arena.get(t as usize)! as RecordOf<T>;
   }
 
+  // Gives a generator's or a future's type the fields its frame holds, once its body is checked.
+  setFrame(this: Mut<this>, t: GeneratorType | FutureType, frame: Field[]): void {
+    const r = this.rec(t);
+    if (r.kind === "generator") this.arena.set(t as usize, { ...r, frame });
+    else if (r.kind === "future") this.arena.set(t as usize, { ...r, frame });
+  }
+
+  // Marks a class as standing for a Rust type.
+  setRust(this: Mut<this>, t: ClassType, rust: RustClass): void {
+    const r = this.rec(t);
+    this.arena.set(t as usize, { ...r, rust });
+  }
+
   // Updates the record of a type that isn't a primitive.
   setRec<T extends Exclude<Type, string>>(this: Mut<this>, t: T, record: RecordOf<T>): void {
     this.arena.set(t as usize, record);
