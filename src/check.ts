@@ -654,16 +654,27 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         if (s.typeParams.some(isLifetime)) decls.slots.set(s.name, s.typeParams.map(isLifetime));
         if (node.typeParams.length > 0) top.templates.set(s.name, node);
         else top.classes.set(s.name, declareClass(tables, node));
-        const declared = tables.arenas.classOf(top.classes.get(s.name));
+        const declared = top.classes.get(s.name);
+        if (declared === undefined) continue;
+        const type = tables.arenas.classOf(declared).type;
         const rust = tables.rust.classNodes.get(s);
-        if (rust !== undefined) tables.typing.setRust(declared!.type, rust);
+        if (rust !== undefined) tables.typing.setRust(type, rust);
         // A Rust type declaring no constructor is never made with `new`, so its handle needs no
         // assigning in the empty one it is given.
-        if (rust !== undefined && tables.arenas.bodyOf(declared!.constructor).rust === undefined) declared!.required.clear();
+        if (rust !== undefined && tables.arenas.bodyOf(tables.arenas.classOf(declared).constructor).rust === undefined) {
+          let info = tables.arenas.classMut(declared);
+          info.required.clear();
+        }
         // A `static readonly` field is a top-level const named `C.x`, which no source name can be.
-        for (const f of declared?.staticFields.values() ?? []) {
-          const giving: Stmt = { id: nextId(tables.ids), kind: "return", value: f.init!, start: f.init!.start, end: f.init!.end };
-          top.funcs.push(addBodyTo(tables, Object.assign({ id: nextId(tables.ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end }, { comptime: "const" as const, owner: declared!.type })));
+        let statics: { name: string; init: Expr; type: TypeNode | undefined; start: usize; end: usize }[] = [];
+        for (const f of tables.arenas.classOf(declared).staticFields.values()) statics.push({ name: f.name, init: cloneExpr(f.init!), type: f.type === undefined ? undefined : cloneTypeNode(f.type!), start: f.start, end: f.end });
+        while (statics.length > 0) {
+          const f = statics.shift()!;
+          const start = f.init.start;
+          const end = f.init.end;
+          const giving: Stmt = { id: nextId(tables.ids), kind: "return", value: f.init, start, end };
+          const made: Func & { comptime: "const"; owner: ClassType } = { id: nextId(tables.ids), kind: "function", async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${s.name}.${f.name}`, returnType: f.type, body: [giving], start: f.start, end: f.end, comptime: "const", owner: type };
+          top.funcs.push(addBodyTo(tables, made));
         }
         continue;
       }
@@ -956,7 +967,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // Names the program's functions and finds `main`, before any body is checked.
   /** @throws {CompileError} */
   prepare(this: Mut<this>): void {
-    for (const id of this.funcs) {
+    for (const id of [...this.funcs]) {
       const f = this.tables.arenas.bodyOf(id);
       try {
         // A tag takes its strings, then its values as a rest parameter.
@@ -978,7 +989,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     // Overloads are lowered on the tree, where an implementation lists its signatures' names;
     // as a body it names them by id.
-    for (const id of this.funcs) {
+    for (const id of [...this.funcs]) {
       const names = this.tables.arenas.bodyOf(id).overloadNames;
       if (names === undefined) continue;
       let ids: BodyId[] = [];
@@ -1327,7 +1338,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
-    for (const id of this.funcs) {
+    for (const id of [...this.funcs]) {
       try {
         this.checkBody(this.definition(id));
       } catch (e) {
@@ -1368,7 +1379,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         while (this.instancingState.pending.length > 0) this.instancingState.pending.pop();
         const kept = this.registryState.unsettled.filter((c) => declaredClasses.has(c));
         while (this.registryState.unsettled.length > 0) this.registryState.unsettled.pop();
-        this.registryState.unsettled.push(...kept);
+        for (const c of kept) this.registryState.unsettled.push(c);
         if (this.registryState.unsettled.length === 0 && this.instancingState.pending.length === 0) break;
       }
       try {
@@ -1606,9 +1617,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     const open = openParam(this.tables.typing, result, true);
     if (open !== undefined) {
-      const i = f.params.findIndex((_, i) => def.bindings.get(`#${i}`) === open);
-      const param = f.params[i]?.pattern;
-      throw new CompileError("E0114", `'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${param?.kind === "ident" ? param.name : this.tables.typing.rec(open).name}'; write the return type`, at.start, at.end);
+      let given: string | undefined = undefined;
+      for (let i: usize = 0; i < f.params.length; i++) if (given === undefined && def.bindings.get(`#${i}`) === open) given = boundName(f.params[i]!.pattern) ?? this.tables.typing.rec(open).name;
+      if (given === undefined) given = this.tables.typing.rec(open).name;
+      throw new CompileError("E0114", `'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${given}'; write the return type`, at.start, at.end);
     }
     return this.tables.typing.functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(this.tables, p) : "_")), this.instancing().declaredParams(f), result);
   }
@@ -1952,7 +1964,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         const [k, pr] = predicates.shift()!;
         instance.predicates?.setValueById(k, pr);
       }
-      if (instance.throws !== undefined) instance.throws = this.tables.typing.lower(instance.throws);
+      const thrown = instance.throws;
+      if (thrown !== undefined) instance.throws = this.tables.typing.lower(thrown);
     }
     let localIds: LocalId[] = [];
     for (const l of new Set(this.tables.arenas.instanceOf(id).locals.values())) localIds.push(l);
@@ -2346,7 +2359,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if ((f.self!.owned === true) !== (declared.self!.owned === true)) throw why(declared.self!.owned === true ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
     const error = this.errorOf(instance);
     const allowed = this.errorOf(this.instanceOf(declaredId));
-    if (error && (!allowed || !this.tables.typing.fits(error, allowed))) throw why(allowed ? `can only throw '${this.tables.typing.show(allowed)}'` : "can't throw");
+    if (error !== undefined && (allowed === undefined || !this.tables.typing.fits(error, allowed))) throw why(allowed !== undefined ? `can only throw '${this.tables.typing.show(allowed)}'` : "can't throw");
     const gives = this.returnOf(instance, { start: f.start, end: f.end });
     const wanted = this.returnOf(this.instanceOf(declaredId), { start: declared.start, end: declared.end });
     if (!this.tables.typing.fits(gives, wanted)) throw why(`must return '${this.tables.typing.show(wanted)}', not '${this.tables.typing.show(gives)}'`);
