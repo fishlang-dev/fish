@@ -55,6 +55,7 @@ export type Place =
 const STEPS = 10_000_000;
 const DEPTH = 1000;
 const LONGEST: usize = 1 << 28;
+const INFINITY: f64 = 1.0 / 0.0;
 
 // What an optional link meeting an empty Option makes of the rest of its chain.
 type Short = { kind: "short" };
@@ -115,7 +116,7 @@ function span<S extends Span>(at: Ref<S>): Span {
   return { start: at.start, end: at.end };
 }
 
-type Frame = { instance: InstanceId; locals: Map<LocalId, Value>; temps: Value[]; self: Place | undefined };
+type Frame = { instance: InstanceId; locals: Map<LocalId, Value>; temps: Map<usize, Value>; self: Place | undefined };
 
 
 // What runs comptime code: the compilation's tables, and checking a function before comptime
@@ -334,7 +335,7 @@ export function comptimeParameter(tables: Ref<Tables>, instance: Ref<Instance>, 
 
 // A frame for comptime code in an instance, which knows the instance's comptime parameters.
 function seeded(tables: Ref<Tables>, instance: InstanceId): Frame {
-  return { instance, locals: known(tables, tables.arenas.instanceOf(instance)), temps: [], self: undefined };
+  return { instance, locals: known(tables, tables.arenas.instanceOf(instance)), temps: new Map<usize, Value>(), self: undefined };
 }
 
 // The comptime parameters an instance can read, by local: its own, and in a closure, those of
@@ -434,8 +435,9 @@ class Interpreter<H extends ComptimeHost> {
   // A place holding a value no variable holds, alive until its frame returns.
   // ponytail: a frame keeps every temporary until it returns, so a long loop grows it; STEPS bounds it.
   private temp(this: Mut<this>, f: usize, v: Value): Place {
-    this.frames[f]!.temps.push(v);
-    return { kind: "place", of: "temp", frame: f, index: this.frames[f]!.temps.length - 1, path: [] };
+    const index = this.frames[f]!.temps.size;
+    this.frames[f]!.temps.set(index, v);
+    return { kind: "place", of: "temp", frame: f, index, path: [] };
   }
 
   // The place of a part of what a place holds; an accessor's value is its getter's copy, whose
@@ -449,32 +451,6 @@ class Interpreter<H extends ComptimeHost> {
     return this.extend(held, step);
   }
 
-  // `held` with `v` put at the end of `path`. A union's tag is kept on the way, and at the end
-  // too when `inner`, as when a call changes the value inside it.
-  /** @throws {CompileError | Jump | Stop | Thrown} */
-  private placed(this: Mut<this>, held: Value, path: Step[], i: usize, v: Value, inner: boolean): Value {
-    if ((i < path.length || inner) && held !== null && typeof held === "object" && held.kind === "member") {
-      held.value = this.placed(held.value, path, i, v, inner);
-      return held;
-    }
-    if (i === path.length) return v;
-    // A `Mut` held on the way: what follows is written through it.
-    if (isPlace(held)) {
-      let at = held;
-      for (let j = i; j < path.length; j++) at = this.extend(at, path[j]!);
-      this.write(at, v, inner);
-      return held;
-    }
-    const step = path[i]!;
-    if (step.kind === "field") {
-      const r = held as Record;
-      r.fields.set(step.name, this.placed(r.fields.get(step.name), path, i + 1, v, inner));
-      return r;
-    }
-    const a = held as Items;
-    a.items[toIndex(step.index)] = this.placed(a.items[toIndex(step.index)], path, i + 1, v, inner);
-    return a;
-  }
 
   // A block's statements; the checker lets no `return`, `break` or `continue` leave it.
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
@@ -548,48 +524,48 @@ class Interpreter<H extends ComptimeHost> {
   // What a place holds, an accessor's read through its getter.
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private read(this: Mut<this>, p: Ref<Place>): Value {
-    switch (p.of) {
-      case "accessor":
-        if (p.getter !== undefined) return this.call(p.getter, [], copyPlace(p.self), p.at);
-        return (this.readValue(p.self) as Record).fields.get(p.name);
-      case "char":
-        return p.text[toIndex(p.index)];
-      case "local":
-      case "temp": {
-        const frame = this.frames[p.frame]!;
-        let v = p.of === "local" ? frame.locals.get(p.local) : frame.temps[p.index];
-        for (const step of p.path) {
-          const holder = this.unwrap(v);
-          v = step.kind === "field" ? (holder as Record).fields.get(step.name) : (holder as Items).items[toIndex(step.index)];
-        }
-        return v;
-      }
+    if (p.of === "accessor") {
+      if (p.getter !== undefined) return this.call(p.getter, [], copyPlace(p.self), p.at);
+      const self = this.readValue(p.self);
+      return isRecord(self) ? self.fields.get(p.name) : undefined;
     }
+    if (p.of === "char") return p.text[toIndex(p.index)];
+    const root = this.root(p);
+    const followed = follow(root, p.path, 0);
+    if (followed.kind === "value") return followed.value;
+    let at = followed.place;
+    for (const step of followed.rest) at = this.extend(at, step);
+    return this.read(at);
+  }
+
+  // What a local's or a temporary's place starts from.
+  private root(p: Ref<Place>): Value {
+    if (p.of === "local") return this.frames[p.frame]!.locals.get(p.local);
+    if (p.of === "temp") return this.frames[p.frame]!.temps.get(p.index);
     return undefined;
   }
 
   // Writes `v` where a place is, an accessor's through its setter; `inner` keeps a union's tag
-  // around what is there.
+  // around what is there. A `Mut` met on the way is written through.
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private write(this: Mut<this>, p: Ref<Place>, v: Value, inner = false) {
-    switch (p.of) {
-      case "accessor":
-        this.call(p.setter, [v], copyPlace(p.self), p.at);
-        return;
-      case "char":
-        return this.unsupported("changing a string's character", p.at);
-      case "local": {
-        let locals = this.frames[p.frame]!.locals;
-        locals.set(p.local, this.placed(locals.get(p.local), p.path, 0, v, inner));
-        return;
-      }
-      case "temp": {
-        let temps = this.frames[p.frame]!.temps;
-        temps[p.index] = this.placed(temps[p.index], p.path, 0, v, inner);
-        return;
-      }
+    if (p.of === "accessor") {
+      this.call(p.setter, [v], copyPlace(p.self), p.at);
+      return;
     }
+    if (p.of === "char") return this.unsupported("changing a string's character", p.at);
+    const followed = follow(this.root(p), p.path, 0);
+    if (followed.kind === "through" && followed.rest.length > 0) {
+      let at = followed.place;
+      for (const step of followed.rest) at = this.extend(at, step);
+      this.write(at, v, inner);
+      return;
+    }
+    const next = placed(this.root(p), p.path, 0, v, inner);
+    if (p.of === "local") this.frames[p.frame]!.locals.set(p.local, next);
+    else this.frames[p.frame]!.temps.set(p.index, next);
   }
+
 
   // A value without a union's tag, read through a `Mut`'s place.
   /** @throws {CompileError | Jump | Stop | Thrown} */
@@ -704,7 +680,7 @@ class Interpreter<H extends ComptimeHost> {
       if (body.foreign === true) this.refuse(`the ${body.rust !== undefined ? "Rust" : "C"} function '${name}'`, at);
       if (body.js !== undefined) this.refuse(`'${name}' from the package '${body.js.module}'`, at);
       if (!this.host.ensureChecked(callee)) throw new Stop(`this comptime code calls '${name}', which is still being checked, so it can't run yet; compute the value without it`, span(at), false);
-      let frame: Frame = { instance: callee, locals: new Map<LocalId, Value>(), temps: [], self };
+      let frame: Frame = { instance: callee, locals: new Map<LocalId, Value>(), temps: new Map<usize, Value>(), self };
       const instance = this.host.tables.arenas.instanceOf(callee);
       for (let i: usize = 0; i < body.params.length; i++) frame.locals.set(instance.locals.get(body.params[i]!)!, i < args.length ? args[i]! : null);
       // The body runs as a copy of it, as checking another function may change where it lives.
@@ -752,7 +728,7 @@ class Interpreter<H extends ComptimeHost> {
         return;
       }
       case "return":
-        throw new Return(s.value ? this.expr(f, s.value) : undefined);
+        throw new Return(s.value !== undefined ? this.expr(f, s.value) : undefined);
       case "if":
         if (this.valueOf(f, s.cond)) this.statements(f, s.then);
         else if (s.else) this.statements(f, s.else);
@@ -889,7 +865,8 @@ class Interpreter<H extends ComptimeHost> {
     const v = isPlace(value) ? this.read(value) : value;
     const to = deref(this.host.tables.typing, target);
     if (typeof v === "bigint" && to !== undefined && isFloat(to)) return fit(toFloat(v), to);
-    return retag(this.host.tables.typing, v, deref(this.host.tables.typing, own), to);
+    const from = deref(this.host.tables.typing, own);
+    return retag(this.host.tables.typing, v, from, to);
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
@@ -961,9 +938,9 @@ class Interpreter<H extends ComptimeHost> {
         return made;
       }
       case "template": {
-        let text = e.quasis[0] ?? "";
+        let text = e.quasis.length > 0 ? e.quasis[0]! : "";
         e.exprs.forEach((x, i) => {
-          text = this.joined(text, display(this.expr(f, x), this.typeOf(f, x)) + (e.quasis[i + 1] ?? ""), e);
+          text = this.joined(text, display(this.expr(f, x), this.typeOf(f, x)) + (i + 1 < e.quasis.length ? e.quasis[i + 1]! : ""), e);
         });
         return text;
       }
@@ -1167,14 +1144,14 @@ class Interpreter<H extends ComptimeHost> {
       throw new Stop(said, span(e), true, true);
     }
     const target = this.calledAt(f, e);
-    if (target && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return this.call(target, this.args(f, target, e.args), this.frames[f]!.self, e);
+    if (target !== undefined && (callee.kind === "super" || (callee.kind === "member" && callee.object.kind === "super"))) return this.call(target, this.args(f, target, e.args), this.frames[f]!.self, e);
     if (target !== undefined && callee.kind === "member" && this.body(target).self !== undefined) {
       const self = this.receiver(f, callee.object);
       if (isShort(self)) return short();
       if ((callee.optional || e.optional) && this.readValue(self) === null) return short();
       return this.call(target, this.args(f, target, e.args), self, e);
     }
-    if (target) return this.call(target, this.args(f, target, e.args), undefined, e);
+    if (target !== undefined) return this.call(target, this.args(f, target, e.args), undefined, e);
     if (callee.kind === "ident" && callee.name === "String" && e.args.length === 1) return display(this.expr(f, e.args[0]!), this.typeOf(f, e.args[0]!));
     // `String.fromCharCode` and `String.fromCodePoint`, their arguments gathered into one array.
     const built = this.host.tables.stringBuilds.get(e);
@@ -1353,39 +1330,46 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {Stop} */
-  private stringMethod<S extends Span>(this: Mut<this>, name: string, s: string, args: Value[], at: Ref<S>): Value {
-    const n = (i: usize) => Number(args[i] as bigint);
+  private stringMethod<S extends Span>(this: Mut<this>, name: string, s: string, args: Ref<Value[]>, at: Ref<S>): Value {
+    const more = args.length > 1;
     switch (name) {
       case "charCodeAt": {
-        const i = args[0] as bigint;
+        const i = bigArg(args, 0);
         if (i < 0n || i >= BigInt(s.length)) this.panic(`index out of bounds: the len is ${s.length} but the index is ${i}`, at);
-        return BigInt(s.charCodeAt(Number(i)));
+        return BigInt(s.charCodeAt(toIndex(i)));
       }
       case "indexOf":
-        return BigInt(s.indexOf(args[0] as string, args.length > 1 ? n(1) : undefined));
+        return BigInt(more ? s.indexOf(textArg(args, 0), intArg(args, 1)) : s.indexOf(textArg(args, 0)));
       case "replaceAll":
-        return s.replaceAll(args[0] as string, args[1] as string);
-      case "concat":
-        return s.concat(...(args as string[]));
+        return s.replaceAll(textArg(args, 0), textArg(args, 1));
+      case "concat": {
+        let out = s;
+        for (let i: usize = 0; i < args.length; i++) out = out + textArg(args, i);
+        return out;
+      }
       case "lastIndexOf":
-        return BigInt(s.lastIndexOf(args[0] as string, args.length > 1 ? n(1) : undefined));
-      case "at":
-        return s.at(n(0)) ?? null;
+        return BigInt(more ? s.lastIndexOf(textArg(args, 0), intArg(args, 1)) : s.lastIndexOf(textArg(args, 0)));
+      case "at": {
+        const c = s.at(intArg(args, 0));
+        return c === undefined ? null : c;
+      }
       case "charAt":
-        return s.charAt(n(0));
+        return s.charAt(intArg(args, 0));
       case "codePointAt": {
-        const point = s.codePointAt(n(0));
+        const point = s.codePointAt(intArg(args, 0));
         return point === undefined ? null : BigInt(point);
       }
       case "includes":
-        return s.includes(args[0] as string, args.length > 1 ? n(1) : undefined);
+        return more ? s.includes(textArg(args, 0), intArg(args, 1)) : s.includes(textArg(args, 0));
       case "startsWith":
-        return s.startsWith(args[0] as string, args.length > 1 ? n(1) : undefined);
+        return more ? s.startsWith(textArg(args, 0), intArg(args, 1)) : s.startsWith(textArg(args, 0));
       case "endsWith":
-        return s.endsWith(args[0] as string, args.length > 1 ? n(1) : undefined);
+        return more ? s.endsWith(textArg(args, 0), intArg(args, 1)) : s.endsWith(textArg(args, 0));
       case "split": {
-        const parts = args.length === 0 || args[0] === null ? [s] : s.split(args[0] as string, args.length > 1 ? n(1) : undefined);
-        return { kind: "array", items: parts };
+        let items: Value[] = [];
+        if (args.length === 0 || args[0] === null) items.push(s);
+        else for (const part of more ? s.split(textArg(args, 0), intArg(args, 1)) : s.split(textArg(args, 0))) items.push(part);
+        return { kind: "array", items };
       }
       case "trim":
         return s.trim();
@@ -1398,23 +1382,30 @@ class Interpreter<H extends ComptimeHost> {
       case "toLowerCase":
         return s.toLowerCase();
       case "replace":
-        return s.replace(args[0] as string, args[1] as string);
-      case "padStart":
-        return this.joined("", s.padStart(Math.min(n(0), LONGEST + 1), args.length > 1 ? (args[1] as string) : undefined), at);
-      case "padEnd":
-        return this.joined("", s.padEnd(Math.min(n(0), LONGEST + 1), args.length > 1 ? (args[1] as string) : undefined), at);
-      case "repeat":
-        if ((args[0] as bigint) < 0n) this.panic("Invalid count value: " + String(args[0]), at);
-        if (BigInt(s.length) * (args[0] as bigint) > BigInt(LONGEST)) this.tooLong(at);
-        return s.repeat(n(0));
+        return s.replace(textArg(args, 0), textArg(args, 1));
+      case "padStart": {
+        const width = Math.min(intArg(args, 0), (LONGEST as i64) + 1);
+        return this.joined("", more ? s.padStart(width, textArg(args, 1)) : s.padStart(width), at);
+      }
+      case "padEnd": {
+        const width = Math.min(intArg(args, 0), (LONGEST as i64) + 1);
+        return this.joined("", more ? s.padEnd(width, textArg(args, 1)) : s.padEnd(width), at);
+      }
+      case "repeat": {
+        const count = bigArg(args, 0);
+        if (count < 0n) this.panic("Invalid count value: " + count.toString(), at);
+        if (BigInt(s.length) * count > BigInt(LONGEST)) this.tooLong(at);
+        return s.repeat(intArg(args, 0));
+      }
       case "slice":
-        return s.slice(n(0), args.length > 1 ? n(1) : undefined);
+        return more ? s.slice(intArg(args, 0), intArg(args, 1)) : s.slice(intArg(args, 0));
       case "substring":
-        return s.substring(n(0), args.length > 1 ? n(1) : undefined);
+        return more ? s.substring(intArg(args, 0), intArg(args, 1)) : s.substring(intArg(args, 0));
       default:
         return this.unsupported(`the string method '${name}'`, at);
     }
   }
+
 
   /** @throws {Stop} */
   private tooLong<S extends Span>(this: Mut<this>, at: Ref<S>): never {
@@ -1570,7 +1561,7 @@ class Interpreter<H extends ComptimeHost> {
         return this.extend(base, { kind: "field", name: target.name });
       }
       // A part of a value that isn't an object's, like an array's length, which is only read.
-      if (typeof holder === "string" || (holder && typeof holder === "object" && (holder.kind === "array" || holder.kind === "map"))) return this.temp(f, this.memberValue(target, holder));
+      if (typeof holder === "string" || isItems(holder) || isTable(holder)) return this.temp(f, this.memberValue(target, holder));
     }
     if (target.kind === "index") {
       const base = object === undefined ? this.holder(f, target.object) : isPlace(object) ? object : this.temp(f, object);
@@ -1794,7 +1785,7 @@ class Interpreter<H extends ComptimeHost> {
         let [result, base, exponent] = [1n, a, b];
         while (exponent > 0n) {
           this.step(at);
-          if (exponent & 1n) result = this.checked(result * base, type, "multiply", at);
+          if ((exponent & 1n) !== 0n) result = this.checked(result * base, type, "multiply", at);
           exponent >>= 1n;
           if (exponent > 0n) base = this.checked(base * base, type, "multiply", at);
         }
@@ -1879,7 +1870,7 @@ class Interpreter<H extends ComptimeHost> {
         exact = power;
       }
     }
-    over ??= wrap(exact, type) !== exact;
+    if (over === undefined) over = wrap(exact, type) !== exact;
     const wrapped = wrap(exact, type);
     if (family === "checked") return over ? null : wrapped;
     if (family === "wrapping") return wrapped;
@@ -1910,8 +1901,8 @@ class Interpreter<H extends ComptimeHost> {
     const { bits, signed } = integerInfo(to);
     const min = signed ? -(1n << BigInt(bits - 1)) : 0n;
     const max = signed ? (1n << BigInt(bits - 1)) - 1n : (1n << BigInt(bits)) - 1n;
-    if (v === Infinity) return max;
-    if (v === -Infinity) return min;
+    if (v === INFINITY) return max;
+    if (v === -INFINITY) return min;
     const t = bigOf(Math.trunc(v));
     return t < min ? min : t > max ? max : t;
   }
@@ -1975,6 +1966,7 @@ function copyValue(v: Ref<Value>): Value {
     case "place":
       return copyPlace(v);
   }
+  return v;
 }
 
 function copyNames(names: Ref<Free>): Free {
@@ -2064,6 +2056,63 @@ function integerKey(k: Ref<Value>): f64 | undefined {
   return n < 4294967295 ? n : undefined;
 }
 
+// What is at the end of `path` in `v`, or a `Mut` met on the way with the steps left after it.
+type Followed = { kind: "value"; value: Value } | { kind: "through"; place: Place; rest: Step[] };
+
+function follow(v: Value, path: Ref<Step[]>, i: usize): Followed {
+  if (i === path.length) return { kind: "value", value: v };
+  if (isPlace(v)) {
+    let rest: Step[] = [];
+    for (let j = i; j < path.length; j++) rest.push(copyStep(path[j]!));
+    return { kind: "through", place: v, rest };
+  }
+  if (isMember(v)) return follow(v.value, path, i);
+  const step = path[i]!;
+  if (step.kind === "field") return follow(isRecord(v) ? v.fields.get(step.name) : undefined, path, i + 1);
+  const at = toIndex(step.index);
+  return follow(isItems(v) && at < v.items.length ? copyValue(v.items[at]!) : undefined, path, i + 1);
+}
+
+// `held` with `v` put at the end of `path`. A union's tag is kept on the way, and at the end
+// too when `inner`, as when a call changes the value inside it.
+function placed(held: Value, path: Ref<Step[]>, i: usize, v: Value, inner: boolean): Value {
+  if (isMember(held) && (i < path.length || inner)) return { kind: "member", type: held.type, value: placed(held.value, path, i, v, inner) };
+  if (i === path.length) return v;
+  const step = path[i]!;
+  const last = i + 1 === path.length && !inner;
+  if (step.kind === "field" && isRecord(held)) {
+    if (last) held.fields.set(step.name, v);
+    else held.fields.set(step.name, placed(held.fields.get(step.name), path, i + 1, v, inner));
+    return held;
+  }
+  if (step.kind === "element" && isItems(held)) {
+    const at = toIndex(step.index);
+    if (last) held.items[at] = v;
+    else held.items[at] = placed(copyValue(held.items[at]!), path, i + 1, v, inner);
+    return held;
+  }
+  return held;
+}
+
+function copyStep(s: Ref<Step>): Step {
+  return s.kind === "field" ? { kind: "field", name: s.name } : { kind: "element", index: s.index };
+}
+
+// An argument a string method is given: an integer, as an index or count, or a string.
+function bigArg(args: Ref<Value[]>, i: usize): bigint {
+  return i < args.length ? bigOfValue(args[i]!) : 0n;
+}
+
+function intArg(args: Ref<Value[]>, i: usize): i64 {
+  return Number(bigArg(args, i).toString())! as i64;
+}
+
+function textArg(args: Ref<Value[]>, i: usize): string {
+  if (i >= args.length) return "undefined";
+  const v = args[i]!;
+  return typeof v === "string" ? v : "undefined";
+}
+
 function isShort(v: Ref<Value | Short>): v is Short {
   return v !== null && typeof v === "object" && v.kind === "short";
 }
@@ -2082,11 +2131,12 @@ function deref(typing: Ref<Typing>, t: Type | undefined): Type | undefined {
 // A value without a union's tag, outside a run of the interpreter, which alone reads places.
 function unwrap(v: Ref<Value>): Ref<Value> {
   assert(!isPlace(v), "internal error: a place was read outside a run of the interpreter");
-  if (v !== null && typeof v === "object" && v.kind === "member") {
-    const inner: Ref<Value> = v.value;
-    return unwrap(inner);
-  }
+  if (isMember(v)) return unwrapMember(v);
   return v;
+}
+
+function unwrapMember(m: Ref<Member>): Ref<Value> {
+  return unwrap(m.value);
 }
 
 // An owned value without a union's tag.
