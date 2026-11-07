@@ -13,30 +13,41 @@ export type KeyLeaf = (e: Ref<Expr>) => string;
 
 // The name a computed key gives, from its literal parts; `leaf` gives the name of anything else,
 // or throws. `Symbol.iterator` and the other well-known symbols aren't names, and are refused.
-// A template's parts are taken from a stack rather than by recursion, so `leaf` is called rather
-// than handed on: Fish has no references to functions, and each closure handed on would make
-// another instance of this function.
 /** @throws {CompileError} */
 export function knownKey(key: Ref<Expr>, leaf: KeyLeaf): string {
   let out = "";
+  for (const part of keyParts(key)) {
+    if (typeof part === "string") out += part;
+    else out += leaf(leafOf(part));
+  }
+  return out;
+}
+
+// A key's parts in order: text as it is, and the expressions left for a leaf to name, which
+// `leafOf` checks first. A template's parts are taken from a stack rather than by recursion, so
+// a leaf is called rather than handed on: Fish has no references to functions, and each closure
+// handed on would make another instance of a function.
+/** @throws {CompileError} */
+export function keyParts(key: Ref<Expr>): (string | Expr)[] {
+  let parts: (string | Expr)[] = [];
   // What is left to read, last first: text as it is, or an expression to name.
   let left: (string | Expr)[] = [cloneExpr(key)];
   while (left.length > 0) {
     const part = left.pop()!;
     if (typeof part === "string") {
-      out += part;
+      parts.push(part);
       continue;
     }
     switch (part.kind) {
       case "string":
-        out += part.value;
+        parts.push(part.value);
         continue;
       // A number key is a double's name, as in JavaScript.
       case "int":
-        out += String(Number(String(part.value))!);
+        parts.push(String(Number(String(part.value))!));
         continue;
       case "float":
-        out += String(part.value);
+        parts.push(String(part.value));
         continue;
       case "template":
         for (let i = part.quasis.length; i > 0; i--) {
@@ -46,11 +57,11 @@ export function knownKey(key: Ref<Expr>, leaf: KeyLeaf): string {
         continue;
       case "unary":
         if (part.op === "-" && part.operand.kind === "int") {
-          out += String(-Number(String(part.operand.value))!);
+          parts.push(String(-Number(String(part.operand.value))!));
           continue;
         }
         if (part.op === "-" && part.operand.kind === "float") {
-          out += String(-Number(String(part.operand.value))!);
+          parts.push(String(-Number(String(part.operand.value))!));
           continue;
         }
         break;
@@ -60,13 +71,17 @@ export function knownKey(key: Ref<Expr>, leaf: KeyLeaf): string {
           continue;
         }
         break;
-      case "member":
-        if (part.object.kind === "ident" && part.object.name === "Symbol") throw symbolKey(part);
-        break;
     }
-    out += leaf(part);
+    parts.push(part);
   }
-  return out;
+  return parts;
+}
+
+// A key part a leaf names, with `Symbol.iterator` and the other well-known symbols refused.
+/** @throws {CompileError} */
+export function leafOf(part: Ref<Expr>): Ref<Expr> {
+  if (part.kind === "member" && part.object.kind === "ident" && part.object.name === "Symbol") throw symbolKey(part);
+  return part;
 }
 
 // The name a number literal, maybe negated or written `as const`, gives as a key.
@@ -93,7 +108,7 @@ export function unknownKey(key: Ref<Expr>, what: string): CompileError {
 
 // The names a key there may read: top-level consts and enums, by their written literals.
 /** @throws {CompileError} */
-export function topKeys(program: Ref<Stmt[]>): KeyLeaf {
+export function topKeys(program: Ref<Stmt[]>): TopKeys {
   let consts = new Map<string, Expr>();
   let enums = new Map<string, Extract<Stmt, { kind: "enum" }>>();
   for (const s of program) {
@@ -101,10 +116,26 @@ export function topKeys(program: Ref<Stmt[]>): KeyLeaf {
     if (d.kind === "let" && d.keyword === "const") for (const x of d.declarations) if (x.target.kind === "ident" && x.init !== undefined) consts.set(x.target.name, cloneExpr(x.init));
     if (d.kind === "enum") enums.set(d.name, { ...d });
   }
-  return (e: Ref<Expr>) => {
+  return new TopKeys(consts, enums);
+}
+
+// The top-level consts and enums a key may read, held as data: Fish has no references to
+// functions, so the checker's tables can't hold a closure reading them.
+export class TopKeys {
+  consts: Map<string, Expr>;
+  enums: Map<string, Extract<Stmt, { kind: "enum" }>>;
+
+  constructor(consts: Map<string, Expr>, enums: Map<string, Extract<Stmt, { kind: "enum" }>>) {
+    this.consts = consts;
+    this.enums = enums;
+  }
+
+  // The name a leaf of a key gives, or a CompileError when it gives none.
+  /** @throws {CompileError} */
+  read(e: Ref<Expr>): string {
     let reading = new Set<string>();
-    return readLeaf(e, consts, enums, reading);
-  };
+    return readLeaf(e, this.consts, this.enums, reading);
+  }
 }
 
 function withMemberName(m: Ref<ClassMember>, name: string): ClassMember {
@@ -170,7 +201,7 @@ export function lowerKeys(program: Mut<Stmt[]>) {
       }
       if (key.kind === "member" && key.object.kind === "ident" && key.object.name === "Symbol") return;
       try {
-        const name = knownKey(key, (e) => leaf(e));
+        const name = knownKey(key, (e) => leaf.read(e));
         if (name === ITERATOR) {
           failure = unknownKey(key, `'${name}' would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`);
           return;
@@ -200,7 +231,7 @@ export function lowerKeys(program: Mut<Stmt[]>) {
         }
         if (key.kind === "member" && key.object.kind === "ident" && key.object.name === "Symbol") return;
         try {
-          const name = knownKey(key, (e) => leaf(e));
+          const name = knownKey(key, (e) => leaf.read(e));
           if (name === ITERATOR) {
             failure = unknownKey(key, `'${name}' would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`);
             return;
