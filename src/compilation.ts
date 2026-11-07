@@ -8,6 +8,7 @@ import type { Categories, Free, Hygiene, Quote } from "./quote.ts";
 import type { RegexTables } from "./regex.ts";
 import type { RustClass, RustName, RustTables } from "./rust.ts";
 import type { Locking } from "./program.ts";
+import type { TopKeys } from "./keys.ts";
 import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
@@ -328,10 +329,6 @@ export type Tables = {
   computing: Set<InstanceId>;
 };
 
-/** @throws {CompileError} */
-export type TopKeys = (e: Ref<Expr>) => string;
-
-/** @throws {CompileError} */
 /** @throws {CompileError} */
 export type Timed<T> = () => T;
 
