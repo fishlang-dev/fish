@@ -480,30 +480,35 @@ export function newDeclarations(): Declarations {
 // When a timed stage started, and the time stages inside the one around it had taken by then.
 export type Started = { outer: f64; start: f64 };
 
-// Starts timing a stage, when timing.
-export function timingStart(timings: Mut<Timings> | undefined): Started | undefined {
-  if (timings === undefined) return undefined;
-  const outer = timings.inner;
-  timings.inner = 0;
-  return { outer, start: now(timings) };
+// Starts timing a stage of a compilation, when it is timed.
+export function timingStart(tables: Mut<Tables>): Started | undefined {
+  if (tables.timings === undefined) return undefined;
+  const outer = tables.timings.inner;
+  tables.timings.inner = 0;
+  return { outer, start: now(tables.timings) };
 }
 
 // Adds a stage's own time to stage `name`, leaving out the stages inside it.
-export function timingEnd(timings: Mut<Timings> | undefined, name: string, started: Ref<Started> | undefined) {
-  if (timings === undefined || started === undefined) return;
-  const spent = now(timings) - started.start;
-  timings.ms.set(name, (timings.ms.get(name) ?? 0) + spent - timings.inner);
-  timings.inner = started.outer + spent;
+export function timingEnd(tables: Mut<Tables>, name: string, started: Ref<Started> | undefined) {
+  if (tables.timings === undefined || started === undefined) return;
+  const spent = now(tables.timings) - started.start;
+  tables.timings.ms.set(name, (tables.timings.ms.get(name) ?? 0) + spent - tables.timings.inner);
+  tables.timings.inner = started.outer + spent;
 }
 
 // Runs `run`, adding its own time to stage `name` when timing.
 /** @throws {CompileError} */
 export function timed<T>(timings: Timings | undefined, name: string, run: Timed<T>): T {
-  const started = timingStart(timings);
+  if (timings === undefined) return run();
+  const outer = timings.inner;
+  timings.inner = 0;
+  const start = now(timings);
   try {
     return run();
   } finally {
-    timingEnd(timings, name, started);
+    const spent = now(timings) - start;
+    timings.ms.set(name, (timings.ms.get(name) ?? 0) + spent - timings.inner);
+    timings.inner = outer + spent;
   }
 }
 

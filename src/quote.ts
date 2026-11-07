@@ -335,11 +335,14 @@ function isUnionOf(typing: Ref<Typing>, t: Type, category: Type): boolean {
 // What a quote's tree is while compiling: records of the Ast types, every node given the
 // quote's span, each splice the value of its hole, and the text, numbers and flags it holds.
 export interface Builder<V> {
+  // Called once the quote's bindings are in `scope`, before any splice; a name a splice leaves
+  // free that nothing binds goes in `free`.
+  prepare(this: Mut<this>, scope: Ref<Map<string, string>>, free: Mut<Free>): void;
   record(type: ObjectType, fields: Map<string, V>): V;
   array(items: V[]): V;
   member(value: V, of: Type, member: Type): V;
   /** @throws {CompileError} */
-  splice(i: usize, into: Type): V;
+  splice(typing: Mut<Typing>, i: usize, into: Type): V;
   /** @throws {CompileError} */
   name(i: usize): V;
   int(n: bigint): V;
@@ -621,11 +624,15 @@ export function built<V>(tables: Mut<Tables>, q: Ref<Quote>, types: Ref<Categori
   const c: Building = { types: { AstExpr: types.AstExpr, AstStmt: types.AstStmt, AstType: types.AstType }, asExpressions, fixed: at !== undefined, start: at !== undefined ? at.start : 0, end: at !== undefined ? at.end : 0 };
   const type = typeFor(types, q.category);
   const last = tables.hygienes.length;
-  if (at === undefined || last === 0) return make<V>(tables.typing, c, b, tree, type, c.start, c.end);
+  if (at === undefined || last === 0) {
+    b.prepare(scope, free);
+    return make<V>(tables.typing, c, b, tree, type, c.start, c.end);
+  }
   const span = FILE_SPAN as usize;
   const file = (at.start - (at.start % span)) / span;
   const m: Making = { file, names: tables.hygienes[last - 1]!.namesIn.get(file)! };
   const clean = hygienic(tables.ids, tree, m, tables.hygienes[last - 1]!, scope, free);
+  b.prepare(scope, free);
   return make<V>(tables.typing, c, b, clean, type, c.start, c.end);
 }
 
@@ -638,7 +645,7 @@ function make<V>(typing: Mut<Typing>, c: Ref<Building>, b: Ref<Builder<V>>, v: R
   if (members !== undefined) {
     if (v.kind === "none") return b.member(b.none(), t, "null");
     const splice = spliceIn(typing, v, t, members, c.types, c.asExpressions);
-    if (splice !== undefined) return b.splice(splice.i, type);
+    if (splice !== undefined) return b.splice(typing, splice.i, type);
     const member = memberFor(typing, v, members);
     if (member === undefined) throw new CompileError("E1103", "internal error: a quoted node fits no member of its Ast type", start, end);
     return b.member(make<V>(typing, c, b, v, member, start, end), t, member);

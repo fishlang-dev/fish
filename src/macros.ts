@@ -411,7 +411,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const types: Categories = { AstExpr: input, AstStmt: input, AstType: input };
   let value: Value;
   try {
-    value = built<Value>(checked.tables, { tree: { of: "stmt", node: bare }, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, new AstValues(undefined), new Map(), new Map());
+    value = built<Value>(checked.tables, { tree: { of: "stmt", node: bare }, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, new AstValues([], [], [], [], { start: 0, end: 0 }), new Map(), new Map());
   } catch (e) {
     if (e instanceof CompileError && e.code !== "E1103") throw e;
     throw new CompileError("E1103", "a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
@@ -433,7 +433,7 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     const t = checked.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
     if (a.none) return null;
     if (!a.syntax) return comptimeBody(new CheckedHost(checked.tables), compiledOf(checked).find((c) => bodyOf(checked.tables.arenas, c).name === `const ${a.name}`)!.id);
-    return built<Value>(checked.tables, { tree: { of: "expr", node: original[i] ?? a.expr }, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, new AstValues(undefined), new Map(), new Map());
+    return built<Value>(checked.tables, { tree: { of: "expr", node: original[i] ?? a.expr }, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, new AstValues([], [], [], [], { start: 0, end: 0 }), new Map(), new Map());
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
   let result: Value;

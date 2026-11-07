@@ -4,12 +4,13 @@ import type { Body } from "./classes.ts";
 import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.ts";
 import { CompileError } from "./diag.ts";
 import { nextId } from "./ids.ts";
+import { cloneStmts } from "./rebuild.ts";
 import { fileAt, stdModuleAt } from "./program.ts";
 import { built, quoted, type Builder, type Free } from "./quote.ts";
 import { integerMethod } from "./values.ts";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { timingEnd, timingStart, type Started, type Tables } from "./compilation.ts";
-import { INTEGERS, range, redundantBang, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type MapType, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
+import { integerInfo, range, redundantBang, type LiteralType, isFloat, isInteger, type ClassType, type Integer, type MapType, type ObjectType, type Type, type UnionType, type VariantType, type Typing } from "./typing.ts";
 
 // Comptime: Fish code run while compiling, by interpreting the checked program. What it computes
 // is baked into the binary. It is pure computation: anything that would reach outside the
@@ -68,9 +69,9 @@ class Stop {
   at: Span;
   panic: boolean;
   assertion: boolean;
-  constructor(message: string, at: Span, panic: boolean, assertion = false) {
+  constructor(message: string, at: Ref<Span>, panic: boolean, assertion = false) {
     this.message = message;
-    this.at = at;
+    this.at = { start: at.start, end: at.end };
     this.panic = panic;
     this.assertion = assertion;
   }
@@ -86,9 +87,9 @@ class Return {
 
 // A `break` or `continue`, unwinding to the statement it leaves or repeats.
 class Jump {
-  target: Stmt;
+  target: usize;
   again: boolean;
-  constructor(target: Stmt, again: boolean) {
+  constructor(target: usize, again: boolean) {
     this.target = target;
     this.again = again;
   }
@@ -98,9 +99,9 @@ class Jump {
 class Thrown {
   value: Value;
   at: Span;
-  constructor(value: Value, at: Span) {
+  constructor(value: Value, at: Ref<Span>) {
     this.value = value;
-    this.at = at;
+    this.at = { start: at.start, end: at.end };
   }
 }
 
@@ -174,25 +175,28 @@ export function comptimeArgument<H extends ComptimeHost>(host: Mut<H>, instance:
   }
 }
 
-// Renames, in a quote's value, the names spelled `from` in nodes its quotes made.
-function renameQuoted({ quotedSpans }: Tables, v: Value, from: string, to: string) {
-  const q = quoteOf(v);
-  const spans = (q === undefined ? undefined : quotedSpans.get(q)) ?? new Set<string>();
-  const visit = (x: Value) => {
-    const u = untagged(x);
-    if (!u || typeof u !== "object") return;
-    if (u.kind === "array") return u.items.forEach(visit);
-    if (u.kind !== "record") return;
-    const kind = u.fields.get("kind");
-    const at = `${u.fields.get("start")}:${u.fields.get("end")}`;
-    const name = u.fields.get("name");
-    if (spans.has(at) && typeof name === "string" && (kind === "ident" || kind === "ref" || kind === "variant")) {
-      const [head, ...rest] = name.split(".");
-      if (head === from) u.fields.set("name", [to, ...rest].join("."));
+// A quote's value with the names spelled `from`, in nodes its quotes made at `spans`, renamed.
+function renamed(spans: Ref<Set<string>>, v: Value, from: string, to: string): Value {
+  if (isMember(v)) return { kind: "member", type: v.type, value: renamed(spans, v.value, from, to) };
+  if (isItems(v)) {
+    let items: Value[] = [];
+    for (const x of v.items) items.push(renamed(spans, copyValue(x), from, to));
+    return { kind: "array", items, quote: v.quote };
+  }
+  if (!isRecord(v)) return v;
+  const kind = v.fields.get("kind");
+  const at = `${String(v.fields.get("start"))}:${String(v.fields.get("end"))}`;
+  const name = v.fields.get("name");
+  let fields = new Map<string, Value>();
+  for (const [k, x] of v.fields) fields.set(k, renamed(spans, copyValue(x), from, to));
+  if (spans.has(at) && typeof name === "string" && (kind === "ident" || kind === "ref" || kind === "variant")) {
+    const parts = name.split(".");
+    if (parts[0] === from) {
+      parts[0] = to;
+      fields.set("name", parts.join("."));
     }
-    for (const f of u.fields.values()) visit(f);
-  };
-  visit(v);
+  }
+  return { kind: "record", type: v.type, fields, quote: v.quote };
 }
 
 // A function run while compiling with the given arguments, as a macro runs on a declaration;
@@ -209,17 +213,40 @@ export function comptimeCall<H extends ComptimeHost>(host: Mut<H>, instance: Ins
   }
 }
 
-// How a quoted tree, or a declaration a macro takes, becomes a value while compiling. Each
-// splice's value comes from `spliced`, or is nothing without it.
+// How a quoted tree, or a declaration a macro takes, becomes a value while compiling: each
+// splice is its hole's value, of the type its hole was written as. A hole made by quotes names
+// what they leave free, `frees`, in nodes they made at `spans`.
 export class AstValues implements Builder<Value> {
-  spliced: ((i: usize, into: Type) => Value) | undefined;
   holes: Value[];
+  types: (Type | undefined)[];
+  frees: (Free | undefined)[];
+  spans: Set<string>[];
   at: Span;
 
-  constructor(spliced: ((i: usize, into: Type) => Value) | undefined, holes: Value[] = [], at: Span = { start: 0, end: 0 }) {
-    this.spliced = spliced;
+  constructor(holes: Value[], types: (Type | undefined)[], frees: (Free | undefined)[], spans: Set<string>[], at: Ref<Span>) {
     this.holes = holes;
-    this.at = at;
+    this.types = types;
+    this.frees = frees;
+    this.spans = spans;
+    this.at = { start: at.start, end: at.end };
+  }
+
+  // A name a hole's quotes leave free means this quote's binding of it; what this quote leaves
+  // free, a quote around it may bind.
+  prepare(this: Mut<this>, scope: Ref<Map<string, string>>, free: Mut<Free>) {
+    for (let i: usize = 0; i < this.holes.length; i++) {
+      const inner = this.frees[i];
+      if (inner === undefined) continue;
+      for (const [name, spelling] of inner) {
+        const to = scope.get(name);
+        if (to === undefined) {
+          free.set(name, spelling);
+          continue;
+        }
+        const held = copyValue(this.holes[i]!);
+        this.holes[i] = renamed(this.spans[i]!, held, spelling, to);
+      }
+    }
   }
 
   record(type: ObjectType, fields: Map<string, Value>): Value {
@@ -234,16 +261,15 @@ export class AstValues implements Builder<Value> {
     return { kind: "member", type: member, value };
   }
 
-  /** @throws {CompileError} */
-  splice(i: usize, into: Type): Value {
-    return this.spliced !== undefined ? this.spliced(i, into) : null;
+  splice(typing: Mut<Typing>, i: usize, into: Type): Value {
+    return retag(typing, copyValue(this.holes[i]!), this.types[i], into);
   }
 
   // A splice where a name goes: the name of the identifier it is.
   /** @throws {CompileError} */
   name(i: usize): Value {
-    const v = untagged(this.holes[i]);
-    if (v && typeof v === "object" && v.kind === "record" && v.fields.get("kind") === "ident") return v.fields.get("name");
+    const v = untagged(this.holes[i]!);
+    if (isRecord(v) && v.fields.get("kind") === "ident") return copyValue(v.fields.get("name"));
     throw new CompileError("E1101", "a splice where a name goes takes an identifier, as 'ident(\"name\")' makes", this.at.start, this.at.end);
   }
 
@@ -275,21 +301,27 @@ export class AstValues implements Builder<Value> {
 // A comptime string array's binding: a literal type standing for exactly that array, so equal
 // arrays share an instance. It is never the interned literal of an ordinary string, which a
 // string parameter may be given with the same text.
-export function stringsType({ typing, stringArrays }: Tables, items: string[]): LiteralType {
-  const t = typing.standInLiteral(`strings ${JSON.stringify(items)}`);
-  stringArrays.set(t, items);
+export function stringsType(tables: Mut<Tables>, items: string[]): LiteralType {
+  const t = tables.typing.standInLiteral(`strings ${JSON.stringify(items)}`);
+  tables.stringArrays.set(t, items);
   return t;
 }
 
 // The value an instance's comptime parameter was given, from the literal type it is keyed by.
-export function comptimeParameter(tables: Tables, instance: Instance, p: Param): Value {
-  const t = instance.bindings.get(`comptime ${(p.pattern as { name: string }).name}`);
-  const r = t === undefined || typeof t === "string" ? undefined : tables.typing.rec(t);
-  if (r?.kind !== "literal") return undefined;
+export function comptimeParameter(tables: Ref<Tables>, instance: Ref<Instance>, p: Ref<Param>): Value {
+  const name = p.pattern.kind === "ident" ? p.pattern.name : "";
+  const t = instance.bindings.get(`comptime ${name}`);
+  if (t === undefined || typeof t === "string") return undefined;
+  const r = tables.typing.rec(t);
+  if (r.kind !== "literal") return undefined;
   const strings = tables.stringArrays.get(t as LiteralType);
-  if (strings) return { kind: "array", items: [...strings] };
+  if (strings !== undefined) {
+    let items: Value[] = [];
+    for (const x of strings) items.push(x);
+    return { kind: "array", items };
+  }
   // An enum's member keeps which enum it is, as members of two enums may share a value.
-  return r.owner ? { kind: "member", type: t!, value: r.value } : r.value;
+  return r.owner !== undefined ? { kind: "member", type: t, value: r.value } : r.value;
 }
 
 // A frame for comptime code in an instance, which knows the instance's comptime parameters.
@@ -299,12 +331,15 @@ function seeded(tables: Ref<Tables>, instance: InstanceId): Frame {
 
 // The comptime parameters an instance can read, by local: its own, and in a closure, those of
 // the functions it is written in, through what it captures.
-function known(tables: Tables, instance: Instance): Map<LocalId, Value> {
-  const parent = bodyOf(tables.arenas, instance).closure?.parent;
-  const outer = parent ? known(tables, tables.arenas.instanceOf(parent)) : new Map<LocalId, Value>();
-  const locals = new Map<LocalId, Value>();
-  for (const p of bodyOf(tables.arenas, instance).params) if (p.comptime) locals.set(instance.locals.get(p)!, comptimeParameter(tables, instance, p));
-  for (const [alias, from] of instance.captures ?? []) if (from !== "this" && outer.has(from)) locals.set(alias, outer.get(from));
+function known(tables: Ref<Tables>, instance: Ref<Instance>): Map<LocalId, Value> {
+  const body = bodyOf(tables.arenas, instance);
+  const parent = body.closure !== undefined ? body.closure.parent : undefined;
+  const outer = parent !== undefined ? known(tables, tables.arenas.instanceOf(parent)) : new Map<LocalId, Value>();
+  let locals = new Map<LocalId, Value>();
+  for (const p of body.params) if (p.comptime === true) locals.set(instance.locals.get(p)!, comptimeParameter(tables, instance, p));
+  if (instance.captures !== undefined) {
+    for (const [alias, from] of instance.captures) if (from !== "this" && outer.has(from)) locals.set(alias, copyValue(outer.get(from)));
+  }
   return locals;
 }
 
@@ -338,19 +373,20 @@ class Interpreter<H extends ComptimeHost> {
 
   constructor(host: Mut<H>) {
     this.host = host;
-    this.started = timingStart(host.tables.timings);
+    this.started = timingStart(host.tables);
   }
 
   // Adds the run's time to the comptime stage's.
   finish(this: Mut<this>) {
-    timingEnd(this.host.tables.timings, "comptime", this.started);
+    timingEnd(this.host.tables, "comptime", this.started);
   }
 
   // A panic, a refusal or an error comptime code didn't catch, as the compile error at the
-  // comptime site that reports it, noting where inside it happened; anything else goes on.
-  /** @throws {CompileError} */
-  failure(this: Mut<this>, e: Failure, site: Ref<Span>): CompileError | Return | Jump {
-    if (e instanceof CompileError || e instanceof Return || e instanceof Jump) return e;
+  // comptime site that reports it, noting where inside it happened. A `return` or a jump never
+  // leaves the function it is in.
+  failure(this: Mut<this>, e: Failure, site: Ref<Span>): CompileError {
+    if (e instanceof CompileError) return e;
+    assert(!(e instanceof Return) && !(e instanceof Jump), "internal error: a return or a jump left comptime code");
     const stop = e instanceof Thrown ? new Stop(`this comptime code threw an error it didn't catch: ${described(this.host.tables.typing, e.value)}`, e.at, false) : e;
     const inside = stop.at.start !== site.start || stop.at.end !== site.end;
     if (stop.assertion) return new CompileError("E1101", stop.message, stop.at.start, stop.at.end, inside ? { message: "while running this comptime code", start: site.start, end: site.end } : undefined);
@@ -397,7 +433,7 @@ class Interpreter<H extends ComptimeHost> {
   // The place of a part of what a place holds; an accessor's value is its getter's copy, whose
   // parts a temporary holds.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private extend(this: Mut<this>, p: Place, step: Step): Place {
+  private extend(this: Mut<this>, p: Ref<Place>, step: Step): Place {
     if (p.of === "local") return { kind: "place", of: "local", frame: p.frame, local: p.local, path: [...p.path, step] };
     if (p.of === "temp") return { kind: "place", of: "temp", frame: p.frame, index: p.index, path: [...p.path, step] };
     const held = this.temp(this.frames.length - 1, this.read(p));
@@ -433,14 +469,14 @@ class Interpreter<H extends ComptimeHost> {
 
   // A block's statements; the checker lets no `return`, `break` or `continue` leave it.
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
-  block(this: Mut<this>, f: usize, body: Stmt[]): Value {
+  block(this: Mut<this>, f: usize, body: Ref<Stmt[]>): Value {
     this.statements(f, body);
     return undefined;
   }
 
   // A const's value, computed once; one that reads itself never ends, so it is refused.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  constant(this: Mut<this>, c: InstanceId, at: Span): Value {
+  constant(this: Mut<this>, c: InstanceId, at: Ref<Span>): Value {
     if (this.host.tables.constants.has(c)) return this.host.tables.constants.get(c);
     if (this.host.tables.computing.has(c)) {
       const computing = [...this.host.tables.computing];
@@ -471,36 +507,36 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {Stop} */
-  private step(this: Mut<this>, at: Span) {
+  private step(this: Mut<this>, at: Ref<Span>) {
     if (++this.steps > STEPS) throw new Stop(`this comptime code took more than ${STEPS.toLocaleString("en-US")} steps; is there a loop that never ends?`, at, false);
   }
 
   // Code that reaches outside the program, or waits, which comptime never runs.
   /** @throws {Stop} */
-  private refuse(what: string, at: Span): never {
+  private refuse(what: string, at: Ref<Span>): never {
     throw new Stop(`${what} can't run while compiling: comptime code only computes values`, at, false);
   }
 
   // A source of randomness, whose one value comptime would bake into every run.
   /** @throws {Stop} */
-  private random(what: string, at: Span): never {
+  private random(what: string, at: Ref<Span>): never {
     throw new Stop(`${what} can't run while compiling; its value would be fixed into the program`, at, false);
   }
 
   // Pure code the interpreter doesn't run yet.
   /** @throws {Stop} */
-  private unsupported(what: string, at: Span): never {
+  private unsupported(what: string, at: Ref<Span>): never {
     throw new Stop(`${what} isn't supported in comptime code yet`, at, false);
   }
 
   /** @throws {Stop} */
-  private panic(message: string, at: Span): never {
+  private panic(message: string, at: Ref<Span>): never {
     throw new Stop(message, at, true);
   }
 
   // What a place holds, an accessor's read through its getter.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private read(this: Mut<this>, p: Place): Value {
+  private read(this: Mut<this>, p: Ref<Place>): Value {
     switch (p.of) {
       case "accessor":
         if (p.getter !== undefined) return this.call(p.getter, [], p.self, p.at);
@@ -523,7 +559,7 @@ class Interpreter<H extends ComptimeHost> {
   // Writes `v` where a place is, an accessor's through its setter; `inner` keeps a union's tag
   // around what is there.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private write(this: Mut<this>, p: Place, v: Value, inner = false) {
+  private write(this: Mut<this>, p: Ref<Place>, v: Value, inner = false) {
     switch (p.of) {
       case "accessor":
         this.call(p.setter, [v], p.self, p.at);
@@ -550,13 +586,13 @@ class Interpreter<H extends ComptimeHost> {
     return v && typeof v === "object" && v.kind === "member" ? this.unwrap(v.value) : v;
   }
 
-  private typeOf(f: usize, e: Expr): Type {
+  private typeOf(f: usize, e: Ref<Expr>): Type {
     return this.inst(f).coercions.get(e) ?? this.inst(f).types.get(e)!;
   }
 
   // An instance's comparison through its class's `equals`, or nothing for other records.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private equals(this: Mut<this>, a: Record, b: Record, at: Span): boolean | undefined {
+  private equals(this: Mut<this>, a: Record, b: Record, at: Ref<Span>): boolean | undefined {
     if (this.host.tables.typing.rec(a.type).kind !== "class") return undefined;
     const method = this.host.tables.equalities.get(a.type as ClassType);
     if (method === undefined) return undefined;
@@ -586,7 +622,7 @@ class Interpreter<H extends ComptimeHost> {
   // value it holds. Instances of a class with an `equals` compare through it when `at` is given,
   // as they do at run time.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private equal(this: Mut<this>, a: Value, ta: Type | undefined, b: Value, tb: Type | undefined, at: Span | undefined): boolean {
+  private equal(this: Mut<this>, a: Value, ta: Type | undefined, b: Value, tb: Type | undefined, at: Ref<Span> | undefined): boolean {
     const [ma, mb] = [this.memberType(a, ta), this.memberType(b, tb)];
     // A literal stands for its base type: members of two enums that share a value are equal, as
     // they are at run time.
@@ -596,7 +632,7 @@ class Interpreter<H extends ComptimeHost> {
 
   // Values compare as `===` compares them: primitives by value, variants by member and payload.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private same(this: Mut<this>, x: Value, y: Value, at: Span | undefined): boolean {
+  private same(this: Mut<this>, x: Value, y: Value, at: Ref<Span> | undefined): boolean {
     // Two members of a union are equal when they are the same member holding equal values.
     if (x !== null && y !== null && typeof x === "object" && typeof y === "object" && x.kind === "member" && y.kind === "member") {
       if (plainType(this.host.tables.typing, x.type) !== plainType(this.host.tables.typing, y.type)) return false;
@@ -618,7 +654,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  call(this: Mut<this>, callee: InstanceId, args: Value[], self: Place | undefined, at: Span): Value {
+  call(this: Mut<this>, callee: InstanceId, args: Value[], self: Place | undefined, at: Ref<Span>): Value {
     if (++this.depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, at, false);
     try {
       const body = this.body(callee);
@@ -632,9 +668,11 @@ class Interpreter<H extends ComptimeHost> {
       let frame: Frame = { instance: callee, locals: new Map<LocalId, Value>(), temps: [], self };
       const instance = this.host.tables.arenas.instanceOf(callee);
       for (let i: usize = 0; i < body.params.length; i++) frame.locals.set(instance.locals.get(body.params[i]!)!, i < args.length ? args[i]! : null);
+      // The body runs as a copy of it, as checking another function may change where it lives.
+      const code = cloneStmts(this.body(callee).body ?? []);
       const f = this.enter(frame);
       try {
-        this.statements(f, this.body(callee).body ?? []);
+        this.statements(f, code);
       } finally {
         this.frames.pop();
       }
@@ -649,17 +687,17 @@ class Interpreter<H extends ComptimeHost> {
 
   // The arguments of a call: a `Mut` parameter takes its argument's place, the rest values.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private args(this: Mut<this>, f: usize, callee: InstanceId, list: Expr[]): Value[] {
+  private args(this: Mut<this>, f: usize, callee: InstanceId, list: Ref<Expr[]>): Value[] {
     return list.map((a) => this.expr(f, a));
   }
 
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
-  private statements(this: Mut<this>, f: usize, list: Stmt[]) {
+  private statements(this: Mut<this>, f: usize, list: Ref<Stmt[]>) {
     for (const s of list) this.statement(f, s);
   }
 
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
-  private statement(this: Mut<this>, f: usize, s: Stmt) {
+  private statement(this: Mut<this>, f: usize, s: Ref<Stmt>) {
     this.step(s);
     switch (s.kind) {
       case "expr":
@@ -718,18 +756,18 @@ class Interpreter<H extends ComptimeHost> {
         try {
           for (const c of s.cases.slice(at)) this.statements(f, c.body);
         } catch (e) {
-          if (!(e instanceof Jump) || e.target !== s) throw e;
+          if (!(e instanceof Jump) || e.target !== s.id) throw e;
         }
         return;
       }
       case "break":
       case "continue":
-        throw new Jump(this.inst(f).jumps.get(s)!, s.kind === "continue");
+        throw new Jump(this.inst(f).jumps.get(s)!.id, s.kind === "continue");
       case "labeled":
         try {
           this.statement(f, s.body);
         } catch (e) {
-          if (!(e instanceof Jump) || e.target !== s) throw e;
+          if (!(e instanceof Jump) || e.target !== s.id) throw e;
         }
         return;
       case "throw":
@@ -746,7 +784,7 @@ class Interpreter<H extends ComptimeHost> {
   // A `try`: its catch takes a thrown error; its `finally` runs however the block is left, but
   // not for a panic, which skips both, as it does at run time.
   /** @throws {CompileError | Jump | Return | Stop | Thrown} */
-  private attempt(this: Mut<this>, f: usize, s: Extract<Stmt, { kind: "try" }>) {
+  private attempt(this: Mut<this>, f: usize, s: Ref<Extract<Stmt, { kind: "try" }>>) {
     let left: unknown;
     let leaving = false;
     try {
@@ -769,18 +807,18 @@ class Interpreter<H extends ComptimeHost> {
 
   // Runs a loop's body once: false when a `break` leaves the loop.
   /** @throws {CompileError} */
-  private loopBody(this: Mut<this>, f: usize, loop: Stmt, body: Stmt[]): boolean {
+  private loopBody(this: Mut<this>, f: usize, loop: Ref<Stmt>, body: Ref<Stmt[]>): boolean {
     try {
       this.statements(f, body);
       return true;
     } catch (e) {
-      if (e instanceof Jump && e.target === loop) return e.again;
+      if (e instanceof Jump && e.target === loop.id) return e.again;
       throw e;
     }
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  expr(this: Mut<this>, f: usize, e: Expr): Value {
+  expr(this: Mut<this>, f: usize, e: Ref<Expr>): Value {
     const v = this.link(f, e);
     return isShort(v) ? this.typed(f, e, null) : v;
   }
@@ -788,7 +826,7 @@ class Interpreter<H extends ComptimeHost> {
   // An expression's value; a member or call in an optional chain that met an empty Option
   // gives SHORT, which ends the chain as an empty Option.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private link(this: Mut<this>, f: usize, e: Expr, keep = false): Value | typeof SHORT {
+  private link(this: Mut<this>, f: usize, e: Ref<Expr>, keep = false): Value | typeof SHORT {
     this.step(e);
     // A place lent to a `Mut`: the place itself, which reads and writes go through.
     const [own, target] = [this.inst(f).types.get(e), this.inst(f).coercions.get(e) ?? this.inst(f).types.get(e)];
@@ -804,7 +842,7 @@ class Interpreter<H extends ComptimeHost> {
   // where a literal meets one; a union's value tagged with the member its type says, in fields and
   // elements too; a member out of its union where a check narrowed it.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private typed(f: usize, e: Expr, value: Value): Value {
+  private typed(f: usize, e: Ref<Expr>, value: Value): Value {
     const own = this.inst(f).types.get(e);
     const target = this.inst(f).coercions.get(e) ?? own;
     if (isPlace(value) && mutable(this.host.tables.typing, target)) return value;
@@ -815,7 +853,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private raw(this: Mut<this>, f: usize, e: Expr): Value | typeof SHORT {
+  private raw(this: Mut<this>, f: usize, e: Ref<Expr>): Value | typeof SHORT {
     const type = this.inst(f).types.get(e)!;
     switch (e.kind) {
       case "int":
@@ -837,39 +875,48 @@ class Interpreter<H extends ComptimeHost> {
       // A quote's value: its tree as records of the Ast types, each splice its hole's value.
       case "tagged": {
         const types = this.host.tables.quotes.get(e);
-        if (!types) return this.unsupported("this tagged template", e);
-        const q = quoted(this.host.tables, e, e.tag.kind === "ident" && e.tag.name === "quoteType");
-        const holes = q.holes.map((x) => ({ value: this.expr(f, x), type: this.inst(f).types.get(x) }));
+        if (types === undefined) return this.unsupported("this tagged template", e);
+        const asType = e.tag.kind === "ident" && e.tag.name === "quoteType";
+        const q = quoted(this.host.tables, e, asType);
+        let values: Value[] = [];
+        let holeTypes: (Type | undefined)[] = [];
+        for (const x of q.holes) {
+          values.push(this.expr(f, x));
+          holeTypes.push(this.inst(f).types.get(x));
+        }
         // A quote spliced in shares its bindings with this one, and a name it leaves free means
         // this one's binding of it; what this one leaves free, a quote around it may bind.
-        const scope = new Map(holes.flatMap((h) => [...(this.quoteEntry(this.host.tables.quoteScopes, h.value) ?? [])]));
-        const free: Free = new Map();
-        const splice = (i: usize, into: Type) => {
-          const v = holes[i]!.value;
-          const inner = this.quoteEntry(this.host.tables.quoteFrees, v);
-          if (inner) {
-            for (const [name, spelling] of inner) {
-              const to = scope.get(name);
-              if (to) renameQuoted(this.host.tables, v, spelling, to);
-              else free.set(name, spelling);
-            }
-          }
-          return retag(this.host.tables.typing, v, holes[i]!.type, into);
-        };
+        let scope = new Map<string, string>();
+        let spans = new Set<string>();
+        for (const v of values) {
+          const bound = this.quoteEntry(this.host.tables.quoteScopes, v);
+          if (bound !== undefined) for (const [k, x] of bound) scope.set(k, x);
+          const made = this.quoteEntry(this.host.tables.quotedSpans, v);
+          if (made !== undefined) for (const x of made) spans.add(x);
+        }
+        spans.add(`${e.start}:${e.end}`);
+        let free: Free = new Map<string, string>();
+        let frees: (Free | undefined)[] = [];
+        let within: Set<string>[] = [];
+        for (const v of values) {
+          const q = quoteOf(v);
+          const inner = q === undefined ? undefined : this.host.tables.quoteFrees.get(q);
+          frees.push(inner === undefined ? undefined : new Map(inner));
+          const made = q === undefined ? undefined : this.host.tables.quotedSpans.get(q);
+          within.push(made === undefined ? new Set<string>() : new Set(made));
+        }
         let made: Value;
         try {
-          made = built<Value>(this.host.tables, q, types, e, new AstValues(splice, holes.map((h) => h.value), e), scope, free);
+          made = built<Value>(this.host.tables, q, types, e, new AstValues(values, holeTypes, frees, within, e), scope, free);
         } catch (err) {
           if (err instanceof CompileError && err.code === "E1101") throw new Stop(err.message, e, false);
           throw err;
         }
-        const u = untagged(made);
-        if (u && typeof u === "object" && (u.kind === "record" || u.kind === "array")) {
-          const at = (u.quote = nextId(this.host.tables.quoteValues));
-          this.host.tables.quoteScopes.set(at, scope);
-          this.host.tables.quoteFrees.set(at, free);
-          this.host.tables.quotedSpans.set(at, new Set([...holes.flatMap((h) => [...(this.quoteEntry(this.host.tables.quotedSpans, h.value) ?? [])]), `${e.start}:${e.end}`]));
-        }
+        const at = nextId(this.host.tables.quoteValues);
+        if (!withQuote(made, at)) return made;
+        this.host.tables.quoteScopes.set(at, scope);
+        this.host.tables.quoteFrees.set(at, free);
+        this.host.tables.quotedSpans.set(at, spans);
         return made;
       }
       case "template": {
@@ -982,7 +1029,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private construct(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "new" }>, type: Type): Value {
+  private construct(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "new" }>>, type: Type): Value {
     const r = typeof type === "string" ? undefined : this.host.tables.typing.rec(type);
     if (r?.kind === "interior" && r.which !== "Cell" && e.args?.length === 1) return { kind: "interior", value: this.expr(f, e.args[0]!) };
     if (r?.kind === "map") {
@@ -1003,7 +1050,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private member(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "member" }>, type: Type): Value | typeof SHORT {
+  private member(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "member" }>>, type: Type): Value | typeof SHORT {
     // An enum's member, as `Color.Red`, is known from its type alone.
     const literal = literalValue(this.host.tables.typing, type);
     if (literal !== undefined) return literal;
@@ -1025,7 +1072,7 @@ class Interpreter<H extends ComptimeHost> {
 
   // A member read from a value: a length, a size, or a field.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private memberValue(this: Mut<this>, e: Extract<Expr, { kind: "member" }>, object: Value): Value {
+  private memberValue(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>, object: Value): Value {
     if (e.name === "length" && typeof object === "string") return BigInt(object.length);
     if (object && typeof object === "object" && object.kind === "array" && e.name === "length") return BigInt(object.items.length);
     if (object && typeof object === "object" && object.kind === "map" && e.name === "size") return BigInt(object.entries.size);
@@ -1037,7 +1084,7 @@ class Interpreter<H extends ComptimeHost> {
   // A tuple's length, as at run time: its required elements, up to the last optional one there,
   // then its rest.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private tupleLength(t: Record): bigint {
+  private tupleLength(t: Ref<Record>): bigint {
     const type = t.type as ObjectType;
     const count = this.host.tables.typing.elementsOf(type).length;
     let length = this.host.tables.typing.rec(type).required ?? count;
@@ -1047,7 +1094,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private callExpr(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "call" }>, type: Type): Value | typeof SHORT {
+  private callExpr(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "call" }>>, type: Type): Value | typeof SHORT {
     const callee = e.callee;
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") this.refuse("printing", e);
     if (this.host.tables.clocks.get(e) === "Math.random") this.random("'Math.random'", e);
@@ -1110,7 +1157,7 @@ class Interpreter<H extends ComptimeHost> {
   // A Map's or a Set's method, on the table `self` holds; `get` and the arrays of entries hand
   // out clones, as at run time, and `set` and `add` hand back the table's place, to chain.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private tableMethod(this: Mut<this>, f: usize, name: string, self: Place, table: Table, e: Extract<Expr, { kind: "call" }>): Value {
+  private tableMethod(this: Mut<this>, f: usize, name: string, self: Place, table: Table, e: Ref<Extract<Expr, { kind: "call" }>>): Value {
     const args = e.args.map((a) => this.expr(f, a));
     const key = () => this.keyName(args[0]);
     switch (name) {
@@ -1148,7 +1195,7 @@ class Interpreter<H extends ComptimeHost> {
 
   // Puts a key and its value in a table: a key already there keeps its place, as JavaScript's does.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private put(table: Table, k: Value, v: Value) {
+  private put(table: Table, k: Ref<Value>, v: Value) {
     const name = this.keyName(k);
     const was = table.entries.get(name);
     // As at run time, a float key of -0 is kept as 0.
@@ -1158,7 +1205,7 @@ class Interpreter<H extends ComptimeHost> {
   // The string a key is compared by, which for a float is SameValueZero's: `String` names every
   // NaN alike and -0 as 0.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private keyName(k: Value): string {
+  private keyName(k: Ref<Value>): string {
     const v = this.unwrap(k);
     return typeof v === "string" ? `s${v}` : `i${v as bigint | f64}`;
   }
@@ -1176,7 +1223,7 @@ class Interpreter<H extends ComptimeHost> {
   // members, or a Map's entries as pairs of clones. A dictionary's entries come in the order
   // JavaScript gives an object's keys: integer keys first, from smallest.
   /** @throws {Stop} */
-  private iterated(this: Mut<this>, over: Value, at: Span): Value[] {
+  private iterated(this: Mut<this>, over: Value, at: Ref<Span>): Value[] {
     if (typeof over === "string") return [...over];
     if (over && typeof over === "object" && over.kind === "array") return over.items;
     if (!over || typeof over !== "object" || over.kind !== "map") return this.unsupported("looping over this", at);
@@ -1193,7 +1240,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {Stop} */
-  private stringMethod(name: string, s: string, args: Value[], at: Span): Value {
+  private stringMethod(name: string, s: string, args: Value[], at: Ref<Span>): Value {
     const n = (i: usize) => Number(args[i] as bigint);
     switch (name) {
       case "charCodeAt": {
@@ -1257,19 +1304,19 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {Stop} */
-  private tooLong(at: Span): never {
+  private tooLong(at: Ref<Span>): never {
     throw new Stop(`this comptime code made a string longer than ${LONGEST.toLocaleString("en-US")} characters`, at, false);
   }
 
   // Two strings joined, within the longest string comptime makes.
   /** @throws {Stop} */
-  private joined(a: string, b: string, at: Span): string {
+  private joined(a: string, b: string, at: Ref<Span>): string {
     if (a.length + b.length > LONGEST) this.tooLong(at);
     return a + b;
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private unary(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "unary" }>): Value {
+  private unary(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "unary" }>>): Value {
     if (e.op === "await") this.refuse("'await'", e);
     const held = this.expr(f, e.operand);
     const v = this.unwrap(held);
@@ -1293,7 +1340,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private binary(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "binary" }>): Value {
+  private binary(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "binary" }>>): Value {
     if (e.op === "&&") return this.unwrap(this.expr(f, e.left)) ? this.expr(f, e.right) : false;
     if (e.op === "||") return this.unwrap(this.expr(f, e.left)) ? true : this.expr(f, e.right);
     if (e.op === "??") {
@@ -1334,7 +1381,7 @@ class Interpreter<H extends ComptimeHost> {
 
   // The place is found first, then the value; a compound assignment reads the place once.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private assign(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "assign" }>): Value {
+  private assign(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "assign" }>>): Value {
     const at = this.place(f, e.target);
     if (e.op === "=") {
       const v = this.expr(f, e.value);
@@ -1359,7 +1406,7 @@ class Interpreter<H extends ComptimeHost> {
   // Where an expression's value lives: a variable, a `Mut` parameter's place, an object's field,
   // or an array's element, its index read once.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private place(this: Mut<this>, f: usize, target: Expr, object?: Value): Place {
+  private place(this: Mut<this>, f: usize, target: Ref<Expr>, object?: Value): Place {
     if (target.kind === "nonNull" && redundantBang(target)) return this.place(f, target.expr, object);
     if (target.kind === "this") {
       const self = this.frames[f]!.self;
@@ -1405,7 +1452,7 @@ class Interpreter<H extends ComptimeHost> {
 
   // Whether an expression names where a value lives, so its place can be taken without reading
   // it first. A FixedArray's isn't, so reading it refuses it.
-  private placeable(f: usize, e: Expr): boolean {
+  private placeable(f: usize, e: Ref<Expr>): boolean {
     const held = deref(this.host.tables.typing, this.inst(f).types.get(e));
     if (held !== undefined && typeof held !== "string" && this.host.tables.typing.rec(held).kind === "fixed") return false;
     switch (e.kind) {
@@ -1428,7 +1475,7 @@ class Interpreter<H extends ComptimeHost> {
   // A method's receiver: the place it names, or a temporary holding its value, so what the
   // method changes reaches where the value lives.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private receiver(this: Mut<this>, f: usize, e: Expr): Place | typeof SHORT {
+  private receiver(this: Mut<this>, f: usize, e: Ref<Expr>): Place | typeof SHORT {
     if (this.placeable(f, e)) return this.place(f, e);
     const v = this.link(f, e, true);
     if (isShort(v)) return SHORT;
@@ -1437,13 +1484,13 @@ class Interpreter<H extends ComptimeHost> {
 
   // Where the value a member or an index is read from lives.
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private holder(this: Mut<this>, f: usize, e: Expr): Place {
+  private holder(this: Mut<this>, f: usize, e: Ref<Expr>): Place {
     const p = this.receiver(f, e);
     return isShort(p) ? this.temp(f, this.typed(f, e, null)) : p;
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private match(this: Mut<this>, f: usize, e: Extract<Expr, { kind: "match" }>): Value {
+  private match(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "match" }>>): Value {
     const subject = this.expr(f, e.subject);
     for (const arm of e.arms) {
       if (!this.tests(f, arm.pattern, subject)) continue;
@@ -1463,7 +1510,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private tests(this: Mut<this>, f: usize, p: Pattern, value: Value): boolean {
+  private tests(this: Mut<this>, f: usize, p: Ref<Pattern>, value: Value): boolean {
     const info = this.inst(f).patterns.get(p)!;
     const tag = value && typeof value === "object" && value.kind === "member" ? value.type : undefined;
     const v = this.unwrap(value);
@@ -1498,7 +1545,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
-  private bind(f: usize, p: Pattern, value: Value) {
+  private bind(f: usize, p: Ref<Pattern>, value: Value) {
     const info = this.inst(f).patterns.get(p)!;
     const v = this.unwrap(value);
     if (info.kind === "any" && p.kind === "ident") return void this.frames[f]!.locals.set(this.inst(f).locals.get(p as Expr)!, value);
@@ -1511,7 +1558,7 @@ class Interpreter<H extends ComptimeHost> {
   // An arithmetic or bitwise operator on numbers of `type`, panicking where the program would.
   // A bigint's operators as JavaScript has them, panicking where it throws a RangeError.
   /** @throws {Stop} */
-  private bigNumeric(op: string, a: bigint, b: bigint, at: Span): Value {
+  private bigNumeric(op: string, a: bigint, b: bigint, at: Ref<Span>): Value {
     if ((op === "/" || op === "%") && b === 0n) this.panic("Division by zero", at);
     if (op === "**" && b < 0n) this.panic("Exponent must be non-negative", at);
     if ((op === "**" || op === "<<") && tooBig(op, a, b)) throw new Stop("this comptime code made a value too large to hold while compiling", at, false);
@@ -1532,7 +1579,7 @@ class Interpreter<H extends ComptimeHost> {
   }
 
   /** @throws {Stop} */
-  private numeric(this: Mut<this>, op: string, a: bigint | f64, b: bigint | f64, type: Type, at: Span): Value {
+  private numeric(this: Mut<this>, op: string, a: bigint | f64, b: bigint | f64, type: Type, at: Ref<Span>): Value {
     if (typeof a === "number" || typeof b === "number") {
       const [x, y] = [Number(a), Number(b)];
       const v = op === "+" ? x + y : op === "-" ? x - y : op === "*" ? x * y : op === "/" ? x / y : op === "%" ? x % y : op === "**" ? x ** y : undefined;
@@ -1541,7 +1588,7 @@ class Interpreter<H extends ComptimeHost> {
     }
     if (type === "bigint") return this.bigNumeric(op, a as bigint, b as bigint, at);
     if (!isInteger(type)) return this.unsupported(`'${op}' on '${this.host.tables.typing.show(type)}'`, at);
-    const { bits, signed } = INTEGERS[type];
+    const { bits, signed } = integerInfo(type);
     switch (op) {
       case "+":
         return this.checked(a + b, type, "add", at);
@@ -1588,9 +1635,9 @@ class Interpreter<H extends ComptimeHost> {
   // `x.checkedAdd(y)` and its kin, as the program computes them: the exact result, then null,
   // the wrapped value, the nearest bound, or the wrapped value and whether it overflowed.
   /** @throws {Stop} */
-  private integerValue(this: Mut<this>, name: string, a: bigint, b: bigint, type: Integer, result: Type, at: Span): Value {
+  private integerValue(this: Mut<this>, name: string, a: bigint, b: bigint, type: Integer, result: Type, at: Ref<Span>): Value {
     const [family, operation] = integerMethod(name)!;
-    const { bits, signed } = INTEGERS[type];
+    const { bits, signed } = integerInfo(type);
     const [min, max] = range(type);
     let exact: bigint;
     let over: boolean | undefined;
@@ -1653,21 +1700,21 @@ class Interpreter<H extends ComptimeHost> {
   // Comptime checks overflow in every build: a value that would wrap in a release build is a
   // compile error rather than a different number baked.
   /** @throws {Stop} */
-  private checked(v: bigint, type: Integer, verb: string, at: Span): bigint {
+  private checked(v: bigint, type: Integer, verb: string, at: Ref<Span>): bigint {
     if (wrap(v, type) !== v) this.panic(`attempt to ${verb} with overflow`, at);
     return v;
   }
 
   // `x as T` between numbers, as Rust's `as` converts: integers wrap, floats truncate and saturate.
   /** @throws {Stop} */
-  private convert(v: Value, to: Type, at: Span): Value {
+  private convert(v: Value, to: Type, at: Ref<Span>): Value {
     if (typeof v === "boolean") v = v ? 1n : 0n;
     if (isFloat(to)) return typeof v === "bigint" && to === "f32" ? toF32(v) : fit(Number(v), to);
     if (!isInteger(to)) return v;
     if (typeof v === "bigint") return wrap(v, to);
     if (typeof v !== "number") return this.unsupported(`converting this with 'as'`, at);
     if (Number.isNaN(v)) return 0n;
-    const { bits, signed } = INTEGERS[to];
+    const { bits, signed } = integerInfo(to);
     const [min, max] = signed ? [-(1n << BigInt(bits - 1)), (1n << BigInt(bits - 1)) - 1n] : [0n, (1n << BigInt(bits)) - 1n];
     if (v === Infinity) return max;
     if (v === -Infinity) return min;
@@ -1683,123 +1730,275 @@ function tooBig(op: string, a: bigint, b: bigint): boolean {
   return a !== 0n && bits + b > 1n << 30n;
 }
 
-function isShort(v: Value | typeof SHORT): v is typeof SHORT {
-  return v === SHORT;
+function isRecord(v: Ref<Value>): v is Record {
+  return v !== null && typeof v === "object" && v.kind === "record";
 }
 
-function isPlace(v: Value | Place): v is Place {
-  return !!v && typeof v === "object" && v.kind === "place";
+function isItems(v: Ref<Value>): v is Items {
+  return v !== null && typeof v === "object" && v.kind === "array";
+}
+
+function isTable(v: Ref<Value>): v is Table {
+  return v !== null && typeof v === "object" && v.kind === "map";
+}
+
+function isMember(v: Ref<Value>): v is Member {
+  return v !== null && typeof v === "object" && v.kind === "member";
+}
+
+function isVariant(v: Ref<Value>): v is Variant {
+  return v !== null && typeof v === "object" && v.kind === "variant";
+}
+
+// A copy of a value owning all its parts, as reading a value out of where it lives hands one over;
+// a quote's value keeps naming its entries in the quote tables, and a `Mut` its place.
+function copyValue(v: Ref<Value>): Value {
+  if (v === null || typeof v !== "object") return v;
+  switch (v.kind) {
+    case "record": {
+      let fields = new Map<string, Value>();
+      for (const [k, x] of v.fields) fields.set(k, copyValue(x));
+      return { kind: "record", type: v.type, fields, quote: v.quote };
+    }
+    case "array":
+      return { kind: "array", items: copyValues(v.items), quote: v.quote };
+    case "variant":
+      return { kind: "variant", type: v.type, args: copyValues(v.args) };
+    case "interior":
+      return { kind: "interior", value: copyValue(v.value) };
+    case "map": {
+      let entries = new Map<string, [Value, Value]>();
+      for (const [k, e] of v.entries) entries.set(k, [copyValue(e[0]), copyValue(e[1])]);
+      return { kind: "map", type: v.type, entries };
+    }
+    case "member":
+      return { kind: "member", type: v.type, value: copyValue(v.value) };
+    case "place":
+      return copyPlace(v);
+  }
+}
+
+function copyValues(vs: Ref<Value[]>): Value[] {
+  let out: Value[] = [];
+  for (const x of vs) out.push(copyValue(x));
+  return out;
+}
+
+function copyPlace(p: Ref<Place>): Place {
+  switch (p.of) {
+    case "local":
+      return { kind: "place", of: "local", frame: p.frame, local: p.local, path: copySteps(p.path) };
+    case "temp":
+      return { kind: "place", of: "temp", frame: p.frame, index: p.index, path: copySteps(p.path) };
+    case "accessor":
+      return { kind: "place", of: "accessor", self: copyPlace(p.self), name: p.name, getter: p.getter, setter: p.setter, at: { start: p.at.start, end: p.at.end } };
+    case "char":
+      return { kind: "place", of: "char", text: p.text, index: p.index, length: p.length, before: p.before, at: { start: p.at.start, end: p.at.end } };
+  }
+}
+
+function copySteps(steps: Ref<Step[]>): Step[] {
+  let out: Step[] = [];
+  for (const s of steps) out.push(s.kind === "field" ? { kind: "field", name: s.name } : { kind: "element", index: s.index });
+  return out;
+}
+
+// Marks a quote's value, a record or an array inside any union's tag, as entry `q` of the quote
+// tables; false when it is neither.
+function withQuote(v: Mut<Value>, q: usize): boolean {
+  if (isMember(v)) return withQuote(v.value, q);
+  if (isRecord(v) || isItems(v)) {
+    v.quote = q;
+    return true;
+  }
+  return false;
+}
+
+function isShort(v: Ref<Value | typeof SHORT>): v is typeof SHORT {
+  return v !== null && typeof v === "object" && v.kind === "short";
+}
+
+function isPlace(v: Ref<Value | typeof SHORT>): v is Place {
+  return v !== null && typeof v === "object" && v.kind === "place";
 }
 
 // The type a reference refers to, or the type itself.
-function deref(typing: Typing, t: Type | undefined): Type | undefined {
+function deref(typing: Ref<Typing>, t: Type | undefined): Type | undefined {
   if (t === undefined || typeof t === "string") return t;
   const r = typing.rec(t);
   return r.kind === "ref" ? r.to : t;
 }
 
 // A value without a union's tag, outside a run of the interpreter, which alone reads places.
-function unwrap(v: Value): Value {
+function unwrap(v: Ref<Value>): Ref<Value> {
   assert(!isPlace(v), "internal error: a place was read outside a run of the interpreter");
-  return v && typeof v === "object" && v.kind === "member" ? unwrap(v.value) : v;
+  if (isMember(v)) return unwrap(v.value);
+  return v;
+}
+
+// An owned value without a union's tag.
+function unwrapped(v: Value): Value {
+  assert(!isPlace(v), "internal error: a place was read outside a run of the interpreter");
+  if (isMember(v)) return unwrapped(v.value);
+  return v;
 }
 
 // Panics on an index outside a string or array of `length`, `before` counting a rest tuple's
 // fixed elements in what the message says.
 /** @throws {Stop} */
-function checkedIndex(i: bigint, length: bigint, before: bigint, at: Span) {
+function checkedIndex(i: bigint, length: bigint, before: bigint, at: Ref<Span>) {
   if (i < 0n || i >= length) throw new Stop(`index out of bounds: the len is ${length + before} but the index is ${i + before}`, at, true);
 }
 
-function mutable(typing: Typing, t: Type | undefined): boolean {
+function mutable(typing: Ref<Typing>, t: Type | undefined): boolean {
   if (t === undefined || typeof t === "string") return false;
   const r = typing.rec(t);
   return r.kind === "ref" && r.mutable;
 }
 
+// The kind of a type's record, for a type that has one.
+function kindOf(typing: Ref<Typing>, t: Type | undefined): string | undefined {
+  if (t === undefined || typeof t === "string") return undefined;
+  return typing.rec(t).kind;
+}
+
+// A union's members, a copy the caller may hold while the typing changes.
+function membersOf(typing: Ref<Typing>, t: Type): Type[] {
+  if (typeof t === "string") return [];
+  const r = typing.rec(t);
+  if (r.kind !== "union") return [];
+  let out: Type[] = [];
+  for (const m of r.members) out.push(m);
+  return out;
+}
+
 // A value of type `from` as one of type `to`: entering a union it is tagged with the member its
 // type is, and a union's fields and elements are tagged the same way, so each is baked as the
 // member the program would hold.
-function retag(typing: Typing, value: Value, from: Type | undefined, to: Type | undefined): Value {
+function retag(typing: Mut<Typing>, value: Value, from: Type | undefined, to: Type | undefined): Value {
   // A `Mut` held in a field stays the place it points at.
   if (isPlace(value)) return value;
-  const record = (t: Type | undefined) => (t === undefined || typeof t === "string" ? undefined : typing.rec(t));
-  const tr = record(to);
-  if (to === undefined || from === to) return tr?.kind === "union" ? value : unwrap(value);
-  if (tr?.kind === "union") {
-    const tag = value && typeof value === "object" && value.kind === "member" ? value.type : undefined;
-    if (tag !== undefined && tr.members.includes(tag)) return value;
-    const v = unwrap(value);
-    const own = tag ?? from;
-    const or = record(own);
-    const member = own !== undefined && tr.members.includes(own) ? own : or?.kind === "union" ? memberOf(typing, v, own as UnionType) : own !== undefined ? (typing.membersFor(own, to as UnionType)[0] ?? memberOf(typing, v, to as UnionType)) : memberOf(typing, v, to as UnionType);
+  const toKind = kindOf(typing, to);
+  if (to === undefined || from === to) return toKind === "union" ? value : unwrapped(value);
+  if (toKind === "union") {
+    const union = to as UnionType;
+    const members = membersOf(typing, union);
+    const tag = isMember(value) ? value.type : undefined;
+    if (tag !== undefined && members.includes(tag)) return value;
+    const v = unwrapped(value);
+    const own = tag !== undefined ? tag : from;
+    let member: Type;
+    if (own !== undefined && members.includes(own)) member = own;
+    else if (kindOf(typing, own) === "union") member = memberOf(typing, v, own as UnionType);
+    else if (own !== undefined) {
+      const fitting = typing.membersFor(own, union);
+      member = fitting.length > 0 ? fitting[0]! : memberOf(typing, v, union);
+    } else member = memberOf(typing, v, union);
     return { kind: "member", type: member, value: retag(typing, v, own, member) };
   }
-  const v = unwrap(value);
-  if (v && typeof v === "object" && v.kind === "record" && (tr?.kind === "object" || tr?.kind === "class")) {
+  let v = unwrapped(value);
+  if (isRecord(v) && (toKind === "object" || toKind === "class")) {
+    let fields: { name: string; type: Type }[] = [];
+    const r = typing.rec(to as Exclude<Type, string>);
+    if (r.kind === "object" || r.kind === "class") for (const f of r.fields) fields.push({ name: f.name, type: f.type });
     // A field the value leaves out is an optional one, which is empty.
-    for (const f of tr.fields) v.fields.set(f.name, v.fields.has(f.name) ? retag(typing, v.fields.get(f.name), typing.field(v.type, f.name)?.type, f.type) : retag(typing, null, "null", f.type));
+    for (const f of fields) {
+      const held = v.fields.get(f.name);
+      if (held === undefined && !v.fields.has(f.name)) {
+        v.fields.set(f.name, retag(typing, null, "null", f.type));
+        continue;
+      }
+      const had = typing.field(v.type, f.name);
+      const was = had !== undefined ? had.type : undefined;
+      v.fields.set(f.name, retag(typing, copyValue(held), was, f.type));
+    }
   }
-  if (v && typeof v === "object" && v.kind === "array" && tr?.kind === "array") {
-    const fr = record(from);
-    const element = fr?.kind === "array" ? fr.element : undefined;
-    v.items = v.items.map((x) => retag(typing, x, element, tr.element));
+  if (isItems(v) && toKind === "array") {
+    const element = elementOf(typing, from);
+    const into = elementOf(typing, to);
+    let items: Value[] = [];
+    while (v.items.length > 0) items.push(retag(typing, v.items.shift() ?? null, element, into));
+    v.items = items;
   }
   return v;
 }
 
+// An array type's element.
+function elementOf(typing: Ref<Typing>, t: Type | undefined): Type | undefined {
+  if (t === undefined || typeof t === "string") return undefined;
+  const r = typing.rec(t);
+  return r.kind === "array" ? r.element : undefined;
+}
+
 // A literal type as its base type, which `===` compares by.
-function plainType(typing: Typing, t: Type): Type {
-  const r = typeof t === "string" ? undefined : typing.rec(t);
-  return r?.kind === "literal" ? (typing.baseOf(t as LiteralType) ?? t) : t;
+function plainType(typing: Ref<Typing>, t: Type): Type {
+  if (typeof t === "string" || typing.rec(t).kind !== "literal") return t;
+  return typing.baseOf(t as LiteralType);
 }
 
 // The value an enum member's literal type stands for, or undefined for any other type.
-function literalValue(typing: Typing, type: Type | undefined): Value {
-  const r = type === undefined || typeof type === "string" ? undefined : typing.rec(type);
-  return r?.kind === "literal" && r.owner ? r.value : undefined;
+function literalValue(typing: Ref<Typing>, type: Type | undefined): Value {
+  if (type === undefined || typeof type === "string") return undefined;
+  const r = typing.rec(type);
+  return r.kind === "literal" && r.owner !== undefined ? r.value : undefined;
 }
 
 // Whether an expression names an enum rather than a value.
-function enumName(e: Expr): boolean {
-  return e.kind === "ident" || (e.kind === "member" && enumName(e.object));
+function enumName(e: Ref<Expr>): boolean {
+  if (e.kind === "ident") return true;
+  return e.kind === "member" && enumName(e.object);
 }
 
-function typeofValue(v: Value): string {
+function typeofValue(v: Ref<Value>): string {
   if (typeof v === "bigint" || typeof v === "number") return "number";
   if (v === null) return "undefined";
   if (typeof v === "object") return "object";
-  return typeof v;
+  if (typeof v === "boolean") return "boolean";
+  if (typeof v === "string") return "string";
+  return "undefined";
 }
 
-// A copy owning all its parts, as `.clone()` makes.
-function cloned(tables: Tables, v: Value): Value {
-  const { quoteScopes: scopes, quoteFrees: frees, quotedSpans } = tables;
-  const copied = (x: Value) => cloned(tables, x);
-  if (!v || typeof v !== "object" || v.kind === "interior") return v;
+// A copy owning all its parts, as `.clone()` makes. A clone of a quote's record is another entry
+// of the quote tables, keeping its bindings and free names for a quote it is spliced into.
+function cloned(tables: Mut<Tables>, v: Ref<Value>): Value {
+  if (v === null || typeof v !== "object" || v.kind === "interior") return copyValue(v);
   assert(v.kind !== "place", "internal error: a place was cloned outside a run of the interpreter");
-  if (v.kind === "member") return { kind: "member", type: v.type, value: copied(v.value) };
-  if (v.kind === "array") return { kind: "array", items: v.items.map(copied) };
-  if (v.kind === "variant") return { kind: "variant", type: v.type, args: v.args.map(copied) };
-  if (v.kind === "map") return { kind: "map", type: v.type, entries: new Map([...v.entries].map(([k, [key, x]]) => [k, [copied(key), copied(x)]])) };
-  const copy: Record = { kind: "record", type: v.type, fields: new Map([...v.fields].map(([k, x]) => [k, copied(x)])) };
-  if (v.quote === undefined) return copy;
-  // A clone of a quote's value keeps its bindings and free names for a quote it is spliced into.
-  const at = (copy.quote = nextId(tables.quoteValues));
-  const scope = scopes.get(v.quote);
-  if (scope) scopes.set(at, scope);
-  const free = frees.get(v.quote);
-  if (free) frees.set(at, new Map(free));
-  const spans = quotedSpans.get(v.quote);
-  if (spans) quotedSpans.set(at, spans);
-  return copy;
+  if (v.kind === "member") return { kind: "member", type: v.type, value: cloned(tables, v.value) };
+  if (v.kind === "array") {
+    let items: Value[] = [];
+    for (const x of v.items) items.push(cloned(tables, x));
+    return { kind: "array", items };
+  }
+  if (v.kind === "variant") {
+    let args: Value[] = [];
+    for (const x of v.args) args.push(cloned(tables, x));
+    return { kind: "variant", type: v.type, args };
+  }
+  if (v.kind === "map") {
+    let entries = new Map<string, [Value, Value]>();
+    for (const [k, e] of v.entries) entries.set(k, [cloned(tables, e[0]), cloned(tables, e[1])]);
+    return { kind: "map", type: v.type, entries };
+  }
+  let fields = new Map<string, Value>();
+  for (const [k, x] of v.fields) fields.set(k, cloned(tables, x));
+  if (v.quote === undefined) return { kind: "record", type: v.type, fields };
+  const was = v.quote;
+  const at = nextId(tables.quoteValues);
+  const scope = tables.quoteScopes.get(was);
+  if (scope !== undefined) tables.quoteScopes.set(at, new Map(scope));
+  const free = tables.quoteFrees.get(was);
+  if (free !== undefined) tables.quoteFrees.set(at, new Map(free));
+  const spans = tables.quotedSpans.get(was);
+  if (spans !== undefined) tables.quotedSpans.set(at, new Set(spans));
+  return { kind: "record", type: v.type, fields, quote: at };
 }
 
 // What a thrown value is, for the compile error reporting it.
-function described(typing: Typing, value: Value): string {
+function described(typing: Ref<Typing>, value: Ref<Value>): string {
   const v = unwrap(value);
-  if (v && typeof v === "object" && v.kind === "record") {
-    const message = unwrap(v.fields.get("message"));
+  if (isRecord(v)) {
+    const held = v.fields.get("message");
+    const message = held === undefined ? undefined : unwrap(held);
     const r = typing.rec(v.type);
     const name = r.kind === "class" ? r.name : "an object";
     return typeof message === "string" ? `${name}: ${message}` : name;
@@ -1809,79 +2008,165 @@ function described(typing: Typing, value: Value): string {
 
 // An integer wrapped to its type's bits, as the machine holds it.
 function wrap(v: bigint, type: Integer): bigint {
-  const { bits, signed } = INTEGERS[type];
-  return signed ? BigInt.asIntN(bits, v) : BigInt.asUintN(bits, v);
+  const info = integerInfo(type);
+  return info.signed ? BigInt.asIntN(info.bits, v) : BigInt.asUintN(info.bits, v);
 }
 
 function fit(v: f64, type: Type): f64 {
-  return type === "f32" ? Math.fround(v) : v;
+  return type === "f32" ? fround(v) : v;
+}
+
+// The f32 nearest a float, as Math.fround gives it.
+function fround(v: f64): f64 {
+  let held = new Float32Array(1);
+  held[0] = v as f32;
+  return held[0]! as f64;
+}
+
+// A bigint as the nearest float, read through its digits, which Fish and JavaScript both parse.
+function toFloat(b: bigint): f64 {
+  return Number(String(b))!;
+}
+
+// A bigint index as an array's or a string's index.
+function toIndex(b: bigint): usize {
+  return Number(String(b))! as usize;
+}
+
+// A float with no fraction as a bigint, halving it into a 64-bit integer first, which leaves its
+// value exact as only its exponent changes.
+function bigOf(v: f64): bigint {
+  let x = v;
+  let shift = 0n;
+  while (x >= 4611686018427387904 || x <= -4611686018427387904) {
+    x = x / 2;
+    shift += 1n;
+  }
+  return BigInt(x as i64) << shift;
 }
 
 // An integer as the f32 nearest it, rounding once, ties to even.
 function toF32(v: bigint): f64 {
   const magnitude = v < 0n ? -v : v;
   const bits = magnitude.toString(2).length;
-  if (bits <= 24) return Math.fround(Number(v));
+  if (bits <= 24) return fround(toFloat(v));
   const shift = BigInt(bits - 24);
   let mantissa = magnitude >> shift;
   const rest = magnitude - (mantissa << shift);
   const half = 1n << (shift - 1n);
   if (rest > half || (rest === half && (mantissa & 1n) === 1n)) mantissa += 1n;
-  const rounded = Math.fround(Number(mantissa) * 2 ** Number(shift));
+  const rounded = fround(toFloat(mantissa << shift));
   return v < 0n ? -rounded : rounded;
 }
 
 // A value as `String(x)` and templates write it; an f32 as the shortest decimal naming it.
-function display(value: Value, type: Type | undefined): string {
+function display(value: Ref<Value>, type: Type | undefined): string {
   const v = unwrap(value);
   if (typeof v === "number" && type === "f32") return shortestF32(v);
-  if (typeof v === "number") return Object.is(v, -0) ? "0" : String(v);
+  if (typeof v === "number") return v === 0 ? "0" : String(v);
   if (v === null) return "null";
-  return String(v);
+  if (typeof v === "bigint" || typeof v === "boolean") return String(v);
+  if (typeof v === "string") return v;
+  if (typeof v === "object") return "[object Object]";
+  return "undefined";
 }
 
 function shortestF32(v: f64): string {
-  if (!Number.isFinite(v) || v === 0) return Object.is(v, -0) ? "0" : String(v);
-  for (let digits = 1; digits <= 9; digits++) {
-    const near = Number(v.toPrecision(digits));
-    if (Math.fround(near) === v) return String(near);
+  if (v === 0 || v - v !== 0) return v === 0 ? "0" : String(v);
+  for (let digits: usize = 1; digits <= 9; digits++) {
+    const near = Number(precision(v, digits))!;
+    if (fround(near) === v) return String(near);
   }
   return String(v);
+}
+
+// A finite, nonzero float to `digits` significant digits, as `toPrecision` rounds it: exactly,
+// halves away from zero, written as digits and a power of ten.
+function precision(v: f64, digits: usize): string {
+  let x = v < 0 ? -v : v;
+  // `x` is `whole * 2^power` exactly.
+  let power: i64 = 0;
+  while (x !== Math.floor(x)) {
+    x = x * 2;
+    power -= 1;
+  }
+  let whole = bigOf(x);
+  let exact = whole;
+  let ten: i64 = 0;
+  if (power < 0) {
+    exact = whole * 5n ** BigInt(-power);
+    ten = power;
+  } else exact = whole << BigInt(power);
+  const text = String(exact);
+  if (text.length <= digits) return `${v < 0 ? "-" : ""}${text}e${ten}`;
+  let head = BigInt(text.slice(0, digits as i64));
+  if (text.charCodeAt(digits) >= 53) head += 1n;
+  const scale = (text.length as i64) - (digits as i64) + ten;
+  return `${v < 0 ? "-" : ""}${String(head)}e${scale}`;
+}
+
+// A count as English writes it, its digits grouped in threes.
+function grouped(n: i64): string {
+  const digits = String(n);
+  let out = "";
+  for (let i: usize = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 === 0) out += ",";
+    out += digits[i]!;
+  }
+  return out;
 }
 
 // The member of a union a value is when nothing says: its own type for an aggregate, the
 // literal member with its value, or the member of its kind.
-export function memberOf(typing: Typing, value: Value, union: UnionType): Type {
-  const m = typing.rec(union).members;
-  const kindOf = (t: Type) => (typeof t === "string" ? undefined : typing.rec(t).kind);
-  if (value && typeof value === "object" && value.kind === "member" && m.includes(value.type)) return value.type;
+export function memberOf(typing: Mut<Typing>, value: Ref<Value>, union: UnionType): Type {
+  const m = membersOf(typing, union);
+  if (isMember(value) && m.includes(value.type)) return value.type;
   const v = unwrap(value);
   if (v === null) return "null";
-  if (v && typeof v === "object") {
-    if (v.kind === "array") return m.find((t) => kindOf(t) === "array")!;
-    if (v.kind === "interior") return m.find((t) => kindOf(t) === "interior")!;
-    if (v.kind === "map") return m.find((t) => t === v.type) ?? m.find((t) => kindOf(t) === "map")!;
-    if (v.kind === "member" || v.kind === "place") return memberOf(typing, unwrap(v), union);
-    return m.find((t) => t === v.type) ?? m.find((t) => typing.fits(v.type, t))!;
+  if (isItems(v)) return firstOfKind(typing, m, "array");
+  if (v !== null && typeof v === "object" && v.kind === "interior") return firstOfKind(typing, m, "interior");
+  if (isTable(v)) return m.includes(v.type) ? v.type : firstOfKind(typing, m, "map");
+  if (isRecord(v)) {
+    if (m.includes(v.type)) return v.type;
+    for (const t of m) if (typing.fits(v.type, t)) return t;
+    assert(false, "internal error: a record no member of its union holds");
   }
-  const literal = m.find((t) => {
-    const r = typeof t === "string" ? undefined : typing.rec(t);
-    return r?.kind === "literal" && r.value === v;
-  });
-  if (literal) return literal;
-  if (typeof v === "bigint") return m.find(isInteger) ?? "bigint";
-  if (typeof v === "number") return m.find(isFloat)!;
+  if (isVariant(v)) {
+    if (m.includes(v.type)) return v.type;
+    for (const t of m) if (typing.fits(v.type, t)) return t;
+    assert(false, "internal error: a variant no member of its union holds");
+  }
+  for (const t of m) {
+    if (typeof t === "string") continue;
+    const r = typing.rec(t);
+    if (r.kind === "literal" && r.value === v) return t;
+  }
+  if (typeof v === "bigint") {
+    for (const t of m) if (isInteger(t)) return t;
+    return "bigint";
+  }
+  if (typeof v === "number") {
+    for (const t of m) if (isFloat(t)) return t;
+  }
   if (typeof v === "string") return "string";
   return "boolean";
 }
 
-// The value inside a union's tag, for baking.
-// The number naming a quote's value in the quote tables, when it is one or a clone of one.
-function quoteOf(v: Value): usize | undefined {
-  const u = untagged(v);
-  return u && typeof u === "object" && (u.kind === "record" || u.kind === "array") ? u.quote : undefined;
+// The first of a union's members whose record is of `kind`.
+function firstOfKind(typing: Ref<Typing>, members: Ref<Type[]>, kind: string): Type {
+  for (const t of members) if (kindOf(typing, t) === kind) return t;
+  assert(false, `internal error: a union with no ${kind} member holds one`);
 }
 
+// The number naming a quote's value in the quote tables, when it is one or a clone of one.
+function quoteOf(v: Ref<Value>): usize | undefined {
+  const u = unwrap(v);
+  if (isRecord(u)) return u.quote;
+  if (isItems(u)) return u.quote;
+  return undefined;
+}
+
+// The value inside a union's tag, for baking.
 export function untagged(v: Value): Value {
-  return unwrap(v);
+  return unwrapped(v);
 }
