@@ -2917,10 +2917,14 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // `x as const`: a literal checked as its literal type, deeply, as TypeScript gives it.
   /** @throws {CompileError} */
-  private constAssertion(this: Mut<this>, x: Ref<Expr>): Type {
-    x = this.ctx.tables.rewrites.current(x);
+  private constAssertion(this: Mut<this>, given: Ref<Expr>): Type {
+    const now = this.ctx.tables.rewrites.rewritten(given);
+    return now !== undefined ? this.constAssertionNow(now) : this.constAssertionNow(given);
+  }
+  /** @throws {CompileError} */
+  private constAssertionNow(this: Mut<this>, x: Ref<Expr>): Type {
     const enumMember = x.kind === "member" && x.object.kind === "ident" && (this.ctx.lookup(x.object.name, undefined) === undefined) && this.ctx.enums.has(x.object.name);
-    const literal = ["string", "template", "int", "float", "bool", "array", "object"].includes(x.kind) || (x.kind === "unary" && x.op === "-" && (x.operand.kind === "int" || x.operand.kind === "float")) || enumMember;
+    const literal = x.kind === "string" || x.kind === "template" || x.kind === "int" || x.kind === "float" || x.kind === "bool" || x.kind === "array" || x.kind === "object" || (x.kind === "unary" && x.op === "-" && (x.operand.kind === "int" || x.operand.kind === "float")) || enumMember;
     if (!literal) throw new CompileError("E0111", "a 'const' assertion can only be applied to an enum member, or a string, number, boolean, array or object literal", x.start, x.end);
     const t = this.constType(x);
     this.expect(x, t);
@@ -2952,14 +2956,29 @@ export class Expressions<C extends Context> implements Union<C> {
     if (x.kind === "unary" && x.op === "-" && x.operand.kind === "int" && x.operand.value <= I64_MAX) return this.ctx.tables.typing.literalType(-x.operand.value);
     if (x.kind === "bool") return this.ctx.tables.typing.literalType(x.value);
     if (x.kind === "array" && x.elements.length === 0) return this.ctx.tables.typing.tupleType([]);
-    if (x.kind === "array" && x.elements.every((y) => y !== undefined && y.kind !== "spread")) {
-      const parts = (x.elements as Expr[]).map((y) => this.constType(y));
-      return parts.every((p) => this.constWide(p) === this.constWide(parts[0]!)) ? this.ctx.tables.typing.arrayType(this.constJoin(parts)) : this.ctx.tables.typing.tupleType(parts, undefined, undefined, true);
+    if (x.kind === "array") {
+      let plain = true;
+      for (const y of x.elements) if (y === undefined || y.kind === "spread") plain = false;
+      if (plain) {
+        let parts: Type[] = [];
+        for (const y of x.elements) parts.push(this.constType(y!));
+        const first = this.constWide(parts[0]!);
+        let same = true;
+        for (const p of parts) if (this.constWide(p) !== first) same = false;
+        return same ? this.ctx.tables.typing.arrayType(this.constJoin(parts)) : this.ctx.tables.typing.tupleType(parts, undefined, undefined, true);
+      }
     }
-    const props = x.kind === "object" ? x.props.filter((p): p is Extract<ObjectProp, { kind: "property" }> => p.kind === "property" && typeof p.key === "string") : [];
-    if (x.kind === "object" && props.length === x.props.length) return this.ctx.tables.typing.objectType(props.map((p) => ({ name: p.key as string, type: this.constType(p.value), readonly: true })));
+    if (x.kind === "object") {
+      let plain = true;
+      for (const p of x.props) if (p.kind !== "property" || typeof p.key !== "string") plain = false;
+      if (plain) {
+        let fields: Field[] = [];
+        for (const p of x.props) if (p.kind === "property") fields.push({ name: keyText(p.key), type: this.constType(p.value), readonly: true });
+        return this.ctx.tables.typing.objectType(fields);
+      }
+    }
     const t = this.value(x);
-    this.ctx.exprsState.once.add(x);
+    this.ctx.exprsState.once.add(cloneExpr(x));
     return t;
   }
 
@@ -2967,18 +2986,36 @@ export class Expressions<C extends Context> implements Union<C> {
   private constWide(this: Mut<this>, t: Type): Type {
     const r = this.recOf(t);
     if (r?.kind === "literal" && (r.owner === undefined)) return this.ctx.tables.typing.baseOf(t as LiteralType);
-    if (r?.kind === "object" && (r.tuple !== undefined)) return this.ctx.tables.typing.tupleType(this.ctx.tables.typing.elementsOf(t as ObjectType).map((p) => this.constWide(p)));
-    if (r?.kind === "object") return this.ctx.tables.typing.objectType(r.fields.map((f) => ({ ...f, type: this.constWide(f.type) })));
+    if (r?.kind === "object" && (r.tuple !== undefined)) {
+      let parts: Type[] = [];
+      for (const p of this.ctx.tables.typing.elementsOf(t as ObjectType)) parts.push(this.constWide(p));
+      return this.ctx.tables.typing.tupleType(parts);
+    }
+    if (r?.kind === "object") {
+      const given = r.fields.slice();
+      let fields: Field[] = [];
+      for (const f of given) fields.push({ ...f, type: this.constWide(f.type) });
+      return this.ctx.tables.typing.objectType(fields);
+    }
     return t;
   }
 
   // One type holding each of parts, which widen alike: the union of their literals or objects, as
   // TypeScript gives, so an object's fields stay linked; tuples are joined position by position,
   // since a union of tuples can't be destructured.
-  private constJoin(this: Mut<this>, parts: Type[]): Type {
+  private constJoin(this: Mut<this>, parts: Ref<Type[]>): Type {
     const r = this.recOf(parts[0]!);
-    if (r?.kind === "object" && (r.tuple !== undefined)) return this.ctx.tables.typing.tupleType(this.ctx.tables.typing.elementsOf(parts[0] as ObjectType).map((_, i) => this.constJoin(parts.map((p) => this.ctx.tables.typing.elementsOf(p as ObjectType)[i]!))));
-    return this.ctx.tables.typing.unionType(parts);
+    if (r?.kind === "object" && (r.tuple !== undefined)) {
+      const count = this.ctx.tables.typing.elementsOf(parts[0] as ObjectType).length;
+      let joined: Type[] = [];
+      for (let i: usize = 0; i < count; i++) {
+        let column: Type[] = [];
+        for (const p of parts) column.push(this.ctx.tables.typing.elementsOf(p as ObjectType)[i]!);
+        joined.push(this.constJoin(column));
+      }
+      return this.ctx.tables.typing.tupleType(joined);
+    }
+    return this.ctx.tables.typing.unionType(parts.slice());
   }
 
   // `[a, b]` written where a tuple is expected: each element checked against its own type, then
@@ -2987,36 +3024,61 @@ export class Expressions<C extends Context> implements Union<C> {
   private tupleLiteral(this: Mut<this>, e: Ref<Expr>, tuple: ObjectType): Type {
     const elements = this.ctx.tables.typing.elementsOf(tuple);
     // Once a literal became an object, its rest elements are its field `...`, checked again.
-    const parts = this.tupleParts(e) as Expr[];
-    const given = this.ctx.tables.typing.rec(tuple).rest !== undefined && e.kind === "object" ? parts.slice(0, -1) : [...parts];
+    let parts: Expr[] = [];
+    for (const x of this.tupleParts(e)) if (x !== undefined) parts.push(x);
+    const restLast = this.ctx.tables.typing.rec(tuple).rest !== undefined && e.kind === "object";
+    let last: Expr[] = [];
+    if (restLast && parts.length > 0) last.push(parts.pop()!);
+    let fixed: Expr[] = [];
+    let beyond: Elements = [];
+    const count = parts.length;
+    while (parts.length > 0) {
+      const x = parts.shift()!;
+      if (fixed.length < elements.length) fixed.push(x);
+      else beyond.push(x);
+    }
     const least = this.ctx.tables.typing.rec(tuple).required ?? elements.length;
-    const fixed = given.slice(0, elements.length);
-    const spread = fixed.find((x) => x.kind === "spread");
-    if (spread) throw unsupported("spread elements in tuple literals", spread);
-    if (given.length < least || (given.length > elements.length && this.ctx.tables.typing.rec(tuple).rest === undefined)) {
-      const count = this.ctx.tables.typing.rec(tuple).rest !== undefined ? `at least ${least}` : least === elements.length ? `${least}` : `${least} to ${elements.length}`;
-      throw new CompileError("E0117", `type '${this.ctx.tables.typing.show(tuple)}' has ${count} element${elements.length === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
+    for (const x of fixed) if (x.kind === "spread") throw unsupported("spread elements in tuple literals", x);
+    if (count < least || (count > elements.length && this.ctx.tables.typing.rec(tuple).rest === undefined)) {
+      const counted = this.ctx.tables.typing.rec(tuple).rest !== undefined ? `at least ${least}` : least === elements.length ? `${least}` : `${least} to ${elements.length}`;
+      throw new CompileError("E0117", `type '${this.ctx.tables.typing.show(tuple)}' has ${counted} element${elements.length === 1 ? "" : "s"}, but this literal has ${count}`, e.start, e.end);
     }
     // Optional elements left out are empty.
-    for (let i = fixed.length; i < elements.length; i++) fixed.push({ id: nextId(this.ctx.tables.ids), kind: "null", start: e.end, end: e.end } as Expr);
-    fixed.forEach((x, i) => {
-      const t = this.value(x);
-      this.coerce(x, t, elements[i]!, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(elements[i]!)}'`);
-    });
+    for (let i = fixed.length; i < elements.length; i++) fixed.push({ id: nextId(this.ctx.tables.ids), kind: "null", start: e.end, end: e.end });
+    for (let i: usize = 0; i < fixed.length; i++) {
+      const t = this.value(fixed[i]!);
+      this.coerce(fixed[i]!, t, elements[i]!, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(elements[i]!)}'`);
+    }
     // A rest tuple's further elements are an array literal of its rest type, spreads allowed.
-    const many: Expr[] = [];
     if (this.ctx.tables.typing.rec(tuple).rest !== undefined) {
       const rest = this.ctx.tables.typing.arrayType(this.ctx.tables.typing.rec(tuple).rest!);
-      const extra: Expr = e.kind === "object" ? parts.at(-1)! : { id: nextId(this.ctx.tables.ids), kind: "array", elements: given.slice(elements.length), start: e.start, end: e.end };
+      const extra: Expr = last.length > 0 ? last.pop()! : { id: nextId(this.ctx.tables.ids), kind: "array", elements: beyond, start: e.start, end: e.end };
       this.expect(extra, rest);
       const t = this.value(extra);
       this.coerce(extra, t, rest, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(rest)}'`);
-      many.push(extra);
+      fixed.push(extra);
     }
     if (e.kind === "array") {
-      this.ctx.tables.tupleLiterals.add(this.ctx.tables.rewrites.replace(e, { id: 0, kind: "object", props: [...fixed, ...many].map((value, i): ObjectProp => ({ id: nextId(this.ctx.tables.ids), kind: "property", key: i < elements.length ? String(i) : "...", value, start: value.start, end: value.end })), start: e.start, end: e.end }));
+      let props: ObjectProp[] = [];
+      let i: usize = 0;
+      while (fixed.length > 0) {
+        const value = fixed.shift()!;
+        const id = nextId(this.ctx.tables.ids);
+        props.push({ id, kind: "property", key: i < elements.length ? i.toString() : "...", start: value.start, end: value.end, value });
+        i++;
+      }
+      const made = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "object", props, start: e.start, end: e.end });
+      this.ctx.tables.tupleLiterals.add(cloneExpr(made));
     }
     return tuple;
+  }
+
+  // The types a tuple literal's parts have, widened as a `let` widens them.
+  /** @throws {CompileError} */
+  private partTypes(this: Mut<this>, e: Ref<Expr>): Type[] {
+    let out: Type[] = [];
+    for (const x of this.tupleParts(e)) out.push(this.ctx.tables.typing.widenLet(this.value(x!)));
+    return out;
   }
 
   // The tuple a literal of these parts' types is where a generic function takes one: its parts in
@@ -3095,8 +3157,13 @@ export class Expressions<C extends Context> implements Union<C> {
     return now !== undefined ? this.tuplePartsNow(now) : this.tuplePartsNow(given);
   }
   private tuplePartsNow(e: Ref<Expr>): (Expr | undefined)[] {
-    if (e.kind === "array") return e.elements;
-    return e.kind === "object" ? e.props.map((p) => (p.kind === "property" ? p.value : undefined)) : [];
+    let out: (Expr | undefined)[] = [];
+    if (e.kind === "array") {
+      for (const x of e.elements) out.push(x === undefined ? undefined : cloneExpr(x));
+    } else if (e.kind === "object") {
+      for (const p of e.props) out.push(p.kind === "property" ? cloneExpr(p.value) : undefined);
+    }
+    return out;
   }
 
   // `FixedArray.filled<T, N>(v)`: N copies of `v`, its type written or the one expected.
@@ -6383,7 +6450,7 @@ export class Expressions<C extends Context> implements Union<C> {
       case "object": {
         const tuple = this.ctx.exprsState.tuples.get(e);
         if (tuple) return this.tupleLiteral(e, tuple);
-        if ((this.ctx.exprsState.shaped.has(e) || this.ctx.tables.pairs.has(e)) && this.ctx.tables.tupleLiterals.has(e)) return this.tupleLiteral(e, this.shapedTuple(e, this.tupleParts(e).map((x) => this.ctx.tables.typing.widenLet(this.value(x!)))));
+        if ((this.ctx.exprsState.shaped.has(e) || this.ctx.tables.pairs.has(e)) && this.ctx.tables.tupleLiterals.has(e)) return this.tupleLiteral(e, this.shapedTuple(e, this.partTypes(e)));
         if (e.props.some((p) => p.kind === "spread")) return this.objectSpread(e);
         return this.ctx.tables.typing.objectType(fields(e.props.map((p) => this.property(p)), e.props));
       }
@@ -6429,7 +6496,7 @@ export class Expressions<C extends Context> implements Union<C> {
           return inline;
         }
         if (this.ctx.exprsState.shaped.has(e) && e.elements.every((x) => x !== undefined && x.kind !== "spread")) {
-          return this.tupleLiteral(e, this.shapedTuple(e, (e.elements as Expr[]).map((x) => this.ctx.tables.typing.widenLet(this.value(x)))));
+          return this.tupleLiteral(e, this.shapedTuple(e, this.partTypes(e)));
         }
         const elements = e.elements as Expr[];
         // A spread gives an array's elements: those of an array itself, or of what a string, a
