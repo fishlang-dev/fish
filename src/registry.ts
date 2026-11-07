@@ -526,9 +526,16 @@ export class Registry<H extends RegistryHost> {
 
   /** @throws {CompileError} */
   classOf(this: Mut<this>, t: ClassType): Ref<ClassInfo> {
+    const c = this.classIdOf(t);
+    return this.host.tables.arenas.classOf(c);
+  }
+
+  // The class `t` is an instance of, laid out.
+  /** @throws {CompileError} */
+  classIdOf(this: Mut<this>, t: ClassType): ClassId {
     const c = this.host.registryState.infoOf.get(t)!;
     this.layout(c);
-    return this.host.tables.arenas.classOf(c);
+    return c;
   }
 }
 

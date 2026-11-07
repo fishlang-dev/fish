@@ -108,6 +108,14 @@ export function named(e: CompileError, names: Names): CompileError {
   return out;
 }
 
+export function copyNames(names: Ref<Names>): Names {
+  let local = new Set<string>();
+  for (const n of names.local) local.add(n);
+  let madeUp = new Map<string, string>();
+  for (const [k, v] of names.madeUp) madeUp.set(k, v);
+  return { local, madeUp };
+}
+
 // `e`'s messages with the hoisted names in them as written.
 function rename(e: Mut<CompileError>, names: Ref<Names>): void {
   e.message = written(e.message, names);

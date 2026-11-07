@@ -6,7 +6,7 @@ import type { EnumMember, Expr, Interface, Param, PropertyName, Span, Stmt, Tupl
 import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.ts";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.ts";
 import { placeholders } from "./generics.ts";
-import { cloneEnumMember, cloneParam, cloneStmt, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.ts";
+import { cloneEnumMember, cloneParam, cloneStmt, cloneTypeAlias, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.ts";
 import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, typedNamed, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type BlockRecord, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.ts";
 import { typeForm, unsupported } from "./unsupported.ts";
 import { symbolKey } from "./keys.ts";
@@ -81,7 +81,7 @@ export type InScope<T> = () => T;
 
 export interface ResolverHost {
   tables: Tables;
-  decls: Ref<Declarations>;
+  decls: Declarations;
   enums: Map<string, EnumInfo>;
   // An enum's type and a member of it, read once the enum is settled.
   /** @throws {CompileError} */
@@ -234,9 +234,11 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   /** @throws {CompileError} */
   interfaceInstance(this: Mut<this>, t: InterfaceType, args: Type[]) {
     const name = this.host.tables.typing.rec(t).generic!.name;
-    const decls = this.host.decls;
-    const named = decls.interfaces.get(name);
-    if (named !== undefined) return this.interfaceOf(named, args, named);
+    const found = this.host.decls.interfaces.get(name);
+    if (found !== undefined) {
+      const named = cloneInterface(found);
+      return this.interfaceOf(named, args, named);
+    }
     // An inline interface is made while resolving, so it is read from a copy.
     const written = cloneInterface(this.host.resolverState.inline.get(name)!);
     const inline = this.interfaceOf(written, args, written);
@@ -247,8 +249,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   remakeRecursive(this: Mut<this>, t: RecursiveType, args: Type[]): RecursiveType {
     const name = this.host.resolverState.recursiveAliases.get(t);
     if (name === undefined) return t;
-    const decls = this.host.decls;
-    const a = decls.aliases.get(name)!;
+    const a = cloneTypeAlias(this.host.decls.aliases.get(name)!);
     let keys: string[] = [];
     for (const x of args) keys.push(this.host.tables.typing.keyOf(x));
     const key = `${name}<${keys.join(",")}>`;
@@ -296,8 +297,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // uses it. Run once classes are linked, since an alias may read a class's fields.
   /** @throws {CompileError} */
   validate(this: Mut<this>) {
-    const decls = this.host.decls;
-    for (const a of decls.aliases.values()) {
+    let aliases: string[] = [];
+    for (const name of this.host.decls.aliases.keys()) aliases.push(name);
+    for (const name of aliases) {
+      const a = cloneTypeAlias(this.host.decls.aliases.get(name)!);
       const scope = placeholders(this.host, a.typeParams, undefined, undefined);
       let args: Type[] = [];
       for (const t of scope.values()) args.push(t);
@@ -309,7 +312,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       }
     }
     // A generic interface is checked once with placeholders for its parameters.
-    for (const i of decls.interfaces.values()) {
+    let interfaces: string[] = [];
+    for (const name of this.host.decls.interfaces.keys()) interfaces.push(name);
+    for (const name of interfaces) {
+      const i = cloneInterface(this.host.decls.interfaces.get(name)!);
       let args: Type[] = [];
       const scope = placeholders(this.host, i.typeParams, undefined, undefined);
       for (const t of scope.values()) args.push(t);
@@ -836,12 +842,13 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       return this.host.tables.typing.unionType([member, "null"]);
     }
     // A class's lifetimes, written or left out, are no type arguments.
-    const decls = this.host.decls;
-    const lifetime = decls.slots.get(t.name);
+    const slots = this.host.decls.slots.get(t.name);
+    const lifetime = slots === undefined ? undefined : [...slots];
     const skipping = lifetime !== undefined && t.args.length === lifetime.length;
     let args: Type[] = [];
     for (let i: usize = 0; i < t.args.length; i++) if (!skipping || !lifetime![i]!) args.push(this.resolveType(t.args[i]!));
-    const alias = decls.aliases.get(t.name);
+    const written = this.host.decls.aliases.get(t.name);
+    const alias = written === undefined ? undefined : cloneTypeAlias(written);
     // A package's object type is a JS handle of that shape; its other aliases are what they say.
     if (alias !== undefined && alias.js !== undefined) {
       const aliased = this.aliasType(alias, args, t);
@@ -867,7 +874,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (isEnum && name === undefined) return this.host.enumType(owner);
     const found = isEnum ? this.host.enumMember(owner, name!) : undefined;
     if (found !== undefined) return found;
-    const trait = decls.interfaces.get(t.name);
+    const declared = this.host.decls.interfaces.get(t.name);
+    const trait = declared === undefined ? undefined : cloneInterface(declared);
     // A package's interface or class is a JS handle of its shape.
     if (trait !== undefined && trait.js !== undefined) {
       const viewed = this.interfaceOf(trait, args, t);
@@ -1491,7 +1499,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const prefix = a.name.startsWith("Stmt") ? "Stmt" : "TypeNode";
       const exprName = `Expr${a.name.slice(prefix.length as i64)}`;
       const exprKey = `${exprName}<>`;
-      const exprAlias = this.host.decls.aliases.get(exprName);
+      const exprWritten = this.host.decls.aliases.get(exprName);
+      const exprAlias = exprWritten === undefined ? undefined : cloneTypeAlias(exprWritten);
       if (exprAlias !== undefined && exprAlias.typeParams.length === 0 && !this.host.resolverState.resolving.has(exprKey) && !this.host.resolverState.resolved.has(exprKey)) {
         this.aliasType(exprAlias, [], exprAlias);
         const nowDone = this.host.resolverState.resolved.get(key);

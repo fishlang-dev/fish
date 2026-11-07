@@ -1,5 +1,5 @@
-import type { Arenas, BodyId } from "./arenas.ts";
-import { inheritedId, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import type { Arenas, BodyId, ClassId } from "./arenas.ts";
+import { inheritedId, isLifetime, type Body } from "./classes.ts";
 import type { CompileError } from "./diag.ts";
 import type { Span } from "./parser.ts";
 import { TypeMap, TypeSet, type ClassType, type FunctionType, type InterfaceType, type Type, type Typing } from "./typing.ts";
@@ -11,7 +11,7 @@ export type Refused = { type: string; trait: string; reason: string };
 // What satisfying an interface needs from the checker: a class's members and their types.
 export type Members = {
   /** @throws {CompileError} */
-  classOf(t: ClassType): ClassInfo;
+  classIdOf(t: ClassType): ClassId;
   /** @throws {CompileError} */
   returnOf(f: BodyId, at: Span): Type;
   /** @throws {CompileError} */
@@ -23,7 +23,7 @@ export type Members = {
   /** @throws {CompileError} */
   typeParamsOf(f: BodyId): Type[];
   // A function declared at the top level, or lifted there, by its name.
-  bodyNamed(name: string): Body | undefined;
+  bodyIdNamed(name: string): BodyId | undefined;
   /** @throws {CompileError} */
   replaced(t: Type, swap: Ref<TypeMap<Type, Type>>): Type;
   typing(): Mut<Typing>;
@@ -173,11 +173,12 @@ function check(type: Type, trait: InterfaceType, members: Mut<Members>, at: Span
     if (sends !== undefined && (t.sends === undefined || members.typing().lower(t.sends) !== members.typing().lower(sends))) return `its 'next' takes ${t.sends === undefined ? "nothing" : `'${members.typing().show(t.sends)}'`}, not '${members.typing().show(sends)}'`;
     return members.typing().lower(t.yields) === members.typing().lower(element) ? undefined : `it yields '${members.typing().show(t.yields)}', not '${members.typing().show(element)}'`;
   }
-  const c = t !== undefined && t.kind === "class" ? members.classOf(type as ClassType) : undefined;
+  const c = t !== undefined && t.kind === "class" ? members.classIdOf(type as ClassType) : undefined;
   const wanted = members.typing().rec(trait);
   for (const f of wanted.fields) {
     const own = typeof type === "string" ? undefined : members.typing().field(type, f.name);
-    const getter = own === undefined && c !== undefined ? inheritedId(members.arenas(), c, "getters", f.name) : undefined;
+    const arenas = members.arenas();
+    const getter = own === undefined && c !== undefined ? inheritedId(arenas, arenas.classOf(c), "getters", f.name) : undefined;
     if (getter !== undefined && members.arenas().bodyOf(getter).access === "public") {
       if (!members.typing().fits(members.returnOf(getter, { start: at.start, end: at.end }), f.type)) return `types of property '${f.name}' are incompatible`;
       continue;
@@ -209,7 +210,8 @@ function check(type: Type, trait: InterfaceType, members: Mut<Members>, at: Span
       if (!fit) return `types of method '${m.name}' are incompatible`;
       continue;
     }
-    const method = c !== undefined ? inheritedId(members.arenas(), c, "methods", m.name) : undefined;
+    const arenas = members.arenas();
+    const method = c !== undefined ? inheritedId(arenas, arenas.classOf(c), "methods", m.name) : undefined;
     const access = method !== undefined ? members.arenas().bodyOf(method).access : undefined;
     // An optional method may be left out, but not stood in for by a field.
     if (method === undefined && m.omittable === true && (typeof type === "string" || members.typing().field(type, m.name) === undefined)) continue;

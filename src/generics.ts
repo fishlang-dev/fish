@@ -507,11 +507,11 @@ class Concreteness {
 // What instantiating needs from the checker.
 export interface InstancingHost {
   tables: Tables;
-  decls: Ref<Declarations>;
+  decls: Declarations;
   /** @throws {CompileError} */
   resolveType(t: TypeNode): Type;
   /** @throws {CompileError} */
-  paramType(p: Param, property?: boolean): Type;
+  paramType(this: Mut<this>, p: Ref<Param>, property: boolean): Type;
   /** @throws {CompileError} */
   resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type;
   // A type in a body's own signature, where its parameter names shadow top-level ones.
@@ -1058,7 +1058,7 @@ export class Instancing<H extends InstancingHost> {
     const held = r?.kind === "ref" ? r.to : t;
     if (this.host.tables.typing.recOf(held)?.kind !== "class") return t;
     const members = this.host.members();
-    const method = inherited(members.arenas(), members.classOf(held as ClassType), "methods", ITERATOR);
+    const method = inherited(members.arenas(), members.arenas().classOf(members.classIdOf(held as ClassType)), "methods", ITERATOR);
     if (method === undefined) return t;
     const gives = members.returnOf(method.bodyId, at);
     return r?.kind === "ref" ? this.host.tables.typing.refType(gives, r.mutable) : gives;
@@ -1162,7 +1162,7 @@ function callsIn(n: AnyNode, name: string, repeated: boolean, count: Mut<Calls>)
 // What generic classes need from the checker.
 export interface GenericClassesHost {
   tables: Tables;
-  decls: Ref<Declarations>;
+  decls: Declarations;
   classes: Map<string, ClassId>;
   templates: Map<string, ClassNode & { name: string }>;
   register(c: ClassId): void;
@@ -1291,8 +1291,8 @@ function implicitArgument<H extends InstancingHost>(host: Mut<H>, arg: Ref<Expr>
     const fam = family === undefined || typeof family === "string" ? undefined : host.tables.typing.rec(family);
     if (fam !== undefined && fam.kind === "function" && fam.generic !== undefined && fam.name === b.name) return type;
     if (h !== undefined && h.kind === "closure" && h.generic !== undefined) {
-      const f = host.members().bodyNamed(h.generic);
-      const reason = f !== undefined ? familyMismatch(f.bodyId, bound as FunctionType, host.members(), { start: arg.start, end: arg.end }) : undefined;
+      const f = host.members().bodyIdNamed(h.generic);
+      const reason = f !== undefined ? familyMismatch(f, bound as FunctionType, host.members(), { start: arg.start, end: arg.end }) : undefined;
       if (reason !== undefined && reason !== "") throw new CompileError("E0101", `${message}: ${reason}`, arg.start, arg.end);
       return type;
     }

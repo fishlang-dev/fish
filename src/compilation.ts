@@ -90,7 +90,6 @@ export type Tables = {
   files: Compilation["files"];
   rust: RustTables;
   generated: Compilation["generated"];
-  timings?: Timings;
   // The `let` statements and parameters that declare a name, as the checker meets them; every
   // other node an instance's `locals` holds is a use of one.
   declarations: NodeSet<Expr | Stmt | Param | ObjectProp>;
@@ -338,7 +337,6 @@ export type Timed<T> = () => T;
 
 export function newTables({ session, names, enumInits, fileNames, looked, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
-    timings: session.timings,
     session,
     names,
     enumInits,
@@ -493,18 +491,18 @@ export type Started = { timing: boolean; outer: f64; start: f64 };
 
 // Starts timing a stage of a compilation, when it is timed.
 export function timingStart(tables: Mut<Tables>): Started {
-  if (tables.timings === undefined) return { timing: false, outer: 0, start: 0 };
-  const outer = tables.timings.inner;
-  tables.timings.inner = 0;
-  return { timing: true, outer, start: now(tables.timings) };
+  if (tables.session.timings === undefined) return { timing: false, outer: 0, start: 0 };
+  const outer = tables.session.timings.inner;
+  tables.session.timings.inner = 0;
+  return { timing: true, outer, start: now(tables.session.timings) };
 }
 
 // Adds a stage's own time to stage `name`, leaving out the stages inside it.
 export function timingEnd(tables: Mut<Tables>, name: string, started: Ref<Started>) {
-  if (!started.timing || tables.timings === undefined) return;
-  const spent = now(tables.timings) - started.start;
-  tables.timings.ms.set(name, (tables.timings.ms.get(name) ?? 0) + spent - tables.timings.inner);
-  tables.timings.inner = started.outer + spent;
+  if (!started.timing || tables.session.timings === undefined) return;
+  const spent = now(tables.session.timings) - started.start;
+  tables.session.timings.ms.set(name, (tables.session.timings.ms.get(name) ?? 0) + spent - tables.session.timings.inner);
+  tables.session.timings.inner = started.outer + spent;
 }
 
 // Runs `run`, adding its own time to stage `name` when timing.
