@@ -1,7 +1,7 @@
 import type { Declarations, Tables } from "./compilation.ts";
 import { stdModuleAt, textAt } from "./program.ts";
 import { rustClassOf, type RustClass } from "./rust.ts";
-import { abstractIn, copyFor, inherited, inheritedId, selfTyped, shownName, isLifetime, type Body, type ClassInfo } from "./classes.ts";
+import { abstractIn, cloneSignature, copyFor, inherited, inheritedId, selfTyped, shownName, isLifetime, type Body, type ClassInfo } from "./classes.ts";
 import { openParam } from "./typefns.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { Direct } from "./overloads.ts";
@@ -1641,7 +1641,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const params = this.jsParams(m.params);
       params.forEach((p) => this.crossing(p, `'${jsClass.name}.${callee.name}' takes a`, e));
       this.jsArgs(e, params, m.params.map((p) => p.optional));
-      const returns = m.returns ? this.ctx.resolveType(m.returns) : this.ctx.tables.typing.blockType("JsValue");
+      const returns = m.returns !== undefined ? this.ctx.resolveType(m.returns) : this.ctx.tables.typing.blockType("JsValue");
       return { type: this.crossing(returns === "void" ? "void" : this.ctx.tables.typing.jsView(returns), `'${jsClass.name}.${callee.name}' gives a`, e), what: `'${callee.name}'` };
     }
     if (callee.kind === "ident" && TIMER_CALLS.has(callee.name) && (this.ctx.lookup(callee.name, undefined) === undefined) && !this.ctx.byName.has(callee.name)) {
@@ -1651,7 +1651,8 @@ export class Expressions<C extends Context> implements Union<C> {
       return this.call(this.promiseResolvers(e));
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && (callee.name === "resolve" || callee.name === "reject") && (this.ctx.lookup("Promise", undefined) === undefined) && !this.ctx.classes.has("Promise")) {
-      return this.call(this.promiseSettled(e, callee.name));
+      const settled = callee.name === "resolve" ? this.promiseSettled(e, "resolve") : this.promiseSettled(e, "reject");
+      return this.call(settled);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "AbortSignal" && (this.ctx.lookup("AbortSignal", undefined) === undefined) && !this.ctx.classes.has("AbortSignal")) {
       return this.signalStatic(e, callee);
@@ -2018,17 +2019,17 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private calleeFound(this: Mut<this>, e: Ref<Call>, foundId: BodyId | undefined): { type: Type; what: string } {
     const callee: Ref<Expr> = e.callee;
-    const found = this.ctx.tables.arenas.bodyOf(foundId);
     // A package's function declared with several signatures is checked against the first that
     // takes the arguments, as TypeScript picks one.
     const targetId = this.targetFor(e, foundId);
-    const target = this.ctx.tables.arenas.bodyOf(targetId);
+    const target = targetId === undefined ? undefined : cloneSignature(this.ctx.tables.arenas.bodyOf(targetId));
     // A package's const is a value; one holding a function would be a function crossing from JS.
     if (target !== undefined && target.js?.const === true) {
       const held = this.ctx.resolveType(target.returnType!);
       const kind = this.recOf(held)?.kind;
       const callable = kind === "function" || kind === "closure" || this.boundFunction(held) !== undefined;
-      throw new CompileError(callable ? "E1005" : "E0503", callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${this.ctx.tables.typing.show(this.ctx.tables.typing.jsView(held))}' has no call signatures`, e.start, e.end);
+      const viewed = this.ctx.tables.typing.jsView(held);
+      throw new CompileError(callable ? "E1005" : "E0503", callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${this.ctx.tables.typing.show(viewed)}' has no call signatures`, e.start, e.end);
     }
     if (target !== undefined && target.name.replace(/-fsh\d+$/, "") === "ok" && stdModuleAt(this.ctx.tables.files, target.start) === "node:assert") return this.assertion(e);
     // node:util's functions that take any values, as Node's do, given their meaning here.
@@ -2072,8 +2073,8 @@ export class Expressions<C extends Context> implements Union<C> {
 
   /** @throws {CompileError} */
   private calleeUtil(this: Mut<this>, e: Ref<Call>, targetId: BodyId | undefined, util: string | undefined): { type: Type; what: string } {
-    const callee = e.callee;
-    const target = this.ctx.tables.arenas.bodyOf(targetId);
+    const callee: Ref<Expr> = e.callee;
+    const target = targetId === undefined ? undefined : cloneSignature(this.ctx.tables.arenas.bodyOf(targetId));
     // Fish's value equality, which `===` already is.
     if (util === "isDeepStrictEqual") {
       if (e.args.length !== 2) throw new CompileError("E0504", "'isDeepStrictEqual' takes 2 arguments", e.start, e.end);
@@ -2088,13 +2089,13 @@ export class Expressions<C extends Context> implements Union<C> {
     if (target !== undefined && this.ctx.macroBody(target.bodyId)) throw new CompileError("E0503", `'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
     // The prelude holds std's TLS helper, so a program would otherwise reach it; only std calls it.
     const stdOnly = callee.kind === "ident" && callee.name === "__tlsClient" && e.start < STD_BASE && stdModuleAt(this.ctx.tables.files, e.start) === undefined;
-    if (!target || stdOnly) {
+    if (target === undefined || stdOnly) {
       const name = callee.kind === "ident" ? `'${callee.name}'` : "this expression";
       if (callee.kind === "ident" && this.ctx.byName.has(`const ${callee.name}`)) throw new CompileError("E0801", `'${callee.name}' is a top-level const, and calling a function value one holds isn't supported yet; write its value as an arrow, as in 'const ${callee.name} = (x: i64) => ...', or declare it with 'function'`, callee.start, callee.end);
       throw new CompileError("E0401", `unknown function ${name}${callee.kind === "ident" ? didYouMean(callee.name, this.ctx.names(callee.start)) : ""}`, callee.start, callee.end);
     }
-    if (target.foreign && !target.rust) this.needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
-    if (target.js) this.ctx.tables.jsCalls.set(e, target.js);
+    if (target.foreign === true && target.rust === undefined) this.needsUnsafe(`calling the C function '${target.name}'`, callee, "the compiler can't check what C code does");
+    if (target.js !== undefined) this.ctx.tables.jsCalls.set(cloneExpr(e), { ...target.js });
     if (target.params.length > 0 && target.params[target.params.length - 1]!.rest && !this.ctx.tables.tagCalls.has(e)) {
       const packed = this.packRest(e, e.args, target.params);
       if (packed !== undefined && packed.kind === "call") return this.calleeArgs(packed, target.bodyId);
@@ -3775,13 +3776,17 @@ export class Expressions<C extends Context> implements Union<C> {
       const count = rest >= 2 ? this.arrayLength(list[2]!, false) : this.intAt(-1n, at);
       const bytes = this.intAt(size, at);
       const label: Expr = { id: nextId(this.ctx.tables.ids), kind: "string", value: name, ...at };
-      return this.typedAs(e, this.typedCall(helper, [cloneExpr(source), offset, count, bytes, label], at), typed);
+      const made = this.typedCall(helper, [cloneExpr(source), offset, count, bytes, label], at);
+      return this.typedAs(e, made, typed);
     }
     if (this.isArray(held) && rest === 0 && name !== "ArrayBuffer") {
       const inner = this.ctx.tables.typing.rec(held).element;
       const got = this.ctx.tables.typing.lower(inner);
       if (got !== element) throw new CompileError("E0101", `'new ${name}' copies elements of type '${this.ctx.tables.typing.show(element)}', not '${this.ctx.tables.typing.show(got)}'; convert them first, as in 'xs.map((x) => x as ${this.ctx.tables.typing.show(element)})'${floatInto(got, element)}`, source.start, source.end);
-      return this.typedAs(e, { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(source), name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at }, typed);
+      const callId = nextId(this.ctx.tables.ids);
+      const memberId = nextId(this.ctx.tables.ids);
+      const sliced: Expr = { id: callId, kind: "call", callee: { id: memberId, kind: "member", object: cloneExpr(source), name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+      return this.typedAs(e, sliced, typed);
     }
     throw new CompileError("E0504", usage, e.start, e.end);
   }
@@ -4596,8 +4601,9 @@ export class Expressions<C extends Context> implements Union<C> {
       else this.passedExactly(name, params[i]!, c.params[i]!, undefined, { start: callback.start, end: callback.end });
     }
     if (this.holdsFuture(c.returns)) throw new CompileError("E0801", `'${name}' with a callback giving a Promise isn't supported yet`, callback.start, callback.end);
-    if (c.throws) this.ctx.raise(e, c.throws, `'${name}'`);
-    return { type: name === "update" ? "boolean" : "void", what: `'${name}'` };
+    if (c.throws !== undefined) this.ctx.raise(e, c.throws, `'${name}'`);
+    const type: Type = name === "update" ? "boolean" : "void";
+    return { type, what: `'${name}'` };
   }
 
   // `new Map<K, V>()` and `new Set<T>()`, their types written or taken from where they're expected.
