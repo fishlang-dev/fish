@@ -523,7 +523,7 @@ export interface InstancingHost {
   members(this: Mut<this>): Members;
   instancingState: InstancingState;
   // The instance being checked, which new instantiations count their depth from.
-  checking(): Instance | undefined;
+  checking(): InstanceId | undefined;
   // The type parameters of the generic class a body belongs to, if any.
   /** @throws {CompileError} */
   classParams(f: Ref<Body>): TypeParam[];
@@ -777,7 +777,7 @@ export class Instancing<H extends InstancingHost> {
     const body = this.host.tables.arenas.addBody(cloneBody(f)).bodyId;
     const symbol = generic && isConcrete ? instanceSymbol(this.host, f.name, bindings, byKey) : f.name;
     const checking = this.host.checking();
-    const depth = generic && checking !== undefined ? checking.depth + 1 : 0;
+    const depth = generic && checking !== undefined ? this.host.tables.arenas.instanceOf(checking).depth + 1 : 0;
     const found = this.host.tables.arenas.addInstance({
       body, symbol, bindings, concrete: isConcrete,
       depth, returns: "void",

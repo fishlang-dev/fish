@@ -149,7 +149,7 @@ export interface Context {
   // What a call returns as the calling body sees it: in terms of the calling instance's own
   // type parameters, where it passed them.
   /** @throws {CompileError} */
-  resultOf(this: Mut<this>, instance: InstanceId, at: Ref<Span>): Type;
+  resultOf(this: Mut<this>, instance: InstanceId, at: Ref<Span & { id: usize }>): Type;
   // What a call's returned reference borrows from, and the record of it for each call.
   /** @throws {CompileError} */
   sourcesOf(this: Mut<this>, instance: InstanceId, args: Ref<Expr[]>, receiver: Ref<Expr> | undefined, at: Ref<Span>, lent: Ref<boolean[]>): Expr[];
