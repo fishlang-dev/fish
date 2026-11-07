@@ -1901,18 +1901,20 @@ export class Expressions<C extends Context> implements Union<C> {
     // an arrow nor a name is made here, on the caller's thread, as `f |> spawn(async () => %())`.
     if (callee.kind === "ident" && callee.name === "spawnBlocking" && (!this.ctx.byName.has("spawnBlocking") || inStd)) {
       if (!this.ctx.async) throw new CompileError("E0301", "'spawnBlocking' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
-      const f = e.args[0];
-      if (e.args.length !== 1 || !f) throw new CompileError("E0305", "'spawnBlocking' takes the function to run, like 'spawnBlocking(() => hash(data))'", e.start, e.end);
+      if (e.args.length !== 1) throw new CompileError("E0305", "'spawnBlocking' takes the function to run, like 'spawnBlocking(() => hash(data))'", e.start, e.end);
+      const f: Ref<Expr> = e.args[0]!;
       if (f.kind === "arrow" && f.async) throw new CompileError("E0305", "'spawnBlocking' runs a synchronous function on a thread of its own; run async work with 'spawn' instead", f.start, f.end);
       if (f.kind === "arrow" && f.params.length > 0) throw new CompileError("E0305", "'spawnBlocking' calls its function with no arguments, so it can't take parameters; capture what it needs instead", f.start, f.end);
       const made = f.kind !== "arrow" && f.kind !== "ident";
-      const fn: Expr = made ? { id: nextId(this.ctx.tables.ids), kind: "topic", start: f.start, end: f.end } : f;
+      const fn: Expr = made ? { id: nextId(this.ctx.tables.ids), kind: "topic", start: f.start, end: f.end } : cloneExpr(f);
       const run: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: fn, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
-      if (f.kind !== "arrow") this.ctx.tables.blockingRuns.add(run);
+      if (f.kind !== "arrow") this.ctx.tables.blockingRuns.add(cloneExpr(run));
       const arrow: Expr = { id: nextId(this.ctx.tables.ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: run, start: f.start, end: f.end };
       const task: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: arrow, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
-      const spawned: Expr = made ? { id: nextId(this.ctx.tables.ids), kind: "pipe", value: f, body: task, start: f.start, end: f.end } : arrow;
-      return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "blocking spawn", start: callee.start, end: callee.end }, args: [spawned] }));
+      const spawned: Expr = made ? { id: nextId(this.ctx.tables.ids), kind: "pipe", value: cloneExpr(f), body: task, start: f.start, end: f.end } : arrow;
+      const blocking: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: "blocking spawn", start: callee.start, end: callee.end };
+      const replaced = this.ctx.tables.rewrites.replace(e, { ...e, callee: blocking, args: [spawned] });
+      return this.callMade(replaced);
     }
     // std's `timer spawn` is `spawn` with the task's first poll run at once; `blocking spawn` is
     // what `spawnBlocking` becomes.
@@ -1921,18 +1923,13 @@ export class Expressions<C extends Context> implements Union<C> {
       if (!this.ctx.async) throw new CompileError("E0301", "'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("E0305", "'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
-      const given = e.args[0]!;
+      const given: Ref<Expr> = e.args[0]!;
       if (given.kind === "arrow" && given.async && given.params.length === 0) {
-        e = this.ctx.tables.rewrites.replace(e, { ...e, args: [{ id: nextId(this.ctx.tables.ids), kind: "call", callee: given, typeArgs: [], args: [], optional: false, start: given.start, end: given.end }] }) as Call;
+        const run: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: cloneExpr(given), typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
+        const made = this.ctx.tables.rewrites.replace(e, { ...e, args: [run] });
+        if (made.kind === "call") return this.spawnOf(made, spawning);
       }
-      const t = this.value(e.args[0]!);
-      const r = this.recOf(t);
-      if (r?.kind !== "future" || t === YIELD_NOW || t === SLEEP || this.ctx.tables.typing.leafOf.has(t as FutureType)) throw new CompileError("E0305", `'spawn' needs a Promise from an async function's call, not '${this.ctx.tables.typing.show(t)}'`, e.args[0]!.start, e.args[0]!.end);
-      const blocker = this.unsent(t);
-      if (blocker) {
-        throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${this.ctx.tables.typing.show(blocker)}', which ${typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "shared" ? COUNTED_UNLOCKED : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
-      }
-      return { type: this.ctx.tables.typing.handleType(r.gives, r.throws), what: "'spawn'" };
+      return this.spawnOf(e, spawning);
     }
     // `sleep(ms)`: a future done once that many milliseconds have passed, holding no thread.
     if (callee.kind === "ident" && callee.name === "sleep" && (!this.ctx.byName.has("sleep") || inStd)) {
@@ -1955,22 +1952,27 @@ export class Expressions<C extends Context> implements Union<C> {
         const bytes = this.value(e.args[1]!);
         this.coerce(e.args[1]!, bytes, this.ctx.tables.typing.arrayType("u8"), `the bytes are a 'u8[]', not '${this.ctx.tables.typing.show(bytes)}'`);
       }
-      this.ctx.tables.fileCalls.add(e);
+      this.ctx.tables.fileCalls.add(cloneExpr(e));
       return { type: this.ctx.tables.typing.leafFuture(reading ? "readFile" : "writeFile", "void", this.ioError()), what: `'${callee.name}'` };
     }
     // The blocking calls node:fs is written over, as `fileReadSync(path)`, run on the calling
     // thread.
     const sync = callee.kind === "ident" && (inStd || stdModuleAt(this.ctx.tables.files, e.start) !== undefined) ? syncFileSignatures(this.ctx.tables.typing)[callee.name] : undefined;
-    if (sync) {
-      const [params, returns, throws] = sync;
-      const name = (callee as Extract<Expr, { kind: "ident" }>).name;
+    if (sync !== undefined) {
+      const params = sync[0];
+      const returns = sync[1];
+      const throws = sync[2];
+      const name = callee.kind === "ident" ? callee.name : "";
       if (e.args.length !== params.length) throw new CompileError("E0504", `'${name}' takes ${params.length} argument${params.length === 1 ? "" : "s"}`, e.start, e.end);
-      e.args.forEach((a, i) => {
-        const t = this.value(a);
-        this.coerce(a, t, params[i]!, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(params[i]!)}'`);
-      });
-      if (throws) this.ctx.raise(e, this.ioError(), `'${name}'`);
-      this.ctx.tables.syncFileCalls.set(e, name);
+      for (let i: usize = 0; i < e.args.length; i++) {
+        const t = this.value(e.args[i]!);
+        this.coerce(e.args[i]!, t, params[i]!, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(params[i]!)}'`);
+      }
+      if (throws) {
+        const error = this.ioError();
+        this.ctx.raise(e, error, `'${name}'`);
+      }
+      this.ctx.tables.syncFileCalls.set(cloneExpr(e), name);
       return { type: returns, what: `'${name}'` };
     }
     // The std's timers: `timerSet(callback, ms, repeat, loop)` hands a callable to the runtime,
@@ -4889,6 +4891,19 @@ export class Expressions<C extends Context> implements Union<C> {
     this.expect(x, to);
     const got = this.value(x);
     this.coerce(x, got, to, `argument of type '${this.ctx.tables.typing.show(got)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(to)}'`);
+  }
+
+  // A `spawn` of a Promise: the task runs on any thread, so it must own all it uses.
+  /** @throws {CompileError} */
+  private spawnOf(this: Mut<this>, e: Ref<Call>, spawning: string): { type: Type; what: string } {
+    const t = this.value(e.args[0]!);
+    const r = this.recOf(t);
+    if (r?.kind !== "future" || t === YIELD_NOW || t === SLEEP || this.ctx.tables.typing.leafOf.has(t as FutureType)) throw new CompileError("E0305", `'spawn' needs a Promise from an async function's call, not '${this.ctx.tables.typing.show(t)}'`, e.args[0]!.start, e.args[0]!.end);
+    const blocker = this.unsent(t);
+    if (blocker !== undefined) {
+      throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${this.ctx.tables.typing.show(blocker)}', which ${typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "shared" ? COUNTED_UNLOCKED : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
+    }
+    return { type: this.ctx.tables.typing.handleType(r.gives, r.throws), what: "'spawn'" };
   }
 
   /** @throws {CompileError} */
