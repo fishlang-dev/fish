@@ -1979,23 +1979,24 @@ export class Expressions<C extends Context> implements Union<C> {
     // starting the timer task `loop` once; `timerNext()` waits for the next one due, and
     // `timerClear(id)` drops one.
     if (callee.kind === "ident" && (inStd || this.ctx.tables.timerSets.has(e)) && (callee.name === "timerSet" || callee.name === "timerNext" || callee.name === "timerClear")) {
-      this.ctx.tables.timerCalls.set(e, callee.name);
-      if (callee.name === "timerNext") return { type: this.ctx.tables.typing.leafFuture("timerNext", this.ctx.tables.typing.timerCallback()), what: "'timerNext'" };
+      this.ctx.tables.timerCalls.set(cloneExpr(e), callee.name);
+      const callback = this.ctx.tables.typing.timerCallback();
+      if (callee.name === "timerNext") return { type: this.ctx.tables.typing.leafFuture("timerNext", callback), what: "'timerNext'" };
       if (callee.name === "timerClear") {
-        this.coerce(e.args[0]!, this.value(e.args[0]!), "i64", "a timer's id is an 'i64'");
+        this.coerceValue(e.args[0]!, "i64", "a timer's id is an 'i64'");
         return { type: "void", what: "'timerClear'" };
       }
-      this.expect(e.args[0]!, this.ctx.tables.typing.timerCallback());
-      this.coerce(e.args[0]!, this.value(e.args[0]!), this.ctx.tables.typing.timerCallback(), "a timer runs an async function");
+      this.expect(e.args[0]!, callback);
+      this.coerceValue(e.args[0]!, callback, "a timer runs an async function");
       const delay = this.value(e.args[1]!);
       this.coerce(e.args[1]!, delay, "i64", `a delay is milliseconds as an 'i64', not '${this.ctx.tables.typing.show(delay)}'`);
-      this.coerce(e.args[2]!, this.value(e.args[2]!), "boolean", "whether it repeats is a 'boolean'");
+      this.coerceValue(e.args[2]!, "boolean", "whether it repeats is a 'boolean'");
       this.value(e.args[3]!);
       return { type: "i64", what: "'timerSet'" };
     }
     if (callee.kind === "ident" && callee.name === "jsEvaluate" && stdModuleAt(this.ctx.tables.files, e.start) === "fish:engine") {
-      this.coerce(e.args[0]!, this.value(e.args[0]!), "string", "a module's source is a 'string'");
-      this.ctx.tables.jsEvaluations.add(e);
+      this.coerceValue(e.args[0]!, "string", "a module's source is a 'string'");
+      this.ctx.tables.jsEvaluations.add(cloneExpr(e));
       return { type: this.ctx.tables.typing.blockType("JsValue"), what: "'jsEvaluate'" };
     }
     // `yieldNow()`: a future that is pending once, letting other tasks run.
@@ -2007,15 +2008,15 @@ export class Expressions<C extends Context> implements Union<C> {
     // owns and frees when it ends.
     if (callee.kind === "ident" && callee.name === "cString" && !this.ctx.byName.has("cString")) {
       if (e.args.length !== 1) throw new CompileError("E1006", "'cString' takes 1 argument", e.start, e.end);
-      if (this.ctx.generator) throw unsupported("'cString' inside generators", callee);
-      if (this.ctx.async) throw unsupported("'cString' inside async functions", callee);
+      if (this.ctx.generator) throw unsupported("'cString' inside generators", { start: callee.start, end: callee.end });
+      if (this.ctx.async) throw unsupported("'cString' inside async functions", { start: callee.start, end: callee.end });
       const t = this.value(e.args[0]!);
       this.coerce(e.args[0]!, t, "string", `'cString' takes a string, not '${this.ctx.tables.typing.show(t)}'`);
       return { type: this.ctx.tables.typing.pointerType("u8", false), what: "'cString'" };
     }
     // `fromCString(p)`: a new string from a C string's bytes, read up to its NUL.
     if (callee.kind === "ident" && callee.name === "fromCString" && !this.ctx.byName.has("fromCString")) {
-      this.needsUnsafe("'fromCString'", callee);
+      this.needsUnsafe("'fromCString'", { start: callee.start, end: callee.end });
       if (e.args.length !== 1) throw new CompileError("E1006", "'fromCString' takes 1 argument", e.start, e.end);
       const want = this.ctx.tables.typing.pointerType("u8", false);
       const t = this.value(e.args[0]!);
@@ -4885,6 +4886,13 @@ export class Expressions<C extends Context> implements Union<C> {
   // system says no. std's own `TcpListener.unix(path)` and `TcpStream.unix(path)` give a socket on a
   // path typed as TCP's, so serve and fetch share their HTTP code.
   /** @throws {CompileError} */
+  // A value read and coerced to `to`.
+  /** @throws {CompileError} */
+  private coerceValue(this: Mut<this>, e: Ref<Expr>, to: Type, message: string): void {
+    const given = this.value(e);
+    this.coerce(e, given, to, message);
+  }
+
   // An argument checked against the parameter type it is passed as.
   /** @throws {CompileError} */
   private argumentTo(this: Mut<this>, x: Ref<Expr>, to: Type): void {
