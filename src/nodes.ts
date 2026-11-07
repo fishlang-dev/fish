@@ -623,8 +623,13 @@ export class Rewrites implements Replacements {
 
   // Records `by`, a node made for the purpose, as `node`'s replacement, and gives it.
   replace(this: Mut<this>, node: Ref<Id>, by: Expr): Expr {
+    return this.replaceAt(node.id, by);
+  }
+
+  // Records `by` as the replacement of the node of id `id`, for a caller holding a node whose
+  // type has no `id` field of its own, as a union of nodes has none.
+  replaceAt(this: Mut<this>, id: usize, by: Expr): Expr {
     this.hasChanges = true;
-    const id = node.id;
     this.exprs.set(id, withIdExpr(by, id, 0));
     return this.exprs.get(id)!;
   }
