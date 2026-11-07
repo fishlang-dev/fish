@@ -7119,14 +7119,15 @@ export class Expressions<C extends Context> implements Union<C> {
     if (base === undefined) throw new CompileError("E0708", "'super' can only be used in a class that extends another", callee.start, callee.end);
     if (!this.ctx.thisReady(callee.object)) throw new CompileError("E0703", "'super' can't be used until every field is assigned", callee.object.start, callee.object.end);
     const target = this.inheritedOf(base, "methods", callee.name);
-    if (target === undefined) {
+    const targetId = target !== undefined ? target.bodyId : undefined;
+    const abstract = target !== undefined && target.abstract !== undefined;
+    const declaredIn = target !== undefined ? target.owner : undefined;
+    const copyOf = target !== undefined ? target.copyOf : undefined;
+    if (targetId === undefined) {
       const names = this.memberNames(base);
       throw new CompileError("E0502", `'${this.ctx.tables.typing.rec(base).name}' has no method '${callee.name}'${didYouMean(callee.name, names)}`, callee.start, callee.end);
     }
-    let found = target.bodyId;
-    const abstract = target.abstract !== undefined;
-    const declaredIn = target.owner;
-    const copyOf = target.copyOf;
+    let found = targetId;
     if (abstract) throw new CompileError("E0701", `'${callee.name}' is abstract in '${this.ctx.tables.typing.rec(declaredIn!).name}', so 'super.${callee.name}()' has nothing to run`, callee.start, callee.end);
     // A template runs as this class's own copy of it, on this class's `this`.
     const original = copyOf !== undefined ? copyOf : found;
@@ -7484,11 +7485,11 @@ export class Expressions<C extends Context> implements Union<C> {
       // `x!` is what an Option holds; it panics when there is nothing. On a value that can't be
       // empty, as `xs[i]!` written for TypeScript's unchecked indexes, it is that value itself.
       case "nonNull": {
-        const narrows = e.narrows;
-        if ((narrows !== undefined)) return this.narrowedReturn(e.expr, narrows);
+        if (e.narrows !== undefined) return this.narrowedReturn(e.expr, e.narrows);
         const given = this.value(e.expr);
         if (this.redundant(e, given)) return given;
-        return this.held(this.loaded(e.expr, given) as UnionType);
+        const loaded = this.loaded(e.expr, given);
+        return this.held(loaded as UnionType);
       }
       case "bool":
         return "boolean";
@@ -7520,7 +7521,7 @@ export class Expressions<C extends Context> implements Union<C> {
         if (this.ctx.tables.typing.isPlainJs(object)) throw new CompileError("E1005", `a 'JsValue' could be anything, as an 'unknown' could, so its elements are read with 'at': '${this.placeText(e.object)}.at(i)'`, e.start, e.end);
         if (!stringLike(this.ctx.tables.typing, object) && !array) throw unsupported(EXPRESSION_FORMS.index, e);
         if (e.optional) throw unsupported("optional index expressions", e);
-        if (array && object !== through) this.ctx.coercions.set(e.object, object);
+        if (array && object !== through) this.ctx.coercions.set(cloneExpr(e.object), object);
         if (!array) this.text(e.object, object, false);
         const index = this.value(e.index);
         this.coerce(e.index, index, "usize", `${array ? "an array" : "a string"}'s index is a 'usize', not '${this.ctx.tables.typing.show(index)}'`);
@@ -7529,247 +7530,50 @@ export class Expressions<C extends Context> implements Union<C> {
       // Text alone is a literal; with substitutions, a new string.
       case "template":
         if (e.exprs.length === 0) return this.ctx.tables.typing.literalType(e.quasis[0]!);
-        for (const x of e.exprs) this.joined(x, this.operand(x), "a template");
+        for (const x of e.exprs) {
+          const t = this.operand(x);
+          this.joined(x, t, "a template");
+        }
         return "string";
-      case "member": {
-        if (e.object.kind === "super" && this.superDelegated(e.name)) return this.typeOf(this.become(e, this.throughEmbedded(e)));
-        // A static property of a package's class.
-        const jsClass = e.object.kind === "ident" && (this.ctx.lookup(e.object.name, undefined) === undefined) ? this.ctx.tables.jsClasses.get(e.object.name) : undefined;
-        if ((jsClass !== undefined)) {
-          const m = this.jsStatic(jsClass, e.name, e);
-          if (m.kind !== "property") throw new CompileError("E0503", `'${e.name}' is a method of '${jsClass.name}'; call it`, e.start, e.end);
-          const declared = (m.type !== undefined) ? this.ctx.resolveType(m.type) : this.ctx.tables.typing.blockType("JsValue");
-          return this.crossing(this.ctx.tables.typing.jsView(m.optional ? this.ctx.tables.typing.unionType([declared, "null"]) : declared), `'${jsClass.name}.${e.name}' is a`, e);
-        }
-        if (e.object.kind === "ident" && isTypedName(e.object.name) && (this.ctx.lookup(e.object.name, undefined) === undefined) && !this.ctx.classes.has(e.object.name)) {
-          if (e.name !== "BYTES_PER_ELEMENT" || e.object.name === "ArrayBuffer") throw new CompileError("E0502", `'${e.object.name}' has no static property '${shownName(e.name)}'`, e.start, e.end);
-          return this.typeOf(this.become(e, { id: nextId(this.ctx.tables.ids), kind: "int", value: BigInt(typedSize(typedNamed(e.object.name)!)), start: e.start, end: e.end }));
-        }
-        if (this.isMath(e.object)) {
-          if (MATH_CONSTANTS[e.name] === undefined) throw new CompileError("E0503", `'Math.${e.name}' is a function, or not in Fish yet; the constants are ${Object.keys(MATH_CONSTANTS).join(", ")}`, e.start, e.end);
-          this.ctx.tables.maths.add(e);
-          return "f64";
-        }
-        const property = this.staticProperty(e);
-        if (property) {
-          return this.typeOf(this.become(e, this.staticRead(e, property)));
-        }
-        // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
-        const named = e.object.kind === "ident" && (this.ctx.lookup(e.object.name, undefined) === undefined) ? this.ctx.enums.get(e.object.name) : undefined;
-        if (named?.data) return this.variant(e, named, true);
-        if (named && e.object.kind === "ident") {
-          const found = this.ctx.enumMember(e.object.name, e.name);
-          if (!found) throw new CompileError("E0502", `property '${e.name}' does not exist on enum '${e.object.name}'${didYouMean(e.name, this.ctx.enumMemberNames(e.object.name))}`, e.start, e.end);
-          return found;
-        }
-        if (e.object.kind === "ident") this.ctx.exprsState.objects.add(cloneExpr(e.object));
-        const through = this.linked(e) ? this.unwrapped(e.object, e.optional) : this.value(e.object);
-        const tr = this.recOf(through);
-        const object = this.ctx.tables.typing.unfold(tr?.kind === "ref" ? tr.to : through);
-        if (object === "never") return "never";
-        const or = this.recOf(object);
-        // A field read through a reference loads what it points to; a getter gets the pointer.
-        if (or?.kind === "unknown") throw this.unnarrowed(e);
-        if (or?.kind === "shared") return this.sharedField(e, object as SharedType);
-        if (or?.kind === "block") return this.blockProperty(e, object as BlockType);
-        if (or?.kind === "dyn") return this.dynField(e, object as DynType);
-        const rx = this.asRegex(object);
-        if (rx) {
-          if (object !== through) this.ctx.coercions.set(e.object, object);
-          return this.regexMember(e, rx, this.ctx.tables.typing.lower(object) !== rx);
-        }
-        const load = () => object !== through && this.ctx.coercions.set(e.object, object);
-        const shared = or?.kind === "union" ? unionField(this.ctx.tables.typing, object as UnionType, e.name, e) : undefined;
-        if (shared) {
-          load();
-          return this.linked(e) ? this.optional(shared, e) : shared;
-        }
-        if (or?.kind === "class") this.cls(object as ClassType);
-        // A dictionary's property is the entry under that key, as `o[k]` reads it.
-        if (or?.kind === "map" && or.dict) {
-          if (this.linked(e)) throw unsupported("optional chains reading a dictionary", e);
-          if (this.ctx.exprsState.writing === e.id) throw this.dictWrite(e);
-          this.ctx.exprsState.once.add(e.object);
-          return this.typeOf(this.dictCall(e, e.object, "get", [{ id: nextId(this.ctx.tables.ids), kind: "string", value: e.name, start: e.start, end: e.end }]));
-        }
-        // A Map's or a Set's one property is its size, the number of entries it holds.
-        if (or?.kind === "map") {
-          if ((or.set ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError("E0503", `'${or.set ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "size") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, ["size", ...(or.set ? SET_METHODS : MAP_METHODS)])}`, e.start, e.end);
-          load();
-          return this.linked(e) ? this.optional("usize", e) : "usize";
-        }
-        // A tuple's one property is its length: the count of its elements, up to the last
-        // optional one there.
-        if (this.ctx.tables.typing.isTuple(object) && !this.ctx.tables.typing.rec(object as ObjectType).match && e.name === "length") {
-          load();
-          return this.linked(e) ? this.optional("usize", e) : "usize";
-        }
-        // A fixed array's one property is its length, known while compiling.
-        if (this.isFixed(object)) {
-          if (e.name !== "length") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, ["length"])}`, e.start, e.end);
-          load();
-          return "usize";
-        }
-        // An array's properties are its length and its capacity, the room before a push grows it;
-        // capacity isn't JavaScript's.
-        if (this.isArray(object)) {
-          const typed = this.ctx.tables.typing.typedName(object);
-          if (typed && TYPED_MEMBERS.has(e.name)) return this.typedMember(e, typed);
-          if (ARRAY_METHODS.has(e.name)) throw new CompileError("E0503", `array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
-          // A shared value's array is read as a copy, which has only the room it needs.
-          if (e.name === "capacity" && this.ctx.copiesOut.has(e.object)) throw new CompileError("E0304", `a shared value's array is read as a copy, so read its capacity inside '${this.placeText(e.object).split(".")[0]}.update(...)'`, e.start, e.end);
-          if (e.name !== "length" && e.name !== "capacity") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, ["length", "capacity", ...ARRAY_METHODS])}`, e.start, e.end);
-          load();
-          return this.linked(e) ? this.optional("usize", e) : "usize";
-        }
-        // A string's one property is its length in UTF-16 code units, a type parameter's bounded
-        // by strings included.
-        const plain = this.plainOf(object);
-        if (stringLike(this.ctx.tables.typing, plain)) {
-          if (stringMethods(this.ctx.tables.typing)[e.name]) throw new CompileError("E0503", `string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
-          if (e.name !== "length") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type 'string'${didYouMean(e.name, ["length", ...Object.keys(stringMethods(this.ctx.tables.typing))])}`, e.start, e.end);
-          this.text(e.object, plain, this.linked(e));
-          return this.linked(e) ? this.optional("usize", e) : "usize";
-        }
-        if (this.delegated(object, e.name)) return this.typeOf(this.become(e, this.throughEmbedded(e)));
-        const found = or === undefined || or.kind === "closure" ? undefined : this.ctx.tables.typing.field(object as Exclude<Type, string>, e.name);
-        const c = or?.kind === "class" ? this.cls(object as ClassType) : undefined;
-        const getter = !found && c ? inherited(this.ctx.tables.arenas, c, "getters", e.name) : undefined;
-        if (getter) {
-          this.visible(getter.access, getter.declared ?? getter.owner!, e.name, e);
-          this.ctx.calls.set(e, this.ctx.instanceOf(getter.bodyId, undefined));
-          const returns = this.ctx.returnOf(this.ctx.instanceOf((this.abstractDeclaration(e, "getters") ?? getter).bodyId, undefined), e);
-          // A getter's reference borrows from its object.
-          if (this.ctx.tables.typing.holdsRef(returns)) this.ctx.borrowsFrom.set(e, [e.object]);
-          return this.linked(e) ? this.optional(returns, e) : returns;
-        }
-        if (!found && c && inherited(this.ctx.tables.arenas, c, "methods", e.name)) throw new CompileError("E0801", "methods can't be used as values yet; call it", e.start, e.end);
-        if (!found && c && inherited(this.ctx.tables.arenas, c, "setters", e.name)) throw new CompileError("E0208", `property '${e.name}' has a setter but no getter`, e.start, e.end);
-        if (!found) throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, this.memberNames(object))}`, e.start, e.end);
-        if (or?.kind === "class") this.visible(found.access, this.declaring(object as ClassType, e.name), e.name, e);
-        // Through a type parameter the field has its bound's type, and in an instance the
-        // concrete class may give it with a getter.
-        const stored = this.ctx.tables.typing.lower(object);
-        const sr = this.recOf(stored);
-        if (stored !== object && sr?.kind === "class" && !this.ctx.tables.typing.field(stored as ClassType, e.name)) {
-          const instance = this.ctx.instanceOf((this.inheritedOf(stored as ClassType, "getters", e.name)!).bodyId, undefined);
-          this.ctx.returnOf(instance, e);
-          this.ctx.calls.set(e, instance);
-        }
-        if (!this.ctx.calls.has(e)) load();
-        if (this.linked(e)) return this.optional(this.ctx.tables.typing.unfolded(found.type), e);
-        const narrowed = this.ctx.calls.has(e) || this.ctx.exprsState.asDeclared.has(e) ? undefined : this.ctx.narrowedField(e);
-        if (narrowed === undefined) {
-          this.ctx.instance.narrowedFields?.delete(e);
-          return this.ctx.tables.typing.unfolded(found.type);
-        }
-        (this.ctx.instance.narrowedFields ??= new NodeMap()).set(e, this.ctx.tables.typing.unfolded(found.type));
-        return narrowed;
-      }
+      case "member":
+        return this.memberValue(e);
       case "object": {
         const tuple = this.ctx.exprsState.tuples.get(e);
-        if (tuple) return this.tupleLiteral(e, tuple);
-        if ((this.ctx.exprsState.shaped.has(e) || this.ctx.tables.pairs.has(e)) && this.ctx.tables.tupleLiterals.has(e)) return this.tupleLiteral(e, this.shapedTuple(e, this.partTypes(e)));
+        if (tuple !== undefined) return this.tupleLiteral(e, tuple);
+        if ((this.ctx.exprsState.shaped.has(e) || this.ctx.tables.pairs.has(e)) && this.ctx.tables.tupleLiterals.has(e)) {
+          const parts = this.partTypes(e);
+          const shaped = this.shapedTuple(e, parts);
+          return this.tupleLiteral(e, shaped);
+        }
         if (e.props.some((p) => p.kind === "spread")) return this.objectSpread(e);
-        return this.ctx.tables.typing.objectType(fields(e.props.map((p) => this.property(p)), e.props));
+        let props: Field[] = [];
+        let spans: Span[] = [];
+        for (const p of e.props) {
+          props.push(this.property(p));
+          spans.push({ start: p.start, end: p.end });
+        }
+        const made = fields(props, spans);
+        return this.ctx.tables.typing.objectType(made);
       }
       // An array literal holds its elements' types, each widened as a `let` widens; with none, a
       // declared type has to say what it holds.
-      case "array": {
-        if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
-        const fromObject = this.ctx.tables.objectReads.get(e);
-        if (fromObject && !this.ctx.exprsState.wanted.has(e)) this.expect(e, this.objectRead(fromObject.name, fromObject.object).type);
-        const tuple = this.ctx.exprsState.tuples.get(e);
-        if (tuple) return this.tupleLiteral(e, tuple);
-        // A pair in `new Map([[k, v]])` is a tuple of what it holds.
-        if (this.ctx.tables.pairs.has(e)) {
-          const parts = (e.elements as Expr[]).map((x) => {
-            const t = this.ctx.tables.typing.widenLet(this.value(x));
-            this.ctx.exprsState.once.add(x);
-            return t;
-          });
-          return this.tupleLiteral(e, this.ctx.tables.typing.tupleType(parts));
-        }
-        // `Array.of<T>(...)`: an array of T, its elements checked against it.
-        const written = this.ctx.tables.ofElements.get(e);
-        if (written) {
-          // Resolved as an array's element is, so references and functions get the same rules.
-          const element = this.ctx.tables.typing.rec(this.ctx.resolveType({ id: nextId(this.ctx.tables.ids), kind: "array", element: written, start: written.start, end: written.end } as TypeNode) as ArrayType).element;
-          for (const x of e.elements as Expr[]) {
-            this.expect(x, element);
-            const t = this.value(x);
-            this.coerce(x, t, element, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(element)}'`);
-          }
-          return this.ctx.tables.typing.arrayType(element);
-        }
-        const inline = this.ctx.exprsState.fixedLiterals.get(e);
-        if (inline) {
-          const given = e.elements as Expr[];
-          if (given.length !== this.ctx.tables.typing.rec(inline).size) throw new CompileError("E0117", `type '${this.ctx.tables.typing.show(inline)}' holds ${this.ctx.tables.typing.rec(inline).size} element${this.ctx.tables.typing.rec(inline).size === 1 ? "" : "s"}, but this literal has ${given.length}`, e.start, e.end);
-          const spread = given.find((x) => x.kind === "spread");
-          if (spread) throw unsupported("spread elements in fixed array literals", spread);
-          for (const x of given) {
-            const t = this.value(x);
-            this.coerce(x, t, this.ctx.tables.typing.rec(inline).element, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(this.ctx.tables.typing.rec(inline).element)}'`);
-          }
-          return inline;
-        }
-        if (this.ctx.exprsState.shaped.has(e) && e.elements.every((x) => x !== undefined && x.kind !== "spread")) {
-          return this.tupleLiteral(e, this.shapedTuple(e, this.partTypes(e)));
-        }
-        const elements = e.elements as Expr[];
-        // A spread gives an array's elements: those of an array itself, or of what a string, a
-        // generator, a Map or a Set gives, as `Array.from` would. Its elements type the others
-        // when nothing else does.
-        const spreads = new NodeMap<Expr, Type>();
-        for (const x of elements) if (x.kind === "spread") spreads.set(x, this.spreadElements(x));
-        const first = [...spreads.values()][0];
-        if (first !== undefined && !this.ctx.exprsState.wanted.has(e)) for (const x of elements) if (x.kind !== "spread") this.expect(x, first);
-        // Closures meeting the callable an annotation expects of each element are boxed into it.
-        const want = this.ctx.exprsState.wanted.get(e);
-        const callable = typeof want !== "string" && this.recOf(want)?.kind === "dyn" && this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(want as DynType).of) ? want : undefined;
-        const promise = typeof want !== "string" && this.recOf(want)?.kind === "dyn" && this.ctx.tables.typing.promiseElement(this.ctx.tables.typing.rec(want as DynType).of) !== undefined ? want : undefined;
-        const given = elements.map((x) => {
-          const spread = spreads.get(x);
-          if (spread !== undefined) return spread;
-          const t = this.value(x);
-          const boxed = typeof t !== "string" && ((this.ctx.tables.typing.rec(t).kind === "closure" && callable) || (this.ctx.tables.typing.rec(t).kind === "future" && promise));
-          if (boxed) {
-            const into = (callable ?? promise)!;
-            this.coerce(x, t, into, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(into)}'`);
-            return into;
-          }
-          if (typeof t !== "string" && this.ctx.tables.typing.rec(t).kind === "closure") throw unsupported("arrays of functions", x);
-          if (this.ctx.tables.typing.holdsRef(t)) throw unsupported("arrays of references", x);
-          const widened = this.ctx.tables.typing.widenLet(t);
-          if (widened !== t) this.coerce(x, t, widened, "");
-          return widened;
-        });
-        const fromSpreads = spreads.size > 0 && !this.ctx.exprsState.wanted.has(e);
-        const element = given.length === 0 ? "never" : fromSpreads ? this.ctx.tables.typing.unionType([...spreads.values()]) : this.ctx.tables.typing.unionType(given);
-        elements.forEach((x, i) => {
-          if (given[i] === element || this.ctx.tables.typing.sameLowered(given[i]!, element)) return;
-          // A spread's elements are each converted to the array's type, which has to hold them.
-          if (spreads.has(x)) {
-            if (!this.ctx.tables.typing.fits(given[i]!, element)) throw new CompileError("E0101", `this spread gives '${this.ctx.tables.typing.show(given[i]!)}' elements, which an array of '${this.ctx.tables.typing.show(element)}' can't hold`, x.start, x.end);
-            return;
-          }
-          this.coerce(x, this.ctx.types.get(x)!, element, `type '${this.ctx.tables.typing.show(this.ctx.types.get(x)!)}' is not assignable to type '${this.ctx.tables.typing.show(element)}', the type of the spread's elements`);
-        });
-        return this.ctx.tables.typing.arrayType(element);
-      }
+      case "array":
+        return this.arrayValue(e);
       case "arrow":
         // A generic arrow is a family of functions: a generic function value, named by the
         // function it is lifted to.
         if (e.typeParams.some((p) => !isLifetime(p))) {
-          return this.typeOf(this.ctx.liftArrow(e));
+          const lifted = this.ctx.liftArrow(e);
+          return this.typeOf(lifted);
         }
-        return this.ctx.closure(e, this.ctx.exprsState.expecting.get(e), this.ctx.exprsState.unsafeDepth > 0, this.ctx.exprsState.owning.has(e));
+        const expecting = this.ctx.exprsState.expecting.get(e);
+        const unsafe = this.ctx.exprsState.unsafeDepth > 0;
+        const owning = this.ctx.exprsState.owning.has(e);
+        return this.ctx.closure(e, expecting, unsafe, owning);
       // `as` converts between numbers as Rust's does; a boolean or an enum member converts to
       // an integer.
       case "as": {
-        if (isConstAssertion(e)) return this.constAssertion(e.expr);
+        if (constAssertion(e)) return this.constAssertion(e.expr);
         const resolved = this.ctx.resolveType(e.type);
         // A type parameter bounded by a union or primitive is reached as its bound is at its
         // definition, and as its argument in each instance.
@@ -7781,15 +7585,18 @@ export class Expressions<C extends Context> implements Union<C> {
         return this.converted(e, resolved);
       }
       case "this":
-        if (!this.ctx.self) throw new CompileError("E0708", "'this' can only be used inside a class", e.start, e.end);
+        if (this.ctx.self === undefined) throw new CompileError("E0708", "'this' can only be used inside a class", e.start, e.end);
         if (!this.ctx.thisReady(e)) throw new CompileError("E0703", "'this' can't be used until every field is assigned", e.start, e.end);
         this.ctx.noteThis(e);
-        return this.ctx.self.type;
+        return this.ctx.self!.type;
       case "new":
         return this.newValue(e);
       case "tagged":
         if (this.isQuote(e)) return this.quote(e, e.tag.kind === "ident" && e.tag.name === "quoteType");
-        return this.typeOf(this.untag(e));
+        {
+          const untagged = this.untag(e);
+          return this.typeOf(untagged);
+        }
       case "call": {
         const { type, what } = this.call(e);
         if (type === "void") throw new CompileError("E0118", `${what} does not return a value`, e.start, e.end);
@@ -7826,17 +7633,21 @@ export class Expressions<C extends Context> implements Union<C> {
         }
         const deleted = e.op === "delete" ? this.dictEntry(e.operand) : undefined;
         // JavaScript's delete gives true whether or not the key was there.
-        if (deleted) {
+        if (deleted !== undefined) {
           const at = { start: e.start, end: e.end };
           const removed = this.dictMethod(deleted.object, "delete", [deleted.key], e);
-          return this.typeOf(this.become(e, { id: nextId(this.ctx.tables.ids), kind: "binary", op: "||", left: removed, right: { id: nextId(this.ctx.tables.ids), kind: "bool", value: true, ...at }, ...at }));
+          const id = nextId(this.ctx.tables.ids);
+          const right: Expr = { id: nextId(this.ctx.tables.ids), kind: "bool", value: true, ...at };
+          const or: Expr = { id, kind: "binary", op: "||", left: removed, right, ...at };
+          const made = this.become(e, or);
+          return this.typeOf(made);
         }
         if (e.op !== "-" && e.op !== "!" && e.op !== "~") throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
         const operand = this.operand(e.operand);
         // A brand's operators work on its base; a unit negated keeps its unit.
         const type = this.ctx.tables.typing.unbranded(operand);
         // The smallest i64 is written as the negation of a literal one past the largest.
-        if (e.op === "-" && e.operand.kind === "int" && e.operand.value === I64_MAX + 1n) this.ctx.exprsState.fitted.add(e.operand);
+        if (e.op === "-" && e.operand.kind === "int" && e.operand.value === I64_MAX + 1n) this.ctx.exprsState.fitted.add(cloneExpr(e.operand));
         if (e.op === "!" ? type !== "boolean" : type !== "bigint" && (e.op === "~" ? !isInteger(type) : !isNumeric(type))) {
           throw new CompileError("E0103", `operator '${e.op}' cannot be applied to type '${this.ctx.tables.typing.show(type)}'`, e.start, e.end);
         }
@@ -7844,167 +7655,506 @@ export class Expressions<C extends Context> implements Union<C> {
           throw new CompileError("E0110", `'${this.ctx.tables.typing.show(type)}' is unsigned, so it can't be negated; convert it to a signed type with 'as' first`, e.start, e.end);
         }
         const brand = this.recOf(operand);
-        return e.op === "-" && brand?.kind === "brand" && brand.unit ? operand : type;
+        return e.op === "-" && brand?.kind === "brand" && brand.unit !== undefined ? operand : type;
       }
-      case "assign": {
-        if (this.staticWrite(e)) throw new CompileError("E0705", "a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
-        const op = assignedWith(e.op);
-        if (!op) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
-        const entry = this.dictEntry(e.target);
-        if (entry) {
-          if (op !== "=") throw this.dictWrite(entry.place);
-          if (this.ctx.exprsState.statementAssign !== e.id) throw new CompileError("E0801", "writing a dictionary's entry gives no value to use, so write it as a statement of its own", e.start, e.end);
-          return this.typeOf(this.dictCall(e, entry.object, "set", [entry.key, e.value]));
-        }
-        const target = this.assignable(e.target, op !== "=");
-        const place = this.bare(e.target);
-        if (op === "=") this.expect(e.value, target);
-        const assigned = op === "=" ? this.value(e.value) : this.read(e.value);
-        if (op === "=") this.readOnlySubarray(e.value);
-        // A variable whose type is still open takes the integer type assigned to it.
-        if (op === "=" && isInteger(assigned) && assigned !== target && this.ctx.infer(place, assigned)) return assigned;
-        const type = op === "=" ? assigned
-          : op === "+" && this.ctx.tables.typing.unbranded(target) === "string" ? this.join(place, target, e.value, this.widen(e.value, assigned))
-          : op === "**" ? this.power(place, target, e.value, this.widen(e.value, assigned), e)
-          : binaryType(this.ctx.tables.typing, op, ...this.sameNumbers(place, target, e.value, this.widen(e.value, assigned)), e);
-        // A parameter typed by an object type or interface takes any value with its members, so
-        // what it holds may have more fields than any value written here.
-        const param = place.kind === "ident" ? this.localAt(place) : undefined;
-        if (op === "=" && param?.param && this.recOf(target)?.kind === "param" && !this.ctx.tables.typing.fits(type, target)) {
-          throw new CompileError("E0101", `'${param.name}' takes any value with the members of '${this.ctx.tables.typing.show(target)}', which may have more, so it can't be given a '${this.ctx.tables.typing.show(type)}'; declare 'let ${param.name}2: ${this.ctx.tables.typing.show(target)} = ${param.name}' to hold just those`, e.start, e.end);
-        }
-        this.coerce(e.value, type, target, `type '${this.ctx.tables.typing.show(type)}' is not assignable to type '${this.ctx.tables.typing.show(target)}'`);
-        // A handle's property is written in JS, with the value converted.
-        if (this.ctx.tables.jsMembers.has(place)) {
-          this.givenToJs(e.value, assigned);
-          // What JS is given is JS's to keep, so nothing is left to be the assignment's value.
-          if (this.ctx.tables.typing.keptByJs(target) && this.ctx.exprsState.statementAssign !== e.id) throw new CompileError("E1005", `a callback or a Promise written to property '${(place as { name: string }).name}' goes to JS, so the assignment has no value to use; write it as a statement of its own`, e.start, e.end);
-        }
-        const local = place.kind === "ident" ? this.localAt(place) : undefined;
-        if (local && typeof local.type !== "string" && this.ctx.tables.typing.rec(local.type).kind === "ref" && !this.ctx.coercions.has(place)) this.rebind(local, e.value);
-        const narrow = local && this.ctx.narrowed(local.localId);
-        if (local && op === "=" && this.ctx.coercions.has(place) && narrow && this.isRefType(narrow) && !this.ctx.tables.typing.fits(type, this.ctx.tables.typing.rec(narrow).to)) this.ctx.rewritten(local.localId, e);
-        if (local && op === "=") this.ctx.forget(local.localId, e);
-        return target;
-      }
+      case "assign":
+        return this.assignValue(e);
       case "update": {
         if (this.staticWrite(e)) throw new CompileError("E0705", "a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
         const entry = this.dictEntry(e.operand);
-        if (entry) throw this.dictWrite(entry.place);
+        if (entry !== undefined) throw this.dictWrite(entry.place);
         const target = this.assignable(e.operand, true);
         // A loose brand takes back the base `++` gives; a strict one or a unit only through `as`.
         const brand = this.recOf(target);
         if (brand?.kind === "brand" && isNumeric(brand.base)) {
-          if (brand.loose) return target;
+          if (brand.loose === true) return target;
           throw new CompileError("E0103", `operator '${e.op}' gives a '${this.ctx.tables.typing.show(brand.base)}', which a '${this.ctx.tables.typing.show(target)}' is made from only with 'as'; write it as an assignment, like 'x = (x ${e.op[0]} 1) as ${this.ctx.tables.typing.show(target)}'`, e.start, e.end);
         }
         if (!isNumeric(target) && target !== "bigint") throw new CompileError("E0103", `operator '${e.op}' cannot be applied to type '${this.ctx.tables.typing.show(target)}'`, e.start, e.end);
         return target;
       }
-      case "conditional": {
-        this.condition(e.cond);
-        const proven = this.ctx.proves(e.cond);
-        if (ruledOut(proven.yes)) return this.valueAssuming(proven.no, e.else, false);
-        if (ruledOut(proven.no)) return this.valueAssuming(proven.yes, e.then, false);
-        let then = this.valueAssuming(proven.yes, e.then, false);
-        let otherwise = this.valueAssuming(proven.no, e.else, false);
-        [then, otherwise] = this.sameNumbers(e.then, then, e.else, otherwise);
-        if (then === otherwise) return then;
-        // Two references lend shared what both point to, or a type both fit; otherwise a side
-        // that borrows gives its value.
-        const isRef = (t: Type) => typeof t !== "string" && this.ctx.tables.typing.rec(t).kind === "ref";
-        if (isRef(then) && isRef(otherwise)) {
-          const [a, b] = [this.ctx.tables.typing.rec(then as RefType).to, this.ctx.tables.typing.rec(otherwise as RefType).to];
-          if (this.ctx.tables.typing.rec(then as RefType).mutable && this.ctx.tables.typing.rec(otherwise as RefType).mutable && this.ctx.tables.typing.lower(a) === this.ctx.tables.typing.lower(b)) return then;
-          const bound = (t: Type) => {
-            const r = this.recOf(t);
-            return r?.kind === "param" ? r.bound : undefined;
-          };
-          const common = [a, b, bound(a), bound(b)].find((t) => t && this.ctx.tables.typing.fits(a, t) && this.ctx.tables.typing.fits(b, t));
-          if (common) {
-            const shared = this.ctx.tables.typing.refType(common, false);
-            this.coerce(e.then, then, shared, "");
-            this.coerce(e.else, otherwise, shared, "");
-            return shared;
-          }
-        }
-        // A reference against nothing is a reference or nothing.
-        const option = isRef(then) && otherwise === "null" ? this.ctx.tables.typing.unionType([then, "null"]) : isRef(otherwise) && then === "null" ? this.ctx.tables.typing.unionType([otherwise, "null"]) : undefined;
-        if (option) {
-          this.coerce(e.then, then, option, "");
-          this.coerce(e.else, otherwise, option, "");
-          return option;
-        }
-        if (isRef(then) || isRef(otherwise)) [then, otherwise] = [this.loaded(e.then, then), this.loaded(e.else, otherwise)];
-        if (then === otherwise) return then;
-        // A tuple of literals, as `as const` writes one, beside a tuple it fits is that tuple, since a
-        // union of tuples can't be destructured.
-        if (this.ctx.tables.typing.isTuple(then) && this.ctx.tables.typing.isTuple(otherwise)) {
-          const wider = this.ctx.tables.typing.fits(otherwise, then) ? then : this.ctx.tables.typing.fits(then, otherwise) ? otherwise : undefined;
-          if (wider !== undefined) {
-            this.coerce(e.then, then, wider, "");
-            this.coerce(e.else, otherwise, wider, "");
-            return wider;
-          }
-        }
-        return bothSides(this, e, then, otherwise);
-      }
+      case "conditional":
+        return this.conditionalValue(e);
       case "binary":
-        if (this.presence(e)) return "boolean";
-        // Each instance of an isDeepStrictEqual checks its own operands' types.
-        if (this.ctx.tables.deepEqualities.has(e)) {
-          for (const a of [e.left, e.right]) {
-            const t = this.value(a);
-            this.ctx.exprsState.once.add(a);
-            if (holdsFloat(this.ctx.tables.typing, t)) throw new CompileError("E0801", "'isDeepStrictEqual' over floats isn't supported yet: Node's compares them as Object.is does, NaN equal to NaN and -0 apart from 0, unlike '==='", a.start, a.end);
-          }
-        }
-        // The migration lint rewrites loose equality to strict, so native code never uses it.
-        if (e.op === "==" || e.op === "!=") throw new CompileError("E0802", `'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
-        if (e.op === "&&" || e.op === "||") {
-          // The right side runs only when the left is true, for `&&`, or false, for `||`.
-          const left = this.operand(e.left);
-          const proven = this.ctx.proves(e.left);
-          return binaryType(this.ctx.tables.typing, e.op, left, this.valueAssuming(e.op === "&&" ? proven.yes : proven.no, e.right, true), e);
-        }
-        if (e.op === "===" || e.op === "!==") {
-          try {
-            return this.compared(e);
-          } catch (err) {
-            // A check against `null` or a literal that a narrowed variable can't be is redundant, as
-            // TypeScript allows, so the variable is compared as declared.
-            if (!(err instanceof CompileError && err.code === "E0112") || !this.asDeclared(e)) throw err;
-            return this.compared(e);
-          }
-        }
-        if (e.op === "instanceof") return instanceofCheck(e, this);
-        if (e.op === "**") return this.power(e.left, this.operand(e.left), e.right, this.operand(e.right), e);
-        if (e.op === "??") return this.orElse(e);
-        if (e.op === "in" && e.left.kind === "privateName") {
-          throw new CompileError("E0802", `'${e.left.name} in' can't be used: Fish has no run-time reflection, and a value's class is known while compiling`, e.start, e.end);
-        }
-        if (e.op === "in") {
-          if (e.right.kind === "ident") this.ctx.exprsState.objects.add(e.right);
-          const tested = this.value(e.right);
-          this.ctx.exprsState.once.add(e.right);
-          if (this.dictOf(tested)) return this.typeOf(this.dictCall(e, e.right, "has", [this.dictKey(e.left)]));
-          return keyCheck(e, this);
-        }
-        if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
-        if (e.op === "+") {
-          const [left, right] = [this.operand(e.left), this.operand(e.right)];
-          if (stringLike(this.ctx.tables.typing, left) || stringLike(this.ctx.tables.typing, right) || enumText(this.ctx.tables.typing, left) || enumText(this.ctx.tables.typing, right)) return this.join(e.left, left, e.right, right);
-        }
-        return binaryType(this.ctx.tables.typing, e.op, ...this.sameNumbers(e.left, this.operand(e.left), e.right, this.operand(e.right), false), e);
+        return this.binaryValue(e);
       // A spread anywhere but in an array literal or a call filling a rest parameter.
       case "spread":
         throw new CompileError("E0408", "'...' spreads into an array literal, or as an argument into a rest parameter, as in 'function f(...xs: T[])'; it can't be used here yet", e.start, e.end);
       case "meta":
         if (e.name === "import.meta") throw new CompileError("E0801", `meta properties are not supported yet; 'import.meta' is read through its members ${IMPORT_META_MEMBERS.join(", ")}, or destructured into them`, e.start, e.end);
-        throw unsupported(EXPRESSION_FORMS[e.kind], e);
+        throw unsupported(EXPRESSION_FORMS.meta, e);
       default:
-        throw unsupported(EXPRESSION_FORMS[e.kind], e);
+        throw unsupported(expressionForm(e.kind), e);
     }
+  }
+
+  /** @throws {CompileError} */
+  private memberValue(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>): Type {
+    if (e.object.kind === "super" && this.superDelegated(e.name)) {
+      const through = this.throughEmbedded(e);
+      const made = this.become(e, through);
+      return this.typeOf(made);
+    }
+    // A static property of a package's class.
+    const jsClass = e.object.kind === "ident" && (this.ctx.lookup(e.object.name, undefined) === undefined) ? this.ctx.tables.jsClasses.get(e.object.name) : undefined;
+    if ((jsClass !== undefined)) {
+      const m = this.jsStatic(jsClass, e.name, e);
+      if (m.kind !== "property") throw new CompileError("E0503", `'${e.name}' is a method of '${jsClass.name}'; call it`, e.start, e.end);
+      const declared = (m.type !== undefined) ? this.ctx.resolveType(m.type) : this.ctx.tables.typing.blockType("JsValue");
+      const optional = m.optional === true ? this.ctx.tables.typing.unionType([declared, "null"]) : declared;
+      const view = this.ctx.tables.typing.jsView(optional);
+      return this.crossing(view, `'${jsClass.name}.${e.name}' is a`, e);
+    }
+    if (e.object.kind === "ident" && isTypedName(e.object.name) && (this.ctx.lookup(e.object.name, undefined) === undefined) && !this.ctx.classes.has(e.object.name)) {
+      if (e.name !== "BYTES_PER_ELEMENT" || e.object.name === "ArrayBuffer") throw new CompileError("E0502", `'${e.object.name}' has no static property '${shownName(e.name)}'`, e.start, e.end);
+      const size: Expr = { id: nextId(this.ctx.tables.ids), kind: "int", value: BigInt(typedSize(typedNamed(e.object.name)!)), start: e.start, end: e.end };
+      const made = this.become(e, size);
+      return this.typeOf(made);
+    }
+    if (this.isMath(e.object)) {
+      if (MATH_CONSTANTS[e.name] === undefined) throw new CompileError("E0503", `'Math.${e.name}' is a function, or not in Fish yet; the constants are ${Object.keys(MATH_CONSTANTS).join(", ")}`, e.start, e.end);
+      this.ctx.tables.maths.add(cloneExpr(e));
+      return "f64";
+    }
+    const property = this.staticProperty(e);
+    if ((property !== undefined)) {
+      const read = this.staticRead(e, property);
+      const made = this.become(e, read);
+      return this.typeOf(made);
+    }
+    // `Color.Red` names an enum member, whose value is known; the enum's name is no value.
+    const named = e.object.kind === "ident" && (this.ctx.lookup(e.object.name, undefined) === undefined) ? this.ctx.enums.get(e.object.name) : undefined;
+    if (named !== undefined && named.data !== undefined) return this.variant(e, named, true);
+    if (named !== undefined && e.object.kind === "ident") {
+      const found = this.ctx.enumMember(e.object.name, e.name);
+      if (found === undefined) throw new CompileError("E0502", `property '${e.name}' does not exist on enum '${e.object.name}'${didYouMean(e.name, this.ctx.enumMemberNames(e.object.name))}`, e.start, e.end);
+      return found;
+    }
+    if (e.object.kind === "ident") this.ctx.exprsState.objects.add(cloneExpr(e.object));
+    const through = this.linked(e) ? this.unwrapped(e.object, e.optional) : this.value(e.object);
+    const tr = this.recOf(through);
+    const object = this.ctx.tables.typing.unfold(tr?.kind === "ref" ? tr.to : through);
+    if (object === "never") return "never";
+    const or = this.recOf(object);
+    const orKind = or !== undefined ? or.kind : undefined;
+    const dict = or !== undefined && or.kind === "map" && or.dict !== undefined;
+    const isSet = or !== undefined && or.kind === "map" && or.set === true;
+    // A field read through a reference loads what it points to; a getter gets the pointer.
+    if (orKind === "unknown") throw this.unnarrowed(e);
+    if (orKind === "shared") return this.sharedField(e, object as SharedType);
+    if (orKind === "block") return this.blockProperty(e, object as BlockType);
+    if (orKind === "dyn") return this.dynField(e, object as DynType);
+    const rx = this.asRegex(object);
+    if (rx !== undefined) {
+      if (object !== through) this.ctx.coercions.set(cloneExpr(e.object), object);
+      const lowered = this.ctx.tables.typing.lower(object);
+      return this.regexMember(e, rx, lowered !== rx);
+    }
+    const shared = orKind === "union" ? unionField(this.ctx.tables.typing, object as UnionType, e.name, e) : undefined;
+    if (shared !== undefined) {
+      this.loadThrough(e, object, through);
+      return this.linked(e) ? this.optional(shared, e) : shared;
+    }
+    if (orKind === "class") this.cls(object as ClassType);
+    // A dictionary's property is the entry under that key, as `o[k]` reads it.
+    if (dict) {
+      if (this.linked(e)) throw unsupported("optional chains reading a dictionary", e);
+      if (this.ctx.exprsState.writing === e.id) throw this.dictWrite(e);
+      this.ctx.exprsState.once.add(cloneExpr(e.object));
+      const key: Expr = { id: nextId(this.ctx.tables.ids), kind: "string", value: e.name, start: e.start, end: e.end };
+      const made = this.dictCall(e, e.object, "get", [key]);
+      return this.typeOf(made);
+    }
+    // A Map's or a Set's one property is its size, the number of entries it holds.
+    if (orKind === "map") {
+      if ((isSet ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError("E0503", `'${isSet ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
+      if (e.name !== "size") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, ["size", ...(isSet ? SET_METHODS : MAP_METHODS)])}`, e.start, e.end);
+      this.loadThrough(e, object, through);
+      return this.linked(e) ? this.optional("usize", e) : "usize";
+    }
+    // A tuple's one property is its length: the count of its elements, up to the last
+    // optional one there.
+    if (this.ctx.tables.typing.isTuple(object) && this.ctx.tables.typing.rec(object as ObjectType).match !== true && e.name === "length") {
+      this.loadThrough(e, object, through);
+      return this.linked(e) ? this.optional("usize", e) : "usize";
+    }
+    // A fixed array's one property is its length, known while compiling.
+    if (this.isFixed(object)) {
+      if (e.name !== "length") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, ["length"])}`, e.start, e.end);
+      this.loadThrough(e, object, through);
+      return "usize";
+    }
+    // An array's properties are its length and its capacity, the room before a push grows it;
+    // capacity isn't JavaScript's.
+    if (this.isArray(object)) {
+      const typed = this.ctx.tables.typing.typedName(object);
+      if (typed !== undefined && TYPED_MEMBERS.has(e.name)) return this.typedMember(e, typed);
+      if (ARRAY_METHODS.has(e.name)) throw new CompileError("E0503", `array methods can only be called, like 'a.${e.name}(...)'`, e.start, e.end);
+      // A shared value's array is read as a copy, which has only the room it needs.
+      if (e.name === "capacity" && this.ctx.copiesOut.has(e.object)) throw new CompileError("E0304", `a shared value's array is read as a copy, so read its capacity inside '${this.placeText(e.object).split(".")[0]}.update(...)'`, e.start, e.end);
+      if (e.name !== "length" && e.name !== "capacity") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, ["length", "capacity", ...ARRAY_METHODS])}`, e.start, e.end);
+      this.loadThrough(e, object, through);
+      return this.linked(e) ? this.optional("usize", e) : "usize";
+    }
+    // A string's one property is its length in UTF-16 code units, a type parameter's bounded
+    // by strings included.
+    const plain = this.plainOf(object);
+    if (stringLike(this.ctx.tables.typing, plain)) {
+      if (stringMethods(this.ctx.tables.typing)[e.name] !== undefined) throw new CompileError("E0503", `string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
+      if (e.name !== "length") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type 'string'${didYouMean(e.name, ["length", ...Object.keys(stringMethods(this.ctx.tables.typing))])}`, e.start, e.end);
+      this.text(e.object, plain, this.linked(e));
+      return this.linked(e) ? this.optional("usize", e) : "usize";
+    }
+    if (this.delegated(object, e.name)) {
+      const through = this.throughEmbedded(e);
+      const made = this.become(e, through);
+      return this.typeOf(made);
+    }
+    const own = typeof object !== "string" && orKind !== undefined && orKind !== "closure" ? this.ctx.tables.typing.field(object, e.name) : undefined;
+    const found: Field | undefined = own !== undefined ? { ...own } : undefined;
+    const classId = orKind === "class" ? this.ctx.classOf(object as ClassType) : undefined;
+    const getter = found === undefined && classId !== undefined ? inherited(this.ctx.tables.arenas, this.ctx.tables.arenas.classOf(classId), "getters", e.name) : undefined;
+    if (getter !== undefined) {
+      const access = getter.access;
+      const declaring = getter.declared ?? getter.owner!;
+      const getterId = getter.bodyId;
+      this.visible(access, declaring, e.name, e);
+      const instance = this.ctx.instanceOf(getterId, undefined);
+      this.ctx.calls.set(cloneExpr(e), instance);
+      const declared = this.abstractDeclaration(e, "getters");
+      const returnsFrom = declared !== undefined ? declared.bodyId : getterId;
+      const run = this.ctx.instanceOf(returnsFrom, undefined);
+      const returns = this.ctx.returnOf(run, e);
+      // A getter's reference borrows from its object.
+      if (this.ctx.tables.typing.holdsRef(returns)) this.ctx.borrowsFrom.set(cloneExpr(e), [cloneExpr(e.object)]);
+      return this.linked(e) ? this.optional(returns, e) : returns;
+    }
+    if (found === undefined && classId !== undefined && inherited(this.ctx.tables.arenas, this.ctx.tables.arenas.classOf(classId), "methods", e.name) !== undefined) throw new CompileError("E0801", "methods can't be used as values yet; call it", e.start, e.end);
+    if (found === undefined && classId !== undefined && inherited(this.ctx.tables.arenas, this.ctx.tables.arenas.classOf(classId), "setters", e.name) !== undefined) throw new CompileError("E0208", `property '${e.name}' has a setter but no getter`, e.start, e.end);
+    if (found === undefined) throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, this.memberNames(object))}`, e.start, e.end);
+    if (orKind === "class") {
+      const declaring = this.declaring(object as ClassType, e.name);
+      this.visible(found.access, declaring, e.name, e);
+    }
+    // Through a type parameter the field has its bound's type, and in an instance the
+    // concrete class may give it with a getter.
+    const stored = this.ctx.tables.typing.lower(object);
+    const sr = this.recOf(stored);
+    if (stored !== object && sr?.kind === "class" && this.ctx.tables.typing.field(stored as ClassType, e.name) === undefined) {
+      const concrete = this.inheritedOf(stored as ClassType, "getters", e.name)!.bodyId;
+      const instance = this.ctx.instanceOf(concrete, undefined);
+      this.ctx.returnOf(instance, e);
+      this.ctx.calls.set(cloneExpr(e), instance);
+    }
+    if (!this.ctx.calls.has(e)) this.loadThrough(e, object, through);
+    const unfolded = this.ctx.tables.typing.unfolded(found.type);
+    if (this.linked(e)) return this.optional(unfolded, e);
+    const narrowed = this.ctx.calls.has(e) || this.ctx.exprsState.asDeclared.has(e) ? undefined : this.ctx.narrowedField(e);
+    if (narrowed === undefined) {
+      this.ctx.instance.narrowedFields?.delete(e);
+      return unfolded;
+    }
+    if (this.ctx.instance.narrowedFields === undefined) this.ctx.instance.narrowedFields = new NodeMap<Expr, Type>();
+    this.ctx.instance.narrowedFields?.set(cloneExpr(e), unfolded);
+    return narrowed;
+  }
+
+  /** @throws {CompileError} */
+  private arrayValue(this: Mut<this>, e: Ref<Extract<Expr, { kind: "array" }>>): Type {
+    if (e.elements.some((x) => x === undefined)) throw unsupported("holes in array literals", e);
+    const fromObject = this.ctx.tables.objectReads.get(e);
+    if (fromObject !== undefined && !this.ctx.exprsState.wanted.has(e)) {
+      const read = this.objectRead(fromObject.name, fromObject.object).type;
+      this.expect(e, read);
+    }
+    const tuple = this.ctx.exprsState.tuples.get(e);
+    if (tuple !== undefined) return this.tupleLiteral(e, tuple);
+    // A pair in `new Map([[k, v]])` is a tuple of what it holds.
+    if (this.ctx.tables.pairs.has(e)) {
+      let parts: Type[] = [];
+      for (const x of e.elements) {
+        if (x === undefined) continue;
+        const read = this.value(x);
+        const t = this.ctx.tables.typing.widenLet(read);
+        this.ctx.exprsState.once.add(cloneExpr(x));
+        parts.push(t);
+      }
+      const pair = this.ctx.tables.typing.tupleType(parts);
+      return this.tupleLiteral(e, pair);
+    }
+    // `Array.of<T>(...)`: an array of T, its elements checked against it.
+    const written = this.ctx.tables.ofElements.get(e);
+    if (written !== undefined) {
+      // Resolved as an array's element is, so references and functions get the same rules.
+      const node: TypeNode = { id: nextId(this.ctx.tables.ids), kind: "array", element: cloneTypeNode(written), start: written.start, end: written.end };
+      const resolved = this.ctx.resolveType(node);
+      const element = this.ctx.tables.typing.rec(resolved as ArrayType).element;
+      for (const x of e.elements) {
+        if (x === undefined) continue;
+        this.expect(x, element);
+        const t = this.value(x);
+        this.coerce(x, t, element, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(element)}'`);
+      }
+      return this.ctx.tables.typing.arrayType(element);
+    }
+    const inline = this.ctx.exprsState.fixedLiterals.get(e);
+    if (inline !== undefined) {
+      const count = e.elements.length;
+      if (count !== this.ctx.tables.typing.rec(inline).size) throw new CompileError("E0117", `type '${this.ctx.tables.typing.show(inline)}' holds ${this.ctx.tables.typing.rec(inline).size} element${this.ctx.tables.typing.rec(inline).size === 1 ? "" : "s"}, but this literal has ${count}`, e.start, e.end);
+      for (const x of e.elements) if (x !== undefined && x.kind === "spread") throw unsupported("spread elements in fixed array literals", x);
+      for (const x of e.elements) {
+        if (x === undefined) continue;
+        const t = this.value(x);
+        this.coerce(x, t, this.ctx.tables.typing.rec(inline).element, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(this.ctx.tables.typing.rec(inline).element)}'`);
+      }
+      return inline;
+    }
+    if (this.ctx.exprsState.shaped.has(e) && e.elements.every((x) => x !== undefined && x.kind !== "spread")) {
+      const parts = this.partTypes(e);
+      const shaped = this.shapedTuple(e, parts);
+      return this.tupleLiteral(e, shaped);
+    }
+    // A spread gives an array's elements: those of an array itself, or of what a string, a
+    // generator, a Map or a Set gives, as `Array.from` would. Its elements type the others
+    // when nothing else does.
+    let spreads = new NodeMap<Expr, Type>();
+    let spreadTypes: Type[] = [];
+    for (const x of e.elements) {
+      if (x === undefined || x.kind !== "spread") continue;
+      const t = this.spreadElements(x);
+      spreads.set(cloneExpr(x), t);
+      spreadTypes.push(t);
+    }
+    const first = spreadTypes.length > 0 ? spreadTypes[0] : undefined;
+    if (first !== undefined && !this.ctx.exprsState.wanted.has(e)) for (const x of e.elements) if (x !== undefined && x.kind !== "spread") this.expect(x, first);
+    // Closures meeting the callable an annotation expects of each element are boxed into it.
+    const want = this.ctx.exprsState.wanted.get(e);
+    const callable = typeof want !== "string" && this.recOf(want)?.kind === "dyn" && this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(want as DynType).of) ? want : undefined;
+    const promise = typeof want !== "string" && this.recOf(want)?.kind === "dyn" && this.ctx.tables.typing.promiseElement(this.ctx.tables.typing.rec(want as DynType).of) !== undefined ? want : undefined;
+    let given: Type[] = [];
+    for (const x of e.elements) if (x !== undefined) given.push(this.elementValue(x, spreads, callable, promise));
+    const fromSpreads = spreads.size > 0 && !this.ctx.exprsState.wanted.has(e);
+    const element = given.length === 0 ? "never" : fromSpreads ? this.ctx.tables.typing.unionType(spreadTypes.slice()) : this.ctx.tables.typing.unionType(given.slice());
+    let i: usize = 0;
+    for (const x of e.elements) {
+      if (x === undefined) continue;
+      const at = i;
+      i++;
+      if (given[at] === element || this.ctx.tables.typing.sameLowered(given[at]!, element)) continue;
+      // A spread's elements are each converted to the array's type, which has to hold them.
+      if (spreads.has(x)) {
+        if (!this.ctx.tables.typing.fits(given[at]!, element)) throw new CompileError("E0101", `this spread gives '${this.ctx.tables.typing.show(given[at]!)}' elements, which an array of '${this.ctx.tables.typing.show(element)}' can't hold`, x.start, x.end);
+        continue;
+      }
+      const t = this.ctx.types.get(x)!;
+      this.coerce(x, t, element, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(element)}', the type of the spread's elements`);
+    }
+    return this.ctx.tables.typing.arrayType(element);
+  }
+
+  // An array literal's element's type: a spread's elements, a closure or future boxed into the
+  // callable or Promise the literal is wanted as, or the element's type widened as a `let` widens.
+  /** @throws {CompileError} */
+  private elementValue(this: Mut<this>, x: Ref<Expr>, spreads: Ref<NodeMap<Expr, Type>>, callable: Type | undefined, promise: Type | undefined): Type {
+    const spread = spreads.get(x);
+    if (spread !== undefined) return spread;
+    const t = this.value(x);
+    const boxed = typeof t !== "string" && ((this.ctx.tables.typing.rec(t).kind === "closure" && callable !== undefined) || (this.ctx.tables.typing.rec(t).kind === "future" && promise !== undefined));
+    if (boxed) {
+      const into = (callable ?? promise)!;
+      this.coerce(x, t, into, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(into)}'`);
+      return into;
+    }
+    if (typeof t !== "string" && this.ctx.tables.typing.rec(t).kind === "closure") throw unsupported("arrays of functions", x);
+    if (this.ctx.tables.typing.holdsRef(t)) throw unsupported("arrays of references", x);
+    const widened = this.ctx.tables.typing.widenLet(t);
+    if (widened !== t) this.coerce(x, t, widened, "");
+    return widened;
+  }
+
+  /** @throws {CompileError} */
+  private assignValue(this: Mut<this>, e: Ref<Extract<Expr, { kind: "assign" }>>): Type {
+    if (this.staticWrite(e)) throw new CompileError("E0705", "a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
+    const op = assignedWith(e.op);
+    if (op === undefined) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
+    const entry = this.dictEntry(e.target);
+    if (entry !== undefined) {
+      if (op !== "=") throw this.dictWrite(entry.place);
+      if (this.ctx.exprsState.statementAssign !== e.id) throw new CompileError("E0801", "writing a dictionary's entry gives no value to use, so write it as a statement of its own", e.start, e.end);
+      const made = this.dictCall(e, entry.object, "set", [entry.key, cloneExpr(e.value)]);
+      return this.typeOf(made);
+    }
+    const target = this.assignable(e.target, op !== "=");
+    const place = this.bare(e.target);
+    if (op === "=") this.expect(e.value, target);
+    const assigned = op === "=" ? this.value(e.value) : this.read(e.value);
+    if (op === "=") this.readOnlySubarray(e.value);
+    // A variable whose type is still open takes the integer type assigned to it.
+    if (op === "=" && isInteger(assigned) && assigned !== target && this.ctx.infer(place, assigned)) return assigned;
+    let type: Type;
+    if (op === "=") type = assigned;
+    else if (op === "+" && this.ctx.tables.typing.unbranded(target) === "string") {
+      const widened = this.widen(e.value, assigned);
+      type = this.join(place, target, e.value, widened);
+    } else if (op === "**") {
+      const widened = this.widen(e.value, assigned);
+      type = this.power(place, target, e.value, widened, e);
+    } else {
+      const widened = this.widen(e.value, assigned);
+      const [a, b] = this.sameNumbers(place, target, e.value, widened);
+      type = binaryType(this.ctx.tables.typing, op, a, b, { start: e.start, end: e.end });
+    }
+    // A parameter typed by an object type or interface takes any value with its members, so
+    // what it holds may have more fields than any value written here.
+    const param = place.kind === "ident" ? this.localOfId(place.id) : undefined;
+    const paramName = param !== undefined && param.param ? param.name : undefined;
+    if (op === "=" && paramName !== undefined && this.recOf(target)?.kind === "param" && !this.ctx.tables.typing.fits(type, target)) {
+      throw new CompileError("E0101", `'${paramName}' takes any value with the members of '${this.ctx.tables.typing.show(target)}', which may have more, so it can't be given a '${this.ctx.tables.typing.show(type)}'; declare 'let ${paramName}2: ${this.ctx.tables.typing.show(target)} = ${paramName}' to hold just those`, e.start, e.end);
+    }
+    this.coerce(e.value, type, target, `type '${this.ctx.tables.typing.show(type)}' is not assignable to type '${this.ctx.tables.typing.show(target)}'`);
+    // A handle's property is written in JS, with the value converted.
+    if (this.ctx.tables.jsMembers.has(place)) {
+      this.givenToJs(e.value, assigned);
+      // What JS is given is JS's to keep, so nothing is left to be the assignment's value.
+      if (this.ctx.tables.typing.keptByJs(target) && this.ctx.exprsState.statementAssign !== e.id) throw new CompileError("E1005", `a callback or a Promise written to property '${placeName(place)}' goes to JS, so the assignment has no value to use; write it as a statement of its own`, e.start, e.end);
+    }
+    const found = place.kind === "ident" ? this.localOfId(place.id) : undefined;
+    const local: Local | undefined = found !== undefined ? { ...found } : undefined;
+    if (local !== undefined && typeof local.type !== "string" && this.ctx.tables.typing.rec(local.type).kind === "ref" && !this.ctx.coercions.has(place)) this.rebind(local, e.value);
+    const narrow = local !== undefined ? this.ctx.narrowed(local.localId) : undefined;
+    if (local !== undefined && op === "=" && this.ctx.coercions.has(place) && narrow !== undefined && this.isRefType(narrow) && !this.ctx.tables.typing.fits(type, this.ctx.tables.typing.rec(narrow).to)) this.ctx.rewritten(local.localId, e);
+    if (local !== undefined && op === "=") this.ctx.forget(local.localId, e);
+    return target;
+  }
+
+  /** @throws {CompileError} */
+  private conditionalValue(this: Mut<this>, e: Ref<Extract<Expr, { kind: "conditional" }>>): Type {
+    this.condition(e.cond);
+    const proven = this.ctx.proves(e.cond);
+    if (ruledOut(proven.yes)) return this.valueAssuming(proven.no, e.else, false);
+    if (ruledOut(proven.no)) return this.valueAssuming(proven.yes, e.then, false);
+    let then = this.valueAssuming(proven.yes, e.then, false);
+    let otherwise = this.valueAssuming(proven.no, e.else, false);
+    [then, otherwise] = this.sameNumbers(e.then, then, e.else, otherwise);
+    if (then === otherwise) return then;
+    // Two references lend shared what both point to, or a type both fit; otherwise a side
+    // that borrows gives its value.
+    if (this.isRefType(then) && this.isRefType(otherwise)) {
+      const a = this.ctx.tables.typing.rec(then as RefType).to;
+      const b = this.ctx.tables.typing.rec(otherwise as RefType).to;
+      if (this.ctx.tables.typing.rec(then as RefType).mutable && this.ctx.tables.typing.rec(otherwise as RefType).mutable && this.ctx.tables.typing.lower(a) === this.ctx.tables.typing.lower(b)) return then;
+      const candidates = [a, b, this.paramBound(a), this.paramBound(b)];
+      let common: Type | undefined = undefined;
+      for (const t of candidates) if (common === undefined && t !== undefined && this.ctx.tables.typing.fits(a, t) && this.ctx.tables.typing.fits(b, t)) common = t;
+      if (common !== undefined) {
+        const shared = this.ctx.tables.typing.refType(common, false);
+        this.coerce(e.then, then, shared, "");
+        this.coerce(e.else, otherwise, shared, "");
+        return shared;
+      }
+    }
+    // A reference against nothing is a reference or nothing.
+    const option = this.isRefType(then) && otherwise === "null" ? this.ctx.tables.typing.unionType([then, "null"]) : this.isRefType(otherwise) && then === "null" ? this.ctx.tables.typing.unionType([otherwise, "null"]) : undefined;
+    if (option !== undefined) {
+      this.coerce(e.then, then, option, "");
+      this.coerce(e.else, otherwise, option, "");
+      return option;
+    }
+    if (this.isRefType(then) || this.isRefType(otherwise)) {
+      then = this.loaded(e.then, then);
+      otherwise = this.loaded(e.else, otherwise);
+    }
+    if (then === otherwise) return then;
+    // A tuple of literals, as `as const` writes one, beside a tuple it fits is that tuple, since a
+    // union of tuples can't be destructured.
+    if (this.ctx.tables.typing.isTuple(then) && this.ctx.tables.typing.isTuple(otherwise)) {
+      const wider = this.ctx.tables.typing.fits(otherwise, then) ? then : this.ctx.tables.typing.fits(then, otherwise) ? otherwise : undefined;
+      if (wider !== undefined) {
+        this.coerce(e.then, then, wider, "");
+        this.coerce(e.else, otherwise, wider, "");
+        return wider;
+      }
+    }
+    return bothSides<C, Expressions<C>>(this, e, then, otherwise);
+  }
+
+  // The bound of a type parameter.
+  private paramBound(t: Type): Type | undefined {
+    const r = this.recOf(t);
+    return r !== undefined && r.kind === "param" ? r.bound : undefined;
+  }
+
+  /** @throws {CompileError} */
+  private binaryValue(this: Mut<this>, e: Ref<Extract<Expr, { kind: "binary" }>>): Type {
+    if (this.presence(e)) return "boolean";
+    // Each instance of an isDeepStrictEqual checks its own operands' types.
+    if (this.ctx.tables.deepEqualities.has(e)) {
+      this.deepOperand(e.left);
+      this.deepOperand(e.right);
+    }
+    // The migration lint rewrites loose equality to strict, so native code never uses it.
+    if (e.op === "==" || e.op === "!=") throw new CompileError("E0802", `'${e.op}' is not supported; use '${e.op}='`, e.start, e.end);
+    if (e.op === "&&" || e.op === "||") {
+      // The right side runs only when the left is true, for `&&`, or false, for `||`.
+      const left = this.operand(e.left);
+      const proven = this.ctx.proves(e.left);
+      const right = this.valueAssuming(e.op === "&&" ? proven.yes : proven.no, e.right, true);
+      return binaryType(this.ctx.tables.typing, e.op, left, right, { start: e.start, end: e.end });
+    }
+    if (e.op === "===" || e.op === "!==") {
+      try {
+        return this.compared(e);
+      } catch (err) {
+        // A check against `null` or a literal that a narrowed variable can't be is redundant, as
+        // TypeScript allows, so the variable is compared as declared.
+        if (!(err instanceof CompileError && err.code === "E0112") || !this.asDeclared(e)) throw err;
+        return this.compared(e);
+      }
+    }
+    if (e.op === "instanceof") return instanceofCheck<C, Expressions<C>>(e, this);
+    if (e.op === "**") {
+      const left = this.operand(e.left);
+      const right = this.operand(e.right);
+      return this.power(e.left, left, e.right, right, e);
+    }
+    if (e.op === "??") return this.orElse(e);
+    if (e.op === "in" && e.left.kind === "privateName") {
+      throw new CompileError("E0802", `'${e.left.name} in' can't be used: Fish has no run-time reflection, and a value's class is known while compiling`, e.start, e.end);
+    }
+    if (e.op === "in") {
+      if (e.right.kind === "ident") this.ctx.exprsState.objects.add(cloneExpr(e.right));
+      const tested = this.value(e.right);
+      this.ctx.exprsState.once.add(cloneExpr(e.right));
+      if (this.dictOf(tested) !== undefined) {
+        const key = this.dictKey(e.left);
+        const made = this.dictCall(e, e.right, "has", [key]);
+        return this.typeOf(made);
+      }
+      return keyCheck<C, Expressions<C>>(e, this);
+    }
+    if (!SUPPORTED_OPERATORS.has(e.op)) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
+    if (e.op === "+") {
+      const left = this.operand(e.left);
+      const right = this.operand(e.right);
+      if (stringLike(this.ctx.tables.typing, left) || stringLike(this.ctx.tables.typing, right) || enumText(this.ctx.tables.typing, left) || enumText(this.ctx.tables.typing, right)) return this.join(e.left, left, e.right, right);
+    }
+    const left = this.operand(e.left);
+    const right = this.operand(e.right);
+    const [a, b] = this.sameNumbers(e.left, left, e.right, right, false);
+    return binaryType(this.ctx.tables.typing, e.op, a, b, { start: e.start, end: e.end });
+  }
+
+  // An operand of an isDeepStrictEqual, whose instance checks it isn't a float.
+  /** @throws {CompileError} */
+  private deepOperand(this: Mut<this>, a: Ref<Expr>): void {
+    const t = this.value(a);
+    this.ctx.exprsState.once.add(cloneExpr(a));
+    if (holdsFloat(this.ctx.tables.typing, t)) throw new CompileError("E0801", "'isDeepStrictEqual' over floats isn't supported yet: Node's compares them as Object.is does, NaN equal to NaN and -0 apart from 0, unlike '==='", a.start, a.end);
+  }
+
+  // A field read through a reference loads what it points to.
+  private loadThrough(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>, object: Type, through: Type): void {
+    if (object !== through) this.ctx.coercions.set(cloneExpr(e.object), object);
   }
 
   // A fresh object literal's literal properties take the number types of the fields they meet,
@@ -8294,8 +8444,9 @@ export class Expressions<C extends Context> implements Union<C> {
         if (missing === undefined) missing = c;
         return true;
       });
-      if (missing === undefined) return part;
-      known.set(missing, this.comparesAsValue(missing));
+      const ask = missing;
+      if (ask === undefined) return part;
+      known.set(ask, this.comparesAsValue(ask));
     }
   }
 
@@ -8353,12 +8504,17 @@ export class Expressions<C extends Context> implements Union<C> {
     if ((known !== undefined)) return true;
     const method = this.inheritedOf(t as ClassType, "methods", "equals");
     if (method === undefined) return false;
-    const instance = this.ctx.instanceOf(method.bodyId, undefined);
-    const [arg, ...more] = this.ctx.paramTypes(instance);
-    const ar = this.recOf(arg);
-    const to = ar?.kind === "ref" ? this.recOf(ar.to) : undefined;
-    const shaped = !method.self?.mutable && !method.self?.owned && more.length === 0 && ar?.kind === "ref" && !ar.mutable && (this.ctx.tables.typing.lower(ar.to) === this.ctx.tables.typing.lower(t) || (to?.kind === "class" && this.ctx.tables.typing.derives(t as ClassType, ar.to as ClassType))) && this.ctx.returnOf(instance, method) === "boolean";
-    if (!shaped) throw new CompileError("E0702", `'${r.name}.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean`, method.start, method.end);
+    const methodId = method.bodyId;
+    const selfMutable = method.self?.mutable === true;
+    const selfOwned = method.self?.owned === true;
+    const at = { start: method.start, end: method.end };
+    const instance = this.ctx.instanceOf(methodId, undefined);
+    const params = this.ctx.paramTypes(instance);
+    const ar = this.recOf(params.length > 0 ? params[0] : undefined);
+    const arTo = ar !== undefined && ar.kind === "ref" && !ar.mutable ? ar.to : undefined;
+    const toClass = arTo !== undefined && this.recOf(arTo)?.kind === "class";
+    const shaped = !selfMutable && !selfOwned && params.length <= 1 && arTo !== undefined && (this.ctx.tables.typing.lower(arTo) === this.ctx.tables.typing.lower(t) || (toClass && this.ctx.tables.typing.derives(t as ClassType, arTo as ClassType))) && this.ctx.returnOf(instance, at) === "boolean";
+    if (!shaped) throw new CompileError("E0702", `'${this.ctx.tables.typing.rec(t as ClassType).name}.equals' is what '===' compares instances with, so it takes 'other: Ref<this>' and returns a boolean`, at.start, at.end);
     this.ctx.tables.equalities.set(t as ClassType, instance);
     return true;
   }
@@ -8717,7 +8873,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const left = this.operand(e.left);
     const right = this.operand(e.right);
     const [a, b] = this.sameNumbers(e.left, left, e.right, right, true);
-    return binaryType(this.ctx.tables.typing, e.op, a, b, e);
+    return binaryType(this.ctx.tables.typing, e.op, a, b, { start: e.start, end: e.end });
   }
 
   // Marks a narrowed variable compared with `null` or a literal to be read as declared; false when
@@ -8872,7 +9028,8 @@ export class Expressions<C extends Context> implements Union<C> {
     const declared = this.ctx.instance.narrowedFields?.get(e);
     if (declared !== undefined) {
       if (this.recOf(type)?.kind === "union") return false;
-      const unfolded = this.ctx.tables.typing.unfolded(this.stored(e));
+      const storedHere = this.stored(e);
+      const unfolded = this.ctx.tables.typing.unfolded(storedHere);
       if (this.ctx.tables.typing.lower(unfolded) !== this.ctx.tables.typing.lower(declared)) return false;
     }
     // A field read through a type parameter may be stored as a different type by the concrete
@@ -8888,7 +9045,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // as it: a place lent where it lives, or another reference variable, declared in its own
   // scope or an enclosing one.
   /** @throws {CompileError} */
-  private rebind(this: Mut<this>, target: Local, e: Ref<Expr>): void {
+  private rebind(this: Mut<this>, target: Ref<Local>, e: Ref<Expr>): void {
     const to = target.type as RefType;
     // A `?:`, or a call's result, lives as long as what it points into.
     if (e.kind === "conditional") {
@@ -9069,8 +9226,8 @@ export class Expressions<C extends Context> implements Union<C> {
         if (written.has(f.name)) throw new CompileError("E0402", `duplicate property '${f.name}'`, p.start, p.end);
         written.add(f.name);
         merged.delete(f.name);
-        merged.set(f.name, f);
         copied.delete(f.name);
+        merged.set(f.name, f);
         continue;
       }
       const t = this.value(p.value);
@@ -9167,13 +9324,13 @@ export class Expressions<C extends Context> implements Union<C> {
   private propertyField(this: Mut<this>, p: Ref<ObjectProp>): Field {
     if (p.kind === "property") {
       // An object stores its fields, so an arrow written in one owns what it captures.
-      if (p.value.kind === "arrow") this.ctx.exprsState.owning.add(p.value);
+      if (p.value.kind === "arrow") this.ctx.exprsState.owning.add(cloneExpr(p.value));
       const type = this.value(p.value);
       // A value written `as const` keeps its literal type.
-      if (isConstAssertion(this.ctx.tables.rewrites.current(p.value))) return { name: p.key as string, type };
+      if (this.writtenConst(p.value)) return { name: nameText(p.key)!, type };
       const widened = this.ctx.tables.typing.widenLet(type);
       if (widened !== type) this.coerce(p.value, type, widened, "");
-      return { name: p.key as string, type: widened };
+      return { name: nameText(p.key)!, type: widened };
     }
     if (p.kind !== "shorthand") {
       throw unsupported(p.kind === "spread" ? "spread elements" : p.kind === "method" ? "methods in object literals" : "accessors in object literals", p);
@@ -9182,16 +9339,18 @@ export class Expressions<C extends Context> implements Union<C> {
     // A shorthand reads its variable like a name does: within its switch case, narrowed, and
     // widened from an enum member to the enum like any property.
     const localId = this.ctx.lookup(p.name, { ...p });
-    const local = localId === undefined ? undefined : this.lc(localId);
-    if ((local === undefined)) throw new CompileError("E0401", `cannot find name '${p.name}'${didYouMean(p.name, this.ctx.names(p.start))}`, p.start, p.end);
-    if (!this.ctx.reachable(local.localId)) {
+    if (localId === undefined) throw new CompileError("E0401", `cannot find name '${p.name}'${didYouMean(p.name, this.ctx.names(p.start))}`, p.start, p.end);
+    const localType = this.lc(localId).type;
+    if (!this.ctx.reachable(localId)) {
       throw new CompileError("E0403", `'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
     }
-    this.ctx.locals.set({ ...p }, local.localId);
-    const js = this.ctx.tables.typing.jsRead(local.type, this.ctx.narrowed(local.localId));
-    if (js === "one") throw new CompileError("E1005", `'${p.name}' is read out of JS as a '${this.ctx.tables.typing.show(this.ctx.narrowed(local.localId)!)}' here; write '${p.name}: ${p.name}'`, p.start, p.end);
-    if (js === "several") return { name: p.name, type: this.stillJs(local.type) };
-    return { name: p.name, type: this.ctx.tables.typing.widenEnum(this.ctx.narrowed(local.localId) ?? local.type) };
+    this.ctx.locals.set({ ...p }, localId);
+    const narrowed = this.ctx.narrowed(localId);
+    const js = this.ctx.tables.typing.jsRead(localType, narrowed);
+    if (js === "one") throw new CompileError("E1005", `'${p.name}' is read out of JS as a '${this.ctx.tables.typing.show(this.ctx.narrowed(localId)!)}' here; write '${p.name}: ${p.name}'`, p.start, p.end);
+    if (js === "several") return { name: p.name, type: this.stillJs(localType) };
+    const read = this.ctx.narrowed(localId);
+    return { name: p.name, type: this.ctx.tables.typing.widenEnum(read ?? localType) };
   }
 
   // What a variable holding a JsValue reads as where `typeof` left several kinds of JS value:
@@ -9234,7 +9393,8 @@ export class Expressions<C extends Context> implements Union<C> {
       const declared = reads ? this.ctx.instance.narrowedFields?.get(place) : undefined;
       const kept = declared === undefined ? undefined : this.ctx.narrowedField(place);
       const stored = kept !== undefined && this.recOf(kept)?.kind !== "union" ? this.stored(place) : undefined;
-      const storedLow = kept !== undefined && stored !== undefined ? this.ctx.tables.typing.lower(this.ctx.tables.typing.unfolded(stored)) : undefined;
+      const storedUnfolded = kept !== undefined && stored !== undefined ? this.ctx.tables.typing.unfolded(stored) : undefined;
+      const storedLow = storedUnfolded !== undefined ? this.ctx.tables.typing.lower(storedUnfolded) : undefined;
       if (kept !== undefined && storedLow !== undefined && storedLow === this.ctx.tables.typing.lower(declared!)) {
         this.ctx.types.set(cloneExpr(place), kept);
         return kept;
@@ -9410,7 +9570,8 @@ export class Expressions<C extends Context> implements Union<C> {
   // makes the property read-only.
   /** @throws {CompileError} */
   private accessor(this: Mut<this>, target: Ref<Extract<Expr, { kind: "member" }>>): BodyId | undefined {
-    const object = this.ctx.tables.typing.lower(this.value(target.object));
+    const read = this.value(target.object);
+    const object = this.ctx.tables.typing.lower(read);
     const or = this.recOf(object);
     if (or?.kind !== "class" || (this.ctx.tables.typing.field(object as ClassType, target.name) !== undefined)) return undefined;
     const c = this.cls(object as ClassType);
@@ -9512,7 +9673,8 @@ export class Expressions<C extends Context> implements Union<C> {
       this.changesThis(path, action, target);
       return;
     }
-    this.changesLocal(this.localOfId(idOfExpr(root))!.localId, path, action, target, throughMut);
+    const id = this.localOfId(idOfExpr(root))!.localId;
+    this.changesLocal(id, path, action, target, throughMut);
   }
 
   // A value moved into a new `Dyn`: its type implements the interface, and owns everything and
@@ -9526,42 +9688,64 @@ export class Expressions<C extends Context> implements Union<C> {
   }
   /** @throws {CompileError} */
   private boxingNow(this: Mut<this>, e: Ref<Expr>, type: Type, to: DynType, message: string): void {
-    if (this.ctx.tables.typing.promiseElement(this.ctx.tables.typing.rec(to).of) !== undefined) return this.boxingFuture(e, this.ctx.tables.typing.lower(type), to, message);
-    if (this.relaying(this.ctx.tables.typing.lower(type), to)) {
-      if (this.isRefType(this.ctx.types.get(e)!)) throw new CompileError("E0202", "can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
-      this.ctx.tables.dynMembers.set(`${this.ctx.tables.typing.keyOf(this.ctx.tables.typing.lower(type))} ${this.ctx.tables.typing.keyOf(this.ctx.tables.typing.lower(to))}`, { methods: [], fields: [], clone: "copy" });
-      return void this.ctx.coercions.set(e, to);
+    if (this.ctx.tables.typing.promiseElement(this.ctx.tables.typing.rec(to).of) !== undefined) {
+      const lowered = this.ctx.tables.typing.lower(type);
+      this.boxingFuture(e, lowered, to, message);
+      return;
     }
-    if (this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(to).of)) this.storing(e, this.ctx.tables.typing.lower(type), to, message);
+    const low = this.ctx.tables.typing.lower(type);
+    if (this.relaying(low, to)) {
+      if (this.isRefType(this.ctx.types.get(e)!)) throw new CompileError("E0202", "can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
+      const lowTo = this.ctx.tables.typing.lower(to);
+      this.ctx.tables.dynMembers.set(`${this.ctx.tables.typing.keyOf(low)} ${this.ctx.tables.typing.keyOf(lowTo)}`, { methods: [], fields: [], clone: "copy" });
+      this.ctx.coercions.set(cloneExpr(e), to);
+      return;
+    }
+    if (this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(to).of)) this.storing(e, low, to, message);
     else if (this.isRefType(this.ctx.types.get(e)!)) throw new CompileError("E0202", "can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
     const held = this.ctx.tables.typing.lower(type);
     if (typeof held !== "string" && this.ctx.tables.typing.rec(held).kind === "dyn") throw new CompileError("E0801", `a '${this.ctx.tables.typing.show(held)}' can't become a '${this.ctx.tables.typing.show(to)}' yet; box the value it was made from`, e.start, e.end);
-    let rust: RustClass | undefined;
-    if (this.ctx.tables.typing.holdsPart(held, (u) => (rust ??= rustClassOf(this.ctx.tables.typing, u)) !== undefined)) throw new CompileError("E1004", `a Rust '${rust!.name}' can't become a '${this.ctx.tables.typing.show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
-    const reason = this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(to).of) ? undefined : unsatisfied(type, this.ctx.tables.typing.rec(to).of, this.ctx.members(), e);
-    if (reason) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
+    let rust: RustClass | undefined = undefined;
+    const holdsRust = this.ctx.tables.typing.holdsPart(held, (u) => {
+      if (rust === undefined) rust = rustClassOf(this.ctx.tables.typing, u);
+      return rust !== undefined;
+    });
+    if (holdsRust) throw new CompileError("E1004", `a Rust '${rust!.name}' can't become a '${this.ctx.tables.typing.show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
+    const reason = this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(to).of) ? undefined : unsatisfied(type, this.ctx.tables.typing.rec(to).of, this.ctx.members(), { start: e.start, end: e.end });
+    if (reason !== undefined) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
     const blocker = this.unsent(held);
-    if (blocker) {
+    if (blocker !== undefined) {
       const why = typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "interior" ? "changes without a lock" : typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "pointer" ? "is a raw pointer no thread can vouch for" : typeof blocker !== "string" && this.ctx.tables.typing.rec(blocker).kind === "shared" ? COUNTED_UNLOCKED : "borrows from where it was made";
       throw new CompileError("E0303", `a '${this.ctx.tables.typing.show(to)}' may cross to another thread, so it can't hold a '${this.ctx.tables.typing.show(blocker)}', which ${why}`, e.start, e.end);
     }
     // A Dyn of a generic interface made in a generic body is keyed as codegen finds it, lowered.
     if (typeof held === "string" || this.ctx.tables.typing.rec(held).kind !== "param") {
-      const table = this.dynTable(e, held, this.ctx.tables.typing.lower(to) as DynType);
-      this.ctx.tables.dynMembers.set(`${this.ctx.tables.typing.keyOf(held)} ${this.ctx.tables.typing.keyOf(this.ctx.tables.typing.lower(to))}`, table);
+      const lowTo = this.ctx.tables.typing.lower(to);
+      const table = this.dynTable(e, held, lowTo as DynType);
+      const lowAfter = this.ctx.tables.typing.lower(to);
+      const kept: DynTable = { methods: table.methods.slice(), fields: table.fields.slice(), clone: table.clone };
+      this.ctx.tables.dynMembers.set(`${this.ctx.tables.typing.keyOf(held)} ${this.ctx.tables.typing.keyOf(lowAfter)}`, kept);
       this.ctx.dynOf(e, table);
     }
-    this.ctx.coercions.set(e, to);
+    this.ctx.coercions.set(cloneExpr(e), to);
   }
 
   // A stored callable held in one taking and giving the same, that throws what it throws or
   // more: its calls are passed on through a slot of their own.
-  private relaying(from: Type, to: DynType): boolean {
+  private relaying(this: Mut<this>, from: Type, to: DynType): boolean {
     const d = this.recOf(from);
     const f = this.recOf(d?.kind === "dyn" ? this.ctx.tables.typing.callableOf.get(d.of) : undefined);
     const g = this.recOf(this.ctx.tables.typing.callableOf.get(this.ctx.tables.typing.rec(to).of));
-    if (!f || !g || !g.throws || f.params.length !== g.params.length || this.ctx.tables.typing.lower(f.returns) !== this.ctx.tables.typing.lower(g.returns)) return false;
-    return f.params.every((p, i) => this.ctx.tables.typing.lower(p) === this.ctx.tables.typing.lower(g.params[i]!)) && (!f.throws || this.ctx.tables.typing.fits(f.throws, g.throws));
+    if (f === undefined || g === undefined || g.throws === undefined) return false;
+    const fParams = f.params.slice();
+    const gParams = g.params.slice();
+    const fReturns = f.returns;
+    const gReturns = g.returns;
+    const fThrows = f.throws;
+    const gThrows = g.throws;
+    if (fParams.length !== gParams.length || this.ctx.tables.typing.lower(fReturns) !== this.ctx.tables.typing.lower(gReturns)) return false;
+    for (let i: usize = 0; i < fParams.length; i++) if (this.ctx.tables.typing.lower(fParams[i]!) !== this.ctx.tables.typing.lower(gParams[i]!)) return false;
+    return fThrows === undefined || this.ctx.tables.typing.fits(fThrows, gThrows);
   }
 
   // A future stored as a `Promise<T>`: one an async function's call made, giving T, throwing
@@ -9578,11 +9762,11 @@ export class Expressions<C extends Context> implements Union<C> {
       throw new CompileError("E0101", `${message}${what}`, e.start, e.end);
     }
     if (this.ctx.tables.typing.lower(r.gives) !== this.ctx.tables.typing.lower(this.ctx.tables.typing.promiseElement(this.ctx.tables.typing.rec(to).of)!)) throw new CompileError("E0101", message, e.start, e.end);
-    if (r.throws) throw new CompileError("E0602", `a stored '${this.ctx.tables.typing.show(to)}' can't throw yet, and this one can throw '${this.ctx.tables.typing.show(r.throws)}'; await it where it is made, or catch inside the async function`, e.start, e.end);
+    if (r.throws !== undefined) throw new CompileError("E0602", `a stored '${this.ctx.tables.typing.show(to)}' can't throw yet, and this one can throw '${this.ctx.tables.typing.show(r.throws)}'; await it where it is made, or catch inside the async function`, e.start, e.end);
     const blocker = this.unsent(type);
-    if (blocker) throw new CompileError("E0303", `a stored '${this.ctx.tables.typing.show(to)}' may be awaited on any thread, so its future can't hold a '${this.ctx.tables.typing.show(blocker)}'`, e.start, e.end);
+    if ((blocker !== undefined)) throw new CompileError("E0303", `a stored '${this.ctx.tables.typing.show(to)}' may be awaited on any thread, so its future can't hold a '${this.ctx.tables.typing.show(blocker)}'`, e.start, e.end);
     this.ctx.tables.dynMembers.set(`${this.ctx.tables.typing.keyOf(type)} ${this.ctx.tables.typing.keyOf(to)}`, { methods: [], fields: [], clone: undefined });
-    this.ctx.coercions.set(e, to);
+    this.ctx.coercions.set(cloneExpr(e), to);
   }
 
   // A closure stored as a callable: it fits the function type, owns what it captures, changes
@@ -9621,8 +9805,8 @@ export class Expressions<C extends Context> implements Union<C> {
       const r = this.recOf(u);
       return (r?.kind === "interior" && r.which !== "Cell") || (r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit")) || r?.kind === "handle";
     };
-    const held = bodyOf(this.ctx.tables.arenas, this.inst(body)).async ? c.fields.find((f) => this.ctx.tables.typing.holdsPart(f.type, pinned)) : undefined;
-    if (held) throw new CompileError("E0303", `this async function captures ${capture(held.name)}, which holds an Atomic, a Lock, a Semaphore or a JoinHandle; each call works on its own copy of what it captures, which would split that state, so capture a shared value holding it instead, like 'shared({ count: new Atomic(0) })'`, e.start, e.end);
+    const held = bodyOf(this.ctx.tables.arenas, this.inst(body)).async === true ? c.fields.find((f) => this.ctx.tables.typing.holdsPart(f.type, pinned)) : undefined;
+    if ((held !== undefined)) throw new CompileError("E0303", `this async function captures ${capture(held.name)}, which holds an Atomic, a Lock, a Semaphore or a JoinHandle; each call works on its own copy of what it captures, which would split that state, so capture a shared value holding it instead, like 'shared({ count: new Atomic(0) })'`, e.start, e.end);
   }
 
   // What a Dyn of this type runs for each interface member. A method may not need more of its
@@ -9639,7 +9823,10 @@ export class Expressions<C extends Context> implements Union<C> {
     // A boxed async generator's one slot is its `next()`, whose future borrows the generator in
     // the Dyn's block and is boxed in turn. A generator runs once, so it is never copied.
     if (r?.kind === "generator") {
-      this.ctx.tables.dynMembers.set(`${this.ctx.tables.typing.keyOf(this.ctx.tables.typing.leafFuture("next", type as GeneratorType))} ${this.ctx.tables.typing.keyOf(this.ctx.tables.typing.lentPromise(this.ctx.tables.typing.nextResult(r.yields)))}`, { methods: [], fields: [], clone: undefined });
+      const next = this.ctx.tables.typing.leafFuture("next", type as GeneratorType);
+      const result = this.ctx.tables.typing.nextResult(r.yields);
+      const lent = this.ctx.tables.typing.lentPromise(result);
+      this.ctx.tables.dynMembers.set(`${this.ctx.tables.typing.keyOf(next)} ${this.ctx.tables.typing.keyOf(lent)}`, { methods: [], fields: [], clone: undefined });
       return { methods: [undefined], fields: [], clone: undefined };
     }
     if (r?.kind === "closure") {
@@ -9704,31 +9891,46 @@ export class Expressions<C extends Context> implements Union<C> {
   }
   /** @throws {CompileError} */
   private newList(this: Mut<this>, e: Ref<Extract<Expr, { kind: "new" }>>): Type {
-    const list = e.args ?? [];
+    if (e.args !== undefined) return this.newListOf(e, e.args);
+    const none: Expr[] = [];
+    return this.newListOf(e, none);
+  }
+  /** @throws {CompileError} */
+  private newListOf(this: Mut<this>, e: Ref<Extract<Expr, { kind: "new" }>>, list: Ref<Expr[]>): Type {
     if (e.callee.kind === "ident" && INTERIORS.has(e.callee.name) && (this.ctx.lookup(e.callee.name, undefined) === undefined) && !this.ctx.classes.has(e.callee.name)) {
       return this.interiorNew(e, interiorNamed(e.callee.name)!, list);
     }
     if (e.callee.kind === "ident" && (e.callee.name === "Rc" || e.callee.name === "Weak") && (this.ctx.lookup(e.callee.name, undefined) === undefined) && !this.ctx.classes.has(e.callee.name)) {
-      return this.countedNew(e, e.callee.name, list);
+      return this.countedNew(e, e.callee.name === "Rc" ? "Rc" : "Weak", list);
     }
     if (e.callee.kind === "ident" && (e.callee.name === "Semaphore" || e.callee.name === "Channel") && (this.ctx.lookup(e.callee.name, undefined) === undefined) && !this.ctx.classes.has(e.callee.name)) {
-      return this.blockNew(e, e.callee.name, list);
+      return this.blockNew(e, e.callee.name === "Channel" ? "Channel" : "Semaphore", list);
     }
     if (e.callee.kind === "ident" && (e.callee.name === "Map" || e.callee.name === "Set") && (this.ctx.lookup(e.callee.name, undefined) === undefined)) return this.mapNew(e, e.callee.name === "Set", list);
     if (e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) && this.ctx.tables.jsClasses.has(e.callee.name)) return this.jsNew(e, this.ctx.tables.jsClasses.get(e.callee.name)!);
     if (e.callee.kind === "ident" && e.callee.name === "Promise" && (this.ctx.lookup("Promise", undefined) === undefined) && !this.ctx.classes.has("Promise")) {
-      return this.typeOf(this.promiseNew(e, list));
+      const made = this.promiseNew(e, list);
+    return this.typeOf(made);
     }
     if (e.callee.kind === "ident" && e.callee.name === "RegExp" && (this.ctx.lookup("RegExp", undefined) === undefined) && !this.ctx.classes.has("RegExp")) return this.regexNew(e, list);
     if (e.callee.kind === "ident" && e.callee.name === "AbortController" && (this.ctx.lookup(e.callee.name, undefined) === undefined) && !this.ctx.classes.has(e.callee.name)) {
       if (list.length > 0 || e.typeArgs.length > 0) throw new CompileError("E0504", "'AbortController' takes no arguments", e.start, e.end);
       return this.ctx.tables.typing.blockType("AbortController");
     }
-    if (e.callee.kind === "ident" && isTypedName(e.callee.name) && (this.ctx.lookup(e.callee.name, undefined) === undefined) && !this.ctx.classes.has(e.callee.name)) return this.typedNew(e, e.callee.name, list);
-    const named = e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.tables.arenas.classOf(this.ctx.classes.get(e.callee.name)) : undefined;
-    if (named?.node.abstract) throw new CompileError("E0701", `cannot create an instance of the abstract class '${this.ctx.tables.typing.rec(named.type).name}'`, e.start, e.end);
-    const written = this.ctx.tables.arenas.bodyOf(named?.constructor)?.params ?? (e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.templateParams(e.callee.name) : undefined);
-    if (written !== undefined && written.length > 0 && written[written.length - 1]!.rest && e.args !== undefined) {
+    if (e.callee.kind === "ident" && isTypedName(e.callee.name) && (this.ctx.lookup(e.callee.name, undefined) === undefined) && !this.ctx.classes.has(e.callee.name)) return this.typedNew(e, typedNamed(e.callee.name)!, list);
+    const namedId = e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.classes.get(e.callee.name) : undefined;
+    const named = this.ctx.tables.arenas.classOf(namedId);
+    const abstract = named !== undefined && named.node.abstract === true;
+    const namedType = named !== undefined ? named.type : undefined;
+    const ctorId = named !== undefined ? named.constructor : undefined;
+    if (abstract) throw new CompileError("E0701", `cannot create an instance of the abstract class '${this.ctx.tables.typing.rec(namedType!).name}'`, e.start, e.end);
+    let written: Param[] | undefined = undefined;
+    if (ctorId !== undefined) {
+      let copied: Param[] = [];
+      for (const p of this.ctx.tables.arenas.bodyOf(ctorId).params) copied.push(cloneParam(p));
+      written = copied;
+    } else if (e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined)) written = this.ctx.templateParams(e.callee.name);
+    if (written !== undefined && written.length > 0 && written[written.length - 1]!.rest === true && e.args !== undefined) {
       const packed = this.packRest(e, e.args, written);
       if (packed !== undefined && packed.kind === "new" && packed.args !== undefined) return this.newChecked(e, packed.args);
       return this.newChecked(e, e.args);
@@ -9738,17 +9940,15 @@ export class Expressions<C extends Context> implements Union<C> {
   }
   /** @throws {CompileError} */
   private newChecked(this: Mut<this>, e: Ref<Extract<Expr, { kind: "new" }>>, list: Ref<Expr[]>): Type {
-    const named = e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.tables.arenas.classOf(this.ctx.classes.get(e.callee.name)) : undefined;
-    if ((named !== undefined)) this.expectFrom(named.constructor, list);
+    const namedId = e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.classes.get(e.callee.name) : undefined;
+    if ((namedId !== undefined)) {
+      const ctor = this.ctx.tables.arenas.classOf(namedId).constructor;
+      this.expectFrom(ctor, list);
+    }
     // A generic class's written type arguments type the arrows given for parameters they name,
     // as in `new Box<(n: i64) => i64>((n) => n * 2)`.
-    const earlyId = (named === undefined) && e.typeArgs.length > 0 && e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.construct(e.callee.name, e.typeArgs, [], e) : undefined;
-    const early = this.ctx.tables.arenas.classOf(earlyId);
-    const earlyConstructor = this.ctx.tables.arenas.bodyOf(early?.constructor);
-    earlyConstructor?.params.forEach((p, i) => {
-      const held = p.type?.kind === "ref" && p.type.args.length === 0 ? (earlyConstructor.scope ?? early!.scope).get(p.type.name) : undefined;
-      if (list[i]?.kind === "arrow" && held) this.expect(list[i]!, held);
-    });
+    const earlyId = (namedId === undefined) && e.typeArgs.length > 0 && e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? this.ctx.construct(e.callee.name, e.typeArgs, [], e) : undefined;
+    if (earlyId !== undefined) this.expectEarly(earlyId, list);
     // JavaScript's `new Array(n)` holds n holes, which Fish has no way to make.
     if (e.callee.kind === "ident" && e.callee.name === "Array" && (this.ctx.lookup("Array", undefined) === undefined) && !this.ctx.classes.has("Array")) {
       const one = list.length === 1 ? this.value(list[0]!) : undefined;
@@ -9757,22 +9957,46 @@ export class Expressions<C extends Context> implements Union<C> {
         : list.length === 1 ? "'new Array(x)' of one value that isn't a length makes '[x]'; write 'Array.of(x)' or '[x]'"
         : "'new Array(a, b)' makes an array of its arguments; write 'Array.of(a, b)' or '[a, b]'", e.start, e.end);
     }
-    const argTypes = list.map((a) => this.value(a));
-    if (named && this.ctx.tables.typing.rec(named.type).name === "Date" && named.node.start >= STD_BASE) this.dateNew(e, list, argTypes);
-    const c = this.ctx.tables.arenas.classOf(e.callee.kind === "ident" ? this.ctx.construct(e.callee.name, e.typeArgs, argTypes, e) : undefined);
-    if (!c) throw new CompileError("E0503", `only a class can be constructed with 'new'${e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? didYouMean(e.callee.name, this.ctx.classNames(e.callee.start)) : ""}`, e.callee.start, e.callee.end);
-    const rust = rustClassOf(this.ctx.tables.typing, c.type);
-    const made = this.ctx.tables.arenas.bodyOf(c.constructor);
-    if (rust && !made.rust) throw new CompileError("E1004", `the Rust type '${rust.name}' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function`, e.start, e.end);
-    this.ctx.constructs(made.bodyId, list, argTypes);
-    const constructor = this.ctx.instantiate(made.bodyId, [], list, argTypes, e);
+    let argTypes: Type[] = [];
+    for (const a of list) argTypes.push(this.value(a));
+    const namedInfo = this.ctx.tables.arenas.classOf(namedId);
+    const stdDate = namedInfo !== undefined && this.ctx.tables.typing.rec(namedInfo.type).name === "Date" && namedInfo.node.start >= STD_BASE;
+    if (stdDate) this.dateNew(e, list, argTypes.slice());
+    const constructed = e.callee.kind === "ident" ? this.ctx.construct(e.callee.name, e.typeArgs, argTypes.slice(), e) : undefined;
+    const c = this.ctx.tables.arenas.classOf(constructed);
+    if (c === undefined) throw new CompileError("E0503", `only a class can be constructed with 'new'${e.callee.kind === "ident" && (this.ctx.lookup(e.callee.name, undefined) === undefined) ? didYouMean(e.callee.name, this.ctx.classNames(e.callee.start)) : ""}`, e.callee.start, e.callee.end);
+    const made = c.type;
+    const madeBody = c.constructor;
+    const rust = rustClassOf(this.ctx.tables.typing, made);
+    const native = this.ctx.tables.arenas.bodyOf(madeBody).rust !== undefined;
+    if (rust !== undefined && !native) throw new CompileError("E1004", `the Rust type '${rust.name}' declares no constructor; declare one, as in 'constructor(x: i64);', or make it with a static function`, e.start, e.end);
+    this.ctx.constructs(madeBody, list, argTypes.slice());
+    const constructor = this.ctx.instantiate(madeBody, [], list, argTypes.slice(), e);
     this.args(list, argTypes, constructor, e);
-    this.ctx.calls.set(e, constructor);
+    this.ctx.calls.set(cloneExpr(e), constructor);
     const error = this.ctx.errorOf(constructor);
-    if (error) this.ctx.raise(e, error, `'new ${this.ctx.tables.typing.rec(c.type).name}'`);
+    if (error !== undefined) this.ctx.raise(e, error, `'new ${this.ctx.tables.typing.rec(made).name}'`);
     // An instance holding references borrows from what it was built from.
-    if (this.ctx.tables.typing.holdsRef(c.type)) this.ctx.borrowsFrom.set(e, list.filter((a) => this.lends(a)));
-    return c.type;
+    if (this.ctx.tables.typing.holdsRef(made)) {
+      let lent: Expr[] = [];
+      for (const a of list) if (this.lends(a)) lent.push(cloneExpr(a));
+      this.ctx.borrowsFrom.set(cloneExpr(e), lent);
+    }
+    return made;
+  }
+
+  // A generic class's written type arguments type the arrows given for parameters they name.
+  /** @throws {CompileError} */
+  private expectEarly(this: Mut<this>, classId: ClassId, list: Ref<Expr[]>): void {
+    const ctorId = this.ctx.tables.arenas.classOf(classId).constructor;
+    const ctor = this.ctx.tables.arenas.bodyOf(ctorId);
+    let wanted: [usize, Type][] = [];
+    for (let i: usize = 0; i < ctor.params.length; i++) {
+      const name = refParamName(ctor.params[i]!);
+      const held = name === undefined ? undefined : ctor.scope !== undefined ? ctor.scope.get(name) : this.ctx.tables.arenas.classOf(classId).scope.get(name);
+      if (i < list.length && list[i]!.kind === "arrow" && held !== undefined) wanted.push([i, held]);
+    }
+    for (const [i, held] of wanted) this.expect(list[i]!, held);
   }
 
   // A slot giving a `Promise<T>` boxes the future its method or closure makes: borrowing the
@@ -9796,16 +10020,16 @@ export class Expressions<C extends Context> implements Union<C> {
   private dynCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, t: DynType): { type: Type; what: string } {
     if (this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(t).of)) throw new CompileError("E0503", `a stored function is called directly, as '${this.placeText(callee.object)}(...)'`, callee.start, callee.end);
     const index = this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).methods.findIndex((m) => m.name === callee.name);
-    const m = this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).methods[index as usize];
-    if (m === undefined) {
+    if (index < 0) {
       const hint = this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).fields.some((f) => f.name === callee.name) ? "; it is a field, read without calling" : didYouMean(callee.name, this.memberNames(t));
       throw new CompileError("E0502", `property '${shownName(callee.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'${hint}`, callee.start, callee.end);
     }
+    const m: Method = { ...this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).methods[index as usize]! };
     if (this.linked(callee)) throw unsupported("optional chains calling methods through a Dyn", callee);
     this.omittableCall(e, callee, m, this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).name);
-    if (m.generic) throw new CompileError("E0211", `'${m.name}' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn; take a type parameter bounded by '${this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).name}' instead`, callee.start, callee.end);
+    if (m.generic !== undefined) throw new CompileError("E0211", `'${m.name}' is generic, a family of methods made one per call, and a Dyn's table holds one function per method, so it can't be called through a Dyn; take a type parameter bounded by '${this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).name}' instead`, callee.start, callee.end);
     const async = this.ctx.tables.typing.promiseElement(m.returns);
-    if (async !== undefined && m.owned) throw unsupported("async methods taking their object over through a Dyn", callee);
+    if (async !== undefined && m.owned === true) throw unsupported("async methods taking their object over through a Dyn", callee);
     const mr = this.recOf(m.returns);
     if (mr?.kind === "interface" && async === undefined) {
       throw new CompileError("E0115", `'${m.name}' returns the interface type '${mr.name}', which each type implementing '${this.ctx.tables.typing.rec(this.ctx.tables.typing.rec(t).of).name}' gives its own way, so a Dyn can't call it; have it return 'Dyn<${mr.name}>'`, callee.start, callee.end);
@@ -9814,26 +10038,28 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.args.length !== m.params.length) throw new CompileError("E0501", `expected ${m.params.length} argument${m.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     // A reference it gives borrows the Dyn, unless the call frees the Dyn's block.
     if (this.ctx.tables.typing.holdsRef(m.returns)) {
-      if (m.owned) throw new CompileError("E0209", `'${m.name}' takes its object over and frees it, so the reference it gives would point at nothing`, callee.start, callee.end);
-      this.ctx.borrowsFrom.set(e, [callee.object]);
+      if (m.owned === true) throw new CompileError("E0209", `'${m.name}' takes its object over and frees it, so the reference it gives would point at nothing`, callee.start, callee.end);
+      this.ctx.borrowsFrom.set(cloneExpr(e), [cloneExpr(callee.object)]);
     }
     // A boxed async generator's `next()` runs it on, changing it.
     const mutable = m.mutable === true || this.ctx.tables.typing.generatorElement(this.ctx.tables.typing.rec(t).of, true) !== undefined;
-    if (m.owned) this.takesOver(callee.object, m.name);
+    if (m.owned === true) this.takesOver(callee.object, m.name);
     else if (mutable) this.mutates(callee.object, m.name);
-    e.args.forEach((a, i) => {
+    for (let i: usize = 0; i < e.args.length; i++) {
       const want = m.params[i]!;
-      this.expect(a, want);
-      const given = this.value(a);
-      this.coerce(a, given, want, `argument of type '${this.ctx.tables.typing.show(given)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(want)}'`);
-    });
-    this.ctx.tables.dynCalls.set(e, { index, mutable, owned: m.owned === true });
+      this.expect(e.args[i]!, want);
+      const given = this.value(e.args[i]!);
+      this.coerce(e.args[i]!, given, want, `argument of type '${this.ctx.tables.typing.show(given)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(want)}'`);
+    }
+    this.ctx.tables.dynCalls.set(cloneExpr(e), { index: index as usize, mutable, owned: m.owned === true });
     // An async method's future, boxed, borrows the Dyn until it is done.
     if (async !== undefined) {
-      this.ctx.borrowsFrom.set(e, [callee.object, ...e.args.filter((a) => this.lends(a))]);
+      let lent: Expr[] = [cloneExpr(callee.object)];
+      for (const a of e.args) if (this.lends(a)) lent.push(cloneExpr(a));
+      this.ctx.borrowsFrom.set(cloneExpr(e), lent);
       return { type: this.ctx.tables.typing.lentPromise(async), what: `'${m.name}'` };
     }
-    if (m.throws) this.ctx.raise(e, m.throws, `'${m.name}'`);
+    if (m.throws !== undefined) this.ctx.raise(e, m.throws, `'${m.name}'`);
     return { type: m.returns, what: `'${m.name}'` };
   }
 
@@ -9851,10 +10077,10 @@ export class Expressions<C extends Context> implements Union<C> {
       const given = this.value(e.args[i]!);
       this.coerce(e.args[i]!, given, want, `argument of type '${this.ctx.tables.typing.show(given)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(want)}'`);
     }
-    if (this.ctx.tables.typing.holdsRef(this.ctx.tables.typing.rec(fn).returns)) this.ctx.borrowsFrom.set(e, [callee]);
-    this.ctx.tables.dynCalls.set(e, { index: 0, mutable: false, owned: false, callable: callee });
+    if (this.ctx.tables.typing.holdsRef(this.ctx.tables.typing.rec(fn).returns)) this.ctx.borrowsFrom.set(cloneExpr(e), [cloneExpr(callee)]);
+    this.ctx.tables.dynCalls.set(cloneExpr(e), { index: 0, mutable: false, owned: false, callable: cloneExpr(callee) });
     const thrown = this.ctx.tables.typing.rec(fn).throws;
-    if (thrown) this.ctx.raise(e, thrown, callee.kind === "ident" || callee.kind === "member" ? `'${callee.name}'` : "this function");
+    if (thrown !== undefined) this.ctx.raise(e, thrown, callee.kind === "ident" || callee.kind === "member" ? `'${callee.name}'` : "this function");
     // One returning a Promise gives its future boxed, owning what it holds.
     return { type: this.ctx.tables.typing.stored(this.ctx.tables.typing.rec(fn).returns), what: "this function" };
   }
@@ -10021,16 +10247,11 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     // A reference widened or narrowed to what it points to would be a copy nobody wrote.
     const read = this.ctx.types.get(e.expr) ?? from;
-    if ((this.isRefType(from) || this.isRefType(read)) && !this.ctx.tables.typing.isCopy(this.ctx.tables.typing.lower(from)) && !this.isRefType(to) && (this.ctx.tables.typing.optionRef(to) === undefined)) throw new CompileError("E0202", `'as' can't take the value out of '${this.ctx.tables.typing.show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
-    const narrowsFromUnion = () => {
-      const fr = this.recOf(from);
-      if (fr?.kind !== "union") return false;
-      const tr = this.recOf(to);
-      const targets = tr?.kind === "union" ? tr.members : [to];
-      return targets.length > 0 && targets.every((t) => fr.members.some((m) => m === t || this.ctx.tables.typing.unfold(m) === t || this.ctx.tables.typing.sameLowered(m, t) || this.ctx.tables.typing.sameLowered(this.ctx.tables.typing.unfold(m), t)));
-    };
+    const lowFrom = this.isRefType(from) || this.isRefType(read) ? this.ctx.tables.typing.lower(from) : undefined;
+    if (lowFrom !== undefined && !this.ctx.tables.typing.isCopy(lowFrom) && !this.isRefType(to) && (this.ctx.tables.typing.optionRef(to) === undefined)) throw new CompileError("E0202", `'as' can't take the value out of '${this.ctx.tables.typing.show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
     // A brand is made and taken apart with 'as', between its base and what converts to it.
-    const [fb, tb] = [this.ctx.tables.typing.unbranded(from), this.ctx.tables.typing.unbranded(to)];
+    const fb = this.ctx.tables.typing.unbranded(from);
+    const tb = this.ctx.tables.typing.unbranded(to);
     if (fb !== from || tb !== to) {
       if (tb !== to && this.adapt(e.expr, tb)) return to;
       if (isNumeric(fb) && isNumeric(tb)) return to;
@@ -10038,7 +10259,7 @@ export class Expressions<C extends Context> implements Union<C> {
         if (from !== tb) this.coerce(e.expr, from, tb, "");
         return to;
       }
-      if (narrowsFromUnion()) return to;
+      if (this.narrowsFromUnion(from, to)) return to;
       throw new CompileError("E0111", `'${this.ctx.tables.typing.show(from)}' can't be converted to '${this.ctx.tables.typing.show(to)}' with 'as'`, e.start, e.end);
     }
     // A bigint becomes a number with 'as', truncated to an integer type's bits as
@@ -10051,11 +10272,39 @@ export class Expressions<C extends Context> implements Union<C> {
         this.coerce(e.expr, from, to, "");
         return to;
       }
-      if (narrowsFromUnion()) return to;
+      if (this.narrowsFromUnion(from, to)) return to;
       if (this.ctx.tables.typing.fits(to, from)) throw new CompileError("E0111", `'as' can't narrow '${this.ctx.tables.typing.show(from)}' to '${this.ctx.tables.typing.show(to)}', since nothing would check it while the program runs; narrow it with a check, like 'typeof', 'instanceof' or '!== null'`, e.start, e.end);
       if (!(from === "boolean" && isInteger(to))) throw new CompileError("E0111", `'${this.ctx.tables.typing.show(from)}' can't be converted to '${this.ctx.tables.typing.show(to)}' with 'as', since neither fits the other`, e.start, e.end);
     }
     return to;
+  }
+
+  // Whether `as` narrows a union to members it holds, which a check of its tag tells apart.
+  private narrowsFromUnion(this: Mut<this>, from: Type, to: Type): boolean {
+    const fr = this.recOf(from);
+    if (fr === undefined || fr.kind !== "union") return false;
+    const froms = fr.members.slice();
+    const targets = this.membersOf(to);
+    if (targets.length === 0) return false;
+    for (const t of targets) {
+      let held = false;
+      for (const m of froms) {
+        if (m === t || this.ctx.tables.typing.unfold(m) === t || this.ctx.tables.typing.sameLowered(m, t)) held = true;
+        else {
+          const unfolded = this.ctx.tables.typing.unfold(m);
+          if (this.ctx.tables.typing.sameLowered(unfolded, t)) held = true;
+        }
+        if (held) break;
+      }
+      if (!held) return false;
+    }
+    return true;
+  }
+
+  // Whether a value is written `as const`, as checking has it so far.
+  private writtenConst(given: Ref<Expr>): boolean {
+    const now = this.ctx.tables.rewrites.rewritten(given);
+    return now !== undefined ? constAssertion(now) : constAssertion(given);
   }
 
   // An operator works on a literal's base type, so `1` adds like any i64. A type parameter
@@ -10549,6 +10798,52 @@ function rootName(e: Ref<Expr>): string | undefined {
 // Whether a `!` is marked redundant; undefined when it isn't marked, or isn't a `!`.
 function bangMark(e: Ref<Expr>): boolean | undefined {
   return e.kind === "nonNull" ? e.redundant : undefined;
+}
+
+// What an expression form the checker has no meaning for is called.
+function expressionForm(kind: string): string {
+  switch (kind) {
+    case "super":
+      return EXPRESSION_FORMS.super;
+    case "spread":
+      return EXPRESSION_FORMS.spread;
+    case "function":
+      return EXPRESSION_FORMS.function;
+    case "class":
+      return EXPRESSION_FORMS.class;
+    case "privateName":
+      return EXPRESSION_FORMS.privateName;
+    case "index":
+      return EXPRESSION_FORMS.index;
+    case "instantiation":
+      return EXPRESSION_FORMS.instantiation;
+    case "meta":
+      return EXPRESSION_FORMS.meta;
+    case "import":
+      return EXPRESSION_FORMS.import;
+    case "topic":
+      return EXPRESSION_FORMS.topic;
+    case "comptime":
+      return EXPRESSION_FORMS.comptime;
+    case "sequence":
+      return EXPRESSION_FORMS.sequence;
+    case "assertion":
+      return EXPRESSION_FORMS.assertion;
+    case "tagged":
+      return EXPRESSION_FORMS.tagged;
+  }
+  // As reading a form with no name gives.
+  return "undefined";
+}
+
+// The name a place written in JS has, as a message shows it.
+function placeName(e: Ref<Expr>): string {
+  return e.kind === "member" ? e.name : "undefined";
+}
+
+// The type parameter a parameter's type names, written bare.
+function refParamName(p: Ref<Param>): string | undefined {
+  return p.type !== undefined && p.type.kind === "ref" && p.type.args.length === 0 ? p.type.name : undefined;
 }
 
 // The interior-mutable type a name names.
