@@ -312,22 +312,24 @@ function madeBy<T extends ClosureType | FutureType | GeneratorType>(typing: Mut<
   return t;
 }
 
+// Gives a local a slot in a frame, once.
+function addSlot(l: Ref<Local>, fields: Mut<Field[]>, locals: Mut<Map<LocalId, usize>>): void {
+  if (locals.has(l.localId)) return;
+  locals.set(l.localId, fields.length);
+  fields.push({ name: `${l.name}.${l.id}`, type: l.type });
+}
+
 function frameOf(tables: Mut<Tables>, instance: Mut<Instance>, generator: GeneratorType | FutureType) {
   let fields: Field[] = [{ name: "state", type: "i32" }];
   let locals = new Map<LocalId, usize>();
   let loops = new NodeMap<Stmt, usize>();
   // Each `await` keeps the future it awaits in the frame while it is pending.
   let awaits = new NodeMap<Expr, usize>();
-  const add = (l: Ref<Local>) => {
-    if (locals.has(l.localId)) return;
-    locals.set(l.localId, fields.length);
-    fields.push({ name: `${l.name}.${l.id}`, type: l.type });
-  };
   // An async arrow's frame holds what it captured, first, and an async method's its object.
   if (bodyOf(tables.arenas, instance).closure !== undefined) fields.push({ name: "env", type: "void" });
   const self = bodyOf(tables.arenas, instance).self;
   if (self !== undefined && !self.constructor) fields.push(receiverField(tables.typing, self, instance.concrete));
-  for (const p of bodyOf(tables.arenas, instance).params) add(tables.arenas.localOf(instance.locals.get(p)!));
+  for (const p of bodyOf(tables.arenas, instance).params) addSlot(tables.arenas.localOf(instance.locals.get(p)!), fields, locals);
   // A local generic function's name holds nothing.
   let named = new Set<LocalId>();
   let kept: LocalId[] = [];
@@ -341,7 +343,7 @@ function frameOf(tables: Mut<Tables>, instance: Mut<Instance>, generator: Genera
     const y = tables.arenas.localOf(b).id;
     return x < y ? -1 : x > y ? 1 : 0;
   });
-  for (const l of kept) add(tables.arenas.localOf(l));
+  for (const l of kept) addSlot(tables.arenas.localOf(l), fields, locals);
   walkWhile({ of: "stmts", node: bodyOf(tables.arenas, instance).body }, (n) => {
     if (n.of === "expr" && n.node.kind === "arrow") return false;
     if (n.of === "stmt" && n.node.kind === "forOf") {
@@ -638,7 +640,7 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         if (rust !== undefined) tables.typing.setRust(declared!.type, rust);
         // A Rust type declaring no constructor is never made with `new`, so its handle needs no
         // assigning in the empty one it is given.
-        if (rust && !tables.arenas.bodyOf(declared!.constructor).rust) declared!.required.clear();
+        if (rust !== undefined && tables.arenas.bodyOf(declared!.constructor).rust === undefined) declared!.required.clear();
         // A `static readonly` field is a top-level const named `C.x`, which no source name can be.
         for (const f of declared?.staticFields.values() ?? []) {
           const giving: Stmt = { id: nextId(tables.ids), kind: "return", value: f.init!, start: f.init!.start, end: f.init!.end };
@@ -748,11 +750,41 @@ function signatureIn(program: Ref<Stmt[]>, type: TypeNode | undefined): TypeNode
 // The parameter, result and error types a top-level function or arrow const writes, for `typeof`.
 function declaredSignatureIn(program: Ref<Stmt[]>, name: string): TypeNode | undefined {
   for (const s of program) {
-    const d = s.kind === "export" ? s.body : s;
-    const f = d.kind === "function" && d.name === name ? d : d.kind === "let" && d.keyword === "const" ? d.declarations.find((x) => x.target.kind === "ident" && x.target.name === name)?.init : undefined;
-    if (f?.kind === "function" || f?.kind === "arrow") return { id: 0, kind: "function", typeParams: f.typeParams, params: f.params, returns: f.returnType!, throws: "throws" in f ? f.throws : undefined, construct: false, abstract: false, start: f.start, end: f.end } as TypeNode;
+    const found = s.kind === "export" ? signatureNamed(s.body, name) : signatureNamed(s, name);
+    if (found !== undefined) return found;
   }
   return undefined;
+}
+
+// What `typeof name` reads in one statement: a function of that name, or a const of that name
+// holding a function or an arrow.
+function signatureNamed(d: Ref<Stmt>, name: string): TypeNode | undefined {
+  if (d.kind === "function") return d.name === name ? signatureFrom(d.typeParams, d.params, d.returnType, d.throws, d.start, d.end) : undefined;
+  if (d.kind !== "let" || d.keyword !== "const") return undefined;
+  for (const x of d.declarations) {
+    if (boundName(x.target) !== name) continue;
+    return x.init === undefined ? undefined : valueSignature(x.init!);
+  }
+  return undefined;
+}
+
+function valueSignature(e: Ref<Expr>): TypeNode | undefined {
+  if (e.kind === "arrow") return signatureFrom(e.typeParams, e.params, e.returnType, e.throws, e.start, e.end);
+  if (e.kind === "function") return signatureFrom(e.typeParams, e.params, e.returnType, undefined, e.start, e.end);
+  return undefined;
+}
+
+function boundName(p: Ref<Pattern>): string | undefined {
+  return p.kind === "ident" ? p.name : undefined;
+}
+
+// A function type written from a declaration's parts, as copies.
+function signatureFrom(typeParams: Ref<TypeParam[]>, params: Ref<Param[]>, returns: Ref<TypeNode | undefined>, throws: Ref<TypeNode | undefined>, start: usize, end: usize): TypeNode {
+  let copied: TypeParam[] = [];
+  for (const p of typeParams) copied.push(cloneTypeParam(p));
+  // A function without a written return type gives none here, as it was read before.
+  const node: TypeNode = { id: 0, kind: "function", typeParams: copied, params: cloneParams(params), returns: returns !== undefined ? cloneTypeNode(returns) : returns!, throws: throws !== undefined ? cloneTypeNode(throws) : undefined, construct: false, abstract: false, start, end };
+  return node;
 }
 
 /** @throws {CompileError} */
@@ -892,7 +924,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         // A tag takes its strings, then its values as a rest parameter.
         const tag = f.params.length === 2 && tagStrings(f.params[0]) && f.params[1]!.rest;
         if (!tag && f.params.length === 2 && f.params[1]!.rest && (f.params[0]!.comptime || refNamed(f.params[0]!.type, "TemplateStringsArray"))) {
-          const strings = f.params[0]!;
+          const strings: Ref<Param> = f.params[0]!;
           throw new CompileError("E1107", `'${f.name}' can't be a tag: its first parameter has to be 'comptime strings: TemplateStringsArray', so the template's text is known while compiling; tags that run on the text at run time aren't supported yet`, strings.start, strings.end);
         } else if (!tag && f.params.length > 0 && f.params[0]!.comptime && f.params[f.params.length - 1]!.rest) {
           const rest: Ref<Param> = f.params[f.params.length - 1]!;
@@ -1244,10 +1276,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // An enum with computed members is settled when first read; one nothing reads still reports
     // a bad initializer.
     for (const name of [...this.enums.keys()]) settleEnum(this, name);
-    const { unsettled } = this.registryState;
-    const { pending } = this.instancingState;
     // The classes as declared, and generic classes' definitions; any other is an instance a call made.
-    const declaredClasses = new Set<ClassId>(unsettled);
+    const declaredClasses = new Set<ClassId>(this.registryState.unsettled);
     // A class's `implements` claims are checked before any body uses the class, so a refused one is
     // reported at the class rather than at each use.
     for (const c of declaredClasses) {
@@ -1295,17 +1325,17 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // Once a body has failed, a generic body's or class's instances aren't checked: their
     // definitions were, and an instance's error then is most often one a refused call already
     // reported.
-    while (!this.unending && (unsettled.length > 0 || pending.length > 0)) {
+    while (!this.unending && (this.registryState.unsettled.length > 0 || this.instancingState.pending.length > 0)) {
       if (this.errors.length > 0) {
-        while (pending.length > 0) pending.pop();
-        const kept = unsettled.filter((c) => declaredClasses.has(c));
-        while (unsettled.length > 0) unsettled.pop();
-        unsettled.push(...kept);
-        if (unsettled.length === 0 && pending.length === 0) break;
+        while (this.instancingState.pending.length > 0) this.instancingState.pending.pop();
+        const kept = this.registryState.unsettled.filter((c) => declaredClasses.has(c));
+        while (this.registryState.unsettled.length > 0) this.registryState.unsettled.pop();
+        this.registryState.unsettled.push(...kept);
+        if (this.registryState.unsettled.length === 0 && this.instancingState.pending.length === 0) break;
       }
       try {
-        if (unsettled.length > 0) {
-          for (const f of this.registry().settle(unsettled.shift()!)) {
+        if (this.registryState.unsettled.length > 0) {
+          for (const f of this.registry().settle(this.registryState.unsettled.shift()!)) {
             try {
               this.checkBody(this.definition(f));
             } catch (e) {
@@ -1313,7 +1343,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
               this.recover(e);
             }
           }
-        } else this.checkBody(pending.shift()!);
+        } else this.checkBody(this.instancingState.pending.shift()!);
       } catch (e) {
         if (!(e instanceof CompileError)) throw e;
         this.recover(e);
@@ -1381,7 +1411,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   /** @throws {CompileError} */
   private unknownJson(this: Mut<this>) {
     if (this.tables.unknownJson.length === 0) return;
-    const at = this.tables.unknownJson[0]!;
+    const at = { start: this.tables.unknownJson[0]!.start, end: this.tables.unknownJson[0]!.end };
     // Whether a class or a data enum derives Json is asked outside the walk, which can't lend the
     // checker: the walk stops at the first not yet known, which is asked and the walk run again.
     const unknown = this.tables.typing.unknownType();
@@ -1468,7 +1498,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const declared = this.instancing().returnTypeOf(cloneSignature(this.tables.arenas.bodyOf(constant)), new Map<string, Type>());
       if (declared === undefined || this.isInterface(declared)) this.unlaid(name, at);
       const id = this.instanceOf(constant);
-      return this.tables.typing.widenLet(this.returnOf(id, at));
+      const returned = this.returnOf(id, at);
+      return this.tables.typing.widenLet(returned);
     } finally {
       this.querying.delete(name);
     }
@@ -1619,7 +1650,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const source = this.recOf(from);
     if (into.kind === "union") {
       const wantedMembers = [...into.members];
-      const members = source !== undefined && source.kind === "union" ? [...source.members] : [from];
+      let members: Type[] = [];
+      if (source !== undefined && source.kind === "union") for (const m of source.members) members.push(m);
+      else members.push(from);
       let others: Type[] = [];
       for (const m of wantedMembers) if (!isJs(this.tables.typing, m)) others.push(m);
       for (const m of members) {
@@ -1766,7 +1799,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       });
     }
     if (missing.length > 0) {
-      const life = missing[0]!;
+      const life = missing.shift()!;
       throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
     }
   }
@@ -1870,12 +1903,16 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         const lowered = this.tables.typing.lower(instance.caught.getById(k)!);
         instance.caught.setValueById(k, lowered);
       }
+      let predicates: [usize, { index: usize; type: Type; yes: boolean; no: boolean }][] = [];
       if (instance.predicates !== undefined) {
         for (const k of instance.predicates.ids()) {
           const pr = instance.predicates.getById(k)!;
-          const type = this.tables.typing.lower(pr.type);
-          instance.predicates.setValueById(k, { ...pr, type });
+          predicates.push([k, { ...pr, type: this.tables.typing.lower(pr.type) }]);
         }
+      }
+      while (predicates.length > 0) {
+        const [k, pr] = predicates.shift()!;
+        instance.predicates?.setValueById(k, pr);
       }
       if (instance.throws !== undefined) instance.throws = this.tables.typing.lower(instance.throws);
     }
@@ -2268,7 +2305,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if ((f.async === true) !== (declared.async === true)) throw why(declared.async === true ? "must be async" : "can't be async");
     if ((f.generator === true) !== (declared.generator === true)) throw why(declared.generator === true ? "must be a generator" : "can't be a generator");
     if (f.self!.mutable && !declared.self!.mutable) throw why("can't change 'this'; it borrows 'this' read-only");
-    if (!!f.self!.owned !== !!declared.self!.owned) throw why(declared.self!.owned ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
+    if ((f.self!.owned === true) !== (declared.self!.owned === true)) throw why(declared.self!.owned === true ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
     const error = this.errorOf(instance);
     const allowed = this.errorOf(this.instanceOf(declaredId));
     if (error && (!allowed || !this.tables.typing.fits(error, allowed))) throw why(allowed ? `can only throw '${this.tables.typing.show(allowed)}'` : "can't throw");
@@ -4363,7 +4400,7 @@ class BodyChecker implements Context, GuardHost {
         return;
       }
       case "throw":
-        this.thrown(s, s.value);
+        this.thrownAt(cloneStmt(s), { start: s.start, end: s.end }, s.value);
         return;
       case "try": {
         // Without a catch, what the block raises goes on out, after the `finally`.
@@ -4717,36 +4754,47 @@ class BodyChecker implements Context, GuardHost {
   // `throw` returns an error of the type the function declares, or goes to a catch. A value
   // the error type takes is converted to it; another may be wrapped.
   /** @throws {CompileError} */
-  thrown(this: Mut<this>, at: Expr | Stmt, thrownValue: Expr) {
+  thrown(this: Mut<this>, at: Ref<Expr>, thrownValue: Ref<Expr>): void {
+    this.thrownAt(cloneExpr(at), { start: at.start, end: at.end }, thrownValue);
+  }
+
+  /** @throws {CompileError} */
+  thrownAt(this: Mut<this>, at: Expr | Stmt, span: { start: usize; end: usize }, thrownValue: Ref<Expr>): void {
     const type = this.exprs().value(thrownValue);
     const into = this.errorType && this.handlers.length === 0 && (this.cx.tables.typing.fits(type, this.errorType) || this.exprs().adapt(thrownValue, this.errorType));
     if (into) this.exprs().coerce(thrownValue, type, this.errorType!, `type '${this.cx.tables.typing.show(type)}' can't be thrown here: ${this.who()} throws '${this.cx.tables.typing.show(this.errorType!)}'`);
-    this.raise(at, into ? this.errorType! : this.types.get(thrownValue)!, "'throw'");
+    this.raiseAt(at, span, into ? this.errorType! : this.types.get(thrownValue)!, "'throw'", true);
   }
 
   // An error raised by a call or a `throw` goes to the function's caller, which needs a
   // `throws` clause it fits.
   /** @throws {CompileError} */
-  raise(this: Mut<this>, at: Expr | Stmt, type: Type, what: string) {
-    if (this.cx.tables.typing.holdsRef(type)) throw unsupported("errors holding references", at);
+  raise(this: Mut<this>, at: Ref<Expr>, type: Type, what: string): void {
+    this.raiseAt(cloneExpr(at), { start: at.start, end: at.end }, type, what, at.kind === "throw");
+  }
+
+  // `site` raises the error, written at `span`; `throwing` when it is a `throw`.
+  /** @throws {CompileError} */
+  raiseAt(this: Mut<this>, at: Expr | Stmt, span: { start: usize; end: usize }, type: Type, what: string, throwing: boolean): void {
+    if (this.cx.tables.typing.holdsRef(type)) throw unsupported("errors holding references", span);
     if (this.handlers.length > 0) {
       this.handlers[this.handlers.length - 1]!.push([at, type]);
       return;
     }
     // An error comptime code doesn't catch is a compile error where it runs, so it may throw any.
     if (this.f.comptime !== undefined || this.comptimeDepth > 0) return;
-    if (this.built) throw new CompileError("E0602", "a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", at.start, at.end);
+    if (this.built) throw new CompileError("E0602", "a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", span.start, span.end);
     if (this.inferring !== undefined) {
       this.inferring!.push([at, type]);
       return;
     }
     if (this.errorType === undefined && this.contextual !== undefined) {
-      const does = "kind" in at && at.kind === "throw" ? `this closure throws '${this.cx.tables.typing.show(this.cx.tables.typing.widenLet(type))}'` : `${what} can throw '${this.cx.tables.typing.show(this.cx.tables.typing.widenLet(type))}'`;
-      throw new CompileError("E0602", `${does}, but the closure is given as '${this.cx.tables.typing.show(this.contextual)}', which throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
+      const does = throwing ? `this closure throws '${this.cx.tables.typing.show(this.cx.tables.typing.widenLet(type))}'` : `${what} can throw '${this.cx.tables.typing.show(this.cx.tables.typing.widenLet(type))}'`;
+      throw new CompileError("E0602", `${does}, but the closure is given as '${this.cx.tables.typing.show(this.contextual)}', which throws nothing; catch it inside the closure with try/catch`, span.start, span.end);
     }
     if (this.errorType === undefined) {
-      const does = "kind" in at && at.kind === "throw" ? "to throw here" : `since ${what} can throw '${this.cx.tables.typing.show(type)}'`;
-      throw new CompileError("E0602", `${this.who()} must declare 'throws ${this.cx.tables.typing.show(type)}' after its return type ${does}, or catch it with try/catch`, at.start, at.end);
+      const does = throwing ? "to throw here" : `since ${what} can throw '${this.cx.tables.typing.show(type)}'`;
+      throw new CompileError("E0602", `${this.who()} must declare 'throws ${this.cx.tables.typing.show(type)}' after its return type ${does}, or catch it with try/catch`, span.start, span.end);
     }
     if (this.cx.tables.typing.fits(type, this.errorType)) {
       this.instance.raises.set(at, { from: type, to: this.errorType });
@@ -4767,13 +4815,13 @@ class BodyChecker implements Context, GuardHost {
       for (const [x, body, param] of this.cx.registry().wrapsOf(id)) if (this.cx.tables.typing.fits(type, x)) taking.push([body, param]);
       for (const [body, param] of taking) wrappers.push({ wrapper: c, param, via: this.cx.instanceOf(body) });
     }
-    const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${this.cx.tables.typing.show(type)}'` : `${what} can throw '${this.cx.tables.typing.show(type)}'`;
+    const does = throwing ? `this 'throw' throws '${this.cx.tables.typing.show(type)}'` : `${what} can throw '${this.cx.tables.typing.show(type)}'`;
     if (wrappers.length === 0) {
       const hint = classes.length > 0 ? `convert it, or have '${this.cx.tables.typing.rec(classes[0]!).name}' implement 'From<${this.cx.tables.typing.show(type)}>'` : `convert it to '${this.cx.tables.typing.show(this.errorType)}'`;
-      throw new CompileError("E0602", `${does}, which isn't the '${this.cx.tables.typing.show(this.errorType)}' that ${this.who()} throws; ${hint}`, at.start, at.end);
+      throw new CompileError("E0602", `${does}, which isn't the '${this.cx.tables.typing.show(this.errorType)}' that ${this.who()} throws; ${hint}`, span.start, span.end);
     }
     if (wrappers.length > 1) {
-      throw new CompileError("E0602", `${does}, which ${wrappers.map((w) => `'${this.cx.tables.typing.rec(w.wrapper).name}'`).join(" and ")} both wrap; throw one of them yourself`, at.start, at.end);
+      throw new CompileError("E0602", `${does}, which ${wrappers.map((w) => `'${this.cx.tables.typing.rec(w.wrapper).name}'`).join(" and ")} both wrap; throw one of them yourself`, span.start, span.end);
     }
     this.instance.raises.set(at, { from: type, to: this.errorType, ...wrappers[0]! });
   }
