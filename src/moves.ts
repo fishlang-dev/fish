@@ -7,7 +7,7 @@ import { CompileError } from "./diag.ts";
 import type { Declarator, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { bindings } from "./match.ts";
 import { rustClassOf } from "./rust.ts";
-import { indexText, MAP_CHANGES, restBase, restSuffix } from "./values.ts";
+import { indexText, MAP_CHANGES, restSuffix } from "./values.ts";
 import { holdsNode } from "./check.ts";
 import { EMBEDDED, redundantBang, type ObjectType, type RefType, type Type, type Typing, type UnionType } from "./typing.ts";
 import { nextId } from "./nodes.ts";
@@ -2282,8 +2282,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   text(cx: Ref<MoveCx<T, B, I>>, e: Ref<Named>): string {
     // A tuple's element reads as it is written, `t[0]`.
     if (e.kind !== "shorthand") {
-      const base = restBase(cx.tables.restStarts, e);
-      if (base !== undefined) return `${this.text(cx, base)}${restSuffix(cx.tables.restStarts, e)}`;
+      if (e.kind === "index" && e.index.kind === "int" && cx.tables.restStarts.has(e.object) && e.object.kind === "member") return `${this.text(cx, e.object.object)}${restSuffix(cx.tables.restStarts, e)}`;
+      if (e.kind === "member" && cx.tables.restStarts.has(e)) return `${this.text(cx, e.object)}${restSuffix(cx.tables.restStarts, e)}`;
     }
     if (e.kind === "member" && e.name === EMBEDDED) return this.text(cx, e.object);
     if (e.kind === "member") return /^\d+$/.test(e.name) ? `${this.text(cx, e.object)}[${e.name}]` : `${this.text(cx, e.object)}.${e.name}`;

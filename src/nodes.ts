@@ -634,6 +634,13 @@ export class Rewrites implements Replacements {
     return this.exprs.get(idOfExpr(node)) ?? node;
   }
 
+  // The node replacing `node`, if one does; for a caller holding `node` by reference, which keeps
+  // reading `node` itself when this gives nothing.
+  rewritten(node: Ref<Expr>): Expr | undefined {
+    if (this.exprs.size === 0) return undefined;
+    return this.exprs.get(idOfExpr(node));
+  }
+
   replaceStmt(this: Mut<this>, node: Ref<Stmt>, by: Stmt): Stmt {
     this.hasChanges = true;
     const id = idOfStmt(node);
