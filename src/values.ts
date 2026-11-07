@@ -116,6 +116,28 @@ function heldTypes(typing: Ref<Typing>, t: Exclude<Type, string>, stack: Mut<Typ
 }
 
 
+// The name a place is read through: `a` for `a`, `a.b` and `a[i]`, and `this` for `this.x`.
+function placeRoot(x: Ref<Expr>): string | undefined {
+  if (x.kind === "ident") return x.name;
+  if (x.kind === "this") return "this";
+  if (x.kind === "member" || x.kind === "index") return placeRoot(x.object);
+  return undefined;
+}
+
+// The type names of a generic function's scope with those a call binds, the call's winning.
+function joinedScope(scope: Ref<Map<string, Type>>, bindings: Ref<Map<string, Type>>): Map<string, Type> {
+  let out = new Map<string, Type>();
+  for (const [k, v] of scope) out.set(k, v);
+  for (const [k, v] of bindings) out.set(k, v);
+  return out;
+}
+
+// Whether a place is a name or `this`, or fields read from one without `?.`.
+function namedPlace(x: Ref<Expr>): boolean {
+  if (x.kind === "member" && !x.optional) return namedPlace(x.object);
+  return x.kind === "this" || x.kind === "ident";
+}
+
 // What expression checking needs from the program and the function it is in.
 export interface Context {
   tables: Tables;
@@ -1346,7 +1368,7 @@ export class Expressions<C extends Context> implements Union<C> {
         if (p.name === "Some" && optional && p.args?.length === 1) {
           const inner = this.ctx.tables.typing.unionType(members.filter((m) => m !== "null"));
           this.pattern(p.args[0]!, inner, borrowing);
-          { this.recordPattern(p, type, { kind: "some", inner, arg: p.args[0]! }); return; }
+          { this.recordPattern(p, type, { kind: "some", inner, arg: clonePattern(p.args[0]!) }); return; }
         }
         const member = this.enumMember(p);
         if ((member !== undefined)) {
@@ -1355,11 +1377,17 @@ export class Expressions<C extends Context> implements Union<C> {
         }
         const v = this.variantNamed(members, p.name);
         if (v === undefined) throw this.neverMatches(p, type);
-        const args = p.args ?? [];
-        if (args.length !== this.ctx.tables.typing.rec(v).fields.length) {
+        const count: usize = p.args !== undefined ? p.args.length : 0;
+        if (count !== this.ctx.tables.typing.rec(v).fields.length) {
           throw new CompileError("E0607", `'${this.ctx.tables.typing.rec(v).name}' holds ${this.ctx.tables.typing.rec(v).fields.length} value${this.ctx.tables.typing.rec(v).fields.length === 1 ? "" : "s"}, so its pattern takes ${this.ctx.tables.typing.rec(v).fields.length}`, p.start, p.end);
         }
-        args.forEach((a, i) => this.pattern(a, this.ctx.tables.typing.rec(v).fields[i]!.type, borrowing));
+        let args: Pattern[] = [];
+        if (p.args !== undefined) {
+          for (let i: usize = 0; i < p.args.length; i++) {
+            this.pattern(p.args[i]!, this.ctx.tables.typing.rec(v).fields[i]!.type, borrowing);
+            args.push(clonePattern(p.args[i]!));
+          }
+        }
         { this.recordPattern(p, type, { kind: "variant", variant: v, args }); return; }
       }
       // An object pattern tests the members that hold every field it names; each field's pattern
@@ -1959,7 +1987,7 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     if (target !== undefined && target.name.replace(/-fsh\d+$/, "") === "ok" && stdModuleAt(this.ctx.tables.files, target.start) === "node:assert") return this.assertion(e);
     // node:util's functions that take any values, as Node's do, given their meaning here.
-    const util = target && callee.kind === "ident" && stdModuleAt(this.ctx.tables.files, target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
+    const util = target !== undefined && callee.kind === "ident" && stdModuleAt(this.ctx.tables.files, target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
       if (e.optional) throw new CompileError("E0505", "'format' is always there, so it is called without '?.'", e.start, e.end);
       this.refuseSpread(e.args);
@@ -2051,9 +2079,9 @@ export class Expressions<C extends Context> implements Union<C> {
     if (target.js) this.ctx.tables.jsCrossings.add(cloneExpr(e));
     if (target.js && !this.ctx.tables.jsCalledAt.has(targetId)) this.ctx.tables.jsCalledAt.set(targetId, cloneExpr(e));
     // Its declaration was refused before a call reached it: this call is where that counts.
-    const refused = target.js ? this.ctx.tables.typing.jsUncalled.get(this.ctx.tables.arenas.bodyOf(targetId)) : undefined;
+    let refused = target.js ? this.ctx.tables.typing.jsUncalled.get(this.ctx.tables.arenas.bodyOf(targetId)) : undefined;
     if (refused !== undefined) {
-      refused.note ??= { message: `'${this.ctx.tables.arenas.bodyOf(targetId).js!.name}' is called here`, start: e.start, end: e.end };
+      if (refused.note === undefined) refused.note = { message: `'${this.ctx.tables.arenas.bodyOf(targetId).js!.name}' is called here`, start: e.start, end: e.end };
       throw refused;
     }
     const instance = this.ctx.instantiate(targetId, e.typeArgs, e.args, argTypes.slice(), e);
@@ -2297,20 +2325,22 @@ export class Expressions<C extends Context> implements Union<C> {
       const bound = bindings.get(n);
       if ((bound === undefined)) throw new CompileError("E0104", `can't infer a type for '${n}' in this call of ${name}; pass it, as in '${(e.callee as { name?: string }).name ?? "f"}<i64>(...)'`, e.start, e.end);
       const constraint = written.typeParams[i]!.constraint;
-      if (constraint) {
-        const limit = this.ctx.resolveWith(constraint, new Map([...scope, ...bindings]));
+      if (constraint !== undefined) {
+        const limit = this.ctx.resolveWith(constraint, joinedScope(scope, bindings));
         const reason = typeof limit !== "string" && this.ctx.tables.typing.rec(limit).kind === "interface" ? unsatisfied(bound, limit as InterfaceType, this.ctx.members(), e) : this.ctx.tables.typing.fits(bound, limit) ? undefined : `'${this.ctx.tables.typing.show(bound)}' is not a '${this.ctx.tables.typing.show(limit)}'`;
-        if (reason) throw new CompileError("E0107", `type '${this.ctx.tables.typing.show(bound)}' does not satisfy the constraint '${this.ctx.tables.typing.show(limit)}' of '${n}' in ${name}: ${reason}`, e.start, e.end);
+        if (reason !== undefined) throw new CompileError("E0107", `type '${this.ctx.tables.typing.show(bound)}' does not satisfy the constraint '${this.ctx.tables.typing.show(limit)}' of '${n}' in ${name}: ${reason}`, e.start, e.end);
       }
     }
-    e.args.forEach((a, i) => {
-      const declared = this.ctx.resolveWith(written.params[i]!.type!, new Map([...scope, ...bindings]));
+    for (let i: usize = 0; i < e.args.length; i++) {
+      const declared = this.ctx.resolveWith(written.params[i]!.type!, joinedScope(scope, bindings));
       // An optional parameter is an Option, as a call may leave it empty.
       const want = written.params[i]!.optional ? this.ctx.tables.typing.unionType([declared, "null"]) : declared;
-      this.coerce(a, argTypes[i]!, want, `argument of type '${this.ctx.tables.typing.show(argTypes[i]!)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(want)}'`);
-    });
-    const full = new Map([...scope, ...bindings]);
-    return { type: this.ctx.resolveWith(written.returns, full), throws: written.throws && this.ctx.resolveWith(written.throws, full), what: name };
+      this.coerce(e.args[i]!, argTypes[i]!, want, `argument of type '${this.ctx.tables.typing.show(argTypes[i]!)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(want)}'`);
+    }
+    const full = joinedScope(scope, bindings);
+    const returns = this.ctx.resolveWith(written.returns, full);
+    const throws = written.throws !== undefined ? this.ctx.resolveWith(written.throws, full) : undefined;
+    return { type: returns, throws, what: name };
   }
 
   // A generic function value, or a generic arrow, rewritten as an arrow calling it with its
@@ -2344,7 +2374,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const params: Param[] = names.map((n): Param => ({ ...at, id: nextId(this.ctx.tables.ids), pattern: { id: nextId(this.ctx.tables.ids), kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
     const call: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "ident", name: n, ...at })), optional: false, ...at };
     const arrow = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call, ...at });
-    this.ctx.tables.madeArrows.add(arrow);
+    this.ctx.tables.madeArrows.add(cloneExpr(arrow));
     return arrow;
   }
 
@@ -2374,8 +2404,8 @@ export class Expressions<C extends Context> implements Union<C> {
   // The generic function a generic function value names, when the callee is a local or a field
   // holding one; read for nothing else, it is called directly, in this instance.
   /** @throws {CompileError} */
-  private genericTarget(this: Mut<this>, callee: Ref<Expr>, receiver: Type | undefined): Body | undefined {
-    let held: Type | undefined;
+  private genericTarget(this: Mut<this>, callee: Ref<Expr>, receiver: Type | undefined): Ref<Body> | undefined {
+    let held: Type | undefined = undefined;
     if (callee.kind === "ident") {
       const localId = this.ctx.lookup(callee.name, undefined);
       const local = localId === undefined ? undefined : this.lc(localId);
@@ -2430,9 +2460,9 @@ export class Expressions<C extends Context> implements Union<C> {
     if (genericIn(f)) return this.instanceArrow(e);
     if (f.foreign === true) throw unsupported(`${f.rust !== undefined ? "Rust" : "C"} functions used as values`, e);
     // A package's function Fish couldn't type is refused where it is used as a value too.
-    const refused = f.js !== undefined ? this.ctx.tables.typing.jsUncalled.get(f) : undefined;
+    let refused = f.js !== undefined ? this.ctx.tables.typing.jsUncalled.get(f) : undefined;
     if (refused !== undefined) {
-      refused.note ??= { message: `'${f.js!.name}' is used here`, start: e.start, end: e.end };
+      if (refused.note === undefined) refused.note = { message: `'${f.js!.name}' is used here`, start: e.start, end: e.end };
       throw refused;
     }
     if (f.throws !== undefined) throw unsupported("functions that throw used as values", e);
@@ -2541,25 +2571,37 @@ export class Expressions<C extends Context> implements Union<C> {
       return got;
     }
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `${name} takes no type arguments`, e.start, e.end);
-    const written = type.kind === "closure" ? bodyOf(this.ctx.tables.arenas, this.inst(this.ctx.closureBody((this.boundFunction(held) ?? held) as ClosureType))).params : undefined;
-    if (written) this.arity(e.args.length, written, e);
-    else if (e.args.length !== type.params.length) {
-      throw new CompileError("E0501", `expected ${type.params.length} argument${type.params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
+    const params: Type[] = type.params.slice();
+    const declaredThrows = type.throws;
+    const declaredReturns = type.returns;
+    const closure = type.kind === "closure" ? this.ctx.closureBody((bound !== undefined ? bound : held) as ClosureType) : undefined;
+    if (closure !== undefined) this.arity(e.args.length, bodyOf(this.ctx.tables.arenas, this.inst(closure)).params, e);
+    else if (e.args.length !== params.length) {
+      throw new CompileError("E0501", `expected ${params.length} argument${params.length === 1 ? "" : "s"}, but got ${e.args.length}`, e.start, e.end);
     }
-    e.args.forEach((a, i) => {
-      if (a.kind !== "arrow" || this.isCallable(type.params[i]!)) this.expect(a, type.params[i]!);
+    for (let i: usize = 0; i < e.args.length; i++) {
+      const a = e.args[i]!;
+      if (a.kind !== "arrow" || this.isCallable(params[i]!)) this.expect(a, params[i]!);
       const t = this.value(a);
-      const shown = (written?.[i] && this.defaultedArg(a, t, written[i]!)) ?? type.params[i]!;
-      this.coerce(a, t, type.params[i]!, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(shown)}'`);
-    });
+      let shown: Type = params[i]!;
+      if (closure !== undefined) {
+        const written = bodyOf(this.ctx.tables.arenas, this.inst(closure)).params;
+        const defaulted = i < written.length ? this.defaultedArg(a, t, written[i]!) : undefined;
+        if (defaulted !== undefined) shown = defaulted;
+      }
+      this.coerce(a, t, params[i]!, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(shown)}'`);
+    }
     const given = this.ctx.tables.typing.lower(held);
     const run = this.recOf(given);
-    if (run?.kind === "closure") this.ctx.calls.set(e, this.ctx.closureBody(given as ClosureType));
+    if (run?.kind === "closure") {
+      const body = this.ctx.closureBody(given as ClosureType);
+      this.ctx.calls.set(cloneExpr(e), body);
+    }
     // The closure it runs throws what it throws, which its function type may only widen.
-    const error = run?.kind === "closure" ? run.throws : type.throws;
-    if (error) this.ctx.raise(e, error, name);
+    const error = run?.kind === "closure" ? run.throws : declaredThrows;
+    if (error !== undefined) this.ctx.raise(e, error, name);
     // Where the signature says `Promise<T>`, the call gives the future of the closure it was given.
-    const returns = run?.kind === "closure" && this.ctx.tables.typing.promiseElement(type.returns) !== undefined ? run.returns : type.returns;
+    const returns = run?.kind === "closure" && this.ctx.tables.typing.promiseElement(declaredReturns) !== undefined ? run.returns : declaredReturns;
     // An async arrow's future holds a copy of what it captured, references too.
     if (this.recOf(returns)?.kind === "future" && this.ctx.tables.typing.holdsRef(returns)) this.ctx.borrowsFrom.set(e, [callee]);
     return { type: returns, what: name };
@@ -2668,12 +2710,11 @@ export class Expressions<C extends Context> implements Union<C> {
     if ((name === "matchAll" || name === "replaceAll") && !global) throw new CompileError("E0508", `${what} needs a regex with the 'g' flag, as JavaScript requires`, e.args[0]!.start, e.args[0]!.end);
     if (name === "matchAll" && !typed) throw unknown();
     if (name === "split" && e.args.length > 1) {
-      const limit = e.args[1]!;
-      const t = this.value(limit);
-      if (t !== "i64" && t !== "usize" && !this.adapt(limit, "i64")) throw new CompileError("E0504", `a limit is an 'i64', not '${this.ctx.tables.typing.show(t)}'`, limit.start, limit.end);
+      const t = this.value(e.args[1]!);
+      if (t !== "i64" && t !== "usize" && !this.adapt(e.args[1]!, "i64")) throw new CompileError("E0504", `a limit is an 'i64', not '${this.ctx.tables.typing.show(t)}'`, e.args[1]!.start, e.args[1]!.end);
     }
     if (name.startsWith("replace")) this.replacement(e, rx, typed, unknown);
-    this.ctx.tables.regexStringCalls.set(e, name);
+    this.ctx.tables.regexStringCalls.set(cloneExpr(e), name);
     return { type: regexStringType(this.ctx.tables.typing, name, rx, !typed), what };
   }
 
@@ -2687,7 +2728,8 @@ export class Expressions<C extends Context> implements Union<C> {
       if (!stringLike(this.ctx.tables.typing, t)) throw new CompileError("E0508", `what replaces each match is a string or an arrow function, not '${this.ctx.tables.typing.show(t)}'`, given.start, given.end);
       // With named groups, $<name> must name one, as JavaScript's early check would if it had one.
       let names = new Set<string>();
-      for (const c of this.ctx.tables.typing.rec(rx).captures) if (c.name !== undefined) names.add(c.name);
+      const captures = this.ctx.tables.typing.rec(rx).captures;
+      for (const c of captures) if (c.name !== undefined) names.add(c.name);
       const missing = given.kind === "string" && names.size > 0 ? [...given.value.matchAll(/\$\$|\$<([^>]*)>/g)].find((m) => m[1] !== undefined && !names.has(m[1])) : undefined;
       if (missing) throw new CompileError("E0508", `the regex has no group named '${missing[1]}' for '${missing[0]}'`, given.start, given.end);
       if (t !== "string") this.coerce(given, t, "string", "");
@@ -2714,31 +2756,40 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private arrayCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, array: ArrayType): { type: Type; what: string } {
     const typed = this.ctx.tables.typing.typedName(array);
-    if ((typed !== undefined) && (callee.name === "subarray" || callee.name === "set")) this.ctx.exprsState.once.add(callee.object);
+    if ((typed !== undefined) && (callee.name === "subarray" || callee.name === "set")) this.ctx.exprsState.once.add(cloneExpr(callee.object));
     // `subarray` is a copy, as `slice` is: a typed array owns its elements, so a write to it
     // doesn't reach the array it came from.
     // Its positions, like set's offset, may be an `i64` or a `usize`, as JavaScript code holding
     // positions in either ports as written.
     if ((typed !== undefined) && callee.name === "subarray") {
-      const made = this.become(e, { ...e, callee: { ...callee, id: nextId(this.ctx.tables.ids), name: "slice" }, args: e.args.map((a) => this.arrayLength(a, false)) }) as Call;
-      this.ctx.exprsState.subarrays.set(made, this.placeText(callee.object));
-      return this.call(made);
+      const id = nextId(this.ctx.tables.ids);
+      let args: Expr[] = [];
+      for (const a of e.args) args.push(this.arrayLength(a, false));
+      const slice: Expr = { ...callee, id, name: "slice" };
+      const made = this.become(e, { ...e, callee: slice, args });
+      const from = this.placeText(callee.object);
+      this.ctx.exprsState.subarrays.set(cloneExpr(made), from);
+      return this.callMade(made);
     }
     if (SUBARRAY_WRITES.has(callee.name)) this.readOnlySubarray(callee.object);
     // `set(source, offset?)` copies the source's elements in at the offset. The source comes
     // first, so one made from the target, as in `a.set(a.subarray(0, 3), 1)`, is made before the
     // target is borrowed to change; the target itself as the source is copied first.
-    if (typed && callee.name === "set") {
+    if (typed !== undefined && callee.name === "set") {
       if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", "'set' takes the array to copy in, and an optional offset", e.start, e.end);
       const at = { start: e.start, end: e.end };
-      const [written, offset] = e.args as [Expr, Expr | undefined];
-      const root = (x: Expr): string | undefined => (x.kind === "ident" ? x.name : x.kind === "this" ? "this" : x.kind === "member" || x.kind === "index" ? root(x.object) : undefined);
-      const same = root(written) !== undefined && root(written) === root(callee.object);
-      const source: Expr = same ? { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: written, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at } : written;
+      const written = e.args[0]!;
+      const root = placeRoot(written);
+      const same = root !== undefined && root === placeRoot(callee.object);
+      const source: Expr = same ? { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(written), name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at } : cloneExpr(written);
       this.expect(source, array);
-      return this.callMade(this.become(e, this.typedCall(`array typed set ${TYPED_ARRAYS[typed]}`, [source, callee.object, offset ? this.arrayLength(offset, false) : { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, ...at }, { id: nextId(this.ctx.tables.ids), kind: "int", value: BigInt(typedSize(typed)), ...at }], at)));
+      const helper = `array typed set ${this.ctx.tables.typing.show(this.ctx.tables.typing.rec(array).element)}`;
+      const offset = e.args.length > 1 ? this.arrayLength(e.args[1]!, false) : this.intAt(0n, at);
+      const bytes = this.intAt(BigInt(typedSize(typed)), at);
+      const made = this.become(e, this.typedCall(helper, [source, cloneExpr(callee.object), offset, bytes], at));
+      return this.callMade(made);
     }
-    if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, ARRAY_METHODS)}`, callee.start, callee.end);
+    if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, [...ARRAY_METHODS])}`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
@@ -3007,7 +3058,8 @@ export class Expressions<C extends Context> implements Union<C> {
           const joined = this.constJoin(parts);
           return this.ctx.tables.typing.arrayType(joined);
         }
-        return this.ctx.tables.typing.tupleType(parts, parts.length, undefined, true);
+        const count = parts.length;
+        return this.ctx.tables.typing.tupleType(parts, count, undefined, true);
       }
     }
     if (x.kind === "object") {
@@ -3110,7 +3162,7 @@ export class Expressions<C extends Context> implements Union<C> {
       while (fixed.length > 0) {
         const value = fixed.shift()!;
         const id = nextId(this.ctx.tables.ids);
-        props.push({ id, kind: "property", key: i < elements.length ? i.toString() : "...", start: value.start, end: value.end, value });
+        props.push({ id, kind: "property", key: i < elements.length ? `${i}` : "...", start: value.start, end: value.end, value });
         i++;
       }
       const made = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "object", props, start: e.start, end: e.end });
@@ -3150,7 +3202,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (!rests) return given.length > optional.length ? this.ctx.tables.typing.tupleType(given) : this.ctx.tables.typing.tupleType(elements, required < 0 ? elements.length : required as usize);
     const fixed = optional;
     // No parts past the fixed ones say nothing about the rest, as an empty array literal doesn't.
-    const extra = given.slice(fixed.length);
+    const extra = given.slice(fixed.length as i64);
     const rest = again ? this.ctx.tables.typing.rec(parts.at(-1) as ArrayType).element : extra.length === 0 ? "never" : this.ctx.tables.typing.unionType(extra);
     return this.ctx.tables.typing.tupleType(elements, undefined, rest);
   }
@@ -3271,7 +3323,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const t = this.read(a);
       if (t !== other && !this.adapt(a, other)) throw new CompileError("E0111", `${what} on '${this.ctx.tables.typing.show(type)}' takes a '${this.ctx.tables.typing.show(other)}', not '${this.ctx.tables.typing.show(t)}'; convert it with 'as', as in 'n as ${this.ctx.tables.typing.show(other)}'`, a.start, a.end);
     }
-    this.ctx.tables.integerCalls.add(e);
+    this.ctx.tables.integerCalls.add(cloneExpr(e));
     const result = family === "checked" ? this.ctx.tables.typing.unionType([type, "null"]) : family === "overflowing" ? this.ctx.tables.typing.tupleType([type, "boolean"]) : type;
     return { type: result, what };
   }
@@ -3300,7 +3352,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private parse(this: Mut<this>, e: Ref<Call>, name: "parseInt" | "parseFloat" | "Number"): { type: Type; what: string } {
     const what = `'${name}'`;
-    const most = name === "parseInt" ? 2 : 1;
+    const most: usize = name === "parseInt" ? 2 : 1;
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `${what} takes no type argument`, e.start, e.end);
     if (e.args.length < 1 || e.args.length > most) throw new CompileError("E0504", name === "parseInt" ? "'parseInt' takes a string and an optional radix" : `${what} takes one string`, e.start, e.end);
     const t = this.read(e.args[0]!);
@@ -3309,12 +3361,11 @@ export class Expressions<C extends Context> implements Union<C> {
       throw new CompileError("E0504", `${what} parses a string, not '${this.ctx.tables.typing.show(t)}'${hint}`, e.args[0]!.start, e.args[0]!.end);
     }
     if (t !== "string") this.coerce(e.args[0]!, t, "string", "");
-    const radix = e.args[1];
-    if (radix) {
-      const r = this.value(radix);
-      if (r !== "i64" && !this.adapt(radix, "i64")) throw new CompileError("E0504", `a radix is an 'i64', not '${this.ctx.tables.typing.show(r)}'`, radix.start, radix.end);
+    if (e.args.length > 1) {
+      const r = this.value(e.args[1]!);
+      if (r !== "i64" && !this.adapt(e.args[1]!, "i64")) throw new CompileError("E0504", `a radix is an 'i64', not '${this.ctx.tables.typing.show(r)}'`, e.args[1]!.start, e.args[1]!.end);
     }
-    this.ctx.tables.parses.set(e, name);
+    this.ctx.tables.parses.set(cloneExpr(e), name);
     return { type: this.ctx.tables.typing.unionType([name === "parseInt" ? "i64" : "f64", "null"]), what };
   }
 
@@ -3324,12 +3375,11 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.typeArgs.length > 0 || e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", "'assert' takes a condition and an optional message, as in 'assert(n > 0, \"n is positive\")'", e.start, e.end);
     this.condition(e.args[0]!);
     if (e.args.length > 1) {
-      const message = e.args[1]!;
-      const t = this.read(message);
-      if (!stringLike(this.ctx.tables.typing, t)) throw new CompileError("E0504", `an assertion's message is a string, not '${this.ctx.tables.typing.show(t)}'`, message.start, message.end);
-      if (t !== "string") this.coerce(message, t, "string", "");
+      const t = this.read(e.args[1]!);
+      if (!stringLike(this.ctx.tables.typing, t)) throw new CompileError("E0504", `an assertion's message is a string, not '${this.ctx.tables.typing.show(t)}'`, e.args[1]!.start, e.args[1]!.end);
+      if (t !== "string") this.coerce(e.args[1]!, t, "string", "");
     }
-    this.ctx.tables.asserts.set(e, textAt(this.ctx.tables.files, e.args[0]!));
+    this.ctx.tables.asserts.set(cloneExpr(e), textAt(this.ctx.tables.files, e.args[0]!));
     return { type: "void", what: "'assert'" };
   }
 
@@ -3375,7 +3425,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.name === "exec" && (this.ctx.tables.typing.rec(t).any !== undefined) && !generic) {
       throw new CompileError("E0508", "'exec' types its match from the regex's pattern, which isn't known for a 'RegExp' kept here; call it where the regex is written, or pass the regex as a parameter", e.start, e.end);
     }
-    this.ctx.tables.regexCalls.set(e, callee.name);
+    this.ctx.tables.regexCalls.set(cloneExpr(e), callee.name === "test" ? "test" : "exec");
     return { type: callee.name === "test" ? "boolean" : this.ctx.tables.typing.unionType([this.ctx.tables.typing.matchType(t), "null"]), what };
   }
 
@@ -3460,7 +3510,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.args.length > 1) throw unsupported("'JSON.stringify' replacer and indent arguments", e.args[1]!);
     if (e.args.length === 0) throw new CompileError("E0509", "'JSON.stringify' takes the value to write", e.start, e.end);
     const read = this.read(e.args[0]!);
-    this.jsonable(read, e.args[0]!, "written as");
+    this.jsonable(read, { start: e.args[0]!.start, end: e.args[0]!.end }, "written as");
     this.ctx.tables.jsonCalls.set(cloneExpr(e), "stringify");
     return { type: "string", what: "'JSON.stringify'" };
   }
@@ -3469,11 +3519,10 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private jsonParse(this: Mut<this>, e: Ref<Call>): { type: Type; what: string } {
     // Without a type it reads the dynamic `Json` value, as TypeScript's gives `any`.
-    const [written = { id: nextId(this.ctx.tables.ids), kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end } as TypeNode, ...others] = e.typeArgs;
-    if (others.length > 0) throw new CompileError("E0106", "'JSON.parse' takes one type argument, the type to read", e.start, e.end);
+    if (e.typeArgs.length > 1) throw new CompileError("E0106", "'JSON.parse' takes one type argument, the type to read", e.start, e.end);
     if (e.args.length > 1) throw unsupported("'JSON.parse' revivers", e.args[1]!);
-    const text = e.args[0];
-    if (!text) throw new CompileError("E0509", "'JSON.parse' takes the text to read", e.start, e.end);
+    if (e.args.length === 0) throw new CompileError("E0509", "'JSON.parse' takes the text to read", e.start, e.end);
+    const written: TypeNode = e.typeArgs.length > 0 ? cloneTypeNode(e.typeArgs[0]!) : { id: nextId(this.ctx.tables.ids), kind: "ref", name: JSON_VALUE_NAME, args: [], start: e.start, end: e.end };
     const t = this.ctx.resolveType(written);
     this.jsonable(t, written, "read from");
     if (this.ctx.tables.typing.holdsRef(t)) throw new CompileError("E0509", `'JSON.parse' makes owned values, so '${this.ctx.tables.typing.show(t)}' can't hold references`, written.start, written.end);
@@ -3481,11 +3530,12 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.tables.typing.holdsPart(t, (u) => typeof u !== "string" && this.ctx.tables.typing.rec(u).kind === "fixed")) throw unsupported("fixed-size arrays in 'JSON.parse'", written);
     const hidden = this.ctx.tables.typing.holdsPart(t, (u) => typeof u !== "string" && this.ctx.tables.typing.rec(u).kind === "class" && this.ctx.tables.typing.rec(u).fields.some((f) => f.name.startsWith("#")));
     if (hidden) throw new CompileError("E0509", "a class with '#private' fields can't be read from JSON, since JSON doesn't hold them", written.start, written.end);
-    const s = this.read(text);
-    if (!stringLike(this.ctx.tables.typing, s)) throw new CompileError("E0509", `'JSON.parse' reads a string, not '${this.ctx.tables.typing.show(s)}'`, text.start, text.end);
-    if (s !== "string") this.coerce(text, s, "string", "");
-    this.ctx.raise(e, this.ctx.tables.arenas.classOf(this.ctx.classes.get("JsonError")!).type, "'JSON.parse'");
-    this.ctx.tables.jsonCalls.set(e, "parse");
+    const s = this.read(e.args[0]!);
+    if (!stringLike(this.ctx.tables.typing, s)) throw new CompileError("E0509", `'JSON.parse' reads a string, not '${this.ctx.tables.typing.show(s)}'`, e.args[0]!.start, e.args[0]!.end);
+    if (s !== "string") this.coerce(e.args[0]!, s, "string", "");
+    const error = this.ctx.tables.arenas.classOf(this.ctx.classes.get("JsonError")!).type;
+    this.ctx.raise(e, error, "'JSON.parse'");
+    this.ctx.tables.jsonCalls.set(cloneExpr(e), "parse");
     return { type: t, what: "'JSON.parse'" };
   }
 
@@ -3495,10 +3545,10 @@ export class Expressions<C extends Context> implements Union<C> {
     // What an unknown holds is known once the whole program is checked, and checked then.
     if (this.ctx.tables.typing.holdsPart(t, (u) => this.ctx.tables.typing.isUnknown(u), true)) {
       if (verb !== "written as") throw new CompileError("E0509", "'JSON.parse' can't read into an 'unknown', which holds only what the program puts in one; read into 'Json' to take any JSON", at.start, at.end);
-      this.ctx.tables.unknownJson.push(at);
+      this.ctx.tables.unknownJson.push({ start: at.start, end: at.end });
     }
     const part = this.ctx.tables.typing.unjson(t, (c) => this.derivesJson(c));
-    if (!part) return;
+    if (part === undefined) return;
     const r = this.recOf(part);
     const why = r === undefined ? "it has no JSON form"
       : r.kind === "class" ? `a class is ${verb} JSON when it has '@derive(Json)', which '${r.name}' doesn't`
@@ -3511,8 +3561,13 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private derivesJson(this: Mut<this>, t: ClassType | VariantType): boolean {
     const r = this.ctx.tables.typing.rec(t);
-    if (r.kind === "variant") return [...this.ctx.enums.values()].some((e) => e.data?.name === r.enum && e.data.json);
-    return this.cls(t as ClassType).node.derives?.includes("Json") ?? false;
+    if (r.kind === "variant") {
+      const name = r.enum;
+      for (const info of this.ctx.enums.values()) if (info.data !== undefined && info.data.name === name && info.data.json) return true;
+      return false;
+    }
+    const derives = this.cls(t as ClassType).node.derives;
+    return derives !== undefined && derives.includes("Json");
   }
 
   // The global `Math`, unless a name of the program's hides it.
@@ -3535,26 +3590,40 @@ export class Expressions<C extends Context> implements Union<C> {
     if (arity !== undefined) {
       if (e.args.length !== arity) throw new CompileError("E0504", `${what} takes ${arity === 1 ? "one number" : "two numbers"}`, e.start, e.end);
       for (const a of e.args) {
-        const t = this.brandBase(this.read(a));
+        const read = this.read(a);
+        const t = this.brandBase(read);
         if (t === "f64" || this.adapt(a, "f64")) continue;
         throw new CompileError("E0111", isNumeric(t) ? `${what} takes a '${this.ctx.tables.typing.show("f64")}', an f64, not '${this.ctx.tables.typing.show(t)}'; convert it with 'as', as in 'n as f64'` : `${what} takes a number, not '${this.ctx.tables.typing.show(t)}'`, a.start, a.end);
       }
-      this.ctx.tables.maths.add(e);
+      this.ctx.tables.maths.add(cloneExpr(e));
       return { type: "f64", what };
     }
     if (!["abs", "sign", "min", "max"].includes(name)) throw new CompileError("E0801", `'Math' has no '${name}' in Fish yet`, e.start, e.end);
     const many = name === "min" || name === "max";
     if (many ? e.args.length === 0 : e.args.length !== 1) throw new CompileError("E0504", many ? `${what} takes one or more numbers` : `${what} takes one number`, e.start, e.end);
-    const given = e.args.map((a) => this.brandBase(this.read(a)));
-    given.forEach((t, i) => {
-      if (!isNumeric(t)) throw new CompileError("E0504", `${what} takes numbers, not '${this.ctx.tables.typing.show(t)}'`, e.args[i]!.start, e.args[i]!.end);
-    });
-    const fixed = e.args.findIndex((a) => !this.literalOnly(a, true));
-    const to = fixed >= 0 ? given[fixed]! : given.some(isFloat) ? "f64" : "i64";
-    e.args.forEach((a, i) => {
-      if (given[i] !== to && !this.adapt(a, to)) throw new CompileError("E0111", `${what} takes numbers of one type, but got '${this.ctx.tables.typing.show(to)}' and '${this.ctx.tables.typing.show(given[i]!)}'; convert one with 'as'`, a.start, a.end);
-    });
-    this.ctx.tables.maths.add(e);
+    let given: Type[] = [];
+    for (const a of e.args) {
+      const read = this.read(a);
+      given.push(this.brandBase(read));
+    }
+    for (let i: usize = 0; i < given.length; i++) {
+      if (!isNumeric(given[i]!)) throw new CompileError("E0504", `${what} takes numbers, not '${this.ctx.tables.typing.show(given[i]!)}'`, e.args[i]!.start, e.args[i]!.end);
+    }
+    let to: Type | undefined = undefined;
+    for (let i: usize = 0; i < e.args.length; i++) {
+      if (!this.literalOnly(e.args[i]!, true)) {
+        to = given[i]!;
+        break;
+      }
+    }
+    if (to === undefined) {
+      to = "i64";
+      for (const g of given) if (isFloat(g)) to = "f64";
+    }
+    for (let i: usize = 0; i < e.args.length; i++) {
+      if (given[i] !== to && !this.adapt(e.args[i]!, to)) throw new CompileError("E0111", `${what} takes numbers of one type, but got '${this.ctx.tables.typing.show(to)}' and '${this.ctx.tables.typing.show(given[i]!)}'; convert one with 'as'`, e.args[i]!.start, e.args[i]!.end);
+    }
+    this.ctx.tables.maths.add(cloneExpr(e));
     return { type: to, what };
   }
 
@@ -3563,42 +3632,58 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private typedNew(this: Mut<this>, e: Ref<Extract<Expr, { kind: "new" }>>, name: TypedName, list: Ref<Expr[]>): Type {
     const typed = this.ctx.tables.typing.typedArray(name);
+    const element = this.ctx.tables.typing.rec(typed).element;
     const at = { start: e.start, end: e.end };
     const usage = name === "ArrayBuffer" ? "'new ArrayBuffer(n)' takes its length in bytes" : `'new ${name}' takes a length, an array to copy, or an ArrayBuffer with an optional byte offset and length`;
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}' takes no type arguments`, e.start, e.end);
     this.refuseSpread(list);
     if (list.length === 0) return this.typedAs(e, { id: nextId(this.ctx.tables.ids), kind: "array", elements: [], ...at }, typed);
-    const [source, ...rest] = list as [Expr, ...Expr[]];
-    if (rest.length > (name === "ArrayBuffer" ? 0 : 2)) throw new CompileError("E0504", usage, e.start, e.end);
-    if (source.kind === "array" && rest.length === 0 && name !== "ArrayBuffer") return this.typedAs(e, source, typed);
+    const source = list[0]!;
+    const rest: usize = list.length - 1;
+    if (rest > (name === "ArrayBuffer" ? 0 : 2)) throw new CompileError("E0504", usage, e.start, e.end);
+    if (source.kind === "array" && rest === 0 && name !== "ArrayBuffer") return this.typedAs(e, cloneExpr(source), typed);
     const t = this.value(source);
-    this.ctx.exprsState.once.add(source);
+    this.ctx.exprsState.once.add(cloneExpr(source));
     const held = this.isRefType(t) ? this.ctx.tables.typing.rec(t).to : t;
-    if (isInteger(t) && rest.length === 0) return this.typedAs(e, this.typedCall("array typed zeros", [this.arrayLength(source, false), this.typedZero(name, source)], at), typed);
-    if (this.ctx.tables.typing.typedName(held) === "ArrayBuffer" && name !== "ArrayBuffer") {
-      const int = (value: bigint): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "int", value, ...at });
-      const size = BigInt(typedSize(name));
-      return this.typedAs(e, this.typedCall(`array from buffer ${TYPED_ARRAYS[name]}`, [source, rest[0] ? this.arrayLength(rest[0], false) : int(0n), rest[1] ? this.arrayLength(rest[1], false) : int(-1n), int(size), { id: nextId(this.ctx.tables.ids), kind: "string", value: name, ...at }], at), typed);
+    if (isInteger(t) && rest === 0) {
+      const length = this.arrayLength(source, false);
+      const zero = this.typedZero(name, { start: source.start, end: source.end });
+      return this.typedAs(e, this.typedCall("array typed zeros", [length, zero], at), typed);
     }
-    if (this.isArray(held) && rest.length === 0 && name !== "ArrayBuffer") {
-      const element = this.ctx.tables.typing.lower(this.ctx.tables.typing.rec(held).element);
-      if (element !== TYPED_ARRAYS[name]) throw new CompileError("E0101", `'new ${name}' copies elements of type '${this.ctx.tables.typing.show(TYPED_ARRAYS[name])}', not '${this.ctx.tables.typing.show(element)}'; convert them first, as in 'xs.map((x) => x as ${TYPED_ARRAYS[name]})'${floatInto(element, TYPED_ARRAYS[name])}`, source.start, source.end);
-      return this.typedAs(e, { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at }, typed);
+    if (this.ctx.tables.typing.typedName(held) === "ArrayBuffer" && name !== "ArrayBuffer") {
+      const size = BigInt(typedSize(name));
+      const helper = `array from buffer ${this.ctx.tables.typing.show(element)}`;
+      const offset = rest >= 1 ? this.arrayLength(list[1]!, false) : this.intAt(0n, at);
+      const count = rest >= 2 ? this.arrayLength(list[2]!, false) : this.intAt(-1n, at);
+      const bytes = this.intAt(size, at);
+      const label: Expr = { id: nextId(this.ctx.tables.ids), kind: "string", value: name, ...at };
+      return this.typedAs(e, this.typedCall(helper, [cloneExpr(source), offset, count, bytes, label], at), typed);
+    }
+    if (this.isArray(held) && rest === 0 && name !== "ArrayBuffer") {
+      const inner = this.ctx.tables.typing.rec(held).element;
+      const got = this.ctx.tables.typing.lower(inner);
+      if (got !== element) throw new CompileError("E0101", `'new ${name}' copies elements of type '${this.ctx.tables.typing.show(element)}', not '${this.ctx.tables.typing.show(got)}'; convert them first, as in 'xs.map((x) => x as ${this.ctx.tables.typing.show(element)})'${floatInto(got, element)}`, source.start, source.end);
+      return this.typedAs(e, { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(source), name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at }, typed);
     }
     throw new CompileError("E0504", usage, e.start, e.end);
   }
 
   // `e` rewritten as `to`, which makes a typed array's elements, typed as that typed array.
   /** @throws {CompileError} */
-  private typedAs(this: Mut<this>, e: Ref<Expr>, to: Ref<Expr>, typed: ArrayType, mapped = false): Type {
+  private typedAs(this: Mut<this>, e: Ref<Expr>, to: Expr, typed: ArrayType, mapped = false): Type {
     const made = this.become(e, to);
     this.expect(made, typed);
     const t = this.value(made);
     const name = this.ctx.tables.typing.typedName(typed)!;
-    const element = this.isArray(t) ? this.ctx.tables.typing.lower(this.ctx.tables.typing.rec(t).element) : undefined;
+    const want = this.ctx.tables.typing.rec(typed).element;
+    let element: Type | undefined = undefined;
+    if (this.isArray(t)) {
+      const inner = this.ctx.tables.typing.rec(t).element;
+      element = this.ctx.tables.typing.lower(inner);
+    }
     // A map function giving another number type is told how to convert what it gives.
     if (mapped && element !== undefined && isNumeric(element) && !this.ctx.tables.typing.fits(t, typed)) {
-      throw new CompileError("E0101", `'${name}.from' holds elements of type '${this.ctx.tables.typing.show(TYPED_ARRAYS[name])}', and this function gives '${this.ctx.tables.typing.show(element)}'; convert what it gives, as in '(x) => (...) as ${TYPED_ARRAYS[name]}'${floatInto(element, TYPED_ARRAYS[name])}`, e.start, e.end);
+      throw new CompileError("E0101", `'${name}.from' holds elements of type '${this.ctx.tables.typing.show(want)}', and this function gives '${this.ctx.tables.typing.show(element)}'; convert what it gives, as in '(x) => (...) as ${this.ctx.tables.typing.show(want)}'${floatInto(element, want)}`, e.start, e.end);
     }
     this.coerce(made, t, typed, `type '${this.ctx.tables.typing.show(t)}' is not assignable to type '${this.ctx.tables.typing.show(typed)}'`);
     return typed;
@@ -3610,34 +3695,58 @@ export class Expressions<C extends Context> implements Union<C> {
   private typedMember(this: Mut<this>, e: Ref<Extract<Expr, { kind: "member" }>>, name: TypedName): Type {
     const at = { start: e.start, end: e.end };
     const size = typedSize(name);
-    const int = (value: bigint): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "int", value, ...at });
     if (this.linked(e)) throw unsupported("optional chains reading a typed array's properties", e);
-    this.ctx.exprsState.once.add(e.object);
-    if (e.name === "BYTES_PER_ELEMENT") return this.typeOf(this.become(e, int(BigInt(size))));
-    if (e.name === "byteOffset") return this.typeOf(this.become(e, { id: nextId(this.ctx.tables.ids), kind: "as", expr: int(0n), type: { id: nextId(this.ctx.tables.ids), kind: "ref", name: "usize", args: [], ...at }, ...at }));
-    if (e.name === "buffer") return this.typeOf(this.become(e, this.typedCall(`array typed buffer ${TYPED_ARRAYS[name]}`, [e.object, int(BigInt(size))], at)));
-    const length: Expr = { id: nextId(this.ctx.tables.ids), kind: "member", object: e.object, name: "length", optional: false, ...at };
-    return this.typeOf(this.become(e, size === 1 ? length : { id: nextId(this.ctx.tables.ids), kind: "binary", op: "*", left: length, right: int(BigInt(size)), ...at }));
+    this.ctx.exprsState.once.add(cloneExpr(e.object));
+    let to: Expr;
+    if (e.name === "BYTES_PER_ELEMENT") to = this.intAt(BigInt(size), at);
+    else if (e.name === "byteOffset") {
+      const id = nextId(this.ctx.tables.ids);
+      const zero = this.intAt(0n, at);
+      const usize: TypeNode = { id: nextId(this.ctx.tables.ids), kind: "ref", name: "usize", args: [], ...at };
+      to = { id, kind: "as", expr: zero, type: usize, ...at };
+    } else if (e.name === "buffer") {
+      const typed = this.ctx.tables.typing.typedArray(name);
+      const element = this.ctx.tables.typing.rec(typed).element;
+      const helper = `array typed buffer ${this.ctx.tables.typing.show(element)}`;
+      const bytes = this.intAt(BigInt(size), at);
+      to = this.typedCall(helper, [cloneExpr(e.object), bytes], at);
+    } else {
+      const length: Expr = { id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(e.object), name: "length", optional: false, ...at };
+      if (size === 1) to = length;
+      else {
+        const id = nextId(this.ctx.tables.ids);
+        to = { id, kind: "binary", op: "*", left: length, right: this.intAt(BigInt(size), at), ...at };
+      }
+    }
+    const made = this.become(e, to);
+    return this.typeOf(made);
+  }
+
+  private intAt(this: Mut<this>, value: bigint, at: Ref<Span>): Expr {
+    return { id: nextId(this.ctx.tables.ids), kind: "int", value, start: at.start, end: at.end };
   }
 
   // A `subarray` is a copy, so a write to it would be lost where JavaScript's reaches the array
   // it views: it is read, and never bound with 'let', assigned, lent mutably or changed.
   /** @throws {CompileError} */
   readOnlySubarray(e: Ref<Expr>) {
-    const from = this.ctx.exprsState.subarrays.get(this.ctx.tables.rewrites.current(e));
+    const now = this.ctx.tables.rewrites.rewritten(e);
+    const from = now !== undefined ? this.ctx.exprsState.subarrays.get(now) : this.ctx.exprsState.subarrays.get(e);
     if (from === undefined) return;
     const named = from === "(...)" ? "the array it came from" : `'${from}'`;
     throw new CompileError("E0212", `subarray copies in Fish, so writes would not reach ${named}; use 'slice()' for a copy you'll change, or write through ${named} at an offset`, e.start, e.end);
   }
 
-  private typedCall(this: Mut<this>, name: string, args: Ref<Expr[]>, at: Ref<Span>): Expr {
-    return { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at };
+  private typedCall(this: Mut<this>, name: string, args: Expr[], at: Ref<Span>): Expr {
+    return { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name, start: at.start, end: at.end }, args, typeArgs: [], optional: false, start: at.start, end: at.end };
   }
 
   // A zero of a typed array's element, which picks the helper's instance.
   private typedZero(this: Mut<this>, name: TypedName, at: Ref<Span>): Expr {
     const span = { start: at.start, end: at.end };
-    return { id: nextId(this.ctx.tables.ids), kind: "as", expr: { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, ...span }, type: { id: nextId(this.ctx.tables.ids), kind: "ref", name: TYPED_ARRAYS[name], args: [], ...span }, ...span };
+    const typed = this.ctx.tables.typing.typedArray(name);
+    const element = this.ctx.tables.typing.rec(typed).element;
+    return { id: nextId(this.ctx.tables.ids), kind: "as", expr: { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, ...span }, type: { id: nextId(this.ctx.tables.ids), kind: "ref", name: this.ctx.tables.typing.show(element), args: [], ...span }, ...span };
   }
 
   // `Uint8Array.from(xs, f?)` and `Uint8Array.of(...)`: a typed array of the elements given, or of
@@ -3649,14 +3758,17 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}.${callee.name}' takes no type arguments`, e.start, e.end);
     if (name === "ArrayBuffer" || (callee.name !== "from" && callee.name !== "of")) throw new CompileError("E0502", `'${name}' has no static '${callee.name}'${name === "ArrayBuffer" ? "" : `; make one with 'new ${name}(...)', '${name}.from(xs)' or '${name}.of(...)'`}`, callee.start, callee.end);
     this.refuseSpread(e.args);
-    if (callee.name === "of") return { type: this.typedAs(e, { id: nextId(this.ctx.tables.ids), kind: "array", elements: e.args, ...at }, typed), what: `'${name}.of'` };
+    if (callee.name === "of") {
+      let elements: Elements = [];
+      for (const a of e.args) elements.push(cloneExpr(a));
+      return { type: this.typedAs(e, { id: nextId(this.ctx.tables.ids), kind: "array", elements, ...at }, typed), what: `'${name}.of'` };
+    }
     if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", `'${name}.from' takes the array to copy, and an optional function mapping each value`, e.start, e.end);
-    const [source, f] = e.args as [Expr, Expr | undefined];
-    if (f) {
-      const mapped: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: source, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
+    if (e.args.length > 1) {
+      const mapped: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(e.args[0]!), name: "map", optional: false, ...at }, args: [cloneExpr(e.args[1]!)], typeArgs: [], optional: false, ...at };
       return { type: this.typedAs(e, mapped, typed, true), what: `'${name}.from'` };
     }
-    const made: Expr = { id: nextId(this.ctx.tables.ids), kind: "new", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name, ...at }, args: [source], typeArgs: [], ...at };
+    const made: Expr = { id: nextId(this.ctx.tables.ids), kind: "new", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name, ...at }, args: [cloneExpr(e.args[0]!)], typeArgs: [], ...at };
     return { type: this.typedAs(e, made, typed), what: `'${name}.from'` };
   }
 
@@ -3665,8 +3777,10 @@ export class Expressions<C extends Context> implements Union<C> {
     const at = { start: callee.start, end: callee.end };
     if (callee.name === "of") {
       if (e.typeArgs.length > 1) throw new CompileError("E0106", "'Array.of' takes one type argument, its element type", e.start, e.end);
-      if (e.typeArgs[0]) this.ctx.tables.ofElements.set(e, e.typeArgs[0]);
-      const literal = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "array", elements: e.args, start: e.start, end: e.end });
+      if (e.typeArgs.length > 0) this.ctx.tables.ofElements.set(cloneExpr(e), cloneTypeNode(e.typeArgs[0]!));
+      let elements: Elements = [];
+      for (const a of e.args) elements.push(cloneExpr(a));
+      const literal = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "array", elements, start: e.start, end: e.end });
       return { type: this.value(literal), what: "'Array.of'" };
     }
     // `Array.isArray(v)`: whether v holds an array, which narrows a union to its array members.
@@ -3679,50 +3793,71 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.name !== "from") throw new CompileError("E0502", `'Array' has no '${callee.name}'; arrays are made with 'Array.of', 'Array.from' or 'new Array(n).fill(x)'`, callee.start, callee.end);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", "'Array.from' takes no type argument; its element type is what the source holds, or what the map function gives", e.start, e.end);
     if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", "'Array.from' takes what to make the array from, and an optional function mapping each value", e.start, e.end);
-    const [source, f] = e.args as [Expr, Expr | undefined];
-    const prelude = (name: string, args: Expr[]): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name, ...at }, args, typeArgs: [], optional: false, ...at });
-    const prop = source.kind === "object" && source.props.length === 1 ? source.props[0]! : undefined;
-    const written = prop?.kind === "property" && prop.key === "length" ? prop.value
-      : prop?.kind === "shorthand" && prop.name === "length" && !prop.default ? { id: nextId(this.ctx.tables.ids), kind: "ident", name: "length", start: prop.start, end: prop.end } as Expr : undefined;
-    const length = written && this.arrayLength(written, false);
+    const source = e.args[0]!;
+    const mapping = e.args.length > 1;
+    let length: Expr | undefined = undefined;
+    if (source.kind === "object" && source.props.length === 1) {
+      const prop = source.props[0]!;
+      if (prop.kind === "property" && prop.key === "length") length = this.arrayLength(prop.value, false);
+      else if (prop.kind === "shorthand" && prop.name === "length" && prop.default === undefined) {
+        const named: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: "length", start: prop.start, end: prop.end };
+        length = this.arrayLength(named, false);
+      }
+    }
     let made: Expr;
-    if (length) {
-      if (!f) throw new CompileError("E0504", "'Array.from({ length: n })' alone would hold n undefined values, which Fish has no way to make; give it a function, as in 'Array.from({ length: n }, (_, i) => i)'", e.start, e.end);
-      made = prelude("array range", [length]);
+    if (length !== undefined) {
+      if (!mapping) throw new CompileError("E0504", "'Array.from({ length: n })' alone would hold n undefined values, which Fish has no way to make; give it a function, as in 'Array.from({ length: n }, (_, i) => i)'", e.start, e.end);
+      made = this.typedCall("array range", [length], at);
     } else {
       const t = this.value(source);
       const held = this.isRefType(t) ? this.ctx.tables.typing.rec(t).to : t;
       if (this.ctx.tables.typing.iterableElement(held) !== undefined) throw unsupported("'Array.from' over an 'Iterable' parameter", source);
       const inner = this.embeddedIterated(source, held);
-      if (inner) {
-        const listed: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: inner, name: this.embeddedOf(held)!.embedded === "Set" ? "values" : "entries", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
-        return this.callMade(this.ctx.tables.rewrites.replace(e, { ...e, args: [listed, ...e.args.slice(1)] }));
+      if (inner !== undefined) {
+        const id = nextId(this.ctx.tables.ids);
+        const calleeId = nextId(this.ctx.tables.ids);
+        const listing = this.embeddedOf(held)!.embedded === "Set" ? "values" : "entries";
+        const listed: Expr = { id, kind: "call", callee: { id: calleeId, kind: "member", object: inner, name: listing, optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+        let args: Expr[] = [listed];
+        for (let i: usize = 1; i < e.args.length; i++) args.push(cloneExpr(e.args[i]!));
+        const replaced = this.ctx.tables.rewrites.replace(e, { ...e, args });
+        return this.callMade(replaced);
       }
-      if (this.isArray(held)) made = f ? source : { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: source, name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
-      else if (stringLike(this.ctx.tables.typing, held)) made = prelude("array chars", [source]);
-      else if (this.ctx.tables.typing.yieldsOf(held) !== undefined) made = prelude("array collect", [source]);
-      else if (this.iteratorCall(source, held)) made = prelude("array collect", [this.iteratorCall(source, held)!]);
-      else throw new CompileError("E0119", `'Array.from' makes an array from an array, a string, a generator, an iterable class or '{ length: n }', not '${this.ctx.tables.typing.show(t)}'`, source.start, source.end);
+      if (this.isArray(held)) made = mapping ? cloneExpr(source) : { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(source), name: "slice", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
+      else if (stringLike(this.ctx.tables.typing, held)) made = this.typedCall("array chars", [cloneExpr(source)], at);
+      else if (this.ctx.tables.typing.yieldsOf(held) !== undefined) made = this.typedCall("array collect", [cloneExpr(source)], at);
+      // Asked twice, as the ids each asking makes are kept in step with the code before.
+      else if (this.iteratorCall(source, held) !== undefined) {
+        const iterated = this.iteratorCall(source, held)!;
+        made = this.typedCall("array collect", [iterated], at);
+      } else throw new CompileError("E0119", `'Array.from' makes an array from an array, a string, a generator, an iterable class or '{ length: n }', not '${this.ctx.tables.typing.show(t)}'`, source.start, source.end);
     }
-    if (f) made = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: made, name: "map", optional: false, ...at }, args: [f], typeArgs: [], optional: false, ...at };
-    return this.callMade(this.ctx.tables.rewrites.replace(e, { ...made, start: e.start, end: e.end }));
+    if (mapping) {
+      const id = nextId(this.ctx.tables.ids);
+      const calleeId = nextId(this.ctx.tables.ids);
+      const object = made;
+      made = { id, kind: "call", callee: { id: calleeId, kind: "member", object, name: "map", optional: false, ...at }, args: [cloneExpr(e.args[1]!)], typeArgs: [], optional: false, ...at };
+    }
+    const replaced = this.ctx.tables.rewrites.replace(e, withIdExpr(made, idOfExpr(made), 0, [e.start, e.end]));
+    return this.callMade(replaced);
   }
 
   // An object literal meeting a dictionary: the Map it is, made from its entries in order.
   /** @throws {CompileError} */
   private dictLiteral(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>, t: MapType) {
     const at = { start: e.start, end: e.end };
-    const entries = e.props.map((p): Expr => {
+    let entries: Elements = [];
+    for (const p of e.props) {
       if (p.kind === "spread") throw unsupported("spreads into a dictionary", p);
       if (p.kind !== "property" && p.kind !== "shorthand") throw unsupported("methods and accessors in a dictionary", p);
       if (p.kind === "property" && typeof p.key !== "string") throw unsupported("computed keys in a dictionary", p);
-      const key: Expr = { id: nextId(this.ctx.tables.ids), kind: "string", value: p.kind === "property" ? p.key as string : p.name, start: p.start, end: p.end };
-      const value: Expr = p.kind === "property" ? p.value : { id: nextId(this.ctx.tables.ids), kind: "ident", name: p.name, start: p.start, end: p.end };
-      return { id: nextId(this.ctx.tables.ids), kind: "array", elements: [key, value], start: p.start, end: p.end };
-    });
+      const key: Expr = { id: nextId(this.ctx.tables.ids), kind: "string", value: propName(p), start: p.start, end: p.end };
+      const value: Expr = p.kind === "property" ? cloneExpr(p.value) : { id: nextId(this.ctx.tables.ids), kind: "ident", name: p.name, start: p.start, end: p.end };
+      entries.push({ id: nextId(this.ctx.tables.ids), kind: "array", elements: [key, value], start: p.start, end: p.end });
+    }
     const args: Expr[] = entries.length > 0 ? [{ id: nextId(this.ctx.tables.ids), kind: "array", elements: entries, ...at }] : [];
     const made = this.become(e, { id: nextId(this.ctx.tables.ids), kind: "new", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "Map", ...at }, args, typeArgs: [], ...at });
-    this.ctx.exprsState.wanted.set(made, t);
+    this.ctx.exprsState.wanted.set(cloneExpr(made), t);
   }
 
   // `Object.keys(o)`, `Object.values(o)` and `Object.entries(o)`: o's fields are known while
@@ -3734,20 +3869,42 @@ export class Expressions<C extends Context> implements Union<C> {
     if (name !== "keys" && name !== "values" && name !== "entries") throw new CompileError("E0502", `'Object' has no '${name}' yet; it has 'keys', 'values' and 'entries'`, callee.start, callee.end);
     if (callee.optional || e.optional) throw new CompileError("E0505", `'Object' is always there, so 'Object.${name}' is called without '?.'`, e.start, e.end);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'Object.${name}' takes no type arguments`, e.start, e.end);
-    const o = e.args[0];
-    if (!o || e.args.length > 1 || o.kind === "spread") throw new CompileError("E0504", `'Object.${name}' takes the object to read`, e.start, e.end);
-    if (this.dictOf(this.value(this.spanned(renumberExpr(cloneExpr(o), () => nextId(this.ctx.tables.ids)), o)))) return this.callMade(this.dictCall(e, o, name, []));
+    if (e.args.length !== 1 || e.args[0]!.kind === "spread") throw new CompileError("E0504", `'Object.${name}' takes the object to read`, e.start, e.end);
+    const o = e.args[0]!;
+    const probe = this.spanned(renumbered(cloneExpr(o), this.ctx.tables.ids), o);
+    const probed = this.value(probe);
+    if (this.dictOf(probed) !== undefined) {
+      const call = this.dictCall(e, o, name, []);
+      return this.callMade(call);
+    }
     const fields = this.objectRead(name, o).fields;
     const at = { start: e.start, end: e.end };
-    const key = (f: Field): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "string", value: f.name, ...at });
-    const fieldValue = (f: Field): Expr => {
-      const member: Expr = { id: nextId(this.ctx.tables.ids), kind: "member", object: this.spanned(renumberExpr(cloneExpr(o), () => nextId(this.ctx.tables.ids)), o), name: f.name, optional: false, ...at };
-      return this.ctx.tables.typing.isCopy(f.type) ? member : { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: member, name: "clone", optional: false, ...at }, args: [], typeArgs: [], optional: false, ...at };
-    };
-    const elements = fields.map((f): Expr => (name === "keys" ? key(f) : name === "values" ? fieldValue(f) : { id: nextId(this.ctx.tables.ids), kind: "array", elements: [key(f), fieldValue(f)], ...at }));
+    let elements: Elements = [];
+    for (const f of fields) {
+      if (name === "keys") elements.push(this.fieldKey(f, at));
+      else if (name === "values") elements.push(this.fieldRead(o, f, at));
+      else {
+        const id = nextId(this.ctx.tables.ids);
+        const key = this.fieldKey(f, at);
+        const value = this.fieldRead(o, f, at);
+        elements.push({ id, kind: "array", elements: [key, value], ...at });
+      }
+    }
     const array = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "array", elements, ...at });
-    this.ctx.tables.objectReads.set(array, { name, object: o });
+    this.ctx.tables.objectReads.set(cloneExpr(array), { name, object: cloneExpr(o) });
     return { type: this.value(array), what: `'Object.${name}'` };
+  }
+  // A field's name, as `Object.keys` gives it.
+  private fieldKey(this: Mut<this>, f: Ref<Field>, at: Ref<Span>): Expr {
+    return { id: nextId(this.ctx.tables.ids), kind: "string", value: f.name, start: at.start, end: at.end };
+  }
+  // A field of o read again, cloned unless it copies, as `Object.values` gives it.
+  private fieldRead(this: Mut<this>, o: Ref<Expr>, f: Ref<Field>, at: Ref<Span>): Expr {
+    const id = nextId(this.ctx.tables.ids);
+    const object = this.spanned(renumbered(cloneExpr(o), this.ctx.tables.ids), o);
+    const member: Expr = { id, kind: "member", object, name: f.name, optional: false, start: at.start, end: at.end };
+    if (this.ctx.tables.typing.isCopy(f.type)) return member;
+    return { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: member, name: "clone", optional: false, start: at.start, end: at.end }, args: [], typeArgs: [], optional: false, start: at.start, end: at.end };
   }
 
   // The fields `Object.keys`, `values` or `entries` reads from o, and the array it gives. An
@@ -3756,13 +3913,12 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private objectRead(this: Mut<this>, name: "keys" | "values" | "entries", o: Ref<Expr>): { fields: Field[]; type: ArrayType } {
     // The object is read once per field, so it has to be a place reading it again gives.
-    const notPlace = () => new CompileError("E0504", `'Object.${name}' reads a variable or a field; store this value in a 'const' first`, o.start, o.end);
-    let root: Expr = o;
-    while (root.kind === "member" && !root.optional) root = root.object;
-    if (root.kind !== "this" && root.kind !== "ident") throw notPlace();
-    const probe = this.spanned(renumberExpr(cloneExpr(o), () => nextId(this.ctx.tables.ids)), o);
-    const t = this.ctx.tables.typing.unfolded(this.read(probe));
-    if (!this.rooted(probe)) throw notPlace();
+    const notPlace = `'Object.${name}' reads a variable or a field; store this value in a 'const' first`;
+    if (!namedPlace(o)) throw new CompileError("E0504", notPlace, o.start, o.end);
+    const probe = this.spanned(renumbered(cloneExpr(o), this.ctx.tables.ids), o);
+    const read = this.read(probe);
+    const t = this.ctx.tables.typing.unfolded(read);
+    if (!this.rooted(probe)) throw new CompileError("E0504", notPlace, o.start, o.end);
     const r = this.recOf(t);
     if (r?.kind === "map") {
       const which = r.set ? "Set" : "Map";
@@ -3772,17 +3928,24 @@ export class Expressions<C extends Context> implements Union<C> {
     const shape: Type = r?.kind === "param" && r.bound !== undefined && this.recOf(r.bound)?.kind === "object" ? r.bound : t;
     const sr = this.recOf(shape);
     if (sr === undefined || !((sr.kind === "object" && !this.ctx.tables.typing.isTuple(shape)) || sr.kind === "class")) throw new CompileError("E0504", `'Object.${name}' reads the fields of an object or a class instance, not '${this.ctx.tables.typing.show(t)}'`, o.start, o.end);
-    const fields = (sr.kind === "class" ? this.ctx.tables.typing.allFields(shape as ClassType) : (sr as { fields: Field[] }).fields).filter((f) => (f.access ?? "public") === "public");
+    let all: Field[] = [];
+    if (sr.kind === "class") all = this.ctx.tables.typing.allFields(shape as ClassType);
+    else if (sr.kind === "object") for (const f of sr.fields) all.push({ ...f });
+    let fields: Field[] = [];
+    for (const f of all) if ((f.access ?? "public") === "public") fields.push(f);
     if (name !== "keys" && fields.length === 0) throw new CompileError("E0504", `'${this.ctx.tables.typing.show(t)}' has no fields, so 'Object.${name}' would give an array of nothing`, o.start, o.end);
-    const held = this.ctx.tables.typing.unionType(fields.map((f) => this.ctx.tables.typing.widenLet(f.type)));
-    return { fields, type: this.ctx.tables.typing.arrayType(name === "keys" ? "string" : name === "values" ? held : this.ctx.tables.typing.tupleType(["string", held])) };
+    let widened: Type[] = [];
+    for (const f of fields) widened.push(this.ctx.tables.typing.widenLet(f.type));
+    const held = this.ctx.tables.typing.unionType(widened);
+    const element = name === "keys" ? "string" : name === "values" ? held : this.ctx.tables.typing.tupleType(["string", held]);
+    return { fields, type: this.ctx.tables.typing.arrayType(element) };
   }
 
   // `n` as the `i64` an array's length is made from, checked to be an i64 or a usize, and with
   // `panics` a negative one ending the program at n.
   private arrayLength(this: Mut<this>, n: Ref<Expr>, panics: boolean): Expr {
-    const checked: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "fill length", start: n.start, end: n.end }, args: [n], typeArgs: [], optional: false, start: n.start, end: n.end };
-    if (panics) this.ctx.tables.lengthChecks.add(checked);
+    const checked: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "fill length", start: n.start, end: n.end }, args: [cloneExpr(n)], typeArgs: [], optional: false, start: n.start, end: n.end };
+    if (panics) this.ctx.tables.lengthChecks.add(cloneExpr(checked));
     return checked;
   }
 
@@ -3790,16 +3953,21 @@ export class Expressions<C extends Context> implements Union<C> {
   // literal may widen, except a reference or, with `converted` false, an index, which it passes
   // as it is. The argument always comes, so the parameter can't be optional.
   /** @throws {CompileError} */
-  private passedExactly(name: string, given: Type, written: Type, p: Ref<Param> | undefined, at: Ref<Span>, converted = true) {
-    if (p && (p.optional || this.ctx.tables.defaulted.has(p)) && !this.ctx.tables.typing.sameLowered(given, written)) throw new CompileError("E0506", `'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
+  private passedExactly(this: Mut<this>, name: string, given: Type, written: Type, p: Ref<Param> | undefined, at: Ref<Span>, converted = true) {
+    const optional = p !== undefined && (p.optional || this.ctx.tables.defaulted.has(p));
+    if (optional && !this.ctx.tables.typing.sameLowered(given, written)) throw new CompileError("E0506", `'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
     if (this.ctx.tables.typing.sameLowered(given, written) || (converted && !this.isRefType(given) && this.ctx.tables.typing.fits(given, written))) return;
-    if (p && (p.optional || this.ctx.tables.defaulted.has(p))) throw new CompileError("E0506", `'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
+    if (optional) throw new CompileError("E0506", `'${name}' always passes its callback this argument, so the parameter can't be optional or have a default`, at.start, at.end);
     // A declared function given by name takes its own value, which a lent element isn't.
-    const named = p && this.ctx.tables.namedParams.get(p);
-    if (named && this.isRefType(given) && this.ctx.tables.typing.sameLowered(this.ctx.tables.typing.rec(given).to, written)) {
-      const { fn, names, clones } = named;
-      const arrow = `(${names.join(", ")}) => ${fn}(${names.map((n, i) => (clones[i] ? `${n}.clone()` : n)).join(", ")})`;
-      throw new CompileError("E0506", `'${name}' lends its callback ${article(this.ctx.tables.typing.show(given))}, and '${fn}' takes its own '${this.ctx.tables.typing.show(written)}'; write '${arrow}', or have '${fn}' take a '${this.ctx.tables.typing.show(given)}'`, at.start, at.end);
+    const named = p !== undefined ? this.ctx.tables.namedParams.get(p) : undefined;
+    if (named !== undefined && this.isRefType(given)) {
+      const to = this.ctx.tables.typing.rec(given).to;
+      if (this.ctx.tables.typing.sameLowered(to, written)) {
+        let passed: string[] = [];
+        for (let i: usize = 0; i < named.names.length; i++) passed.push(named.clones[i] === true ? `${named.names[i]!}.clone()` : named.names[i]!);
+        const arrow = `(${named.names.join(", ")}) => ${named.fn}(${passed.join(", ")})`;
+        throw new CompileError("E0506", `'${name}' lends its callback ${article(this.ctx.tables.typing.show(given))}, and '${named.fn}' takes its own '${this.ctx.tables.typing.show(written)}'; write '${arrow}', or have '${named.fn}' take a '${this.ctx.tables.typing.show(given)}'`, at.start, at.end);
+      }
     }
     throw new CompileError("E0506", `'${name}' passes its callback ${article(this.ctx.tables.typing.show(given))} here, not ${article(this.ctx.tables.typing.show(written))}`, at.start, at.end);
   }
@@ -3813,28 +3981,48 @@ export class Expressions<C extends Context> implements Union<C> {
     const t = this.value(source);
     const held = this.heldBy(t)!;
     const at = { start: source.start, end: source.end };
-    const made = (callee: Expr, args: Expr[] = []): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "call", callee, args, typeArgs: [], optional: false, ...at });
-    let from: Expr | undefined;
-    if ((this.dictOf(held) !== undefined)) throw this.notIterable(source);
+    let from: Expr | undefined = undefined;
+    if ((this.dictOf(held) !== undefined)) throw this.notIterable(at);
     if (this.ctx.tables.typing.iterableElement(held) !== undefined) throw unsupported("spreads of an 'Iterable' parameter", source);
     const inner = this.embeddedIterated(source, held);
-    if (inner) return this.spreadElements(this.ctx.tables.rewrites.replace(x, { ...x, value: inner }) as typeof x);
-    if (stringLike(this.ctx.tables.typing, held)) from = made({ id: nextId(this.ctx.tables.ids), kind: "ident", name: "array chars", ...at }, [source]);
-    else if (this.ctx.tables.typing.yieldsOf(held) !== undefined) from = made({ id: nextId(this.ctx.tables.ids), kind: "ident", name: "array collect", ...at }, [source]);
-    else if (this.iteratorCall(source, held)) from = made({ id: nextId(this.ctx.tables.ids), kind: "ident", name: "array collect", ...at }, [this.iteratorCall(source, held)!]);
-    else if (this.recOf(held)?.kind === "map") from = made({ id: nextId(this.ctx.tables.ids), kind: "member", object: source, name: this.ctx.tables.typing.rec(held as MapType).set ? "values" : "entries", optional: false, ...at });
-    else if (!this.isArray(held)) throw new CompileError("E0119", `'...' spreads an array, a string, a generator, a Map, a Set or an iterable class, not '${this.ctx.tables.typing.show(t)}'`, source.start, source.end);
-    if (from) {
-      this.ctx.exprsState.once.add(source);
-      x = this.ctx.tables.rewrites.replace(x, { ...x, value: from }) as typeof x;
+    if (inner !== undefined) {
+      const replaced = this.ctx.tables.rewrites.replace(x, { ...x, value: inner });
+      if (replaced.kind === "spread") return this.spreadElements(replaced);
     }
-    const array = from ? this.value(from) : t;
-    const lowered = this.ctx.tables.typing.lowerKeepingBrands(this.isRefType(array) ? this.ctx.tables.typing.rec(array).to : array) as ArrayType;
-    if (this.isRefType(array)) this.ctx.coercions.set(x.value, lowered);
-    this.clonable(this.ctx.tables.typing.rec(lowered).element, x, "a spread");
+    if (stringLike(this.ctx.tables.typing, held)) from = this.callOf({ id: nextId(this.ctx.tables.ids), kind: "ident", name: "array chars", ...at }, [cloneExpr(source)], at);
+    else if (this.ctx.tables.typing.yieldsOf(held) !== undefined) from = this.callOf({ id: nextId(this.ctx.tables.ids), kind: "ident", name: "array collect", ...at }, [cloneExpr(source)], at);
+    // Asked twice, as the ids each asking makes are kept in step with the code before.
+    else if (this.iteratorCall(source, held) !== undefined) {
+      const callee: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: "array collect", ...at };
+      const iterated = this.iteratorCall(source, held)!;
+      from = this.callOf(callee, [iterated], at);
+    } else if (this.recOf(held)?.kind === "map") from = this.callOf({ id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(source), name: this.ctx.tables.typing.rec(held as MapType).set ? "values" : "entries", optional: false, ...at }, [], at);
+    else if (!this.isArray(held)) throw new CompileError("E0119", `'...' spreads an array, a string, a generator, a Map, a Set or an iterable class, not '${this.ctx.tables.typing.show(t)}'`, source.start, source.end);
+    if (from !== undefined) {
+      this.ctx.exprsState.once.add(cloneExpr(source));
+      const replaced = this.ctx.tables.rewrites.replace(x, { ...x, value: from });
+      if (replaced.kind === "spread") {
+        const array = this.value(replaced.value);
+        return this.spreadTyped(replaced, array);
+      }
+    }
+    return this.spreadTyped(x, t);
+  }
+  // The element type of a spread of an array, or of a reference to one, of type `array`.
+  /** @throws {CompileError} */
+  private spreadTyped(this: Mut<this>, x: Ref<Extract<Expr, { kind: "spread" }>>, array: Type): Type {
+    const held = this.isRefType(array) ? this.ctx.tables.typing.rec(array).to : array;
+    const lowered = this.ctx.tables.typing.lowerKeepingBrands(held) as ArrayType;
+    if (this.isRefType(array)) this.ctx.coercions.set(cloneExpr(x.value), lowered);
+    const element = this.ctx.tables.typing.rec(lowered).element;
+    this.clonable(element, x, "a spread");
     // Codegen converts each element from this type.
-    this.ctx.types.set(x, this.ctx.tables.typing.rec(lowered).element);
-    return this.ctx.tables.typing.rec(lowered).element;
+    this.ctx.types.set(cloneExpr(x), element);
+    return element;
+  }
+  // A call of `callee`, made after it so their ids come in that order.
+  private callOf(this: Mut<this>, callee: Expr, args: Expr[], at: Ref<Span>): Expr {
+    return { id: nextId(this.ctx.tables.ids), kind: "call", callee, args, typeArgs: [], optional: false, start: at.start, end: at.end };
   }
 
   // A call's arguments after the fixed parameters fill its rest parameter, as one array literal,
@@ -3843,12 +4031,12 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private packRest(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" | "new" }>>, list: Ref<Expr[]>, params: Ref<Param[]>): Expr | undefined {
     if (this.ctx.tables.packed.has(e)) return undefined;
-    const fixed = params.length - 1;
-    this.refuseSpread(list.slice(0, fixed));
+    const fixed: usize = params.length - 1;
+    this.refuseSpread(list.slice(0, fixed as i64));
     if (list.length < fixed) return undefined;
     let args: Expr[] = [];
     let rest: Elements = [];
-    for (let i = 0; i < list.length; i++) {
+    for (let i: usize = 0; i < list.length; i++) {
       if (i < fixed) args.push(cloneExpr(list[i]!));
       else rest.push(cloneExpr(list[i]!));
     }
@@ -3864,18 +4052,20 @@ export class Expressions<C extends Context> implements Union<C> {
   // tuple made for the call has to be named first.
   /** @throws {CompileError} */
   private spreadTuples(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" | "new" }>>): Expr | undefined {
-    if (e.args === undefined) return undefined;
-    let tuples: (ObjectType | undefined)[] = [];
-    let any = false;
-    for (const a of e.args) {
-      const t = a.kind === "spread" ? this.spreadTuple(a.value) : undefined;
-      if (t !== undefined) any = true;
-      tuples.push(t);
+    if (e.args !== undefined) {
+      let tuples: (ObjectType | undefined)[] = [];
+      let any = false;
+      for (const a of e.args) {
+        const t = a.kind === "spread" ? this.spreadTuple(a.value) : undefined;
+        if (t !== undefined) any = true;
+        tuples.push(t);
+      }
+      if (!any) return undefined;
+      let parts: Expr[] = [];
+      for (let i: usize = 0; i < e.args.length; i++) this.spreadParts(e.args[i]!, tuples[i], parts);
+      return this.ctx.tables.rewrites.replace(e, withArgs(e, parts));
     }
-    if (!any) return undefined;
-    let parts: Expr[] = [];
-    for (let i = 0; i < e.args.length; i++) this.spreadParts(e.args[i]!, tuples[i], parts);
-    return this.ctx.tables.rewrites.replace(e, withArgs(e, parts));
+    return undefined;
   }
 
   // An argument as `spreadTuples` passes it: itself, or a tuple's elements read from its variable.
@@ -3888,7 +4078,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const source = now !== undefined ? now : cloneExpr(a.value);
     const at = { start: a.start, end: a.end };
     const count = this.ctx.tables.typing.elementsOf(t).length;
-    for (let n = 0; n < count; n++) parts.push(this.tupleElement(source, n.toString(), at));
+    for (let n: usize = 0; n < count; n++) parts.push(this.tupleElement(source, `${n}`, at));
     if (this.ctx.tables.typing.rec(t).rest !== undefined) {
       const id = nextId(this.ctx.tables.ids);
       parts.push({ id, kind: "spread", value: this.tupleElement(source, "...", at), start: at.start, end: at.end });
@@ -3902,11 +4092,15 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // The tuple a spread argument's variable holds, if it holds one.
   /** @throws {CompileError} */
-  private spreadTuple(this: Mut<this>, source: Ref<Expr>): ObjectType | undefined {
-    source = this.ctx.tables.rewrites.current(source);
+  private spreadTuple(this: Mut<this>, given: Ref<Expr>): ObjectType | undefined {
+    const now = this.ctx.tables.rewrites.rewritten(given);
+    return now !== undefined ? this.spreadTupleNow(now) : this.spreadTupleNow(given);
+  }
+  /** @throws {CompileError} */
+  private spreadTupleNow(this: Mut<this>, source: Ref<Expr>): ObjectType | undefined {
     if (source.kind !== "ident") return undefined;
     const t = this.value(source);
-    this.ctx.exprsState.once.add(source);
+    this.ctx.exprsState.once.add(cloneExpr(source));
     const held = this.heldBy(t)!;
     return this.ctx.tables.typing.isTuple(held) && !this.ctx.tables.typing.rec(held as ObjectType).match ? (held as ObjectType) : undefined;
   }
@@ -3927,7 +4121,8 @@ export class Expressions<C extends Context> implements Union<C> {
   // again and again can't allow.
   /** @throws {CompileError} */
   private runsOften(c: ClosureType, name: string, calls: string, at: Ref<Span>) {
-    if ((this.ctx.tables.typing.rec(c).once !== undefined)) throw new CompileError("E0210", `'${name}' calls ${calls}, but this closure moves '${this.ctx.tables.typing.rec(c).once}' out, so it can run only once; clone it inside instead`, at.start, at.end);
+    const once = this.ctx.tables.typing.rec(c).once;
+    if (once !== undefined) throw new CompileError("E0210", `'${name}' calls ${calls}, but this closure moves '${once}' out, so it can run only once; clone it inside instead`, at.start, at.end);
   }
 
   // `includes` and `indexOf` compare elements by value, as `===` does; `join` writes each as
@@ -3953,44 +4148,53 @@ export class Expressions<C extends Context> implements Union<C> {
       if (typeof inner === "string" || this.ctx.tables.typing.rec(inner).kind !== "array") throw new CompileError("E0504", `'flat' flattens an array of arrays, not '${this.ctx.tables.typing.show(array)}'`, callee.start, callee.end);
       return { type: inner, what: "'flat'" };
     }
-    const [most, takes] = name === "includes" || name === "indexOf" || name === "lastIndexOf" ? [2, "a value to look for and an optional position to start from"] : name === "join" ? [1, "an optional separator"] : [2, "an optional start and end"];
-    const least = name === "includes" || name === "indexOf" || name === "lastIndexOf" ? 1 : 0;
+    const finds = name === "includes" || name === "indexOf" || name === "lastIndexOf";
+    const most: usize = name === "join" && !finds ? 1 : 2;
+    const takes = finds ? "a value to look for and an optional position to start from" : name === "join" ? "an optional separator" : "an optional start and end";
+    const least: usize = finds ? 1 : 0;
     if (e.args.length < least || e.args.length > most) throw new CompileError("E0504", `'${name}' takes ${takes}`, e.start, e.end);
-    const argument = (a: Expr, want: Type) => {
-      this.expect(a, want);
-      const t = this.value(a);
-      this.coerce(a, t, want, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(want)}'`);
-    };
+    const element = this.ctx.tables.typing.rec(array).element;
     if (name === "join") {
-      // Literals, and unions of them, are written as their values.
-      const writable = (t: Type): boolean => {
-        const r = this.recOf(t);
-        return isNumeric(t) || t === "boolean" || t === "string" || r?.kind === "literal" || (r?.kind === "union" && r.members.every(writable));
-      };
-      if (!writable(this.ctx.tables.typing.lower(this.ctx.tables.typing.rec(array).element))) {
-        throw new CompileError("E0504", `'join' writes each element as 'String(x)' does, which works for numbers, booleans and strings, not '${this.ctx.tables.typing.show(this.ctx.tables.typing.rec(array).element)}'`, callee.start, callee.end);
+      const lowered = this.ctx.tables.typing.lower(element);
+      if (!this.joinable(lowered)) {
+        throw new CompileError("E0504", `'join' writes each element as 'String(x)' does, which works for numbers, booleans and strings, not '${this.ctx.tables.typing.show(element)}'`, callee.start, callee.end);
       }
-      if (e.args[0]) argument(e.args[0], "string");
+      if (e.args.length > 0) this.argument(e.args[0]!, "string");
       return { type: "string", what: "'join'" };
     }
     if (name === "slice") {
-      for (const a of e.args) argument(a, "i64");
+      for (const a of e.args) this.argument(a, "i64");
       return { type: array, what: "'slice'" };
     }
-    const [sought, from] = e.args as [Expr, Expr | undefined];
-    this.expect(sought, this.ctx.tables.typing.rec(array).element);
+    const sought = e.args[0]!;
+    this.expect(sought, element);
     const t = this.value(sought);
-    if (objectsMeet(this.ctx.tables.typing, this.ctx.tables.typing.rec(array).element, t)) throw new CompileError("E0112", `'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
+    if (objectsMeet(this.ctx.tables.typing, element, t)) throw new CompileError("E0112", `'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
     // A value that fits the element type, a literal of a sized number too, is one.
-    if (this.ctx.tables.typing.fits(t, this.ctx.tables.typing.rec(array).element) || (isNumeric(this.ctx.tables.typing.widenLet(t)) && isNumeric(this.ctx.tables.typing.rec(array).element) && isFloat(this.ctx.tables.typing.widenLet(t)) === isFloat(this.ctx.tables.typing.rec(array).element))) {
-      if (from) argument(from, "i64");
-      this.coerce(sought, t, this.ctx.tables.typing.rec(array).element, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(this.ctx.tables.typing.rec(array).element)}'`);
+    if (this.ctx.tables.typing.fits(t, element) || (isNumeric(this.ctx.tables.typing.widenLet(t)) && isNumeric(element) && isFloat(this.ctx.tables.typing.widenLet(t)) === isFloat(element))) {
+      if (e.args.length > 1) this.argument(e.args[1]!, "i64");
+      this.coerce(sought, t, element, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(element)}'`);
       return { type: name === "includes" ? "boolean" : "i64", what: `'${name}'` };
     }
-    if (objectsMeet(this.ctx.tables.typing, this.ctx.tables.typing.rec(array).element, t)) throw new CompileError("E0112", `'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
-    if (!comparable(this.ctx.tables.typing, this.ctx.tables.typing.rec(array).element, t)) throw new CompileError("E0112", `'${name}' can never find a '${this.ctx.tables.typing.show(this.ctx.tables.typing.widenLet(t))}' among elements of type '${this.ctx.tables.typing.show(this.ctx.tables.typing.rec(array).element)}'`, sought.start, sought.end);
-    if (from) argument(from, "i64");
+    if (objectsMeet(this.ctx.tables.typing, element, t)) throw new CompileError("E0112", `'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
+    if (!comparable(this.ctx.tables.typing, element, t)) throw new CompileError("E0112", `'${name}' can never find a '${this.ctx.tables.typing.show(this.ctx.tables.typing.widenLet(t))}' among elements of type '${this.ctx.tables.typing.show(element)}'`, sought.start, sought.end);
+    if (e.args.length > 1) this.argument(e.args[1]!, "i64");
     return { type: name === "includes" ? "boolean" : "i64", what: `'${name}'` };
+  }
+  // An argument checked as a `want`, converted to it where it fits.
+  /** @throws {CompileError} */
+  private argument(this: Mut<this>, a: Ref<Expr>, want: Type): void {
+    this.expect(a, want);
+    const t = this.value(a);
+    this.coerce(a, t, want, `argument of type '${this.ctx.tables.typing.show(t)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(want)}'`);
+  }
+  // Literals, and unions of them, are written as their values.
+  private joinable(t: Type): boolean {
+    const r = this.recOf(t);
+    if (isNumeric(t) || t === "boolean" || t === "string" || r?.kind === "literal") return true;
+    if (r?.kind !== "union") return false;
+    for (const m of r.members) if (!this.joinable(m)) return false;
+    return true;
   }
 
   // A raw pointer's methods, all inside `unsafe`: reading and writing what it points at, which
@@ -4153,8 +4357,9 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private mapCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, t: MapType): { type: Type; what: string } {
     const name = callee.name;
-    const kind = this.ctx.tables.typing.rec(t).set ? "Set" : "Map";
-    if (!(this.ctx.tables.typing.rec(t).set ? SET_METHODS : MAP_METHODS).has(name)) throw new CompileError("E0502", `'${kind}' has no method '${name}' yet${didYouMean(name, this.ctx.tables.typing.rec(t).set ? SET_METHODS : MAP_METHODS)}`, callee.start, callee.end);
+    const isSet = this.ctx.tables.typing.rec(t).set;
+    const kind = isSet ? "Set" : "Map";
+    if (isSet ? !SET_METHODS.has(name) : !MAP_METHODS.has(name)) throw new CompileError("E0502", `'${kind}' has no method '${name}' yet${didYouMean(name, isSet ? [...SET_METHODS] : [...MAP_METHODS])}`, callee.start, callee.end);
     if (this.linked(callee)) throw unsupported(`optional chains calling '${kind}' methods`, callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}' takes no type arguments`, e.start, e.end);
     const count = MAP_ARGUMENTS[name]!;
@@ -4274,7 +4479,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.linked(callee)) throw unsupported("optional chains calling 'join'", callee);
     if (e.args.length !== 0) throw new CompileError("E0305", "'join' takes no arguments", e.start, e.end);
     if (this.isRefType(this.ctx.types.get(callee.object)!)) throw new CompileError("E0305", "'join' takes the handle over, so it needs the handle itself, not a borrow of it", callee.object.start, callee.object.end);
-    this.ctx.tables.joinCalls.add(e);
+    this.ctx.tables.joinCalls.add(cloneExpr(e));
     return { type: this.ctx.tables.typing.joinedType(t, this.ctx.tables.arenas.classOf(this.ctx.classes.get("TaskPanic")!).type), what: "'join'" };
   }
 
