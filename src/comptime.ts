@@ -732,9 +732,8 @@ class Interpreter<H extends ComptimeHost> {
       case "let": {
         // The checker gives a declaration one name, its local keyed by the statement.
         const local = this.inst(f).locals.get(s);
-        const d = s.declarations[0]!;
         if (local === undefined || s.declarations.length !== 1) return this.unsupported("destructuring", s);
-        const v = d.init !== undefined ? this.expr(f, d.init) : undefined;
+        const v = s.declarations[0]!.init !== undefined ? this.expr(f, s.declarations[0]!.init!) : undefined;
         this.frames[f]!.locals.set(local, v);
         return;
       }
@@ -807,7 +806,8 @@ class Interpreter<H extends ComptimeHost> {
       case "throw":
         throw new Thrown(this.expr(f, s.value), span(s));
       case "try":
-        return this.attempt(f, s);
+        this.attempt(f, s);
+        return;
       case "empty":
         return;
       default:
@@ -959,10 +959,9 @@ class Interpreter<H extends ComptimeHost> {
       case "template": {
         let text = e.quasis.length > 0 ? e.quasis[0]! : "";
         for (let i: usize = 0; i < e.exprs.length; i++) {
-          const x = e.exprs[i]!;
-          const shown = this.expr(f, x);
+          const shown = this.expr(f, e.exprs[i]!);
           const after = i + 1 < e.quasis.length ? e.quasis[i + 1]! : "";
-          text = this.joined(text, display(shown, this.typeOf(f, x)) + after, e);
+          text = this.joined(text, display(shown, this.typeOf(f, e.exprs[i]!)) + after, e);
         }
         return text;
       }
@@ -996,7 +995,7 @@ class Interpreter<H extends ComptimeHost> {
         const old = numberOf(this.readValue(at));
         const one: bigint | f64 = typeof old === "bigint" ? 1n : 1.0;
         const next = this.numeric(e.op === "++" ? "+" : "-", old, one, this.typeOf(f, e.operand), e);
-        this.write(at, next);
+        this.write(at, copyValue(next));
         return e.prefix ? next : old;
       }
       case "as": {
@@ -1011,7 +1010,8 @@ class Interpreter<H extends ComptimeHost> {
           }
           return retag(this.host.tables.typing, held, from, type);
         }
-        return this.convert(this.valueOf(f, e.expr), type, e);
+        const converted = this.valueOf(f, e.expr);
+        return this.convert(converted, type, e);
       }
       case "satisfies":
         return this.expr(f, e.expr);
@@ -1032,9 +1032,12 @@ class Interpreter<H extends ComptimeHost> {
         return v;
       }
       case "object": {
-        const fields = new Map<string, Value>();
+        let fields = new Map<string, Value>();
         for (const p of e.props) {
-          if (p.kind === "property" && typeof p.key === "string") fields.set(p.key, this.expr(f, p.value));
+          if (p.kind === "property" && typeof p.key === "string") {
+            const v = this.expr(f, p.value);
+            fields.set(p.key, v);
+          }
           else if (p.kind === "shorthand") {
             const local = this.inst(f).locals.get(p)!;
             if (!this.frames[f]!.locals.has(local)) throw new Stop(`'${p.name}' is only known when the program runs, so comptime code can't read it`, span(p), false);
@@ -1045,7 +1048,18 @@ class Interpreter<H extends ComptimeHost> {
         return { kind: "record", type: type as ObjectType, fields };
       }
       case "array":
-        return { kind: "array", items: e.elements.flatMap((x) => (!x ? this.unsupported("a hole in an array", e) : x.kind === "spread" ? this.iterated(this.valueOf(f, x.value), x).map((v) => cloned(this.host.tables, v)) : [this.expr(f, x)])) };
+      {
+        let items: Value[] = [];
+        for (const x of e.elements) {
+          if (x === undefined) return this.unsupported("a hole in an array", e);
+          if (x.kind === "spread") {
+            const spread = this.valueOf(f, x.value);
+            const parts = this.iterated(spread, x);
+            for (const v of parts) items.push(cloned(this.host.tables, v));
+          } else items.push(this.expr(f, x));
+        }
+        return { kind: "array", items };
+      }
       case "new":
         return this.construct(f, e, type);
       case "member":
@@ -1053,7 +1067,8 @@ class Interpreter<H extends ComptimeHost> {
       case "index": {
         const object = this.link(f, e.object);
         if (isShort(object)) return short();
-        return this.read(this.place(f, e, object));
+        const at = this.place(f, e, object);
+        return this.read(at);
       }
       case "call":
         return this.callExpr(f, e, type);
@@ -1180,9 +1195,13 @@ class Interpreter<H extends ComptimeHost> {
       const self = this.receiver(f, callee.object);
       if (isShort(self)) return short();
       if ((callee.optional || e.optional) && this.readValue(self) === null) return short();
-      return this.call(target, this.args(f, target, e.args), self, e);
+      const args = this.args(f, target, e.args);
+      return this.call(target, args, self, e);
     }
-    if (target !== undefined) return this.call(target, this.args(f, target, e.args), undefined, e);
+    if (target !== undefined) {
+      const args = this.args(f, target, e.args);
+      return this.call(target, args, undefined, e);
+    }
     if (callee.kind === "ident" && callee.name === "String" && e.args.length === 1) return display(this.expr(f, e.args[0]!), this.typeOf(f, e.args[0]!));
     // `String.fromCharCode` and `String.fromCodePoint`, their arguments gathered into one array.
     const built = this.host.tables.stringBuilds.get(e);
@@ -1610,7 +1629,10 @@ class Interpreter<H extends ComptimeHost> {
         return this.extend(base, { kind: "field", name: target.name });
       }
       // A part of a value that isn't an object's, like an array's length, which is only read.
-      if (typeof holder === "string" || isItems(holder) || isTable(holder)) return this.temp(f, this.memberValue(target, holder));
+      if (typeof holder === "string" || isItems(holder) || isTable(holder)) {
+        const part = this.memberValue(target, holder);
+        return this.temp(f, part);
+      }
     }
     if (target.kind === "index") {
       const base = object === undefined ? this.holder(f, target.object) : isPlace(object) ? object : this.temp(f, object);
