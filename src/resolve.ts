@@ -34,7 +34,7 @@ export function traitAlias(ids: Ids, a: TypeAlias): Interface | undefined {
 }
 
 // Whether a parameter is written as a tag's strings: `comptime` and a string array.
-export function tagStrings(p: Param | undefined): boolean {
+export function tagStrings(p: Ref<Param> | undefined): boolean {
   if (p === undefined || !p.comptime || p.type === undefined) return false;
   if (p.type.kind === "ref") return p.type.name === "TemplateStringsArray";
   return p.type.kind === "array" && p.type.element.kind === "ref" && p.type.element.name === "string";
