@@ -7,8 +7,8 @@ import { unsatisfied, type Members } from "./interfaces.ts";
 import type { Direct } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
-import { ASSIGNMENTS, binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
-import type { Expr, Func, Interface, MatchArm, ObjectProp, Param, PropertyName, Pattern, Span, Stmt, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import { binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
+import type { AssignOp, BinaryOp, Expr, Func, Interface, MatchArm, ObjectProp, Param, PropertyName, Pattern, Span, Stmt, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings, type InScope } from "./resolve.ts";
 import { infer } from "./generics.ts";
@@ -27,7 +27,7 @@ import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, applyShape, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 import { forEachChild, nextId, NodeMap, NodeSet, reborrowNode, renumberExpr, respanExpr, someNode, walk, walkWhile, type AnyNode, type Ids, type Rewrites } from "./nodes.ts";
-import { cloneExpr, cloneJsName, cloneObjectProp, cloneParam, clonePattern, cloneTypeMember, cloneTypeNode, idOfExpr, rebuiltExpr, withIdExpr } from "./rebuild.ts";
+import { cloneExpr, cloneJsName, cloneObjectProp, cloneParam, clonePattern, cloneTypeMember, cloneTypeNode, idOfExpr, idOfObjectProp, rebuiltExpr, withIdExpr } from "./rebuild.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -3184,7 +3184,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const array: Expr = { id: nextId(this.ctx.tables.ids), kind: "member", object: e.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
       this.ctx.tables.restStarts.set(array, count);
       this.ctx.tables.rewrites.replace(e, { ...e, object: array, index: { id: nextId(this.ctx.tables.ids), kind: "int", value: n - BigInt(count), ...at } });
-      return false;
+      return true;
     }
     if (n >= BigInt(count)) throw new CompileError("E0117", `tuple type '${this.ctx.tables.typing.show(object)}' of length ${count} has no element at index ${n}`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
@@ -5914,7 +5914,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const args = this.ctx.tables.typing.rec(expected).args.slice();
       for (let i: usize = 0; i < params.length; i++) bindings.set(params[i]!, args[i]!);
     } else {
-      const unknown = new Set(params);
+      const unknown = new Set(params.slice());
       for (let i: usize = 0; i < payload.length && i < given.length; i++) {
         const widened = this.ctx.tables.typing.widenLet(given[i]!);
         infer(this.ctx.tables, this.ctx.decls, payload[i]!, widened, unknown, bindings, e);
@@ -6151,8 +6151,11 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // Notes that this instance never runs `e`, a call or test of a method its type leaves out.
   private markAbsent(this: Mut<this>, e: Ref<Expr>): void {
-    if (this.ctx.instance.absent === undefined) this.ctx.instance.absent = new NodeSet<Expr>();
-    this.ctx.instance.absent!.add(cloneExpr(e));
+    // ponytail: copies the set on each add; absent methods are few per instance
+    let absent = new NodeSet<Expr>();
+    if (this.ctx.instance.absent !== undefined) for (const n of this.ctx.instance.absent!) absent.add(cloneExpr(n));
+    absent.add(cloneExpr(e));
+    this.ctx.instance.absent = absent;
   }
 
   // Whether an instance's concrete type for a type parameter leaves out a method: an object,
@@ -6269,7 +6272,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (type !== undefined && this.isRefType(type)) {
       throw new CompileError("E0202", `can't call '${name}' through the reference '${this.placeText(object)}': it takes its object over, and a reference only borrows it; call it on the value itself`, object.start, object.end);
     }
-    const owns = this.ctx.self !== undefined && this.ctx.self.owned === true;
+    const owns = this.ctx.self?.owned === true;
     if ((object.kind === "this" || object.kind === "super") && !owns) {
       throw new CompileError("E0202", `can't call '${name}' on 'this' here: it takes its object over, and this method only borrows 'this'; declare 'this: Own<this>' to give it away`, object.start, object.end);
     }
@@ -6393,7 +6396,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // Whether `super.name` reaches the embedded Map or Set: no base between declares it.
   /** @throws {CompileError} */
   private superDelegated(this: Mut<this>, name: string): boolean {
-    const self = this.ctx.self !== undefined ? this.ctx.self.type : undefined;
+    const self = this.ctx.self?.type;
     if (self === undefined) return false;
     const embedding = this.embeddedId(self);
     if (embedding === undefined || !collectionMember(this.ctx.tables.arenas.classOf(embedding), name)) return false;
@@ -6581,7 +6584,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (found.setter === undefined) throw new CompileError("E0208", `cannot assign to '${target.name}' because it is a read-only property`, target.start, target.end);
     const access = this.ctx.tables.arenas.bodyOf(found.setter).access;
     this.visible(access, this.ctx.tables.arenas.classOf(found.declaring).type, target.name, target);
-    const op = e.kind === "update" ? (e.op === "++" ? "+" : "-") : ASSIGNMENTS[e.op];
+    const op: BinaryOp | "=" | undefined = e.kind === "update" ? (e.op === "++" ? "+" : "-") : assignedWith(e.op);
     if (op === undefined) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
     const right: Expr = e.kind === "update" ? { id: nextId(this.ctx.tables.ids), kind: "int", value: 1n, start: e.start, end: e.end } : cloneExpr(e.value);
     let given = right;
@@ -6659,7 +6662,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private superMethod(this: Mut<this>, callee: Ref<Extract<Expr, { kind: "member" }>>): Ref<Body> {
     // In a copy of a base's member, `super` is the base of the class it was written in.
     const owner = this.ctx.owner;
-    const self = this.ctx.self !== undefined ? this.ctx.self.type : undefined;
+    const self = this.ctx.self?.type;
     const from = owner !== undefined && self !== undefined && this.ctx.tables.typing.derives(self, owner) ? owner : self;
     const base = from === undefined ? undefined : this.ctx.tables.typing.rec(from).base;
     if (base === undefined) throw new CompileError("E0708", "'super' can only be used in a class that extends another", callee.start, callee.end);
@@ -6677,7 +6680,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // A template runs as this class's own copy of it, on this class's `this`.
     const original = copyOf !== undefined ? copyOf : found;
     const written = this.ctx.tables.arenas.bodyOf(original);
-    const copied = (written.template === true || selfTyped(written)) && !this.ctx.tables.typing.rec(this.ctx.self!.type).abstract;
+    const copied = (written.template === true || selfTyped(written)) && this.ctx.tables.typing.rec(this.ctx.self!.type).abstract !== true;
     if (copied) {
       const classId = this.cls(this.ctx.self!.type).classId;
       found = copyFor(this.ctx.tables, classId, original);
@@ -6868,19 +6871,23 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private keyed(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>): Expr {
     let props: ObjectProp[] = [];
-    for (const p of e.props) {
-      if (p.kind === "shorthand" || p.kind === "spread" || typeof p.key === "string") props.push(cloneObjectProp(p));
-      else {
-        const key = this.knownPropKey(p.key);
-        props.push(this.ctx.tables.rewrites.replaceObjectProp(p, withKey(p, key)));
-      }
+    for (let i: usize = 0; i < e.props.length; i++) {
+      const key = this.computedKey(e.props[i]!);
+      if (key === undefined) props.push(cloneObjectProp(e.props[i]!));
+      else props.push(this.ctx.tables.rewrites.replaceObjectProp({ id: idOfObjectProp(e.props[i]!) }, withKey(e.props[i]!, key)));
     }
     return this.ctx.tables.rewrites.replace(e, { id: e.id, kind: "object", props, start: e.start, end: e.end });
   }
 
+  // The name a property's computed key gives, or nothing for a key written as a name.
   /** @throws {CompileError} */
-  private knownPropKey(this: Mut<this>, key: Ref<PropertyName>): string {
-    return typeof key === "string" ? key : this.knownKey(key);
+  private computedKey(this: Mut<this>, p: Ref<ObjectProp>): string | undefined {
+    if (p.kind === "shorthand" || p.kind === "spread") return undefined;
+    return this.knownPropKey(p.key);
+  }
+  /** @throws {CompileError} */
+  private knownPropKey(this: Mut<this>, key: Ref<PropertyName>): string | undefined {
+    return typeof key === "string" ? undefined : this.knownKey(key);
   }
 
   // Whether an object literal has a computed key, which `keyed` makes known.
@@ -6901,17 +6908,88 @@ export class Expressions<C extends Context> implements Union<C> {
       const local = leaf.kind === "ident" ? this.ctx.lookup(leaf.name, undefined) : undefined;
       const number = local !== undefined ? this.ctx.tables.numberKeys.get(local) : undefined;
       if (number !== undefined) return number;
-      if (leaf.kind === "ident" && !local && isNumeric(t) && this.ctx.tables.topKeys) return this.ctx.tables.topKeys(leaf);
+      if (leaf.kind === "ident" && local === undefined && isNumeric(t) && this.ctx.tables.topKeys !== undefined) return this.ctx.tables.topKeys(leaf);
       throw unknownKey(leaf, `this is a '${this.ctx.tables.typing.show(t)}'`);
     });
   }
 
-  // The binding a name read at `at` refers to.
-  private lookedUp(this: Mut<this>, at: Ref<Expr>, name: string): LocalId | undefined {
-    return this.ctx.lookup(name, at);
+  /** @throws {CompileError} */
+  private identType(this: Mut<this>, e: Ref<Extract<Expr, { kind: "ident" }>>): Type {
+    // A nested function used as a value is a closure made here, from what it uses as it is
+    // here, which it borrows from here on.
+    const nested = this.nestedFunction(e.name);
+    if (nested !== undefined) {
+      this.nestedEnv(e, nested, e);
+      return this.lc(nested).type;
+    }
+    const localId = this.ctx.lookup(e.name, e);
+    const generic = localId === undefined ? undefined : this.lc(localId).generic;
+    // A generic arrow a const holds, as a value, is the function it was lifted to.
+    if (generic !== undefined) {
+      const name = this.ctx.tables.arenas.bodyOf(generic).name;
+      const lifted = this.ctx.tables.rewrites.replace(e, { id: e.id, kind: "ident", name, start: e.start, end: e.end });
+      return this.typeOf(lifted);
+    }
+    if (localId === undefined) return this.unboundType(e);
+    if (!this.ctx.reachable(localId)) {
+      throw new CompileError("E0403", `'${e.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, e.start, e.end);
+    }
+    this.ctx.locals.set(cloneExpr(e), localId);
+    const type = this.lc(localId).type;
+    const param = this.lc(localId).param;
+    const lr = this.recOf(type);
+    const held = lr !== undefined && lr.kind === "ref" ? lr.to : type;
+    if (this.ctx.sharing && param && !this.ctx.exprsState.objects.has(e) && this.ctx.tables.typing.interiorMutable(held)) {
+      throw new CompileError("E0304", this.ctx.counting ? `inside an Rc's 'update', use '${e.name}' only through its fields: its interior-mutable parts are borrowed where they live, and another name for it could replace them` : `inside a shared value's 'update', use '${e.name}' only through its fields: other tasks borrow its interior-mutable parts without the lock, and another name for it could replace them`, e.start, e.end);
+    }
+    const read = this.ctx.exprsState.asDeclared.has(e) ? undefined : this.ctx.narrowed(localId);
+    if (read !== undefined) this.ctx.narrowRead(localId, e);
+    // A JsValue narrowed by `typeof` to one kind of value is read out of JS, as a new value
+    // each time; one narrowed to several stays a JsValue.
+    const js = this.ctx.tables.typing.jsRead(type, read);
+    if (js === "one") this.ctx.copiesOut.add(cloneExpr(e));
+    if (js === "several") return this.stillJs(type);
+    return read !== undefined ? read : type;
   }
-  private propLookedUp(this: Mut<this>, at: Ref<ObjectProp>, name: string): LocalId | undefined {
-    return this.ctx.lookup(name, at);
+
+  // A name no local binds: `undefined`, a package's const, a top-level const or function, or
+  // nothing it can read.
+  /** @throws {CompileError} */
+  private unboundType(this: Mut<this>, e: Ref<Extract<Expr, { kind: "ident" }>>): Type {
+    if (e.name === "undefined") return "null";
+    // A package's const, read from JS.
+    const jsConst = this.bodyNamed(e.name);
+    if (jsConst !== undefined && jsConst.js !== undefined && jsConst.js.const === true) {
+      const node = cloneTypeNode(jsConst.returnType!);
+      const js = cloneJsName(jsConst.js);
+      const written = this.ctx.resolveType(node);
+      const type = this.ctx.tables.typing.jsView(written);
+      if (this.ctx.tables.typing.jsConverts(type)) this.ctx.tables.jsExports.set(cloneExpr(e), js);
+      else this.ctx.tables.jsUses.push(cloneExpr(e));
+      return type;
+    }
+    // A top-level const: its value, computed while compiling. An aggregate is read where it
+    // lives, through a reference, as a const can't change.
+    const constant = this.bodyNamed(`const ${e.name}`);
+    if (constant !== undefined) {
+      const instance = this.ctx.instanceOf(constant.bodyId, undefined);
+      this.ctx.calls.set(cloneExpr(e), instance);
+      const type = this.ctx.returnOf(instance, e);
+      return this.ctx.tables.typing.isCopy(type) || type === "string" ? type : this.ctx.tables.typing.refType(type, false);
+    }
+    // A declared function named as a value is a closure calling it.
+    const declared = this.bodyNamed(e.name);
+    if (declared !== undefined && declared.overloads !== undefined) throw new CompileError("E0801", `'${e.name}' is overloaded, so it can't be used as a value yet; pass an arrow that calls it, as in '(x) => ${e.name}(x)'`, e.start, e.end);
+    if (declared !== undefined && declared.comptime === undefined && genericIn(declared)) return this.genericValue({ ...declared }, e);
+    if (declared !== undefined && declared.comptime === undefined) {
+      const made = this.functionValue(e, declared.bodyId);
+      return made !== undefined ? this.typeOf(made) : this.typeOf(e);
+    }
+    const message = this.ctx.byName.has(e.name) ? "functions can't be used as values yet"
+      : this.ctx.classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"
+      : this.ctx.enums.has(e.name) ? "an enum can't be used as a value; name one of its members"
+      : `cannot find name '${e.name}'${didYouMean(e.name, this.ctx.names(e.start))}`;
+    throw new CompileError("E0401", message, e.start, e.end);
   }
 
   /** @throws {CompileError} */
@@ -6954,69 +7032,8 @@ export class Expressions<C extends Context> implements Union<C> {
       }
       case "bool":
         return "boolean";
-      case "ident": {
-        // A nested function used as a value is a closure made here, from what it uses as it is
-        // here, which it borrows from here on.
-        const nested = this.nestedFunction(e.name);
-        if (nested !== undefined) {
-          this.nestedEnv(e, nested, e);
-          return this.lc(nested).type;
-        }
-        const localId = this.lookedUp(e, e.name);
-        const local = localId === undefined ? undefined : this.lc(localId);
-        // A generic arrow a const holds, as a value, is the function it was lifted to.
-        if (local !== undefined && local.generic !== undefined) return this.typeOf(this.ctx.tables.rewrites.replace(e, { ...e, name: this.ctx.tables.arenas.bodyOf(local.generic).name }));
-        if (!local && e.name === "undefined") return "null";
-        // A package's const, read from JS.
-        const jsConst = local ? undefined : this.bodyNamed(e.name);
-        if (jsConst?.js?.const) {
-          const type = this.ctx.tables.typing.jsView(this.ctx.resolveType(jsConst.returnType!));
-          if (this.ctx.tables.typing.jsConverts(type)) this.ctx.tables.jsExports.set(e, jsConst.js);
-          else this.ctx.tables.jsUses.push(e);
-          return type;
-        }
-        // A top-level const: its value, computed while compiling. An aggregate is read where it
-        // lives, through a reference, as a const can't change.
-        const constant = local ? undefined : this.bodyNamed(`const ${e.name}`);
-        if (constant) {
-          const instance = this.ctx.instanceOf(constant.bodyId, undefined);
-          this.ctx.calls.set(e, instance);
-          const type = this.ctx.returnOf(instance, e);
-          return this.ctx.tables.typing.isCopy(type) || type === "string" ? type : this.ctx.tables.typing.refType(type, false);
-        }
-        // A declared function named as a value is a closure calling it.
-        const declared = local ? undefined : this.bodyNamed(e.name);
-        if (declared?.overloads) throw new CompileError("E0801", `'${e.name}' is overloaded, so it can't be used as a value yet; pass an arrow that calls it, as in '(x) => ${e.name}(x)'`, e.start, e.end);
-        if (declared && !declared.comptime && genericIn(declared)) return this.genericValue(declared, e);
-        if (declared !== undefined && declared.comptime === undefined) {
-          const made = this.functionValue(e, declared.bodyId);
-          return made !== undefined ? this.typeOf(made) : this.typeOf(e);
-        }
-        if (!local) {
-          const message = this.ctx.byName.has(e.name) ? "functions can't be used as values yet"
-            : this.ctx.classes.has(e.name) ? "classes can't be used as values yet; construct one with 'new'"
-            : this.ctx.enums.has(e.name) ? "an enum can't be used as a value; name one of its members"
-            : `cannot find name '${e.name}'${didYouMean(e.name, this.ctx.names(e.start))}`;
-          throw new CompileError("E0401", message, e.start, e.end);
-        }
-        if (!this.ctx.reachable(local.localId)) {
-          throw new CompileError("E0403", `'${e.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, e.start, e.end);
-        }
-        this.ctx.locals.set(e, local.localId);
-        const lr = this.recOf(local.type);
-        const held = lr?.kind === "ref" ? lr.to : local.type;
-        if (this.ctx.sharing && local.param && !this.ctx.exprsState.objects.has(e) && this.ctx.tables.typing.interiorMutable(held)) {
-          throw new CompileError("E0304", this.ctx.counting ? `inside an Rc's 'update', use '${e.name}' only through its fields: its interior-mutable parts are borrowed where they live, and another name for it could replace them` : `inside a shared value's 'update', use '${e.name}' only through its fields: other tasks borrow its interior-mutable parts without the lock, and another name for it could replace them`, e.start, e.end);
-        }
-        const read = this.ctx.exprsState.asDeclared.has(e) ? undefined : this.ctx.narrowed(local.localId);
-        if (read !== undefined) this.ctx.narrowRead(local.localId, e);
-        // A JsValue narrowed by `typeof` to one kind of value is read out of JS, as a new value
-        // each time; one narrowed to several stays a JsValue.
-        const js = this.ctx.tables.typing.jsRead(local.type, read);
-        if (js === "one") this.ctx.copiesOut.add(e);
-        if (js === "several") return this.stillJs(local.type);
-        return read ?? local.type;
-      }
+      case "ident":
+        return this.identType(e);
       // Its literal type, which a string takes it as.
       case "string":
         return this.ctx.tables.typing.literalType(e.value);
@@ -7025,7 +7042,11 @@ export class Expressions<C extends Context> implements Union<C> {
         if (e.object.kind === "ident") this.ctx.exprsState.objects.add(cloneExpr(e.object));
         // An enum's reverse mapping, `Color[0]`, has no meaning yet.
         if (e.object.kind === "ident" && (this.ctx.lookup(e.object.name, undefined) === undefined) && this.ctx.enums.has(e.object.name)) throw unsupported(EXPRESSION_FORMS.index, e);
-        if (this.untuple(e) || this.undict(e) || this.ctx.tables.rewrites.current(e) !== e) return this.typeOf(this.ctx.tables.rewrites.current(e));
+        if (this.untuple(e) || this.undict(e)) {
+          const now = this.ctx.tables.rewrites.rewritten(e);
+          if (now !== undefined) return this.typeOf(now);
+          return this.typeOf(e);
+        }
         const through = this.value(e.object);
         const object = this.isRefType(through) ? this.ctx.tables.typing.rec(through).to : through;
         // A fixed array's element, checked against its known length when the program runs.
@@ -7367,7 +7388,7 @@ export class Expressions<C extends Context> implements Union<C> {
       }
       case "assign": {
         if (this.staticWrite(e)) throw new CompileError("E0705", "a static setter gives no value, so an assignment to it can only be a statement of its own", e.start, e.end);
-        const op = ASSIGNMENTS[e.op];
+        const op = assignedWith(e.op);
         if (!op) throw new CompileError("E0801", `operator '${e.op}' is not supported yet`, e.start, e.end);
         const entry = this.dictEntry(e.target);
         if (entry) {
@@ -7528,61 +7549,108 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // A fresh object literal's literal properties take the number types of the fields they meet,
   // in nested literals too; the literal's type is then made again from its properties.
-  // The part of an object literal that gives its field `name`: the last that has it. A spread of
-  // an object-typed parameter has its bound's fields, each instance being checked with its own.
-  private winner(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>, name: string): ObjectProp | undefined {
-    return e.props.findLast((q) => {
-      if (q.kind === "property") return q.key === name;
-      if (q.kind === "shorthand") return q.name === name;
-      if (q.kind !== "spread") return false;
-      const t = this.ctx.types.get(q.value)!;
-      const low = this.heldBy(t)!;
-      const lr = this.recOf(low);
-      const br = lr?.kind === "param" ? this.recOf(lr.bound) : undefined;
-      const source = br?.kind === "object" ? (lr as ParamRecord).bound! : low;
-      return typeof source === "string" || (br?.kind !== "object" && lr?.kind === "param") || this.ctx.tables.typing.field(source, name) !== undefined;
-    });
+  // The part of an object literal that gives its field `name`: the last that has it, by its
+  // place. A spread of an object-typed parameter has its bound's fields, each instance being
+  // checked with its own.
+  private winner(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>, name: string): usize | undefined {
+    for (let i = e.props.length; i > 0; i--) if (this.givesField(e.props[i - 1]!, name)) return i - 1;
+    return undefined;
+  }
+
+  private givesField(this: Mut<this>, q: Ref<ObjectProp>, name: string): boolean {
+    if (q.kind === "property") return propertyKey(q) === name;
+    if (q.kind === "shorthand") return q.name === name;
+    if (q.kind !== "spread") return false;
+    const t = this.ctx.types.get(q.value)!;
+    const low = this.heldBy(t)!;
+    const lr = this.recOf(low);
+    const param = lr !== undefined && lr.kind === "param";
+    const bound = lr !== undefined && lr.kind === "param" ? lr.bound : undefined;
+    const bounded = this.recOf(bound)?.kind === "object";
+    const source = bounded ? bound! : low;
+    if (typeof source === "string" || (!bounded && param)) return true;
+    return this.ctx.tables.typing.field(source, name) !== undefined;
   }
 
   /** @throws {CompileError} */
-  private adaptFields(this: Mut<this>, e: Ref<Expr>, type: Type, to: Type): Type {
-    to = this.ctx.tables.typing.unfolded(to);
+  private adaptFields(this: Mut<this>, e: Ref<Expr>, type: Type, given: Type): Type {
+    let to = this.ctx.tables.typing.unfolded(given);
+    if (e.kind !== "object") return type;
     // An object literal meeting a union adapts to the member it names, then joins the union.
-    if (e.kind === "object") to = this.memberNamed(e, to) ?? to;
-    if (e.kind !== "object" || typeof to === "string" || (this.ctx.tables.typing.rec(to).kind !== "object" && this.ctx.tables.typing.rec(to).kind !== "class")) return type;
+    const named = this.memberNamed(e, to);
+    if (named !== undefined) to = named;
+    if (typeof to === "string" || (this.ctx.tables.typing.rec(to).kind !== "object" && this.ctx.tables.typing.rec(to).kind !== "class")) return type;
+    return this.adaptProps(e, type, to);
+  }
+
+  /** @throws {CompileError} */
+  private adaptProps(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>, type: Type, to: Exclude<Type, string>): Type {
     // Only a property no later part replaces gives its field, so only that one adapts.
-    const winners = e.props.filter((p): p is Extract<ObjectProp, { kind: "property" }> =>
-      p.kind === "property" && typeof p.key === "string" && this.winner(e, p.key) === p);
-    let changed = false;
-    for (const p of winners) {
-      const key = p.key as string;
-      const want = this.ctx.tables.typing.field(to, key)?.type;
-      const have = this.ctx.types.get(p.value)!;
-      // A string literal widened for the object keeps its literal type where one is wanted.
-      if (want && want !== "string" && this.ctx.coercions.get(p.value) === "string" && this.ctx.tables.typing.fits(have, want)) {
-        this.ctx.coercions.delete(p.value);
-        changed = true;
-        continue;
-      }
-      if (!want || have === want) continue;
-      // An array literal meeting a union becomes the union's array, which then joins the union.
-      const adapted = this.adapt(p.value, want) ? want : this.literalArray(p.value, have, want) ? this.ctx.types.get(p.value)! : this.adaptFields(p.value, have, want);
-      if (adapted !== have) {
-        this.ctx.types.set(p.value, adapted);
-        changed = true;
-      }
+    let winners: usize[] = [];
+    for (let i: usize = 0; i < e.props.length; i++) {
+      const key = propertyKey(e.props[i]!);
+      if (key !== undefined && this.winner(e, key) === i) winners.push(i);
     }
-    if (!changed) return type;
-    const fields = this.ctx.tables.typing.rec(type as ObjectType).fields.map((f) => {
-      const p = winners.find((q) => q.key === f.name);
-      return p ? { ...f, type: this.ctx.coercions.get(p.value) ?? this.ctx.types.get(p.value)! } : f;
-    });
+    let changed = false;
+    for (const i of winners) if (this.adaptProp(e.props[i]!, to)) changed = true;
+    if (!changed || !this.isObjectType(type)) return type;
+    const original = this.ctx.tables.typing.rec(type).fields.slice();
+    let fields: Field[] = [];
+    for (const f of original) {
+      let found: usize | undefined = undefined;
+      for (const i of winners) if (found === undefined && propertyKey(e.props[i]!) === f.name) found = i;
+      fields.push(found === undefined ? { ...f } : { ...f, type: this.propType(e.props[found]!) });
+    }
     // A tuple stays one, its rest taken from its adapted array.
-    const tuple = type as ObjectType;
-    const many = fields.find((f) => f.name === "...")?.type as ArrayType | undefined;
-    const remade = this.ctx.tables.typing.isTuple(tuple) && !this.ctx.tables.typing.rec(tuple).match ? this.ctx.tables.typing.tupleType(tupleElements(fields), this.ctx.tables.typing.rec(tuple).required, this.recOf(many)?.element) : this.ctx.tables.typing.objectType(fields);
-    this.ctx.types.set(e, remade);
+    let rest: Type | undefined = undefined;
+    let seen = false;
+    for (const f of fields) {
+      if (seen || f.name !== "...") continue;
+      seen = true;
+      const r = this.recOf(f.type);
+      if (r !== undefined && r.kind === "array") rest = r.element;
+    }
+    const required = this.ctx.tables.typing.rec(type).required;
+    const match = this.ctx.tables.typing.rec(type).match === true;
+    let remade: ObjectType;
+    if (this.ctx.tables.typing.isTuple(type) && !match) {
+      const elements = tupleElements(fields);
+      remade = required !== undefined ? this.ctx.tables.typing.tupleType(elements, required, rest) : this.ctx.tables.typing.tupleType(elements, elements.length, rest);
+    } else remade = this.ctx.tables.typing.objectType(fields);
+    this.ctx.types.set(cloneExpr(e), remade);
     return remade;
+  }
+
+  // Adapts a winning property to the field it meets; whether its type changed.
+  /** @throws {CompileError} */
+  private adaptProp(this: Mut<this>, p: Ref<ObjectProp>, to: Exclude<Type, string>): boolean {
+    if (p.kind !== "property") return false;
+    const key = propertyKey(p);
+    if (key === undefined) return false;
+    const want = this.ctx.tables.typing.field(to, key)?.type;
+    const have = this.ctx.types.get(p.value)!;
+    // A string literal widened for the object keeps its literal type where one is wanted.
+    if (want !== undefined && want !== "string" && this.ctx.coercions.get(p.value) === "string" && this.ctx.tables.typing.fits(have, want)) {
+      this.ctx.coercions.delete(p.value);
+      return true;
+    }
+    if (want === undefined || have === want) return false;
+    // An array literal meeting a union becomes the union's array, which then joins the union.
+    const adapted = this.adapt(p.value, want) ? want : this.literalArray(p.value, have, want) ? this.ctx.types.get(p.value)! : this.adaptFields(p.value, have, want);
+    if (adapted === have) return false;
+    this.ctx.types.set(cloneExpr(p.value), adapted);
+    return true;
+  }
+
+  // A property's value's type, as converted where it goes.
+  private propType(p: Ref<ObjectProp>): Type {
+    if (p.kind !== "property") return "void";
+    const coerced = this.ctx.coercions.get(p.value);
+    return coerced !== undefined ? coerced : this.ctx.types.get(p.value)!;
+  }
+
+  private isObjectType(t: Type): t is ObjectType {
+    return this.recOf(t)?.kind === "object";
   }
 
   // `**` raises an integer to a `u32` power, like Rust's `pow`, and a float to a float power of
@@ -7599,7 +7667,7 @@ export class Expressions<C extends Context> implements Union<C> {
       try {
         if (this.adapt(exponent, "u32")) right = "u32";
       } catch {
-        this.ctx.exprsState.powers.push([at, exponent]);
+        this.ctx.exprsState.powers.push([cloneExpr(at), cloneExpr(exponent)]);
         return left;
       }
     }
@@ -7856,84 +7924,96 @@ export class Expressions<C extends Context> implements Union<C> {
     else this.coerceNow(given, type, to, message);
   }
   /** @throws {CompileError} */
-  private coerceNow(this: Mut<this>, e: Ref<Expr>, type: Type, to: Type, message: string): void {
-    const tr = this.recOf(to);
+  private coerceNow(this: Mut<this>, e: Ref<Expr>, given: Type, to: Type, message: string): void {
+    let type = given;
+    const tk = this.recOf(to)?.kind;
     // A tuple's length is a 'usize', and also the literal of its count where that is known, as
     // in 'const n: 2 = t.length'.
-    if (tr?.kind === "literal" && this.tupleLength(e) === to) {
+    if (tk === "literal" && this.tupleLength(e) === to) {
       this.ctx.types.set(cloneExpr(e), to);
       return;
     }
     // A reference that changes its value's form points at a copy in a slot of the function,
     // which an async function loses each time it stops.
-    if (this.ctx.async && tr?.kind === "ref" && !this.isRefType(type) && this.ctx.tables.typing.lower(type) !== this.ctx.tables.typing.lower(tr.to) && this.ctx.tables.typing.fits(type, tr.to)) {
-      throw unsupported("references that convert their value inside async functions", e);
+    if (this.ctx.async && this.isRefType(to) && !this.isRefType(type)) {
+      const target = this.ctx.tables.typing.rec(to).to;
+      if (this.ctx.tables.typing.lower(type) !== this.ctx.tables.typing.lower(target) && this.ctx.tables.typing.fits(type, target)) throw unsupported("references that convert their value inside async functions", e);
     }
     // `unsafe { expr }` is `expr`, which meets the type itself.
     if (e.kind === "unsafe") {
       this.coerce(e.expr, type, to, message);
-      if (type !== to) this.ctx.types.set(e, this.ctx.coercions.has(e.expr) ? this.ctx.coercions.get(e.expr)! : this.ctx.types.get(e.expr)!);
+      if (type !== to) {
+        const coerced = this.ctx.coercions.get(e.expr);
+        this.ctx.types.set(cloneExpr(e), coerced !== undefined ? coerced : this.ctx.types.get(e.expr)!);
+      }
       return;
     }
     // A widening `as` or a `satisfies` around a `?:` lends the place either side chooses, as the
     // `?:` alone does; lent as a whole, it would lend a copy no borrow keeps track of.
-    if ((tr?.kind === "ref" || this.ctx.tables.typing.optionRef(to)) && this.handsOnChoice(e)) {
-      const inner = this.ctx.tables.rewrites.current((e as Extract<Expr, { kind: "as" | "satisfies" }>).expr);
+    if ((tk === "ref" || this.ctx.tables.typing.optionRef(to) !== undefined) && this.handsOnChoice(e) && (e.kind === "as" || e.kind === "satisfies")) {
+      const inner = this.ctx.tables.rewrites.current(cloneExpr(e.expr));
       this.ctx.coercions.delete(e);
       this.ctx.coercions.delete(inner);
       // What is lent is the operand, so a message naming the wrapper's type names the operand's.
       const named = `type '${this.ctx.tables.typing.show(type)}'`;
       const said = message.startsWith(named) ? `type '${this.ctx.tables.typing.show(this.ctx.types.get(inner)!)}'${message.slice(named.length)}` : message;
       this.coerce(inner, this.ctx.types.get(inner)!, to, said);
-      this.ctx.types.set(e, this.ctx.coercions.get(inner) ?? this.ctx.types.get(inner)!);
+      const coerced = this.ctx.coercions.get(inner);
+      this.ctx.types.set(cloneExpr(e), coerced !== undefined ? coerced : this.ctx.types.get(inner)!);
       return;
     }
     // A recursive type's value meeting another type is the type it stands for, read out of
     // its block.
     const held = this.recOf(type);
-    if (held?.kind === "recursive" && type !== to && !(tr?.kind === "union" && tr.members.includes(type))) {
+    const heldKind = held?.kind;
+    const heldOf = held !== undefined && held.kind === "recursive" ? held.of : undefined;
+    const within = held !== undefined && held.kind === "param" && held.within === true ? held.concrete : undefined;
+    if (heldOf !== undefined && type !== to && !(tk === "union" && this.unionHolds(to, type))) {
       this.ctx.coercions.delete(e);
-      this.coerce(e, held.of, to, message);
-      if (!this.ctx.coercions.has(e)) this.ctx.coercions.set(e, held.of);
+      this.coerce(e, heldOf, to, message);
+      if (!this.ctx.coercions.has(e)) this.ctx.coercions.set(cloneExpr(e), heldOf);
       return;
     }
     // At a definition, a type parameter bounded by a union or primitive meets types as its bound.
-    if (held?.kind === "param" && held.within && type !== to) {
-      this.coerce(e, held.concrete!, to, message);
+    if (heldKind === "param" && within !== undefined && type !== to) {
+      this.coerce(e, within, to, message);
       return;
     }
     // A value meeting a recursive type meets the type it stands for, then moves into a block.
-    if (tr?.kind === "recursive" && type !== to) {
-      this.coerce(e, type, tr.of, message);
-      this.ctx.coercions.set(e, to);
+    const recursive = this.recOf(to);
+    const toOf = recursive !== undefined && recursive.kind === "recursive" ? recursive.of : undefined;
+    if (toOf !== undefined && type !== to) {
+      this.coerce(e, type, toOf, message);
+      this.ctx.coercions.set(cloneExpr(e), to);
       return;
     }
     // A derived `equals` lends its argument to the base's, which reads the embedded base.
-    const from = held?.kind === "ref" ? this.recOf(held.to) : undefined;
-    const into = tr?.kind === "ref" ? this.recOf(tr.to) : undefined;
-    if (this.ctx.tables.upcasts.has(`${e.start}:${e.end}`) && tr?.kind === "ref" && !tr.mutable && from?.kind === "class" && into?.kind === "class" && this.ctx.tables.typing.derives(this.ctx.tables.typing.rec(type as RefType).to as ClassType, tr.to as ClassType)) return;
+    const from = this.isRefType(type) ? this.ctx.tables.typing.rec(type).to : undefined;
+    const into = this.isRefType(to) ? this.ctx.tables.typing.rec(to).to : undefined;
+    const toMutable = this.isRefType(to) && this.ctx.tables.typing.rec(to).mutable;
+    if (this.ctx.tables.upcasts.has(`${e.start}:${e.end}`) && into !== undefined && !toMutable && from !== undefined && this.isClassType(from) && this.isClassType(into) && this.ctx.tables.typing.derives(from, into)) return;
     // A mutable reference lent on must be reachable only through mutable references.
-    if (tr?.kind === "ref" && tr.mutable && held?.kind === "ref" && held.mutable && this.rooted(e) && this.place(e)) this.changeable(e, "mutably borrow");
+    if (toMutable && this.isRefType(type) && this.ctx.tables.typing.rec(type).mutable && this.rooted(e) && this.place(e)) this.changeable(e, "mutably borrow");
     if (type === to || this.ctx.tables.typing.sameLowered(type, to) || this.ctx.tables.typing.sameCallable(type, to)) return;
     // An array literal takes the array of JS values it meets element by element, as any does.
-    if (e.kind === "array" && tr?.kind === "array" && this.holdsJs(to) && this.literalArray(e, type, to)) return;
+    if (e.kind === "array" && tk === "array" && this.holdsJs(to) && this.literalArray(e, type, to)) return;
     // An Option or array of JS values takes what each of its members would.
-    if (tr?.kind !== "block" && this.holdsJs(to) && !this.ctx.tables.typing.fits(type, to) && this.passesJs(type, to)) {
-      this.ctx.coercions.set(e, to);
+    if (tk !== "block" && this.holdsJs(to) && !this.ctx.tables.typing.fits(type, to) && this.passesJs(type, to)) {
+      this.ctx.coercions.set(cloneExpr(e), to);
       return;
     }
     // Any value that crosses to JS is a JsValue there, as TypeScript's 'any' takes anything, and
     // a Fish value of a shape's fields becomes a new JS object of that shape.
-    if (tr?.kind === "block" && tr.which === "JsValue") {
+    if (this.isJsValueType(to)) {
       // A borrowed handle passes as the handle, counted again.
-      if (from?.kind === "block" && from.which === "JsValue") type = this.ctx.tables.typing.rec(type as RefType).to;
+      if (from !== undefined && this.isJsValueType(from)) type = from;
       const shape = this.ctx.tables.typing.jsShape(to);
-      if (shape ? this.takesShape(type, shape) : this.ctx.tables.typing.uncrossable(type) === undefined) {
-        this.ctx.coercions.set(e, to);
+      if (shape !== undefined ? this.takesShape(type, shape) : this.ctx.tables.typing.uncrossable(type) === undefined) {
+        this.ctx.coercions.set(cloneExpr(e), to);
         return;
       }
-      const field = shape && this.missingField(type, shape);
-      throw new CompileError("E0101", field ? `${message}: ${field}` : message, e.start, e.end);
+      const field = shape !== undefined ? this.missingField(type, shape) : undefined;
+      throw new CompileError("E0101", field !== undefined && field !== "" ? `${message}: ${field}` : message, e.start, e.end);
     }
     if (this.adapt(e, to)) return;
     type = this.adaptFields(e, type, to);
@@ -7942,126 +8022,175 @@ export class Expressions<C extends Context> implements Union<C> {
     // A `?:` that doesn't fit as a whole, as two string literals don't fit a union of literals
     // once joined as a 'string', fits when each side does.
     if (e.kind === "conditional" && !this.ctx.tables.typing.fits(type, to)) {
-      for (const side of [e.then, e.else].filter((s) => this.ctx.types.has(s))) {
-        this.ctx.coercions.delete(side);
-        this.coerce(side, this.ctx.types.get(side)!, to, message);
-      }
-      this.ctx.types.set(e, to);
+      this.coerceSides(e, to, message);
+      this.ctx.types.set(cloneExpr(e), to);
       return;
     }
     if (isNumeric(type) && isNumeric(to)) throw new CompileError("E0101", `${message}; convert it with 'as ${this.ctx.tables.typing.show(to)}'`, e.start, e.end);
     // A brand is made from its base only by saying so.
-    if (tr?.kind === "brand" && !tr.loose && message !== "" && (type === tr.base || (isNumeric(type) && isNumeric(tr.base)))) throw new CompileError("E0101", `${message}; make one with 'as ${this.ctx.tables.typing.show(to)}'`, e.start, e.end);
-    if (tr?.kind === "ref" && (typeof type === "string" || this.ctx.tables.typing.rec(type).kind !== "ref")) {
-      this.borrow(e, type, to as RefType, message);
+    const brand = this.recOf(to);
+    if (brand !== undefined && brand.kind === "brand" && brand.loose !== true && message !== "" && (type === brand.base || (isNumeric(type) && isNumeric(brand.base)))) throw new CompileError("E0101", `${message}; make one with 'as ${this.ctx.tables.typing.show(to)}'`, e.start, e.end);
+    if (this.isRefType(to) && !this.isRefType(type)) {
+      this.borrow(e, type, to, message);
       return;
     }
     // A place meeting a reference or nothing is lent, as one meeting the reference is.
     const lent = this.ctx.tables.typing.optionRef(to);
     // A `?:` lends a place either side chooses into it, as it does into a reference.
-    if (lent && e.kind === "conditional" && this.ctx.tables.typing.optionRef(type) === undefined && [e.then, e.else].some((x) => this.ctx.types.has(x) && this.rooted(x))) {
-      for (const side of [e.then, e.else].filter((s) => this.ctx.types.has(s))) {
-        this.ctx.coercions.delete(side);
-        this.coerce(side, this.ctx.types.get(side)!, to, message);
-      }
-      this.ctx.types.set(e, to);
+    if (lent !== undefined && e.kind === "conditional" && this.ctx.tables.typing.optionRef(type) === undefined && ((this.ctx.types.has(e.then) && this.rooted(e.then)) || (this.ctx.types.has(e.else) && this.rooted(e.else)))) {
+      this.coerceSides(e, to, message);
+      this.ctx.types.set(cloneExpr(e), to);
       return;
     }
-    if (lent && type !== "null" && !this.ctx.tables.typing.optionRef(type) && (typeof type === "string" || this.ctx.tables.typing.rec(type).kind !== "ref")) {
+    if (lent !== undefined && type !== "null" && this.ctx.tables.typing.optionRef(type) === undefined && !this.isRefType(type)) {
       this.borrow(e, type, lent, message);
-      this.ctx.coercions.set(e, to);
+      this.ctx.coercions.set(cloneExpr(e), to);
       return;
     }
     // A reference gives its value where one is wanted only by copying it: nothing moves out of
     // a borrow.
-    const ref = this.recOf(type);
-    if (ref?.kind === "ref" && (tr === undefined || tr.kind !== "ref") && !lent) {
-      if (!this.ctx.tables.typing.isCopy(ref.to) && this.ctx.tables.typing.fits(ref.to, to)) {
+    if (this.isRefType(type) && tk !== "ref" && lent === undefined) {
+      const target = this.ctx.tables.typing.rec(type).to;
+      if (!this.ctx.tables.typing.isCopy(target) && this.ctx.tables.typing.fits(target, to)) {
         throw new CompileError("E0202", `can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy`, e.start, e.end);
       }
-      this.ctx.coercions.set(e, ref.to);
-      this.coerce(e, ref.to, to, message);
+      this.ctx.coercions.set(cloneExpr(e), target);
+      this.coerce(e, target, to, message);
       return;
     }
     // In an instance, a member of the union a type parameter stands for goes into that union, as
     // a value awaited from a promise of `T | null` does once narrowed.
-    const argument = this.recOf(tr?.kind === "param" && tr.concrete && !this.ctx.tables.typing.fits(type, to) ? this.ctx.tables.typing.lower(to) : undefined);
-    if (argument?.kind === "union") {
-      intoUnion(e, type, this.ctx.tables.typing.lower(to) as UnionType, message, this);
-      return;
-    }
-    if (tr?.kind === "union") {
-      // A value no member takes as it is goes into the union's one Dyn, boxed.
-      const dyns = tr.members.flatMap((m) => {
-        const r = this.recOf(m);
-        return r?.kind === "dyn" ? [m as DynType] : [];
-      });
-      const kind = this.recOf(type)?.kind;
-      const boxable = kind === "class" || kind === "generator";
-      if (boxable && dyns.length === 1 && this.ctx.tables.typing.membersFor(type, to as UnionType).length === 0 && !this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(dyns[0]!).of)) {
-        this.boxing(e, type, dyns[0]!, message);
-        this.ctx.tables.boxedMembers.set(e, dyns[0]!);
-        this.ctx.coercions.set(e, to);
+    const param = this.recOf(to);
+    const concrete = param !== undefined && param.kind === "param" && param.concrete !== undefined;
+    if (concrete && !this.ctx.tables.typing.fits(type, to)) {
+      const lowered = this.ctx.tables.typing.lower(to);
+      if (this.isUnionType(lowered)) {
+        intoUnion<C, Expressions<C>>(e, type, lowered, message, this);
         return;
       }
-      const member = e.kind === "object" ? this.lentMember(e, to as UnionType) : undefined;
-      if (member) type = this.lendFields(e as Extract<Expr, { kind: "object" }>, member, message);
-      const lending = e.kind === "object" && !member && tr.members.some((m) => this.recOf(m)?.kind === "object" && this.ctx.tables.typing.holdsRef(m));
-      try {
-        intoUnion(e, type, to as UnionType, message, this);
-      } catch (err) {
-        // A literal that could have lent to a member holding references fails for want of a tag.
-        if (!lending || !(err instanceof CompileError) || err.code !== "E0101") throw err;
-        throw new CompileError("E0101", `can't choose which member of '${this.ctx.tables.typing.show(to)}' this object goes into: a member holding references is chosen by its literal fields, like 'of: "a"', so give each member one and write its value here as a literal`, e.start, e.end);
-      }
+    }
+    if (this.isUnionType(to)) {
+      this.coerceUnion(e, type, to, message);
       return;
     }
     // A literal type takes exactly its value, so only a literal expression of that value fits.
-    if (tr?.kind === "literal") {
-      if (literalValue(e) !== tr.value) throw new CompileError("E0101", message, e.start, e.end);
-      this.ctx.coercions.set(e, to);
+    const literal = this.recOf(to);
+    if (literal !== undefined && literal.kind === "literal") {
+      if (literalValue(e) !== literal.value) throw new CompileError("E0101", message, e.start, e.end);
+      this.ctx.coercions.set(cloneExpr(e), to);
       return;
     }
-    if (e.kind === "object" && tr?.kind === "object" && this.ctx.tables.typing.holdsRef(to)) type = this.lendFields(e, to as ObjectType, message);
+    if (e.kind === "object" && this.isObjectType(to) && this.ctx.tables.typing.holdsRef(to)) type = this.lendFields(e, to, message);
     const shape = !this.ctx.tables.typing.fits(type, to) ? literalShape(this.ctx.tables.typing, e, to, this.ctx.types) : undefined;
-    if (shape) {
+    if (shape !== undefined) {
       applyShape(shape, this.ctx.coercions, this.ctx.types);
       type = shape.type;
     }
-    if (tr?.kind === "function") {
+    if (tk === "function") {
       if (!this.ctx.tables.typing.fits(type, to)) throw new CompileError("E0101", message, e.start, e.end);
       return;
     }
-    if (tr?.kind === "dyn") return this.boxing(e, type, to as DynType, message);
-    if (tr?.kind === "interface") {
-      const reason = unsatisfied(type, to as InterfaceType, this.ctx.members(), e);
-      if (reason) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
+    if (this.isDyn(to)) {
+      this.boxing(e, type, to, message);
+      return;
+    }
+    if (this.isInterface(to)) {
+      const reason = unsatisfied(type, to, this.ctx.members(), { start: e.start, end: e.end });
+      if (reason !== undefined && reason !== "") throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
       this.excess(e, to);
       return;
     }
     const sub = this.recOf(type);
-    if (sub?.kind === "class" && tr?.kind === "map" && this.embeddedId(type) !== undefined) {
-      throw new CompileError("E0704", `'${sub.name}' extends '${this.ctx.tables.typing.show(to)}' by embedding one, so it can't be used as '${this.ctx.tables.typing.show(to)}'; take '${sub.name}' itself, or hold the collection in a field and pass that`, e.start, e.end);
+    const subName = sub !== undefined && sub.kind === "class" ? sub.name : undefined;
+    if (subName !== undefined && tk === "map" && this.embeddedId(type) !== undefined) {
+      throw new CompileError("E0704", `'${subName}' extends '${this.ctx.tables.typing.show(to)}' by embedding one, so it can't be used as '${this.ctx.tables.typing.show(to)}'; take '${subName}' itself, or hold the collection in a field and pass that`, e.start, e.end);
     }
-    if (sub?.kind === "class" && tr?.kind === "class" && this.ctx.tables.typing.derives(type as ClassType, to as ClassType)) {
-      throw new CompileError("E0704", `'${sub.name}' extends '${tr.name}' by embedding one, so it can't be used as '${tr.name}'; extract an interface both classes implement`, e.start, e.end);
+    if (this.isClassType(type) && this.isClassType(to) && this.ctx.tables.typing.derives(type, to)) {
+      const toName = this.ctx.tables.typing.rec(to).name;
+      throw new CompileError("E0704", `'${subName!}' extends '${toName}' by embedding one, so it can't be used as '${toName}'; extract an interface both classes implement`, e.start, e.end);
     }
-    if (sub?.kind === "ref" && tr?.kind === "ref" && !this.ctx.tables.typing.fits(type, to)) {
+    if (from !== undefined && into !== undefined && !this.ctx.tables.typing.fits(type, to)) {
+      const fromMutable = this.isRefType(type) && this.ctx.tables.typing.rec(type).mutable;
       // A shared reference to something narrower lends a copy of what this one points to.
-      if (!tr.mutable && this.ctx.tables.typing.fits(sub.to, tr.to)) {
-        this.ctx.coercions.set(e, to);
+      if (!toMutable && this.ctx.tables.typing.fits(from, into)) {
+        this.ctx.coercions.set(cloneExpr(e), to);
         return;
       }
-      if (!tr.mutable) throw new CompileError("E0101", message, e.start, e.end);
-      const reason = !sub.mutable ? "a shared reference can't lend itself as mutable" : `only a reference to exactly '${this.ctx.tables.typing.show(tr.to)}' can be lent mutably`;
+      if (!toMutable) throw new CompileError("E0101", message, e.start, e.end);
+      const reason = !fromMutable ? "a shared reference can't lend itself as mutable" : `only a reference to exactly '${this.ctx.tables.typing.show(into)}' can be lent mutably`;
       throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
     }
     if (!this.ctx.tables.typing.fits(type, to) && !this.builds(e, type, to)) throw new CompileError("E0101", message, e.start, e.end);
     // An instance's concrete class may give a field its bound declares with a getter, which
     // copying field by field can't read, so that copy is rejected in the instance.
-    if (this.ctx.tables.typing.lower(type) !== type && !this.ctx.tables.typing.fits(this.ctx.tables.typing.lower(type), this.ctx.tables.typing.lower(to))) throw new CompileError("E0101", message, e.start, e.end);
+    const lowered = this.ctx.tables.typing.lower(type);
+    if (lowered !== type) {
+      const loweredTo = this.ctx.tables.typing.lower(to);
+      if (!this.ctx.tables.typing.fits(lowered, loweredTo)) throw new CompileError("E0101", message, e.start, e.end);
+    }
     this.excess(e, to);
-    this.ctx.coercions.set(e, to);
+    this.ctx.coercions.set(cloneExpr(e), to);
+  }
+
+  // Each side of a `?:` that has a type meets `to` on its own.
+  /** @throws {CompileError} */
+  private coerceSides(this: Mut<this>, e: Ref<Extract<Expr, { kind: "conditional" }>>, to: Type, message: string): void {
+    const then = this.ctx.types.has(e.then);
+    const otherwise = this.ctx.types.has(e.else);
+    if (then) {
+      this.ctx.coercions.delete(e.then);
+      this.coerce(e.then, this.ctx.types.get(e.then)!, to, message);
+    }
+    if (otherwise) {
+      this.ctx.coercions.delete(e.else);
+      this.coerce(e.else, this.ctx.types.get(e.else)!, to, message);
+    }
+  }
+
+  // A value meeting a union: boxed into its one Dyn when no member takes it as it is, or put
+  // into the member it fits.
+  /** @throws {CompileError} */
+  private coerceUnion(this: Mut<this>, e: Ref<Expr>, given: Type, to: UnionType, message: string): void {
+    let type = given;
+    const members = this.ctx.tables.typing.rec(to).members.slice();
+    // A value no member takes as it is goes into the union's one Dyn, boxed.
+    let dyns: DynType[] = [];
+    for (const m of members) if (this.isDyn(m)) dyns.push(m);
+    const kind = this.recOf(type)?.kind;
+    const boxable = kind === "class" || kind === "generator";
+    if (boxable && dyns.length === 1 && this.ctx.tables.typing.membersFor(type, to).length === 0 && !this.ctx.tables.typing.callableOf.has(this.ctx.tables.typing.rec(dyns[0]!).of)) {
+      this.boxing(e, type, dyns[0]!, message);
+      this.ctx.tables.boxedMembers.set(cloneExpr(e), dyns[0]!);
+      this.ctx.coercions.set(cloneExpr(e), to);
+      return;
+    }
+    const member = e.kind === "object" ? this.lentMember(e, to) : undefined;
+    if (member !== undefined && e.kind === "object") type = this.lendFields(e, member, message);
+    let lending = false;
+    if (e.kind === "object" && member === undefined) for (const m of members) if (this.recOf(m)?.kind === "object" && this.ctx.tables.typing.holdsRef(m)) lending = true;
+    try {
+      intoUnion<C, Expressions<C>>(e, type, to, message, this);
+    } catch (err) {
+      // A literal that could have lent to a member holding references fails for want of a tag.
+      if (!lending || !(err instanceof CompileError) || err.code !== "E0101") throw err;
+      throw new CompileError("E0101", `can't choose which member of '${this.ctx.tables.typing.show(to)}' this object goes into: a member holding references is chosen by its literal fields, like 'of: "a"', so give each member one and write its value here as a literal`, e.start, e.end);
+    }
+  }
+
+  // Whether a union holds `t` as one of its members.
+  private unionHolds(to: Type, t: Type): boolean {
+    const r = this.recOf(to);
+    return r !== undefined && r.kind === "union" && r.members.includes(t);
+  }
+
+  private isUnionType(t: Type): t is UnionType {
+    return this.recOf(t)?.kind === "union";
+  }
+
+  // Whether a type is a JsValue, a handle to any JS value.
+  private isJsValueType(t: Type): boolean {
+    const r = this.recOf(t);
+    return r !== undefined && r.kind === "block" && r.which === "JsValue";
   }
 
   /** @throws {CompileError} */
@@ -8231,42 +8360,64 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // The member holding references an object literal meeting a union goes into: the one object
   // member whose literal fields its literal properties all match, as a tag picks it.
-  private lentMember(e: Ref<Extract<Expr, { kind: "object" }>>, to: UnionType): ObjectType | undefined {
-    const found = this.ctx.tables.typing.rec(to).members.filter((m): m is ObjectType => {
-      if (this.recOf(m)?.kind !== "object" || !this.ctx.tables.typing.holdsRef(m)) return false;
-      return this.ctx.tables.typing.rec(m as ObjectType).fields.every((f) => {
-        const r = this.recOf(f.type);
-        if (r?.kind !== "literal") return true;
-        const p = this.winner(e, f.name);
-        return p?.kind === "property" && literalValue(p.value) === r.value;
-      });
-    });
-    return found.length === 1 ? found[0] : undefined;
+  private lentMember(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>, to: UnionType): ObjectType | undefined {
+    const members = this.ctx.tables.typing.rec(to).members.slice();
+    let found: ObjectType[] = [];
+    for (const m of members) if (this.isObjectType(m) && this.ctx.tables.typing.holdsRef(m) && this.literalsMatch(e, m)) found.push(m);
+    return found.length === 1 ? found[0]! : undefined;
+  }
+
+  // Whether an object literal's properties give each literal field of `m` its value.
+  private literalsMatch(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>, m: ObjectType): boolean {
+    const fields = this.ctx.tables.typing.rec(m).fields.slice();
+    for (const f of fields) {
+      const r = this.recOf(f.type);
+      if (r === undefined || r.kind !== "literal") continue;
+      const value = r.value;
+      const i = this.winner(e, f.name);
+      if (i === undefined || !propertyHolds(e.props[i]!, value)) return false;
+    }
+    return true;
   }
 
   // An object literal meeting a type with fields holding references lends each property to
   // its field, so the literal holds what it borrows.
   /** @throws {CompileError} */
   private lendFields(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>, to: ObjectType, message: string): Type {
-    const own = this.ctx.types.get(e) as ObjectType;
-    const lent = this.ctx.tables.typing.rec(own).fields.map((f) => {
-      const want = this.ctx.tables.typing.field(to, f.name)?.type;
-      const p = this.winner(e, f.name);
-      if ((want === undefined) || (p === undefined) || p.kind === "spread" || !this.ctx.tables.typing.holdsRef(want) || this.ctx.tables.typing.fits(f.type, want)) return f;
-      if (p.kind === "property") this.coerce(p.value, this.ctx.types.get(p.value)!, want, message);
-      else if (p.kind === "shorthand") {
-        // A shorthand lends its variable where it lives, so only as exactly what it holds.
-        const local = this.localAt(p)!;
-        const wr = this.recOf(want);
-        if (wr?.kind !== "ref" || wr.mutable || this.ctx.tables.typing.lower(local.type) !== this.ctx.tables.typing.lower(wr.to)) {
-          throw new CompileError("E0101", `${message}: write '${p.name}: ${p.name}' to lend '${p.name}' here`, p.start, p.end);
-        }
-      }
-      return { ...f, type: want };
-    });
+    const own = this.ctx.types.get(e)!;
+    if (!this.isObjectType(own)) return own;
+    const fields = this.ctx.tables.typing.rec(own).fields.slice();
+    let lent: Field[] = [];
+    for (const f of fields) lent.push(this.lentField(e, to, f, message));
     const type = this.ctx.tables.typing.objectType(lent);
-    this.ctx.types.set(e, type);
+    this.ctx.types.set(cloneExpr(e), type);
     return type;
+  }
+
+  /** @throws {CompileError} */
+  private lentField(this: Mut<this>, e: Ref<Extract<Expr, { kind: "object" }>>, to: ObjectType, f: Ref<Field>, message: string): Field {
+    const want = this.ctx.tables.typing.field(to, f.name)?.type;
+    const i = this.winner(e, f.name);
+    if (want === undefined || i === undefined || e.props[i]!.kind === "spread" || !this.ctx.tables.typing.holdsRef(want) || this.ctx.tables.typing.fits(f.type, want)) return { ...f };
+    this.lendProp(e.props[i]!, want, message);
+    return { ...f, type: want };
+  }
+
+  /** @throws {CompileError} */
+  private lendProp(this: Mut<this>, p: Ref<ObjectProp>, want: Type, message: string): void {
+    if (p.kind === "property") {
+      const t = this.ctx.types.get(p.value)!;
+      this.coerce(p.value, t, want, message);
+      return;
+    }
+    if (p.kind !== "shorthand") return;
+    // A shorthand lends its variable where it lives, so only as exactly what it holds.
+    const held = this.ctx.tables.arenas.localOf(this.ctx.locals.getById(p.id))!.type;
+    const wr = this.recOf(want);
+    const to = wr !== undefined && wr.kind === "ref" && !wr.mutable ? wr.to : undefined;
+    if (to === undefined || this.ctx.tables.typing.lower(held) !== this.ctx.tables.typing.lower(to)) {
+      throw new CompileError("E0101", `${message}: write '${p.name}: ${p.name}' to lend '${p.name}' here`, p.start, p.end);
+    }
   }
 
   // An object literal builds a class it is declared as, without its constructor, when it
@@ -8469,7 +8620,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if ((p.default !== undefined)) throw new CompileError("E0004", "'=' in an object literal is only valid in a destructuring pattern", p.start, p.end);
     // A shorthand reads its variable like a name does: within its switch case, narrowed, and
     // widened from an enum member to the enum like any property.
-    const localId = this.propLookedUp(p, p.name);
+    const localId = this.ctx.lookup(p.name, p);
     const local = localId === undefined ? undefined : this.lc(localId);
     if (!local) throw new CompileError("E0401", `cannot find name '${p.name}'${didYouMean(p.name, this.ctx.names(p.start))}`, p.start, p.end);
     if (!this.ctx.reachable(local.localId)) {
@@ -9645,6 +9796,43 @@ function plainArg(x: Ref<Expr>): boolean {
 // The name a parameter's pattern binds, as a signature shows it, or `_`.
 function patternName(p: Ref<Pattern>): string {
   return p.kind === "ident" || p.kind === "variant" ? p.name : "_";
+}
+
+// The name a property written `key: value` gives, unless its key is computed.
+function propertyKey(p: Ref<ObjectProp>): string | undefined {
+  if (p.kind !== "property") return undefined;
+  return keyName(p.key);
+}
+
+function keyName(key: Ref<PropertyName>): string | undefined {
+  return typeof key === "string" ? key : undefined;
+}
+
+// Whether a part of an object literal is a property whose value is the literal `value`.
+function propertyHolds(p: Ref<ObjectProp>, value: string | bigint | boolean): boolean {
+  return p.kind === "property" && literalValue(p.value) === value;
+}
+
+// The operator a compound assignment applies, `=` for a plain one; `??=` has none yet.
+function assignedWith(op: AssignOp): BinaryOp | "=" | undefined {
+  switch (op) {
+    case "=": return "=";
+    case "+=": return "+";
+    case "-=": return "-";
+    case "*=": return "*";
+    case "/=": return "/";
+    case "%=": return "%";
+    case "&=": return "&";
+    case "|=": return "|";
+    case "^=": return "^";
+    case "<<=": return "<<";
+    case ">>=": return ">>";
+    case ">>>=": return ">>>";
+    case "&&=": return "&&";
+    case "||=": return "||";
+    case "**=": return "**";
+  }
+  return undefined;
 }
 
 // A literal type's value as a property name, as JavaScript names a key.
