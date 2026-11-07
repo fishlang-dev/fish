@@ -329,7 +329,7 @@ export type Tables = {
 };
 
 /** @throws {CompileError} */
-export type TopKeys = (e: Expr) => string;
+export type TopKeys = (e: Ref<Expr>) => string;
 
 /** @throws {CompileError} */
 /** @throws {CompileError} */

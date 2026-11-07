@@ -27,10 +27,14 @@ export function addAlias(aliases: Mut<Map<string, TypeAlias>>, s: TypeAlias, nam
 
 // An object type with a method describes values by what they do, as an interface does, so an
 // alias of one is that interface.
-export function traitAlias(ids: Ids, a: TypeAlias): Interface | undefined {
-  const t = a.type;
+export function traitAlias(ids: Mut<Ids>, a: Ref<TypeAlias>): Interface | undefined {
+  const t: Ref<TypeNode> = a.type;
   if (t.kind !== "object" || !t.members.some((m) => m.kind === "method")) return undefined;
-  return { id: nextId(ids), kind: "interface", name: a.name, typeParams: a.typeParams, extends: [], members: t.members, start: a.start, end: a.end };
+  let typeParams: TypeParam[] = [];
+  for (const p of a.typeParams) typeParams.push(cloneTypeParam(p));
+  let members: TypeMember[] = [];
+  for (const m of t.members) members.push(cloneTypeMember(m));
+  return { id: nextId(ids), kind: "interface", name: a.name, typeParams, extends: [], members, start: a.start, end: a.end };
 }
 
 // Whether a parameter is written as a tag's strings: `comptime` and a string array.
