@@ -156,7 +156,7 @@ export function assignsOwn(body: Ref<Stmt[]>, name: string): boolean {
 }
 
 // The variables a destructuring pattern assigns.
-function patternNames(p: Ref<Pattern>): string[] {
+export function patternNames(p: Ref<Pattern>): string[] {
   let names: string[] = [];
   collectPatternNames(p, names);
   return names;
