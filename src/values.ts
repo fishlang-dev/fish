@@ -153,6 +153,8 @@ function blockArity(which: string, name: string, std: boolean): usize | undefine
 
 // What expression checking needs from the program and the function it is in.
 export interface Context {
+  // Whether a function is a macro, applied to declarations rather than called.
+  macroBody(id: BodyId): boolean;
   tables: Tables;
   decls: Ref<Declarations>;
   types: NodeMap<Expr, Type>;
@@ -1627,11 +1629,12 @@ export class Expressions<C extends Context> implements Union<C> {
       return { type: "void", what: "printing" };
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Promise" && COMBINERS.includes(callee.name) && (this.ctx.lookup("Promise", undefined) === undefined) && !this.ctx.classes.has("Promise")) {
-      return this.combined(e, callee.name as Combiner);
+      const combiner = combinerNamed(callee.name);
+      if (combiner !== undefined) return this.combined(e, combiner);
     }
     // A static method of a package's class.
     const jsClass = callee.kind === "member" && callee.object.kind === "ident" && (this.ctx.lookup(callee.object.name, undefined) === undefined) ? this.ctx.tables.jsClasses.get(callee.object.name) : undefined;
-    if (jsClass && callee.kind === "member") {
+    if (jsClass !== undefined && callee.kind === "member") {
       const m = this.jsStatic(jsClass, callee.name, e);
       if (m.kind !== "method") throw new CompileError("E0503", `'${callee.name}' is a property of '${jsClass.name}', not a method`, callee.start, callee.end);
       if (m.typeParams.length > 0) throw unsupported("generic methods of a package's types", callee);
@@ -2014,7 +2017,7 @@ export class Expressions<C extends Context> implements Union<C> {
 
   /** @throws {CompileError} */
   private calleeFound(this: Mut<this>, e: Ref<Call>, foundId: BodyId | undefined): { type: Type; what: string } {
-    const callee = e.callee;
+    const callee: Ref<Expr> = e.callee;
     const found = this.ctx.tables.arenas.bodyOf(foundId);
     // A package's function declared with several signatures is checked against the first that
     // takes the arguments, as TypeScript picks one.
@@ -2041,7 +2044,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (util === "inspect") {
       if (e.args.length !== 1 || e.args[0]!.kind === "spread") throw new CompileError(e.args.length > 1 ? "E0801" : "E0504", e.args.length > 1 ? "'inspect' takes the value alone; its options aren't supported yet" : "'inspect' takes 1 argument", e.start, e.end);
       this.shown(e.args);
-      this.ctx.tables.inspectCalls.add(e);
+      this.ctx.tables.inspectCalls.add(cloneExpr(e));
       return { type: "string", what: "'inspect'" };
     }
     // `parseArgs(config)` calls std's port with the arguments its literal says, once.
@@ -2077,11 +2080,12 @@ export class Expressions<C extends Context> implements Union<C> {
       this.refuseSpread(e.args);
       const left: Ref<Expr> = e.args[0]!;
       const right: Ref<Expr> = e.args[1]!;
-      const equality = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "binary", op: "===", left, right, start: e.start, end: e.end });
+      const compared: Expr = { id: 0, kind: "binary", op: "===", left: cloneExpr(left), right: cloneExpr(right), start: e.start, end: e.end };
+      const equality = this.ctx.tables.rewrites.replace(e, compared);
       this.ctx.tables.deepEqualities.add(equality);
       return { type: this.value(equality), what: "'isDeepStrictEqual'" };
     }
-    if (target && (target as { macro?: boolean }).macro) throw new CompileError("E0503", `'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
+    if (target !== undefined && this.ctx.macroBody(target.bodyId)) throw new CompileError("E0503", `'${target.name}' is a macro, applied to a declaration as '@${target.name}'; it isn't called as a function`, e.start, e.end);
     // The prelude holds std's TLS helper, so a program would otherwise reach it; only std calls it.
     const stdOnly = callee.kind === "ident" && callee.name === "__tlsClient" && e.start < STD_BASE && stdModuleAt(this.ctx.tables.files, e.start) === undefined;
     if (!target || stdOnly) {
@@ -2720,7 +2724,8 @@ export class Expressions<C extends Context> implements Union<C> {
       for (const a of e.args) {
         if (a.kind === "spread") throw new CompileError("E0801", "a spread into 'concat' isn't supported yet; join the array instead, as in 's + parts.join(\"\")'", a.start, a.end);
         const t = this.value(a);
-        if (!stringLike(this.ctx.tables.typing, this.ctx.tables.typing.lower(t))) throw new CompileError("E0504", `'concat' takes strings, and this is '${this.ctx.tables.typing.show(t)}'; convert it with 'String(x)'`, a.start, a.end);
+        const lowered = this.ctx.tables.typing.lower(t);
+        if (!stringLike(this.ctx.tables.typing, lowered)) throw new CompileError("E0504", `'concat' takes strings, and this is '${this.ctx.tables.typing.show(t)}'; convert it with 'String(x)'`, a.start, a.end);
         this.coerce(a, t, "string", "");
       }
       return { type: "string", what: "'concat'" };
@@ -3750,7 +3755,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const empty: Expr = { id: nextId(this.ctx.tables.ids), kind: "array", elements: [], ...at };
       return this.typedAs(e, empty, typed);
     }
-    const source = list[0]!;
+    const source: Ref<Expr> = list[0]!;
     const rest: usize = list.length - 1;
     if (rest > (name === "ArrayBuffer" ? 0 : 2)) throw new CompileError("E0504", usage, e.start, e.end);
     if (source.kind === "array" && rest === 0 && name !== "ArrayBuffer") return this.typedAs(e, cloneExpr(source), typed);
@@ -3760,7 +3765,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (isInteger(t) && rest === 0) {
       const length = this.arrayLength(source, false);
       const zero = this.typedZero(name, { start: source.start, end: source.end });
-      return this.typedAs(e, this.typedCall("array typed zeros", [length, zero], at), typed);
+      const zeros = this.typedCall("array typed zeros", [length, zero], at);
+      return this.typedAs(e, zeros, typed);
     }
     if (this.ctx.tables.typing.typedName(held) === "ArrayBuffer" && name !== "ArrayBuffer") {
       const size = BigInt(typedSize(name));
@@ -3910,7 +3916,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const mapping = e.args.length > 1;
     let length: Expr | undefined = undefined;
     if (source.kind === "object" && source.props.length === 1) {
-      const prop = source.props[0]!;
+      const prop: Ref<ObjectProp> = source.props[0]!;
       if (prop.kind === "property" && prop.key === "length") length = this.arrayLength(prop.value, false);
       else if (prop.kind === "shorthand" && prop.name === "length" && prop.default === undefined) {
         const named: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: "length", start: prop.start, end: prop.end };
@@ -4176,7 +4182,7 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     const at = fixed < list.length ? { start: list[fixed]!.start, end: list[list.length - 1]!.end } : { start: e.end - 1, end: e.end - 1 };
     args.push({ id: nextId(this.ctx.tables.ids), kind: "array", elements: rest, ...at });
-    const made = this.ctx.tables.rewrites.replace(e, { ...e, args });
+    const made = e.kind === "call" ? this.ctx.tables.rewrites.replace(e, { ...callNode(e), args }) : this.ctx.tables.rewrites.replace(e, { ...newNode(e), args });
     this.ctx.tables.packed.add(cloneExpr(made));
     return made;
   }
@@ -4563,12 +4569,20 @@ export class Expressions<C extends Context> implements Union<C> {
     const callback = e.args[name === "update" ? 1 : 0]!;
     this.namedFunction(callback);
     if (callback.kind !== "arrow") throw new CompileError("E0506", `'${name}' takes an arrow function written in place, or a function by name`, callback.start, callback.end);
-    const lend = (u: Type) => (this.ctx.tables.typing.isCopy(u) ? u : this.ctx.tables.typing.refType(u, false));
     // A Set's forEach passes each member twice, as JavaScript's does.
-    const { key, value: entry, set } = this.ctx.tables.typing.rec(t);
-    const params = name === "update" ? [this.ctx.tables.typing.refType(entry, true)] : set ? [lend(key), lend(key)] : [lend(entry), lend(key)];
+    const key = this.ctx.tables.typing.rec(t).key;
+    const entry = this.ctx.tables.typing.rec(t).value;
+    const set = this.ctx.tables.typing.rec(t).set;
+    let params: Type[] = [];
+    if (name === "update") params.push(this.ctx.tables.typing.refType(entry, true));
+    else {
+      params.push(lentType(this.ctx.tables.typing, set ? key : entry));
+      params.push(lentType(this.ctx.tables.typing, key));
+    }
     const passes = name === "update" ? "the value to change" : set ? "each member" : "each value and its key";
-    const signature = this.ctx.tables.typing.functionType(params.map((_, i) => (i === 0 ? "value" : "key")), params, "void");
+    let names: string[] = [];
+    for (let i: usize = 0; i < params.length; i++) names.push(i === 0 ? "value" : "key");
+    const signature = this.ctx.tables.typing.functionType(names, params, "void");
     this.ctx.tables.typing.openThrows.add(signature);
     this.expect(callback, signature);
     const called = this.value(callback);
@@ -4577,10 +4591,10 @@ export class Expressions<C extends Context> implements Union<C> {
       throw new CompileError("E0506", `'${name}' passes its callback ${passes}${name === "forEach" ? "; JavaScript's last argument, the collection, isn't passed, since it is already borrowed" : ""}`, callback.start, callback.end);
     }
     if (name === "forEach") this.runsOften(called as ClosureType, name, "its callback once per entry", callback);
-    c.params.forEach((p, i) => {
-      const at = callback.params[i] ?? callback;
-      this.passedExactly(name, params[i]!, p, callback.params[i], at);
-    });
+    for (let i: usize = 0; i < c.params.length; i++) {
+      if (i < callback.params.length) this.passedExactly(name, params[i]!, c.params[i]!, callback.params[i]!, { start: callback.params[i]!.start, end: callback.params[i]!.end });
+      else this.passedExactly(name, params[i]!, c.params[i]!, undefined, { start: callback.start, end: callback.end });
+    }
     if (this.holdsFuture(c.returns)) throw new CompileError("E0801", `'${name}' with a callback giving a Promise isn't supported yet`, callback.start, callback.end);
     if (c.throws) this.ctx.raise(e, c.throws, `'${name}'`);
     return { type: name === "update" ? "boolean" : "void", what: `'${name}'` };
@@ -10644,6 +10658,10 @@ function callNode(e: Ref<Call>): Call {
   return { ...e };
 }
 
+function newNode(e: Ref<Extract<Expr, { kind: "new" }>>): Extract<Expr, { kind: "new" }> {
+  return { ...e };
+}
+
 // A copy of a call or `new` with other arguments.
 function withArgs(e: Ref<Extract<Expr, { kind: "call" | "new" }>>, args: Expr[]): Expr {
   if (e.kind === "call") return { ...e, args };
@@ -10896,4 +10914,18 @@ function constAssertion(e: Ref<Expr>): boolean {
 function unformattableFormat(first: Ref<Expr>, count: usize): void {
   if (first.kind !== "string" || !formatPlan(first.value, count).specs.includes("j")) return;
   throw new CompileError("E0801", "'%j' in a format isn't supported yet; pass 'JSON.stringify(x)' to '%s' instead", first.start, first.end);
+}
+
+function combinerNamed(name: string): Combiner | undefined {
+  if (name === "all") return "all";
+  if (name === "race") return "race";
+  if (name === "allSettled") return "allSettled";
+  if (name === "any") return "any";
+  return undefined;
+}
+
+// A callback's parameter type for a value it is passed: the value when it copies, a borrow of it
+// otherwise.
+function lentType(typing: Mut<Typing>, u: Type): Type {
+  return typing.isCopy(u) ? u : typing.refType(u, false);
 }

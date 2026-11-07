@@ -2743,6 +2743,10 @@ class BodyChecker implements Context, GuardHost {
   hidden: boolean;
 
   /** @throws {CompileError} */
+
+  macroBody(id: BodyId): boolean {
+    return this.cx.macroBodies.has(id);
+  }
   constructor(cx: Mut<Checker>, instance: Instance, outer: Mut<BodyChecker> | undefined, f: Body) {
     this.cx = cx;
     this.instance = instance;
