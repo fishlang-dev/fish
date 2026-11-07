@@ -6,7 +6,7 @@ import { compile as compileRegex, parsePattern } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
-import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
+import { CheckedHost, comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
 import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
@@ -293,7 +293,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   for (const instance of instances) {
     if (!bodyOf(noted.arenas, instance).comptime || !instance.concrete) continue;
     if (bodyOf(noted.arenas, instance).comptime === "const") bakeable(instance.returns, bodyOf(noted.arenas, instance), true);
-    comptimeBody(noted, instance);
+    comptimeBody(new CheckedHost(noted), instance.id);
   }
 
   for (const instance of instances) {
@@ -545,7 +545,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       return lines;
     };
     const filler = made('@"fsh.constants"', () => {
-      for (const [c, name] of [...constantGlobals].map(([i, name]) => [arenas.instanceOf(i), name] as const)) emit(`store ${llvm(c.returns)} ${bake(comptimeBody(noted, c), c.returns)}, ptr ${name}`);
+      for (const [c, name] of [...constantGlobals].map(([i, name]) => [arenas.instanceOf(i), name] as const)) emit(`store ${llvm(c.returns)} ${bake(comptimeBody(new CheckedHost(noted), c.id), c.returns)}, ptr ${name}`);
       emit('call void @fsh_rt_constants(ptr @"fsh.constants.drop")');
     });
     const dropper = made('@"fsh.constants.drop"', () => {
@@ -3139,7 +3139,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         return;
       // A comptime block runs while compiling and leaves nothing to run.
       case "comptime":
-        comptimeBlock(noted, current, s);
+        comptimeBlock(new CheckedHost(noted), current.id, s);
         return;
       case "if": {
         const cond = value(s.cond);
@@ -9466,7 +9466,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         return String(e.value);
       case "comptime":
         bakeable(types.get(e)!, e);
-        return bake(comptimeValue(noted, current, e), types.get(e)!);
+        return bake(comptimeValue(new CheckedHost(noted), current.id, e), types.get(e)!);
       // A string literal on its own has only its literal type, which takes no space.
       case "string":
         return "zeroinitializer";
@@ -9568,7 +9568,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         // A top-level const: a scalar or string baked where it is read, an aggregate read through
         // a pointer to its global.
         const read = callOf(e);
-        if (read && bodyOf(noted.arenas, read).comptime === "const") return isRef(types.get(e)!) ? constantGlobal(read) : bake(comptimeBody(noted, read), types.get(e)!);
+        if (read && bodyOf(noted.arenas, read).comptime === "const") return isRef(types.get(e)!) ? constantGlobal(read) : bake(comptimeBody(new CheckedHost(noted), read.id), types.get(e)!);
         // A nested function used as a value is its closure, made here.
         const built = current.envs?.get(e);
         if (built) return environment(arenas.instanceOf(built.of), built.env);

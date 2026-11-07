@@ -1,6 +1,6 @@
 import { bodyOf } from "./arenas.ts";
 import { compiledOf, type Checked } from "./check.ts";
-import { AstValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
+import { AstValues, CheckedHost, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import type { Compilation, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
@@ -432,13 +432,13 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const values = () => ready.args.map((a, i) => {
     const t = checked.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
     if (a.none) return null;
-    if (!a.syntax) return comptimeBody(checked.tables, compiledOf(checked).find((c) => bodyOf(checked.tables.arenas, c).name === `const ${a.name}`)!);
+    if (!a.syntax) return comptimeBody(new CheckedHost(checked.tables), compiledOf(checked).find((c) => bodyOf(checked.tables.arenas, c).name === `const ${a.name}`)!.id);
     return built<Value>(checked.tables, { tree: { of: "expr", node: original[i] ?? a.expr }, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, new AstValues(undefined), new Map(), new Map());
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
   let result: Value;
   try {
-    result = withHygiene(checked.tables, hygiene, () => comptimeCall(checked.tables, instance, [value, ...index, ...values()], nearest));
+    result = withHygiene(checked.tables, hygiene, () => comptimeCall(new CheckedHost(checked.tables), instance.id, [value, ...index, ...values()], nearest));
   } finally {
     // An error the expansion throws names them as written too.
     for (const n of hygiene.made) compilation.names.local.add(n);

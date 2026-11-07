@@ -5,7 +5,7 @@ import { CompileError, compileErrors, named } from "./diag.ts";
 import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
 import { FILE_SPAN, stdModuleAt } from "./program.ts";
-import { comptimeArgument, comptimeBody, comptimeChecks, stringsType, untagged, type Value } from "./comptime.ts";
+import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } from "./comptime.ts";
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
@@ -773,12 +773,6 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.resolverState = new ResolverState();
     this.done = new Set<InstanceId>();
     this.rustTypes = new Map<string, string>();
-    // Comptime runs a function only once the checker has been through it.
-    comptimeChecks(this.tables, (i) => {
-      if (this.inProgress.has(i.id)) return false;
-      this.checkBody(i);
-      return true;
-    });
     this.views = new Map<InstanceId, Type>();
     this.demands = new NodeMap<Stmt, Integer>();
     this.candidates = new Map<LocalId, Stmt>();
@@ -1017,6 +1011,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   /** @throws {CompileError} */
   classParams(f: Body): TypeParam[] {
     return f.scope?.size && f.owner ? this.registry().classOf(f.owner).node.typeParams : [];
+  }
+
+  // Comptime runs a function only once the checker has been through it.
+  /** @throws {CompileError} */
+  ensureChecked(this: Mut<this>, id: InstanceId): boolean {
+    if (this.inProgress.has(id)) return false;
+    this.checkBody(this.arenas.instanceOf(id));
+    return true;
   }
 
   /** @throws {CompileError} */
@@ -1273,7 +1275,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const f = this.addBody(Object.assign({ id: nextId(this.ids), kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start: init.start, end: init.end }, { comptime: "const" as const }));
     const instance = this.instancing().definition(f);
     this.checkBody(instance);
-    return untagged(comptimeBody(this.tables, instance));
+    return untagged(comptimeBody(this, instance.id));
   }
 
   // A result worked out from a body may need the class being laid out, whose fields aren't known.
@@ -1333,7 +1335,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const member = this.recOf(given);
     if (member?.kind === "literal" && member.owner) return given!;
     // The interpreter reads a plain tree, and this body's replacements aren't in place yet.
-    const tagged = comptimeArgument(this.tables, site, rebuiltExpr(arg, this.rewrites));
+    const tagged = comptimeArgument(this, site.id, rebuiltExpr(arg, this.rewrites));
     const tag = tagged && typeof tagged === "object" && tagged.kind === "member" ? tagged.type : undefined;
     if (this.recOf(tag)?.kind === "literal") return tag!;
     const v = untagged(tagged);
