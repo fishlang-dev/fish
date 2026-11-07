@@ -1621,7 +1621,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const printer = callee.kind === "ident" ? callee.name : callee.kind === "member" && callee.object.kind === "ident" ? callee.object.name : "";
     if (isPrint(callee) && (this.ctx.lookup(printer, undefined) === undefined) && !this.ctx.classes.has(printer) && !this.ctx.byName.has(printer) && !this.ctx.byName.has(`const ${printer}`) && !this.ctx.enums.has(printer)) {
       if (e.optional || (callee.kind === "member" && callee.optional)) throw new CompileError("E0505", `'${printer}' is always there, so it is called without '?.'`, e.start, e.end);
-      this.ctx.tables.printCalls.add(e);
+      this.ctx.tables.printCalls.add(cloneExpr(e));
       this.shown(e.args);
       this.unformattable(e.args);
       return { type: "void", what: "printing" };
@@ -2035,7 +2035,7 @@ export class Expressions<C extends Context> implements Union<C> {
       this.refuseSpread(e.args);
       this.shown(e.args);
       this.unformattable(e.args);
-      this.ctx.tables.formatCalls.add(e);
+      this.ctx.tables.formatCalls.add(cloneExpr(e));
       return { type: "string", what: "'format'" };
     }
     if (util === "inspect") {
@@ -2075,7 +2075,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (util === "isDeepStrictEqual") {
       if (e.args.length !== 2) throw new CompileError("E0504", "'isDeepStrictEqual' takes 2 arguments", e.start, e.end);
       this.refuseSpread(e.args);
-      const [left, right] = e.args as [Expr, Expr];
+      const left: Ref<Expr> = e.args[0]!;
+      const right: Ref<Expr> = e.args[1]!;
       const equality = this.ctx.tables.rewrites.replace(e, { id: 0, kind: "binary", op: "===", left, right, start: e.start, end: e.end });
       this.ctx.tables.deepEqualities.add(equality);
       return { type: this.value(equality), what: "'isDeepStrictEqual'" };
@@ -2566,7 +2567,8 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private nestedCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "ident" }>>, local: LocalId): { type: Type; what: string } {
     this.nestedEnv(e, local, callee);
-    return this.closureCall(e, callee, this.lc(local).type);
+    const type = this.lc(local).type;
+    return this.closureCall(e, callee, type);
   }
 
   // Records this body's bindings for what a nested function captures, captured if need be,
@@ -2708,7 +2710,10 @@ export class Expressions<C extends Context> implements Union<C> {
     // A method that may take a regex looks at its first argument to see which it was given.
     const first = REGEX_METHODS.has(callee.name) && e.args.length > 0 ? this.value(e.args[0]!) : undefined;
     const rx = first === undefined ? undefined : this.asRegex(first);
-    if (rx !== undefined) return this.regexStringCall(e, callee, rx, this.ctx.tables.typing.lower(first!) !== rx);
+    if (rx !== undefined) {
+      const other = this.ctx.tables.typing.lower(first!) !== rx;
+      return this.regexStringCall(e, callee, rx, other);
+    }
     if (first !== undefined && stringMethods(this.ctx.tables.typing)[callee.name] === undefined) throw new CompileError("E0508", `'${callee.name}' takes a regex, like '${callee.name}(/x/${callee.name === "matchAll" ? "g" : ""})'; Fish doesn't turn a string into one`, e.args[0]!.start, e.args[0]!.end);
     // `concat` takes any number of strings, as `+` joins them.
     if (callee.name === "concat") {
@@ -3309,25 +3314,27 @@ export class Expressions<C extends Context> implements Union<C> {
     const through = this.value(e.object);
     // Whatever reads the object next, the index's check or the field's, takes this type, so a
     // chain of indexes is checked once, not once per level and again for each.
-    this.ctx.exprsState.once.add(e.object);
+    this.ctx.exprsState.once.add(cloneExpr(e.object));
     const held = this.isRefType(through) ? this.ctx.tables.typing.rec(through).to : through;
     const r = this.recOf(held);
     const object = r?.kind === "shared" ? this.ctx.tables.typing.lower(r.of) : held;
     if (!this.ctx.tables.typing.isTuple(object)) return this.keyRead(e, object);
+    // Parts of the index the read is made of: the same nodes under Bun, copies where Fish owns them.
+    const parts = { ...e };
     const count = this.ctx.tables.typing.elementsOf(object as ObjectType).length;
     if (e.index.kind !== "int") throw new CompileError("E0117", `a tuple's element is named by a number written in place, like '[0]'; '${this.ctx.tables.typing.show(object)}' has no element for a computed index`, e.index.start, e.index.end);
     const n = e.index.value;
     // Past a rest tuple's fixed elements, an index reads its array, panicking past the end.
     if (n >= BigInt(count) && this.ctx.tables.typing.rec(object as ObjectType).rest !== undefined) {
       const at = { start: e.index.start, end: e.index.end };
-      const array: Expr = { id: nextId(this.ctx.tables.ids), kind: "member", object: e.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
-      this.ctx.tables.restStarts.set(array, count);
+      const array: Expr = { id: nextId(this.ctx.tables.ids), kind: "member", object: parts.object, name: "...", optional: false, start: e.object.start, end: e.object.end };
+      this.ctx.tables.restStarts.set(cloneExpr(array), count);
       this.ctx.tables.rewrites.replace(e, { ...e, object: array, index: { id: nextId(this.ctx.tables.ids), kind: "int", value: n - BigInt(count), ...at } });
       return true;
     }
     if (n >= BigInt(count)) throw new CompileError("E0117", `tuple type '${this.ctx.tables.typing.show(object)}' of length ${count} has no element at index ${n}`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
-    this.ctx.tables.rewrites.replace(e, { id: 0, kind: "member", object: e.object, name: String(n), optional: false, start: e.start, end: e.end });
+    this.ctx.tables.rewrites.replace(e, { id: 0, kind: "member", object: parts.object, name: String(n), optional: false, start: e.start, end: e.end });
     return true;
   }
 
@@ -3341,7 +3348,8 @@ export class Expressions<C extends Context> implements Union<C> {
     const name = this.knownKey(e.index);
     if (name.startsWith("#")) throw new CompileError("E0502", `'${name}' names no field: a private field is read as '${this.placeText(e.object)}.${name}'`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
-    this.ctx.tables.rewrites.replace(e, { id: 0, kind: "member", object: e.object, name, optional: false, start: e.start, end: e.end });
+    const parts = { ...e };
+    this.ctx.tables.rewrites.replace(e, { id: 0, kind: "member", object: parts.object, name, optional: false, start: e.start, end: e.end });
     return true;
   }
 
@@ -3738,7 +3746,10 @@ export class Expressions<C extends Context> implements Union<C> {
     const usage = name === "ArrayBuffer" ? "'new ArrayBuffer(n)' takes its length in bytes" : `'new ${name}' takes a length, an array to copy, or an ArrayBuffer with an optional byte offset and length`;
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}' takes no type arguments`, e.start, e.end);
     this.refuseSpread(list);
-    if (list.length === 0) return this.typedAs(e, { id: nextId(this.ctx.tables.ids), kind: "array", elements: [], ...at }, typed);
+    if (list.length === 0) {
+      const empty: Expr = { id: nextId(this.ctx.tables.ids), kind: "array", elements: [], ...at };
+      return this.typedAs(e, empty, typed);
+    }
     const source = list[0]!;
     const rest: usize = list.length - 1;
     if (rest > (name === "ArrayBuffer" ? 0 : 2)) throw new CompileError("E0504", usage, e.start, e.end);
@@ -3862,7 +3873,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.name === "of") {
       let elements: Elements = [];
       for (const a of e.args) elements.push(cloneExpr(a));
-      return { type: this.typedAs(e, { id: nextId(this.ctx.tables.ids), kind: "array", elements, ...at }, typed), what: `'${name}.of'` };
+      const made: Expr = { id: nextId(this.ctx.tables.ids), kind: "array", elements, ...at };
+      return { type: this.typedAs(e, made, typed), what: `'${name}.of'` };
     }
     if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", `'${name}.from' takes the array to copy, and an optional function mapping each value`, e.start, e.end);
     if (e.args.length > 1) {
@@ -3894,7 +3906,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.name !== "from") throw new CompileError("E0502", `'Array' has no '${callee.name}'; arrays are made with 'Array.of', 'Array.from' or 'new Array(n).fill(x)'`, callee.start, callee.end);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", "'Array.from' takes no type argument; its element type is what the source holds, or what the map function gives", e.start, e.end);
     if (e.args.length < 1 || e.args.length > 2) throw new CompileError("E0504", "'Array.from' takes what to make the array from, and an optional function mapping each value", e.start, e.end);
-    const source = e.args[0]!;
+    const source: Ref<Expr> = e.args[0]!;
     const mapping = e.args.length > 1;
     let length: Expr | undefined = undefined;
     if (source.kind === "object" && source.props.length === 1) {
@@ -4164,7 +4176,7 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     const at = fixed < list.length ? { start: list[fixed]!.start, end: list[list.length - 1]!.end } : { start: e.end - 1, end: e.end - 1 };
     args.push({ id: nextId(this.ctx.tables.ids), kind: "array", elements: rest, ...at });
-    const made = this.ctx.tables.rewrites.replace(e, withArgs(e, args));
+    const made = this.ctx.tables.rewrites.replace(e, { ...e, args });
     this.ctx.tables.packed.add(cloneExpr(made));
     return made;
   }
@@ -4291,7 +4303,7 @@ export class Expressions<C extends Context> implements Union<C> {
       for (const a of e.args) this.argument(a, "i64");
       return { type: array, what: "'slice'" };
     }
-    const sought = e.args[0]!;
+    const sought: Ref<Expr> = e.args[0]!;
     this.expect(sought, element);
     const t = this.value(sought);
     if (objectsMeet(this.ctx.tables.typing, element, t)) throw new CompileError("E0112", `'${name}' compares elements by value, which objects and instances can't do until they derive 'Eq'; use 'some' with a callback comparing a field`, callee.start, callee.end);
@@ -4526,7 +4538,7 @@ export class Expressions<C extends Context> implements Union<C> {
       case "set":
       case "add":
         if (name === "set") argument(e.args[1]!, this.ctx.tables.typing.rec(t).value);
-        this.ctx.borrowsFrom.set(e, [callee.object]);
+        this.ctx.borrowsFrom.set(cloneExpr(e), [cloneExpr(callee.object)]);
         return { type: this.ctx.tables.typing.refType(t, true), what: `'${name}'` };
       case "get":
         this.clonable(this.ctx.tables.typing.rec(t).value, callee, undefined, true);
@@ -4791,7 +4803,9 @@ export class Expressions<C extends Context> implements Union<C> {
       }
     } else {
       const given = this.value(list);
-      this.coerce(list, given, this.ctx.tables.typing.refType(this.ctx.tables.typing.arrayType(signal), false), `'AbortSignal.any' takes a list of 'AbortSignal's, not '${this.ctx.tables.typing.show(given)}'`);
+      const signals = this.ctx.tables.typing.arrayType(signal);
+      const wanted = this.ctx.tables.typing.refType(signals, false);
+      this.coerce(list, given, wanted, `'AbortSignal.any' takes a list of 'AbortSignal's, not '${this.ctx.tables.typing.show(given)}'`);
     }
     return { type: signal, what: "'AbortSignal.any'" };
   }
@@ -6320,7 +6334,8 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     const args: Expr[] = e.args.length > 1 ? [cloneExpr(callee.object), cloneExpr(callback), cloneExpr(e.args[1]!)] : [cloneExpr(callee.object), cloneExpr(callback)];
     const helper = this.stdHelper(name, target, args, e);
-    return this.callMade(this.ctx.tables.rewrites.replace(e, helper));
+    const made = this.ctx.tables.rewrites.replace(e, helper);
+    return this.callMade(made);
   }
 
   // Whether an expression is an index into an array, a place inside it.
