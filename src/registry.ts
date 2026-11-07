@@ -25,7 +25,7 @@ type Table = "methods" | "getters" | "setters" | "statics";
 export interface RegistryHost {
   tables: Tables;
   classes: Map<string, ClassId>;
-  templates: Map<string, ClassNode>;
+  templates: Map<string, ClassNode & { name: string }>;
   members(this: Mut<this>): Members;
   registryState: RegistryState;
   // A type written in a scope of type parameters, or in none.
