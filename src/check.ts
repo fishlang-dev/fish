@@ -1433,13 +1433,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // What a call's returned reference, or returned value holding references, borrows from, as
   // the callee's signature says; with no lifetime written, whatever was lent to the call.
   /** @throws {CompileError} */
-  sourcesOf(this: Mut<this>, instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[] {
+  sourcesOf(this: Mut<this>, instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lent: Ref<boolean[]>): Expr[] {
     const f = bodyOf(this.arenas, instance);
     const returns = this.returnOf(instance, at);
     if (!this.typing.holdsRef(returns)) return [];
     const ref = this.isRef(returns) ? returns : this.typing.optionRef(returns);
     const origins = ref ? this.originsOf(f, this.instancing().paramTypes(instance), ref) : this.heldOrigins(f);
-    if (!origins) return [...args.filter(lends), ...(receiver ? [receiver] : [])];
+    if (!origins) return [...args.filter((_, i) => lent[i] === true), ...(receiver ? [receiver] : [])];
     return origins.flatMap((o) => (o === "this" ? (receiver ? [receiver] : []) : [args[o]!]));
   }
 
@@ -2210,50 +2210,54 @@ class BodyChecker implements Context, GuardHost {
   }
 
   /** @throws {CompileError} */
-  construct(this: Mut<this>, name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): ClassInfo | undefined {
-    return this.cx.genericClasses().construct(name, typeArgs, argTypes, at);
+  construct(this: Mut<this>, name: string, typeArgs: Ref<TypeNode[]>, argTypes: Type[], at: Span): ClassId | undefined {
+    return this.cx.genericClasses().construct(name, typeArgs, argTypes, at)?.classId;
   }
 
   templateParams(name: string): Param[] | undefined {
     return this.cx.templateParams(name);
   }
 
-  definedClass(this: Mut<this>, name: string): ClassInfo | undefined {
-    return this.cx.genericClasses().definedClass(name);
+  definedClass(this: Mut<this>, name: string): ClassId | undefined {
+    return this.cx.genericClasses().definedClass(name)?.classId;
   }
 
   /** @throws {CompileError} */
-  returnOf(this: Mut<this>, instance: Instance, at: Span): Type {
+  returnOf(this: Mut<this>, instanceId: InstanceId, at: Span): Type {
+    const instance = this.cx.arenas.instanceOf(instanceId);
     return this.cx.returnOf(instance, at);
   }
 
   /** @throws {CompileError} */
-  resultOf(this: Mut<this>, instance: Instance, at: Span & Id): Type {
+  resultOf(this: Mut<this>, instanceId: InstanceId, at: Span & Id): Type {
+    const instance = this.cx.arenas.instanceOf(instanceId);
     return this.cx.resultOf(instance, at);
   }
 
   /** @throws {CompileError} */
-  sourcesOf(this: Mut<this>, instance: Instance, args: Expr[], receiver: Expr | undefined, at: Span, lends: (a: Expr) => boolean): Expr[] {
-    return this.cx.sourcesOf(instance, args, receiver, at, lends);
+  sourcesOf(this: Mut<this>, instanceId: InstanceId, args: Ref<Expr[]>, receiver: Ref<Expr> | undefined, at: Span, lent: Ref<boolean[]>): Expr[] {
+    const instance = this.cx.arenas.instanceOf(instanceId);
+    return this.cx.sourcesOf(instance, args, receiver, at, lent);
   }
 
   /** @throws {CompileError} */
-  classOf(t: ClassType): ClassInfo {
-    return this.cx.registry().classOf(t);
+  classOf(this: Mut<this>, t: ClassType): ClassId {
+    return this.cx.registry().classOf(t).classId;
   }
 
   /** @throws {CompileError} */
-  instanceOf(this: Mut<this>, f: Body, bindings?: Map<string, Type>): Instance {
-    return this.cx.instancing().instanceOf(f, bindings);
+  instanceOf(this: Mut<this>, f: BodyId, bindings: Map<string, Type> | undefined): InstanceId {
+    return this.cx.instancing().instanceOf(this.cx.arenas.bodyOf(f), bindings).id;
   }
 
   /** @throws {CompileError} */
-  instantiate(this: Mut<this>, f: Body, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span): Instance {
-    return this.cx.instancing().instantiate(f, typeArgs, args, argTypes, at as Span & Id);
+  instantiate(this: Mut<this>, f: BodyId, typeArgs: Ref<TypeNode[]>, args: Ref<Expr[]>, argTypes: Type[], at: Span): InstanceId {
+    return this.cx.instancing().instantiate(this.cx.arenas.bodyOf(f), typeArgs, args, argTypes, at as Span & Id).id;
   }
 
   /** @throws {CompileError} */
-  paramTypes(this: Mut<this>, instance: Instance): Type[] {
+  paramTypes(this: Mut<this>, instanceId: InstanceId): Type[] {
+    const instance = this.cx.arenas.instanceOf(instanceId);
     return this.cx.instancing().paramTypes(instance);
   }
 
@@ -2270,23 +2274,21 @@ class BodyChecker implements Context, GuardHost {
     this.cx.asWritten(this.instance);
   }
 
-  envOf(this: Mut<this>, e: Expr, of: Instance, env: Local[]) {
-    (this.instance.envs ??= new NodeMap()).set(e, { of: of.id, env: env.map((l) => l.localId) });
+  envOf(this: Mut<this>, e: Ref<Expr>, of: InstanceId, env: LocalId[]) {
+    (this.instance.envs ??= new NodeMap()).set(e, { of, env });
   }
 
   dynOf(this: Mut<this>, e: Expr, table: DynTable) {
     (this.instance.dyns ??= new NodeMap()).set(e, table);
   }
 
-  // Runs a match arm in a scope of its own, holding the names its pattern binds.
-  /** @throws {CompileError} */
-  arm<T>(this: Mut<this>, run: InScope<T>): T {
+  // A match arm runs in a scope of its own, holding the names its pattern binds.
+  enterArm(this: Mut<this>): void {
     this.scopes.push(new Map());
-    try {
-      return run();
-    } finally {
-      this.scopes.pop();
-    }
+  }
+
+  leaveArm(this: Mut<this>): void {
+    this.scopes.pop();
   }
 
   /** @throws {CompileError} */
@@ -2300,27 +2302,27 @@ class BodyChecker implements Context, GuardHost {
   }
 
   /** @throws {CompileError} */
-  bind(this: Mut<this>, name: string, type: Type, node: Expr): Local {
+  bind(this: Mut<this>, name: string, type: Type, node: Ref<Expr>): LocalId {
     this.declare(name, type, false, false, node);
-    return this.cx.localOf(this.locals.get(node)!);
+    return this.locals.get(node)!;
   }
 
-  captured(l: Local): boolean {
+  captured(lId: LocalId): boolean {
+    const l = this.cx.localOf(lId);
     return this.captures?.has(l.localId) ?? false;
   }
 
-  /** @throws {CompileError} */
-  comptime<T>(this: Mut<this>, check: InScope<T>): T {
+  enterComptime(this: Mut<this>): void {
     this.comptimeDepth++;
-    try {
-      return check();
-    } finally {
-      this.comptimeDepth--;
-    }
+  }
+
+  leaveComptime(this: Mut<this>): void {
+    this.comptimeDepth--;
   }
 
   /** @throws {CompileError} */
-  errorOf(this: Mut<this>, instance: Instance): Type | undefined {
+  errorOf(this: Mut<this>, instanceId: InstanceId): Type | undefined {
+    const instance = this.cx.arenas.instanceOf(instanceId);
     return this.cx.errorOf(instance);
   }
 
@@ -2328,11 +2330,13 @@ class BodyChecker implements Context, GuardHost {
     return this.instance.throws;
   }
 
-  reachable(l: Local): boolean {
+  reachable(lId: LocalId): boolean {
+    const l = this.cx.localOf(lId);
     return !this.caseOnly.has(l.localId);
   }
 
-  depthOf(l: Local): usize {
+  depthOf(lId: LocalId): usize {
+    const l = this.cx.localOf(lId);
     return this.depths.get(l.localId)!;
   }
 
@@ -2341,8 +2345,8 @@ class BodyChecker implements Context, GuardHost {
     return this.cx.resolver().withScope(scope, () => this.cx.resolver().resolveType(t));
   }
 
-  closureBody(t: ClosureType): Instance {
-    return this.cx.arenas.instanceOf(this.cx.closureBodies.get(t)!);
+  closureBody(this: Mut<this>, t: ClosureType): InstanceId {
+    return this.cx.closureBodies.get(t)!;
   }
 
   /** @throws {CompileError} */
@@ -2351,17 +2355,20 @@ class BodyChecker implements Context, GuardHost {
   }
 
   /** @throws {CompileError} */
-  implicitOf(this: Mut<this>, f: Body): Map<usize, Bound> {
+  implicitOf(this: Mut<this>, fId: BodyId): Map<usize, Bound> {
+    const f = this.cx.arenas.bodyOf(fId);
     return this.cx.instancing().implicitOf(f.bodyId);
   }
 
   /** @throws {CompileError} */
-  callbackType(this: Mut<this>, f: Body, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: usize, at: Span): FunctionType | undefined {
+  callbackType(this: Mut<this>, fId: BodyId, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: usize, at: Span): FunctionType | undefined {
+    const f = this.cx.arenas.bodyOf(fId);
     return this.cx.instancing().callbackType(f, typeArgs, argTypes, i, at);
   }
 
   /** @throws {CompileError} */
-  constructs(this: Mut<this>, f: Body, args: Expr[], argTypes: Type[]) {
+  constructs(this: Mut<this>, fId: BodyId, args: Expr[], argTypes: Type[]) {
+    const f = this.cx.arenas.bodyOf(fId);
     this.cx.instancing().constructs(f, args, argTypes);
   }
 
@@ -2387,8 +2394,8 @@ class BodyChecker implements Context, GuardHost {
   /** @throws {CompileError} */
   changesLocal(this: Mut<this>, l: Local, path: string, action: string, target: Expr, throughMut: boolean) {
     this.closureChanged.add(String(l.localId));
-    this.changesPath(l, "", action, target);
-    this.exprs().changesLocal(l, path, action, target, throughMut);
+    this.changesPath(l.localId, "", action, target);
+    this.exprs().changesLocal(l.localId, path, action, target, throughMut);
   }
 
   /** @throws {CompileError} */
@@ -2515,7 +2522,8 @@ class BodyChecker implements Context, GuardHost {
     return l.param ? this.assignedParams.has(l.localId) : l.mutable && this.assigned.has(l.name);
   }
   // A write to a binding holding no reference forgets what any check or assignment said of it.
-  forget(this: Mut<this>, l: Local, at: Span) {
+  forget(this: Mut<this>, lId: LocalId, at: Span) {
+    const l = this.cx.localOf(lId);
     this.forgetPaths(String(l.localId), at);
     if (this.cx.typing.holdsRef(l.type)) return;
     this.written.push({ local: bindingKey(l.localId), at: at.start });
@@ -2546,7 +2554,7 @@ class BodyChecker implements Context, GuardHost {
         continue;
       }
       const l = this.cx.localOf(Number(id) as LocalId);
-      if (assignsOwn([loop], l.name)) this.forget(l, loop);
+      if (assignsOwn([loop], l.name)) this.forget(l.localId, loop);
     }
   }
   // Lending a binding mutably may give it another member, so what was known of it is forgotten,
@@ -2554,14 +2562,15 @@ class BodyChecker implements Context, GuardHost {
   // something from before the loop, would see the new member the next time round, so that is
   // refused.
   /** @throws {CompileError} */
-  lendsWhole(this: Mut<this>, l: Local, at: Expr) {
+  lendsWhole(this: Mut<this>, lId: LocalId, at: Expr) {
+    const l = this.cx.localOf(lId);
     if (this.cx.typing.holdsRef(l.type)) return;
     const outside = this.captures?.get(l.localId);
     if (outside === "this") return;
     if (outside !== undefined) {
-      this.forget(l, at);
+      this.forget(l.localId, at);
       const from = this.cx.localOf(outside);
-      this.outer!.lendsWhole(from, at);
+      this.outer!.lendsWhole(from.localId, at);
       if (this.f.closure?.self !== undefined) this.outer!.lentPerCall(from);
       return;
     }
@@ -2571,12 +2580,13 @@ class BodyChecker implements Context, GuardHost {
     if (loop && this.narrowReads.slice(loop.reads).some((r) => r.local === bindingKey(l.localId) && r.at !== at)) {
       throw new CompileError("E0109", `can't lend '${l.name}' mutably here: earlier in this loop it was read as narrowed by what was known before the loop, and the next time round it may hold another member; check or assign it inside the loop`, at.start, at.end);
     }
-    this.forget(l, at);
+    this.forget(l.localId, at);
   }
-  narrowRead(this: Mut<this>, l: Local, at: Expr) {
+  narrowRead(this: Mut<this>, lId: LocalId, at: Expr) {
+    const l = this.cx.localOf(lId);
     this.narrowReads.push({ local: bindingKey(l.localId), at });
     const outside = this.captures?.get(l.localId);
-    if (outside !== undefined && outside !== "this") this.outer!.narrowRead(this.cx.localOf(outside), at);
+    if (outside !== undefined && outside !== "this") this.outer!.narrowRead(outside, at);
   }
   lentPerCall(l: Local) {
     this.nestedLent.add(l.localId);
@@ -2634,7 +2644,8 @@ class BodyChecker implements Context, GuardHost {
   // reaches, below an element all of the array's. Lending a path as the one member a check
   // narrowed it to, or updating it in place as `+=` does, keeps that member.
   /** @throws {CompileError} */
-  changesPath(this: Mut<this>, root: Local | "this", path: string, action: string, at: Expr) {
+  changesPath(this: Mut<this>, rootId: LocalId | "this", path: string, action: string, at: Ref<Expr>) {
+    const root = rootId === "this" ? rootId : this.cx.localOf(rootId);
     const cut = path.indexOf("[...]");
     const prefix = `${root === "this" ? root : root.localId}${cut < 0 ? path : path.slice(0, cut)}`;
     if (!this.loopChange(prefix, action, `${root === "this" ? root : root.name}${path}`, at)) return;
@@ -2680,7 +2691,7 @@ class BodyChecker implements Context, GuardHost {
   }
   // What a check on a variable read as declared leaves of what it was narrowed to.
   narrowedPast(this: Mut<this>, id: LocalId, t: Type): Type {
-    const now = this.narrowed(this.cx.localOf(id));
+    const now = this.narrowed(id);
     const members = (x: Type): Type[] => {
       const r = this.cx.recOf(x);
       return r?.kind === "union" ? r.members : [x];
@@ -2862,7 +2873,7 @@ class BodyChecker implements Context, GuardHost {
   partType(this: Mut<this>, s: Stmt): Type | undefined {
     const target = this.cx.destructuredParts.get(s);
     if (!target) return undefined;
-    if (target.kind === "ident") return this.lookup(target.name)?.type;
+    if (target.kind === "ident") { const found = this.lookup(target.name, undefined); return found === undefined ? undefined : this.cx.localOf(found).type; }
     // A field of 'this' has its declared type, which a constructor may not read yet.
     if (target.kind === "member" && target.object.kind === "this" && this.f.self) return this.cx.typing.allFields(this.f.self.type as ClassType).find((x) => x.name === target.name)?.type;
     // A target with only a setter can't be read for its type; its part keeps its own.
@@ -2933,7 +2944,7 @@ class BodyChecker implements Context, GuardHost {
         continue;
       }
       const l = this.cx.localOf(Number(local) as LocalId);
-      ends.set(local, this.narrowed(l) ?? l.type);
+      ends.set(local, this.narrowed(l.localId) ?? l.type);
     }
     this.facts.length = before;
     return ends;
@@ -3203,9 +3214,10 @@ class BodyChecker implements Context, GuardHost {
   // end of each narrowing scope it is read as declared. A loop inside such a scope could come
   // back to reads already checked as narrowed.
   /** @throws {CompileError} */
-  rewritten(this: Mut<this>, l: Local, at: Expr) {
+  rewritten(this: Mut<this>, lId: LocalId, at: Expr) {
+    const l = this.cx.localOf(lId);
     const outside = this.captures?.get(l.localId);
-    if (outside && outside !== "this" && this.outer!.narrowed(this.cx.localOf(outside))) {
+    if (outside && outside !== "this" && this.outer!.narrowed(outside)) {
       throw new CompileError("E0109", `can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
     }
     const from = this.facts.findIndex((f) => f.has(bindingKey(l.localId)));
@@ -3262,12 +3274,21 @@ class BodyChecker implements Context, GuardHost {
   }
 
   /** @throws {CompileError} */
-  assume<T>(this: Mut<this>, proven: Facts, check: InScope<T>): T {
+  assumeFacts(this: Mut<this>, proven: Facts): void {
     this.facts.push(proven);
+  }
+
+  forgetFacts(this: Mut<this>): void {
+    this.facts.pop();
+  }
+
+  /** @throws {CompileError} */
+  assume<T>(this: Mut<this>, proven: Facts, check: InScope<T>): T {
+    this.assumeFacts(proven);
     try {
       return check();
     } finally {
-      this.facts.pop();
+      this.forgetFacts();
     }
   }
 
@@ -3300,13 +3321,13 @@ class BodyChecker implements Context, GuardHost {
     // borrows what that function uses, as this body has it.
     if (e.async || bodyOf(this.cx.arenas, inner).closure!.move) {
       for (const [, from] of captured) {
-        if (from === "this" || !this.nestedLocal(from)) continue;
+        if (from === "this" || !this.nestedLocal(from.localId)) continue;
         const of = this.cx.closureBodies.get(this.cx.typing.lower(from.type) as ClosureType)!;
         const nested = this.cx.arenas.instanceOf(of);
         const env = [...nested.captures!].map(([alias, x]) => {
-          const mine = this.reach(this.cx.localOf(x as LocalId), e);
+          const mine = this.reach(x as LocalId, e);
           if (nested.changed?.has(alias)) this.exprs().changesLocal(mine, "", "change", e, false);
-          return mine.localId;
+          return mine;
         });
         (this.instance.made ??= new NodeMap()).set(e, [...(this.instance.made.get(e) ?? []), { of, env }]);
       }
@@ -3620,7 +3641,7 @@ class BodyChecker implements Context, GuardHost {
         }
         const o = this.cx.recOf(object);
         // std's ServerWebSocket gives the messages its client sends.
-        if (s.await && o?.kind === "class" && o.name === "ServerWebSocket" && this.classOf(object as ClassType).node.start >= STD_BASE) {
+        if (s.await && o?.kind === "class" && o.name === "ServerWebSocket" && this.cx.registry().classOf(object as ClassType).node.start >= STD_BASE) {
           const at = { start: s.right.start, end: s.right.end };
           const callee: Expr = { id: nextId(this.cx.ids), kind: "member", object: s.right, name: "__wsMessages", optional: false, ...at };
           return this.statement(this.cx.rewrites.replaceStmt(s, { ...s, right: { id: nextId(this.cx.ids), kind: "call", callee, typeArgs: [], args: [], optional: false, ...at } }));
@@ -3978,19 +3999,21 @@ class BodyChecker implements Context, GuardHost {
     this.cx.declarations.add(node);
   }
 
-  lookup(this: Mut<this>, name: string, at?: Expr | ObjectProp): Local | undefined {
+  lookup(this: Mut<this>, name: string, at: Ref<Expr | ObjectProp> | undefined): LocalId | undefined {
     for (let i = this.scopes.length - 1; i >= (this.hidden ? 1 : 0); i--) {
       const local = this.scopes[i]!.get(name);
-      if (local) return this.cx.localOf(local);
+      if (local !== undefined) return local;
     }
     const outside = this.outer?.lookup(name, at);
+    if (outside === undefined) return undefined;
     // A local generic function holds nothing to capture.
-    return outside && (outside.generic ? outside : this.capture(outside, at));
+    return this.cx.localOf(outside).generic !== undefined ? outside : this.capture(this.cx.localOf(outside), at).localId;
   }
 
   // Whether a binding is the one a sync nested function's declaration makes, or a closure's
   // capture of it.
-  nestedLocal(this: Mut<this>, l: Local): boolean {
+  nestedLocal(this: Mut<this>, lId: LocalId): boolean {
+    const l = this.cx.localOf(lId);
     const type = this.cx.typing.lower(l.type);
     const closure = this.cx.recOf(type);
     if (!this.cx.nestedBindings.has(l.localId) || closure?.kind !== "closure") return false;
@@ -3998,10 +4021,10 @@ class BodyChecker implements Context, GuardHost {
     return nested === undefined || bodyOf(this.cx.arenas, nested).async !== true;
   }
 
-  peek(this: Mut<this>, name: string): Local | undefined {
+  peek(this: Mut<this>, name: string): LocalId | undefined {
     for (let i = this.scopes.length - 1; i >= (this.hidden ? 1 : 0); i--) {
       const local = this.scopes[i]!.get(name);
-      if (local) return this.cx.localOf(local);
+      if (local !== undefined) return local;
     }
     return this.outer?.peek(name);
   }
@@ -4011,9 +4034,9 @@ class BodyChecker implements Context, GuardHost {
   }
 
   // By the binding itself, not its name, which a body in between may have taken for another.
-  reach(this: Mut<this>, l: Local, at?: Expr | ObjectProp): Local {
-    if (this.captures?.has(l.localId) || this.scopes.some((scope) => [...scope.values()].includes(l.localId))) return l;
-    return this.capture(this.outer!.reach(l, at), at);
+  reach(this: Mut<this>, l: LocalId, at: Ref<Expr | ObjectProp> | undefined): LocalId {
+    if (this.captures?.has(l) || this.scopes.some((scope) => [...scope.values()].includes(l))) return l;
+    return this.capture(this.cx.localOf(this.outer!.reach(l, at)), at).localId;
   }
 
   // A generic function written in a body, or a generic arrow a const holds, is a generic
@@ -4045,7 +4068,7 @@ class BodyChecker implements Context, GuardHost {
     // something else inside it.
     const around = new Set([...declaredIn(this.f), ...(this.f.scope?.keys() ?? []), ...this.scopes.flatMap((s) => [...s.keys()])]);
     for (const n of freeNames(own)) {
-      if (n !== name && (around.has(n) || this.lookup(n))) throw new CompileError("E0409", `${who} is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
+      if (n !== name && (around.has(n) || this.lookup(n, undefined) !== undefined)) throw new CompileError("E0409", `${who} is generic, so it is made apart from the function around it and can't use '${n}' from there; pass it as a parameter, or declare it at the top level`, fn.start, fn.end);
     }
     const outer = (n: AnyNode) => {
       if (n.of !== "typeNode" || n.node.kind !== "ref") return false;
@@ -4078,7 +4101,8 @@ class BodyChecker implements Context, GuardHost {
   // A closure changing what it captures captures it mutably, if it may change where the
   // closure is made.
   /** @throws {CompileError} */
-  changesCapture(this: Mut<this>, l: Local | undefined, path: string, action: string, target: Expr, throughMut: boolean) {
+  changesCapture(this: Mut<this>, lId: LocalId | undefined, path: string, action: string, target: Expr, throughMut: boolean) {
+    const l = lId === undefined ? undefined : this.cx.localOf(lId);
     const alias = l?.localId ?? [...this.captures!].find(([, from]) => from === "this")![0];
     const held = this.captures!.get(alias)!;
     this.instance.changed!.add(alias);
@@ -4173,10 +4197,11 @@ class BodyChecker implements Context, GuardHost {
 
   // A variable's type where something narrowed it: a captured one as it was where the closure
   // was made.
-  narrowed(this: Mut<this>, l: Local): Type | undefined {
+  narrowed(this: Mut<this>, lId: LocalId): Type | undefined {
+    const l = this.cx.localOf(lId);
     const outside = this.captures?.get(l.localId);
     const from = outside && outside !== "this" ? this.cx.localOf(outside) : undefined;
-    return this.facts.findLast((f) => f.has(bindingKey(l.localId)))?.get(bindingKey(l.localId)) ?? (from && !this.outer!.reassigned(from) ? this.outer!.narrowed(from) : undefined);
+    return this.facts.findLast((f) => f.has(bindingKey(l.localId)))?.get(bindingKey(l.localId)) ?? (from && !this.outer!.reassigned(from) ? this.outer!.narrowed(from.localId) : undefined);
   }
 
   // A closure's body reads a variable it captures through a binding of its own, standing
