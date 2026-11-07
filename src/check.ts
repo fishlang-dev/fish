@@ -45,7 +45,7 @@ type StmtEach = (s: Stmt, check: StmtCheck) => Facts | undefined;
 
 // A local generic function's name stands for the function it was lifted to, `generic`. `id`
 // numbers it in its check, naming its slot in the IR; `localId` names it in the compilation's arena.
-export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: Func };
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
 // A checked program: the functions to compile, the tables its check filled in, and the
@@ -292,7 +292,7 @@ function frameOf(tables: Tables, instance: Instance, generator: GeneratorType | 
   if (self && !self.constructor) fields.push(receiverField(typing, self, (t) => (instance.concrete ? typing.lower(t) : t)));
   bodyOf(arenas, instance).params.forEach((p) => add(arenas.localOf(instance.locals.get(p)!)));
   // A local generic function's name holds nothing.
-  [...new Set(instance.locals.values())].map((l) => arenas.localOf(l)).filter((l) => !l.generic).sort((a, b) => a.id - b.id).forEach(add);
+  [...new Set(instance.locals.values())].map((l) => arenas.localOf(l)).filter((l) => l.generic === undefined).sort((a, b) => a.id - b.id).forEach(add);
   walkWhile({ of: "stmts", node: bodyOf(arenas, instance).body }, (n) => {
     if (n.of === "expr" && n.node.kind === "arrow") return false;
     if (n.of === "stmt" && n.node.kind === "forOf") {
@@ -2027,7 +2027,7 @@ class BodyChecker implements Context, GuardHost {
   // A constructor's fields are unset until assigned, so until then `this` may only appear as
   // the target of an assignment to one of them, and the constructor can't return.
   unset: Set<string>;
-  exempt: Expr | undefined;
+  exempt: usize | undefined;
   // A derived constructor's first statement, `super(...)`, fills the embedded base.
   // After its parameters' defaults, which `super(...)` may read.
   superCall: Expr | undefined;
@@ -2409,7 +2409,7 @@ class BodyChecker implements Context, GuardHost {
   check(this: Mut<this>) {
     this.statements(this.f.body, (s, check) => {
       const assigned = this.unset.size > 0 ? this.fieldAssignment(s) : undefined;
-      this.exempt = assigned?.object;
+      this.exempt = assigned?.object.id;
       this.hidden = this.f.self?.constructor === true && this.cx.registry().classOf(this.f.self.type).initializers.has(s);
       const after = check(s);
       this.exempt = undefined;
@@ -2649,7 +2649,7 @@ class BodyChecker implements Context, GuardHost {
     const cut = path.indexOf("[...]");
     const prefix = `${root === "this" ? root : root.localId}${cut < 0 ? path : path.slice(0, cut)}`;
     if (!this.loopChange(prefix, action, `${root === "this" ? root : root.name}${path}`, at)) return;
-    const kept = action !== "assign to" || this.exprsState.updating === at ? this.facts.findLast((f) => f.has(prefix))?.get(prefix) : undefined;
+    const kept = action !== "assign to" || this.exprsState.updating === at.id ? this.facts.findLast((f) => f.has(prefix))?.get(prefix) : undefined;
     const keeps = kept !== undefined && kept === this.types.get(at) && this.cx.recOf(kept)?.kind !== "union";
     if (!keeps) return this.forgetPaths(prefix, at);
     const below = (k: string) => isPath(k) && k !== prefix && covers(prefix, k);
@@ -3591,7 +3591,7 @@ class BodyChecker implements Context, GuardHost {
         const lifted = this.cx.liftedFunctions.get(s);
         if (lifted) {
           this.declare(lifted.name, "void", false, false, s);
-          this.cx.localOf(this.locals.get(s)!).generic = lifted.fn;
+          this.cx.localOf(this.locals.get(s)!).generic = this.cx.byName.get(lifted.fn.name)!;
         }
         return;
       }
@@ -4095,7 +4095,7 @@ class BodyChecker implements Context, GuardHost {
   // Whether `this` may be used: a constructor's can't until every field is assigned, nor can
   // a closure's made before then.
   thisReady(this: Mut<this>, e: Expr): boolean {
-    return this.outer ? this.outer.thisReady(e) : this.unset.size === 0 || e === this.exempt;
+    return this.outer ? this.outer.thisReady(e) : this.unset.size === 0 || e.id === this.exempt;
   }
 
   // A closure changing what it captures captures it mutably, if it may change where the
