@@ -27,7 +27,7 @@ import type { Instance, Local } from "./check.ts";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.ts";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, applyShape, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.ts";
 import { forEachChild, nextId, NodeMap, NodeSet, reborrowNode, renumberExpr, respanExpr, someNode, walk, walkWhile, type AnyNode, type Ids, type Rewrites } from "./nodes.ts";
-import { cloneExpr, cloneObjectProp, cloneParam, clonePattern, cloneTypeNode, idOfExpr, rebuiltExpr, withIdExpr } from "./rebuild.ts";
+import { cloneExpr, cloneJsName, cloneObjectProp, cloneParam, clonePattern, cloneTypeMember, cloneTypeNode, idOfExpr, rebuiltExpr, withIdExpr } from "./rebuild.ts";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -4516,48 +4516,80 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private timerCall(this: Mut<this>, e: Ref<Call>, name: string): Call {
     const at = { start: e.start, end: e.end };
-    const helper = (named: string, args: Expr[]): Call => this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: named, start: e.callee.start, end: e.callee.end }, args, typeArgs: [] }) as Call;
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}' takes no type arguments`, e.start, e.end);
     if (e.args.some((a) => a.kind === "spread")) throw new CompileError("E0504", `'${name}' takes its arguments written out, not spread`, e.start, e.end);
     if (name === "clearTimeout" || name === "clearInterval") {
       if (e.args.length > 1) throw new CompileError("E0504", `'${name}' takes the timer to clear`, e.start, e.end);
-      return helper("timeout clear", [e.args[0] ?? { id: nextId(this.ctx.tables.ids), kind: "null", ...at }]);
+      const cleared: Expr = e.args.length > 0 ? cloneExpr(e.args[0]!) : { id: nextId(this.ctx.tables.ids), kind: "null", start: at.start, end: at.end };
+      return this.timerHelper(e, "timeout clear", [cleared]);
     }
     if (e.args.length === 0) throw new CompileError("E0504", `'${name}' takes the function to run, then the milliseconds to wait`, e.start, e.end);
     if (!this.ctx.runtime && !this.ctx.async) throw new CompileError("E0301", `'${name}' can only be used inside an 'async' function here, where the runtime is running`, e.callee.start, e.callee.end);
-    this.ctx.tables.timerNames.set(e, name);
-    if (e.args.length > 4) throw new CompileError("E0504", `'${name}' passes at most two arguments on to its function so far; pass the rest through an arrow, as in '${name}(() => f(a, b, c), ms)'`, e.args[4]!.start, e.args.at(-1)!.end);
+    this.ctx.tables.timerNames.set(cloneExpr(e), name);
+    if (e.args.length > 4) throw new CompileError("E0504", `'${name}' passes at most two arguments on to its function so far; pass the rest through an arrow, as in '${name}(() => f(a, b, c), ms)'`, e.args[4]!.start, e.args[e.args.length - 1]!.end);
     // What it passes on is captured when the timer is set, so each is a name or a literal, which
     // capturing then and reading later can't tell apart.
-    const passed = e.args.slice(2);
-    const plain = (x: Expr): boolean => ["ident", "int", "float", "bigint", "string", "bool", "null"].includes(x.kind) || (x.kind === "unary" && x.op === "-" && plain(x.operand));
-    const odd = passed.find((x) => !plain(x));
-    if (odd) throw new CompileError("E0504", `'${name}' passes on a name or a literal; give this value a name first, as in 'const v = ...; ${name}(f, ms, v)'`, odd.start, odd.end);
+    let passed: Expr[] = [];
+    for (let i: usize = 2; i < e.args.length; i++) passed.push(cloneExpr(e.args[i]!));
+    for (const x of passed) if (!plainArg(x)) throw new CompileError("E0504", `'${name}' passes on a name or a literal; give this value a name first, as in 'const v = ...; ${name}(f, ms, v)'`, x.start, x.end);
     // The callback runs inside an async arrow the timer keeps, which owns what it captures. It is
     // named or written in place, so making that arrow evaluates nothing early or late.
-    let callback = e.args[0]!;
-    if (callback.kind !== "arrow" && callback.kind !== "ident") throw new CompileError("E0504", `'${name}' takes a function written here or named, as in '${name}(() => tick(), ms)'; give this one a name first`, callback.start, callback.end);
-    // An arrow's unwritten parameters take the types of what is passed, as TypeScript infers.
-    if (callback.kind === "arrow") {
-      const params = callback.params.map((p, i) => (!p.type && passed[i] ? this.ctx.tables.rewrites.replaceParam(p, { ...p, type: this.presetNode(this.ctx.tables.typing.widenLet(this.value(passed[i]!)), p) }) : p));
-      callback = this.ctx.tables.rewrites.replace(callback, { ...callback, params });
-    }
+    const callback = this.timerCallback(e.args[0]!, passed, name);
     const span = { start: callback.start, end: callback.end };
     // Each run passes its own copy of a value that doesn't copy, as each of node's runs passes it.
-    const given = passed.map((x): Expr => (x.kind === "ident" && !this.ctx.tables.typing.isCopy(this.value(x)) ? { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: x, name: "clone", optional: false, start: x.start, end: x.end }, args: [], typeArgs: [], optional: false, start: x.start, end: x.end } : x));
-    const run: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: callback, args: given, typeArgs: [], optional: false, ...span };
-    const body: Expr = this.givesPromise(callback) ? { id: nextId(this.ctx.tables.ids), kind: "unary", op: "await", operand: run, ...span } : run;
+    let given: Expr[] = [];
+    for (let i: usize = 0; i < passed.length; i++) given.push(this.timerPassed(passed[i]!));
+    const run: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: cloneExpr(callback), args: given, typeArgs: [], optional: false, start: span.start, end: span.end };
+    const body: Expr = this.givesPromise(callback) ? { id: nextId(this.ctx.tables.ids), kind: "unary", op: "await", operand: run, start: span.start, end: span.end } : run;
     // An async arrow taking nothing is what the timer keeps, so its captures are made once.
     const own = callback.kind === "arrow" && callback.async && callback.params.length === 0 && Array.isArray(callback.body);
+    const promised = this.givesPromise(callback);
     const kept: Expr = own ? callback
-      : { id: nextId(this.ctx.tables.ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ id: nextId(this.ctx.tables.ids), kind: "expr", expr: body, ...span }], ...span };
-    const wrapper: Expr = this.givesPromise(callback) ? { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "timer detached", ...span }, args: [kept], typeArgs: [], optional: false, ...span } : kept;
-    this.ctx.tables.timerWrappers.add(kept);
-    if (!own) this.ctx.tables.madeArrows.add(kept);
-    const loop: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "timer loop", ...at }, args: [], typeArgs: [], optional: false, ...at };
-    const ms = e.args[1] ?? { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, ...at };
-    this.ctx.tables.timerSets.add(e);
-    return helper("timerSet", [wrapper, ms, { id: nextId(this.ctx.tables.ids), kind: "bool", value: name === "setInterval", ...at }, loop]);
+      : { id: nextId(this.ctx.tables.ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: [{ id: nextId(this.ctx.tables.ids), kind: "expr", expr: body, start: span.start, end: span.end }], start: span.start, end: span.end };
+    this.ctx.tables.timerWrappers.add(cloneExpr(kept));
+    if (!own) this.ctx.tables.madeArrows.add(cloneExpr(kept));
+    const wrapper: Expr = promised ? { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "timer detached", start: span.start, end: span.end }, args: [kept], typeArgs: [], optional: false, start: span.start, end: span.end } : kept;
+    const loop: Expr = { id: nextId(this.ctx.tables.ids), kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: "timer loop", start: at.start, end: at.end }, args: [], typeArgs: [], optional: false, start: at.start, end: at.end };
+    const ms: Expr = e.args.length > 1 ? cloneExpr(e.args[1]!) : { id: nextId(this.ctx.tables.ids), kind: "int", value: 0n, start: at.start, end: at.end };
+    this.ctx.tables.timerSets.add(cloneExpr(e));
+    const interval: Expr = { id: nextId(this.ctx.tables.ids), kind: "bool", value: name === "setInterval", start: at.start, end: at.end };
+    return this.timerHelper(e, "timerSet", [wrapper, ms, interval, loop]);
+  }
+
+  // A call of the std's timer helper `named` in place of `e`.
+  private timerHelper(this: Mut<this>, e: Ref<Call>, named: string, args: Expr[]): Call {
+    const callee: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: named, start: e.callee.start, end: e.callee.end };
+    return this.replacedCall(e, { ...callNode(e), callee, args, typeArgs: [] });
+  }
+
+  // A timer's callback, named or written in place; an arrow's unwritten parameters take the types
+  // of what is passed, as TypeScript infers.
+  /** @throws {CompileError} */
+  private timerCallback(this: Mut<this>, callback: Ref<Expr>, passed: Ref<Expr[]>, name: string): Expr {
+    if (callback.kind === "ident") return cloneExpr(callback);
+    if (callback.kind !== "arrow") throw new CompileError("E0504", `'${name}' takes a function written here or named, as in '${name}(() => tick(), ms)'; give this one a name first`, callback.start, callback.end);
+    let params: Param[] = [];
+    for (let i: usize = 0; i < callback.params.length; i++) {
+      if (callback.params[i]!.type === undefined && i < passed.length) {
+        const v = this.value(passed[i]!);
+        const widened = this.ctx.tables.typing.widenLet(v);
+        const type = this.presetNode(widened, callback.params[i]!);
+        params.push(this.ctx.tables.rewrites.replaceParam(callback.params[i]!, { ...cloneParam(callback.params[i]!), type }));
+      } else params.push(cloneParam(callback.params[i]!));
+    }
+    const arrow = cloneExpr(callback);
+    if (arrow.kind !== "arrow") return arrow;
+    return this.ctx.tables.rewrites.replace(callback, { ...arrow, params });
+  }
+
+  // What a timer passes its callback on each run: a name of a value that doesn't copy is cloned.
+  /** @throws {CompileError} */
+  private timerPassed(this: Mut<this>, x: Ref<Expr>): Expr {
+    if (x.kind !== "ident") return cloneExpr(x);
+    const t = this.value(x);
+    if (this.ctx.tables.typing.isCopy(t)) return cloneExpr(x);
+    const id = nextId(this.ctx.tables.ids);
+    return { id, kind: "call", callee: { id: nextId(this.ctx.tables.ids), kind: "member", object: cloneExpr(x), name: "clone", optional: false, start: x.start, end: x.end }, args: [], typeArgs: [], optional: false, start: x.start, end: x.end };
   }
 
   // Whether a timer's callback gives a Promise to await: an async arrow or one whose body calls a
@@ -4566,22 +4598,29 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callback.kind === "arrow") {
       if (callback.async) return true;
       // A block body gives what its last statement returns.
-      const last = Array.isArray(callback.body) ? callback.body.at(-1) : undefined;
-      const given = Array.isArray(callback.body) ? (last?.kind === "return" ? last.value : undefined) : callback.body;
-      return given?.kind === "call" && this.givesPromise(given.callee);
+      if (!Array.isArray(callback.body)) return callback.body.kind === "call" && this.givesPromise(callback.body.callee);
+      const n = callback.body.length;
+      return n > 0 && this.returnsPromise(callback.body[n - 1]!);
     }
     if (callback.kind !== "ident") return false;
     const localId = this.ctx.lookup(callback.name, undefined);
-    const local = localId === undefined ? undefined : this.lc(localId);
-    if ((local === undefined)) {
+    if (localId === undefined) {
       const f = this.bodyNamed(callback.name);
-      return f?.async === true || (f?.returnType?.kind === "ref" && f.returnType.name === "Promise");
+      if (f === undefined) return false;
+      if (f.async === true) return true;
+      return f.returnType !== undefined && f.returnType.kind === "ref" && f.returnType.name === "Promise";
     }
-    const held = this.ctx.tables.typing.lower(local.type);
+    const declared = this.lc(localId).type;
+    const held = this.ctx.tables.typing.lower(declared);
     const r = this.recOf(held);
     const fn = r?.kind === "closure" || r?.kind === "function" ? r : this.isCallable(held) ? this.recOf(this.ctx.tables.typing.callableOf.get(this.ctx.tables.typing.rec(held as DynType).of)) : undefined;
     const returns = fn?.returns;
     return returns !== undefined && (this.recOf(returns)?.kind === "future" || this.promiseMet(returns) !== undefined);
+  }
+
+  // Whether a block's last statement returns a call giving a Promise.
+  private returnsPromise(this: Mut<this>, s: Ref<Stmt>): boolean {
+    return s.kind === "return" && s.value !== undefined && s.value.kind === "call" && this.givesPromise(s.value.callee);
   }
 
   // `Promise.withResolvers<T>()`, rewritten as the prelude's cell with its promise and the
@@ -4592,11 +4631,22 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.typeArgs.length > 1) throw new CompileError("E0305", "'Promise.withResolvers' takes one type argument, what its Promise gives", e.start, e.end);
     if (e.typeArgs.length === 0) throw new CompileError("E0305", "can't tell what this Promise gives; write it, as in 'Promise.withResolvers<i64>()'", e.start, e.end);
     const gives = this.ctx.resolveType(e.typeArgs[0]!);
-    const error = this.ctx.throwsDeclared() ?? this.ctx.tables.arenas.classOf(this.ctx.classes.get("Error")!).type;
-    const at = { start: e.start, end: e.end };
-    const made = this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", ...at }, typeArgs: [...(gives === "void" ? [] : [this.presetNode(gives, e)]), this.presetNode(error, e)] }) as Call;
-    if (gives !== "void") this.ctx.tables.promiseVariants.set(made, { name: "promise with resolvers", typeArgs: made.typeArgs });
+    const declared = this.ctx.throwsDeclared();
+    const error = declared !== undefined ? declared : this.ctx.tables.arenas.classOf(this.ctx.classes.get("Error")!).type;
+    const callee: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: gives === "void" ? "promise with resolvers void" : "promise with resolvers", start: e.start, end: e.end };
+    let typeArgs: TypeNode[] = [];
+    if (gives !== "void") typeArgs.push(this.presetNode(gives, e));
+    typeArgs.push(this.presetNode(error, e));
+    const made = this.replacedCall(e, { ...callNode(e), callee, typeArgs });
+    if (gives !== "void") this.ctx.tables.promiseVariants.set(cloneExpr(made), { name: "promise with resolvers", typeArgs: cloneTypeNodes(made.typeArgs) });
     return made;
+  }
+
+  // `e` replaced by `call`, a call made from it.
+  private replacedCall(this: Mut<this>, e: Ref<Call>, call: Call): Call {
+    const made = this.ctx.tables.rewrites.replace(e, cloneExpr(call));
+    if (made.kind === "call") return made;
+    return call;
   }
 
   // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions
@@ -4604,28 +4654,36 @@ export class Expressions<C extends Context> implements Union<C> {
   // neither gives nothing.
   /** @throws {CompileError} */
   private promiseSettled(this: Mut<this>, e: Ref<Call>, name: "resolve" | "reject"): Call {
-    const at = { start: e.start, end: e.end };
-    if (e.args.length > 1 || e.args[0]?.kind === "spread") throw new CompileError("E0305", `'Promise.${name}' takes ${name === "resolve" ? "the value it gives" : "the error it throws"}`, e.start, e.end);
+    if (e.args.length > 1 || (e.args.length > 0 && e.args[0]!.kind === "spread")) throw new CompileError("E0305", `'Promise.${name}' takes ${name === "resolve" ? "the value it gives" : "the error it throws"}`, e.start, e.end);
     if (e.typeArgs.length > 1) throw new CompileError("E0305", `'Promise.${name}' takes one type argument, what it gives`, e.start, e.end);
     const expected = this.ctx.exprsState.wanted.get(e);
-    const met = (expected === undefined ? undefined : this.promiseMet(expected)) ?? this.ctx.exprsState.awaitedAs.get(e);
-    const written = e.typeArgs[0] ? this.ctx.resolveType(e.typeArgs[0]) : undefined;
+    const promised = expected === undefined ? undefined : this.promiseMet(expected);
+    const met = promised !== undefined ? promised : this.ctx.exprsState.awaitedAs.get(e);
+    const written = e.typeArgs.length > 0 ? this.ctx.resolveType(e.typeArgs[0]!) : undefined;
     if (name === "resolve") {
-      const gives = written ?? (e.args.length === 0 ? "void" : met);
+      const gives = written !== undefined ? written : e.args.length === 0 ? "void" : met;
       if (gives === "void" && e.args.length > 0) throw new CompileError("E0305", "a 'Promise<void>' gives nothing, so 'Promise.resolve' takes no value for it", e.args[0]!.start, e.args[0]!.end);
       if (gives !== "void" && e.args.length === 0) throw new CompileError("E0305", `'Promise.resolve' takes the value it gives, of type '${this.ctx.tables.typing.show(gives!)}'`, e.start, e.end);
       const given = e.args.length > 0 ? this.value(e.args[0]!) : undefined;
       const r = this.recOf(given);
-      if (r?.kind === "future" || r?.kind === "handle" || (r?.kind === "dyn" && this.ctx.tables.typing.promiseElement(r.of) !== undefined)) {
+      if (r !== undefined && (r.kind === "future" || r.kind === "handle" || (r.kind === "dyn" && this.ctx.tables.typing.promiseElement(r.of) !== undefined))) {
         throw new CompileError("E0305", "'Promise.resolve' of a Promise would hold one Promise inside another, which Fish doesn't flatten; await it first, or use the Promise itself", e.args[0]!.start, e.args[0]!.end);
       }
-      return this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", ...at }, typeArgs: gives === "void" || gives === undefined ? [] : [this.presetNode(gives, e)] }) as Call;
+      const callee: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: gives === "void" ? "promise resolve void" : "promise resolve", start: e.start, end: e.end };
+      let typeArgs: TypeNode[] = [];
+      if (gives !== "void" && gives !== undefined) typeArgs.push(this.presetNode(gives, e));
+      return this.replacedCall(e, { ...callNode(e), callee, typeArgs });
     }
     if (e.args.length === 0) throw new CompileError("E0305", "'Promise.reject' takes the error it throws, as in 'Promise.reject(new Error(\"failed\"))'", e.start, e.end);
-    const gives = written ?? met ?? "void";
+    const gives = written !== undefined ? written : met !== undefined ? met : "void";
     const reason = this.value(e.args[0]!);
-    const made = this.ctx.tables.rewrites.replace(e, { ...e, callee: { id: nextId(this.ctx.tables.ids), kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", ...at }, typeArgs: [...(gives === "void" ? [] : [this.presetNode(gives, e)]), this.presetNode(this.ctx.tables.typing.widenLet(reason), e)] }) as Call;
-    if (gives !== "void") this.ctx.tables.promiseVariants.set(made, { name: "promise reject", typeArgs: made.typeArgs });
+    const callee: Expr = { id: nextId(this.ctx.tables.ids), kind: "ident", name: gives === "void" ? "promise reject void" : "promise reject", start: e.start, end: e.end };
+    let typeArgs: TypeNode[] = [];
+    if (gives !== "void") typeArgs.push(this.presetNode(gives, e));
+    const widened = this.ctx.tables.typing.widenLet(reason);
+    typeArgs.push(this.presetNode(widened, e));
+    const made = this.replacedCall(e, { ...callNode(e), callee, typeArgs });
+    if (gives !== "void") this.ctx.tables.promiseVariants.set(cloneExpr(made), { name: "promise reject", typeArgs: cloneTypeNodes(made.typeArgs) });
     return made;
   }
 
@@ -4649,9 +4707,10 @@ export class Expressions<C extends Context> implements Union<C> {
     // A pair of types met again while it is compared: handles' shapes referring to themselves
     // fit; a Fish type referring to itself has no value JS could take yet. Object types are
     // interned, so a nested value of another type is a pair of its own.
-    const source = own ?? from;
-    if (this.ctx.exprsState.comparing.get(source)?.has(shape)) return own ? undefined : `'${this.ctx.tables.typing.show(from)}' refers to itself, which can't cross between Fish and JS yet`;
-    if (!this.ctx.exprsState.comparing.has(source)) this.ctx.exprsState.comparing.set(source, new TypeSet());
+    const source: Type = own !== undefined ? own : from;
+    const pairs = this.ctx.exprsState.comparing.get(source);
+    if (pairs !== undefined && pairs.has(shape)) return own !== undefined ? undefined : `'${this.ctx.tables.typing.show(from)}' refers to itself, which can't cross between Fish and JS yet`;
+    if (!this.ctx.exprsState.comparing.has(source)) this.ctx.exprsState.comparing.set(source, new TypeSet<Type>());
     this.ctx.exprsState.comparing.get(source)!.add(shape);
     try {
       return this.shapeMisses(from, own, shape);
@@ -4660,47 +4719,71 @@ export class Expressions<C extends Context> implements Union<C> {
     }
   }
 
+  private isInterface(t: Type): t is InterfaceType {
+    return this.recOf(t)?.kind === "interface";
+  }
+
   private shapeMisses(this: Mut<this>, from: Type, own: InterfaceType | ObjectType | undefined, shape: InterfaceType | ObjectType): string | undefined {
     const kind = this.recOf(from)?.kind;
-    const source = own ?? ((kind === "object" || kind === "class") && !this.ctx.tables.typing.isTuple(from) ? from : undefined);
-    if (!source) return `a '${this.ctx.tables.typing.show(from)}' isn't an object`;
-    const wanted = this.ctx.tables.typing.rec(shape);
-    const owned = own && this.ctx.tables.typing.rec(own);
-    if (!own && wanted.kind === "interface" && wanted.methods.length > 0) return `its methods come only with a value JS made`;
+    const source: Type | undefined = own !== undefined ? own : (kind === "object" || kind === "class") && !this.ctx.tables.typing.isTuple(from) ? from : undefined;
+    if (source === undefined) return `a '${this.ctx.tables.typing.show(from)}' isn't an object`;
+    if (own === undefined && this.isInterface(shape) && this.ctx.tables.typing.rec(shape).methods.length > 0) return `its methods come only with a value JS made`;
     // A handle of another shape has the methods this one declares, by name and types.
-    if (own && wanted.kind === "interface") {
-      const methods = owned?.kind === "interface" ? owned.methods : [];
-      // A method fits as TypeScript's do: it may take fewer parameters, an extra one of its own
-      // is optional, the wanted one's arguments pass for those it has, and what it gives passes for
-      // what is wanted; a generic one is matched by its parameters' count.
-      const same = (a: Method, b: Method) => {
-        if (a.params.slice(b.params.length).some((p) => !this.ctx.tables.typing.isOption(p))) return false;
-        if (a.generic || b.generic) return a.params.length === b.params.length;
-        return a.params.every((p, i) => i >= b.params.length || this.passesJs(b.params[i]!, p)) && (b.returns === "void" || this.passesJs(a.returns, b.returns));
-      };
-      const lacking = wanted.methods.find((m) => !methods.some((n) => n.name === m.name && same(n, m)));
-      if (lacking) return methods.some((n) => n.name === lacking.name) ? `method '${lacking.name}' takes or gives other types` : `property '${lacking.name}' is missing`;
+    if (own !== undefined && this.isInterface(shape)) {
+      const wanted = this.ctx.tables.typing.rec(shape).methods.slice();
+      const methods: Method[] = this.isInterface(own) ? this.ctx.tables.typing.rec(own).methods.slice() : [];
+      for (const m of wanted) {
+        let fits = false;
+        for (const n of methods) if (!fits && n.name === m.name && this.jsMethodFits(n, m)) fits = true;
+        if (fits) continue;
+        let named = false;
+        for (const n of methods) if (n.name === m.name) named = true;
+        return named ? `method '${m.name}' takes or gives other types` : `property '${m.name}' is missing`;
+      }
     }
     // A member Fish couldn't type that the shape declares is one only a handle of it has.
-    const held = wanted.kind === "interface" ? this.ctx.tables.typing.jsUntyped.get(shape as InterfaceType) : undefined;
-    const optional = wanted.kind === "interface" ? this.ctx.tables.typing.jsOptional.get(shape as InterfaceType) : undefined;
-    const aside = [...(held ?? [])].filter(([n]) => !(optional?.has(n) ?? false)).map(([n]) => n);
-    const unseen = aside.find((n) => owned?.kind !== "interface" || !(this.ctx.tables.typing.jsUntyped.get(own as InterfaceType)?.has(n) ?? false));
+    let aside: string[] = [];
+    if (this.isInterface(shape)) {
+      const held = this.ctx.tables.typing.jsUntyped.get(shape);
+      const optional = this.ctx.tables.typing.jsOptional.get(shape);
+      if (held !== undefined) for (const n of held.keys()) if (optional === undefined || !optional.has(n)) aside.push(n);
+    }
+    let unseen: string | undefined = undefined;
+    if (own !== undefined && this.isInterface(own)) {
+      const kept = this.ctx.tables.typing.jsUntyped.get(own);
+      for (const n of aside) if (unseen === undefined && (kept === undefined || !kept.has(n))) unseen = n;
+    } else if (aside.length > 0) unseen = aside[0]!;
     if (unseen !== undefined) return unseen.startsWith("[") ? `its ${unseen === "[index]" ? "index" : "call"} signature comes only with a value JS made` : `property '${unseen}' is missing`;
     // A Fish class's private fields stay its own.
-    const r = this.ctx.tables.typing.rec(source as Exclude<Type, string>);
-    const fields = r.kind === "class" ? r.fields.filter((g) => (g.access ?? "public") === "public") : r.fields;
-    for (const f of this.ctx.tables.typing.rec(shape).fields) {
-      const found = fields.find((g) => g.name === f.name);
-      if (!found) {
+    let fields: Field[] = [];
+    if (typeof source !== "string") {
+      const r = this.ctx.tables.typing.rec(source);
+      for (const g of r.fields) if (r.kind !== "class" || g.access === undefined || g.access === "public") fields.push({ ...g });
+    }
+    const wantedFields = this.ctx.tables.typing.rec(shape).fields.slice();
+    for (const f of wantedFields) {
+      let found: Field | undefined = undefined;
+      for (const g of fields) if (found === undefined && g.name === f.name) found = { ...g };
+      if (found === undefined) {
         if (this.ctx.tables.typing.isOption(f.type)) continue;
         return `property '${f.name}' is missing`;
       }
       if (!this.passesJs(found.type, f.type)) return `property '${f.name}' is a '${this.ctx.tables.typing.show(found.type)}', not a '${this.ctx.tables.typing.show(f.type)}'`;
-      const why = own ? undefined : this.ctx.tables.typing.uncrossable(found.type);
-      if (why) return `property '${f.name}' is a '${this.ctx.tables.typing.show(found.type)}', which can't cross between Fish and JS yet: ${why}`;
+      const why = own !== undefined ? undefined : this.ctx.tables.typing.uncrossable(found.type);
+      if (why !== undefined && why !== "") return `property '${f.name}' is a '${this.ctx.tables.typing.show(found.type)}', which can't cross between Fish and JS yet: ${why}`;
     }
     return undefined;
+  }
+
+  // Whether a handle's method `a` fits a wanted one `b` as TypeScript's do: it may take fewer
+  // parameters, an extra one of its own is optional, the wanted one's arguments pass for those it
+  // has, and what it gives passes for what is wanted; a generic one is matched by its parameters'
+  // count.
+  private jsMethodFits(this: Mut<this>, a: Ref<Method>, b: Ref<Method>): boolean {
+    for (let i: usize = b.params.length; i < a.params.length; i++) if (!this.ctx.tables.typing.isOption(a.params[i]!)) return false;
+    if (a.generic !== undefined || b.generic !== undefined) return a.params.length === b.params.length;
+    for (let i: usize = 0; i < a.params.length && i < b.params.length; i++) if (!this.passesJs(b.params[i]!, a.params[i]!)) return false;
+    return b.returns === "void" || this.passesJs(a.returns, b.returns);
   }
 
   // Whether a value passes where a package declares a type: as it fits it, or as a value JS takes
@@ -4734,10 +4817,19 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // A shape's member Fish couldn't type, as the refusal of its declaration, noting this use.
-  private untyped(shape: InterfaceType | ObjectType | undefined, name: string, at: Ref<Span>): CompileError | undefined {
-    const why = shape && this.ctx.tables.typing.rec(shape).kind === "interface" ? this.ctx.tables.typing.jsUntyped.get(shape as InterfaceType)?.get(name) : undefined;
-    if (why && !why.note) why.note = { message: `'${name}' is used here`, start: at.start, end: at.end };
-    return why;
+  private untyped(this: Mut<this>, shape: InterfaceType | ObjectType | undefined, name: string, at: Ref<Span>): CompileError | undefined {
+    if (shape === undefined || !this.isInterface(shape)) return undefined;
+    const errors = this.ctx.tables.typing.jsUntyped.get(shape);
+    const why = errors === undefined ? undefined : errors.get(name);
+    if (why === undefined) return undefined;
+    let out = why.clone();
+    if (out.note !== undefined) return out;
+    // The first use found is the one noted, each time the refusal is given.
+    out.note = { message: `'${name}' is used here`, start: at.start, end: at.end };
+    let noted = new Map<string, CompileError>();
+    for (const [k, v] of errors!) noted.set(k, k === name ? out.clone() : v.clone());
+    this.ctx.tables.typing.jsUntyped.set(shape, noted);
+    return out;
   }
 
   // A type a handle's member gives or takes, refused when it can't cross between Fish and JS.
@@ -4759,21 +4851,39 @@ export class Expressions<C extends Context> implements Union<C> {
       throw new CompileError("E1005", `a 'JsValue' could be anything, as an 'unknown' could, so it has no property '${e.name}' to use; read one with '${this.placeText(e.object)}.get("${e.name}")'`, e.start, e.end);
     }
     const shape = this.ctx.tables.typing.jsShape(t);
-    const found = shape && this.ctx.tables.typing.rec(shape).fields.find((f) => f.name === e.name);
-    if (found) {
-      this.ctx.tables.jsMembers.add(e);
+    let found: Field | undefined = undefined;
+    if (shape !== undefined) {
+      const fields = this.ctx.tables.typing.rec(shape).fields;
+      for (const f of fields) if (found === undefined && f.name === e.name) found = { ...f };
+    }
+    if (found !== undefined) {
+      this.ctx.tables.jsMembers.add(cloneExpr(e));
       // A callback or a Promise goes to JS when written, but Fish has no reading of one back.
-      const kept = (u: Type) => typeof u !== "string" && this.ctx.tables.typing.rec(u).kind === "dyn" && this.ctx.tables.typing.keptByJs(u);
-      if (this.ctx.exprsState.writing !== e.id && this.ctx.tables.typing.holdsPart(found.type, kept)) {
-        const promise = this.ctx.tables.typing.holdsPart(found.type, (u) => kept(u) && this.ctx.tables.typing.promiseElement(this.ctx.tables.typing.rec(u as DynType).of) !== undefined);
+      if (this.ctx.exprsState.writing !== e.id && this.keptByJsIn(found.type, false)) {
+        const promise = this.keptByJsIn(found.type, true);
         throw new CompileError("E0801", `reading property '${e.name}' of '${this.ctx.tables.typing.show(t)}' isn't supported yet: it holds a ${promise ? "Promise" : "function"}, which Fish can give JS but not read back`, e.start, e.end);
       }
-      return this.crossing(this.ctx.tables.typing.jsView(found.type), `property '${e.name}' of '${this.ctx.tables.typing.show(t)}' is a`, e);
+      const view = this.ctx.tables.typing.jsView(found.type);
+      const what = `property '${e.name}' of '${this.ctx.tables.typing.show(t)}' is a`;
+      return this.crossing(view, what, e);
     }
     const r = this.recOf(shape);
-    const method = r?.kind === "interface" && r.methods.some((m) => m.name === e.name);
+    let method = false;
+    if (r !== undefined && r.kind === "interface") for (const m of r.methods) if (m.name === e.name) method = true;
     if (method) throw new CompileError("E0503", `'${e.name}' is a method of '${this.ctx.tables.typing.show(t)}'; call it, as in '${this.placeText(e)}(...)'`, e.start, e.end);
-    throw this.untyped(shape, e.name, e) ?? new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'`, e.start, e.end);
+    const why = this.untyped(shape, e.name, e);
+    throw why !== undefined ? why : new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'`, e.start, e.end);
+  }
+
+  // Whether a type holds a callback or a Promise JS keeps, or with `promised` a Promise only.
+  private keptByJsIn(t: Type, promised: boolean): boolean {
+    for (const u of this.ctx.tables.typing.partsOf(t)) {
+      if (typeof u === "string") continue;
+      const r = this.ctx.tables.typing.rec(u);
+      if (r.kind !== "dyn" || !this.ctx.tables.typing.keptByJs(u)) continue;
+      if (!promised || this.ctx.tables.typing.promiseElement(r.of) !== undefined) return true;
+    }
+    return false;
   }
 
   // `v.get(key)` and `v.at(i)` read a property or an element of a JsValue, and `v.has(key)` tests
@@ -4781,14 +4891,15 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private jsAccessor(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
     const name = callee.name;
-    const takes = ({ get: "string", has: "string", at: "i64" } as Record<string, Type>)[name];
-    if (!takes) throw new CompileError("E1005", `a 'JsValue' has no method '${name}': its own are 'get', 'at' and 'has', and it is narrowed with 'typeof' to read it`, callee.start, callee.end);
+    const takes: Type | undefined = name === "get" || name === "has" ? "string" : name === "at" ? "i64" : undefined;
+    if (takes === undefined) throw new CompileError("E1005", `a 'JsValue' has no method '${name}': its own are 'get', 'at' and 'has', and it is narrowed with 'typeof' to read it`, callee.start, callee.end);
     const what = takes === "i64" ? "an index, as an 'i64'" : "a key, as a 'string'";
     if (e.args.length !== 1) throw new CompileError("E0504", `'${name}' takes ${what}`, e.start, e.end);
     this.expect(e.args[0]!, takes);
     const given = this.value(e.args[0]!);
-    this.coerce(e.args[0]!, given, takes, `'${name}' takes ${what}, not '${this.ctx.tables.typing.show(given)}'`);
-    this.ctx.tables.jsAccessors.add(e);
+    const message = `'${name}' takes ${what}, not '${this.ctx.tables.typing.show(given)}'`;
+    this.coerce(e.args[0]!, given, takes, message);
+    this.ctx.tables.jsAccessors.add(cloneExpr(e));
     return { type: name === "has" ? "boolean" : this.ctx.tables.typing.blockType("JsValue"), what: `'${name}'` };
   }
 
@@ -4798,83 +4909,167 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.tables.typing.rec(t).of === "void") return this.jsAccessor(e, callee);
     const shape = this.ctx.tables.typing.jsShape(t);
     const r = this.recOf(shape);
-    const method = r?.kind === "interface" ? r.methods.find((m) => m.name === callee.name) : undefined;
-    if ((method === undefined)) {
-      const field = r?.fields.some((f) => f.name === callee.name);
-      throw this.untyped(shape, callee.name, callee) ?? new CompileError(field ? "E0503" : "E0502", field ? `'${callee.name}' is a property of '${this.ctx.tables.typing.show(t)}', not a method` : `property '${shownName(callee.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'`, callee.start, callee.end);
+    let method: Method | undefined = undefined;
+    let field = false;
+    if (r !== undefined && r.kind === "interface") for (const m of r.methods) if (method === undefined && m.name === callee.name) method = { ...m };
+    if (r !== undefined) for (const f of r.fields) if (f.name === callee.name) field = true;
+    if (method === undefined) {
+      const why = this.untyped(shape, callee.name, callee);
+      throw why !== undefined ? why : new CompileError(field ? "E0503" : "E0502", field ? `'${callee.name}' is a property of '${this.ctx.tables.typing.show(t)}', not a method` : `property '${shownName(callee.name)}' does not exist on type '${this.ctx.tables.typing.show(t)}'`, callee.start, callee.end);
     }
-    this.ctx.tables.jsMethods.add(e);
+    this.ctx.tables.jsMethods.add(cloneExpr(e));
     // A generic one is typed for the call's type arguments, written or inferred.
-    if (method.generic) {
+    if (method.generic !== undefined) {
       // An optional parameter left out is undefined, as JS gives it.
-      const missing = method.params.slice(e.args.length);
-      const left = missing.findIndex((p) => !this.ctx.tables.typing.isOption(p));
-      const nulls = missing.slice(0, left < 0 ? missing.length : left).map((): Expr => ({ id: nextId(this.ctx.tables.ids), kind: "null", start: e.end, end: e.end }));
-      if (nulls.length > 0) e = this.ctx.tables.rewrites.replace(e, { ...e, args: [...e.args, ...nulls] }) as Call;
-      this.ctx.tables.jsCrossings.add(e);
-      this.ctx.tables.jsOptionalOf.set(e, method.optional ?? []);
-      const typed = this.familyCall(e, { generic: method.generic }, `'${callee.name}'`);
-      e.args.forEach((a) => this.crossing(this.ctx.types.get(a) ?? "void", `'${callee.name}' of '${this.ctx.tables.typing.show(t)}' is given a`, a));
-      return { type: this.crossing(typed.type === "void" ? "void" : this.ctx.tables.typing.jsView(typed.type), `'${callee.name}' of '${this.ctx.tables.typing.show(t)}' gives a`, e), what: typed.what };
+      let nulls: Expr[] = [];
+      for (let i: usize = e.args.length; i < method.params.length && this.ctx.tables.typing.isOption(method.params[i]!); i++) nulls.push({ id: nextId(this.ctx.tables.ids), kind: "null", start: e.end, end: e.end });
+      if (nulls.length === 0) return this.jsGenericCall(e, callee.name, t, method);
+      let args: Expr[] = [];
+      for (const a of e.args) args.push(cloneExpr(a));
+      while (nulls.length > 0) args.push(nulls.shift()!);
+      const made = this.replacedCall(e, { ...callNode(e), args });
+      return this.jsGenericCall(made, callee.name, t, method);
     }
     // A callback or a Promise it takes is one JS keeps, and an object type a JS object's shape.
-    const params = method.params.map((t) => this.ctx.tables.typing.jsTakes(t));
-    params.forEach((p) => this.crossing(p, `'${callee.name}' of '${this.ctx.tables.typing.show(t)}' takes a`, e));
-    this.jsArgs(e, params, method.optional ?? []);
-    return { type: this.crossing(method.returns === "void" ? "void" : this.ctx.tables.typing.jsView(method.returns), `'${callee.name}' of '${this.ctx.tables.typing.show(t)}' gives a`, e), what: `'${callee.name}'` };
+    let params: Type[] = [];
+    for (const p of method.params) params.push(this.ctx.tables.typing.jsTakes(p));
+    const takes = `'${callee.name}' of '${this.ctx.tables.typing.show(t)}' takes a`;
+    for (const p of params) this.crossing(p, takes, e);
+    this.jsArgs(e, params, method.optional !== undefined ? method.optional : []);
+    const returns = method.returns === "void" ? "void" : this.ctx.tables.typing.jsView(method.returns);
+    const gives = `'${callee.name}' of '${this.ctx.tables.typing.show(t)}' gives a`;
+    return { type: this.crossing(returns, gives, e), what: `'${callee.name}'` };
+  }
+
+  // A JS handle's generic method, typed for the call's type arguments, written or inferred.
+  /** @throws {CompileError} */
+  private jsGenericCall(this: Mut<this>, e: Ref<Call>, name: string, t: BlockType, method: Method): { type: Type; what: string } {
+    this.ctx.tables.jsCrossings.add(cloneExpr(e));
+    this.ctx.tables.jsOptionalOf.set(cloneExpr(e), method.optional !== undefined ? method.optional : []);
+    const typed = this.familyCall(e, { generic: method.generic }, `'${name}'`);
+    const given = `'${name}' of '${this.ctx.tables.typing.show(t)}' is given a`;
+    for (const a of e.args) {
+      const at = this.ctx.types.get(a);
+      this.crossing(at !== undefined ? at : "void", given, { start: a.start, end: a.end });
+    }
+    const returns = typed.type === "void" ? "void" : this.ctx.tables.typing.jsView(typed.type);
+    const gives = `'${name}' of '${this.ctx.tables.typing.show(t)}' gives a`;
+    return { type: this.crossing(returns, gives, e), what: typed.what };
   }
 
   // The signature of a package's function a call takes: the first, in the order declared, whose
   // parameters the arguments pass for; a generic one is taken on the count of its arguments.
   /** @throws {CompileError} */
   private jsOverload(this: Mut<this>, e: Ref<Call>, first: Ref<Body>): Body {
-    const signatures = [first, ...first.js!.overloads!.map((f) => this.ctx.tables.arenas.bodyOf(this.ctx.tables.jsBodies.get(f)!))];
-    if (e.args.some((a) => a.kind === "arrow" || a.kind === "spread")) return first;
-    const given = e.args.map((a) => this.value(a));
+    let ids: BodyId[] = [first.bodyId];
+    if (first.js !== undefined && first.js.overloads !== undefined) for (const f of first.js.overloads) ids.push(this.ctx.tables.jsBodies.get(f)!);
+    for (const a of e.args) if (a.kind === "arrow" || a.kind === "spread") return { ...first };
+    let given: Type[] = [];
+    for (const a of e.args) given.push(this.value(a));
     // In a generic body's definition an argument may be a placeholder: each instance picks again.
-    const open = given.some((t) => this.ctx.tables.typing.holdsPart(t, (p) => this.placeholder(p)));
-    const fitting = signatures.find((f) => {
-      const required = f.params.filter((p) => !p.optional && !p.rest).length;
-      if (given.length < required || (given.length > f.params.length && !f.params.at(-1)?.rest)) return false;
-      if ((f.typeParams?.length ?? 0) > 0 || open) return true;
-      return given.every((t, i) => {
-        const p = f.params[Math.min(i, f.params.length - 1)]!;
-        const declared = p.type ? this.ctx.resolveType(p.type) : this.ctx.tables.typing.blockType("JsValue");
-        return this.passesJs(t, p.optional ? this.ctx.tables.typing.unionType([declared, "null"]) : declared);
-      });
-    });
-    if (fitting) return fitting;
-    const shown = signatures.map((f) => `(${f.params.map((p) => `${(p.pattern as { name?: string }).name ?? "_"}${p.optional ? "?" : ""}: ${p.type ? this.ctx.tables.typing.show(this.ctx.resolveType(p.type)) : "any"}`).join(", ")})`).join(", ");
-    throw new CompileError("E0507", `no signature of '${first.js!.name}' takes (${given.map((t) => this.ctx.tables.typing.show(t)).join(", ")}); it takes ${shown}`, e.start, e.end);
+    let open = false;
+    for (const t of given) {
+      const parts = this.ctx.tables.typing.partsOf(t);
+      for (const p of parts) if (this.placeholder(p)) open = true;
+    }
+    for (const id of ids) if (this.jsFits(id, given, open)) return { ...this.ctx.tables.arenas.bodyOf(id) };
+    let shown: string[] = [];
+    for (const id of ids) {
+      const params = this.bodyParams(id);
+      let parts: string[] = [];
+      for (const p of params) {
+        let type = "any";
+        if (p.type !== undefined) {
+          const t = this.ctx.resolveType(p.type);
+          type = this.ctx.tables.typing.show(t);
+        }
+        parts.push(`${patternName(p.pattern)}${p.optional ? "?" : ""}: ${type}`);
+      }
+      shown.push(`(${parts.join(", ")})`);
+    }
+    let args: string[] = [];
+    for (const t of given) args.push(this.ctx.tables.typing.show(t));
+    throw new CompileError("E0507", `no signature of '${first.js!.name}' takes (${args.join(", ")}); it takes ${shown.join(", ")}`, e.start, e.end);
+  }
+
+  // Copies of a body's parameters, for reading while the checker changes.
+  private bodyParams(id: BodyId): Param[] {
+    const body = this.ctx.tables.arenas.bodyOf(id);
+    let out: Param[] = [];
+    for (const p of body.params) out.push(cloneParam(p));
+    return out;
+  }
+
+  // Whether a package's signature takes arguments of these types.
+  /** @throws {CompileError} */
+  private jsFits(this: Mut<this>, id: BodyId, given: Ref<Type[]>, open: boolean): boolean {
+    const params = this.bodyParams(id);
+    const body = this.ctx.tables.arenas.bodyOf(id);
+    const generic = body.typeParams !== undefined && body.typeParams.length > 0;
+    let required: usize = 0;
+    for (const p of params) if (!p.optional && !p.rest) required++;
+    const restLast = params.length > 0 && params[params.length - 1]!.rest;
+    if (given.length < required || (given.length > params.length && !restLast)) return false;
+    if (generic || open) return true;
+    for (let i: usize = 0; i < given.length; i++) {
+      const j = i < params.length - 1 ? i : params.length - 1;
+      const declared = params[j]!.type !== undefined ? this.ctx.resolveType(params[j]!.type!) : this.ctx.tables.typing.blockType("JsValue");
+      const to = params[j]!.optional ? this.ctx.tables.typing.unionType([declared, "null"]) : declared;
+      if (!this.passesJs(given[i]!, to)) return false;
+    }
+    return true;
   }
 
   // The overload a call takes: the first, in the order declared, whose parameters its arguments
   // pass for, as TypeScript picks one. A generic one is taken on the count of its arguments.
   /** @throws {CompileError} */
   private overload(this: Mut<this>, e: Ref<Call>, impl: Ref<Body>): Body {
-    const spread = e.args.find((a) => a.kind === "spread");
-    if ((spread !== undefined)) throw new CompileError("E0801", `spreading arguments into the overloaded '${impl.name}' isn't supported yet; pass them one by one`, spread.start, spread.end);
-    const given = e.args.map((a) => (a.kind === "arrow" ? undefined : this.tried(a)));
-    const overloads = impl.overloads!.map((f) => this.ctx.tables.arenas.bodyOf(f));
-    const fitting = overloads.find((f) => {
-      const required = f.params.filter((p) => !p.optional && !p.rest).length;
-      if (e.args.length < required || (e.args.length > f.params.length && !f.params.at(-1)?.rest)) return false;
-      const types = this.signatureTypes(f);
-      return types === undefined || e.args.every((a, i) => this.passes(a, given[i], types[Math.min(i, types.length - 1)]!, f.params[Math.min(i, f.params.length - 1)]!));
-    });
-    if (fitting) return fitting;
-    const shown = overloads.map((f) => {
-      const types = this.signatureTypes(f);
+    for (const a of e.args) if (a.kind === "spread") throw new CompileError("E0801", `spreading arguments into the overloaded '${impl.name}' isn't supported yet; pass them one by one`, a.start, a.end);
+    let given: (Type | undefined)[] = [];
+    for (const a of e.args) given.push(a.kind === "arrow" ? undefined : this.tried(a));
+    const ids = impl.overloads!.slice();
+    for (const id of ids) if (this.overloadFits(e, id, given)) return { ...this.ctx.tables.arenas.bodyOf(id) };
+    let shown: string[] = [];
+    for (const id of ids) {
+      const types = this.signatureTypes(id);
+      const params = this.bodyParams(id);
       // A destructured parameter, named only to be passed on, shows as its type alone.
-      const params = f.params.map((p, i) => {
-        const name = (p.pattern as { name?: string }).name ?? "_";
-        const type = types ? this.ctx.tables.typing.show(types[i]!) : "_";
-        return name.startsWith("argument ") ? type : `${p.rest ? "..." : ""}${name}${p.optional ? "?" : ""}: ${type}`;
-      });
-      return `(${params.join(", ")}): ${f.returnType ? this.ctx.tables.typing.show(this.ctx.resolveType(f.returnType)) : "_"}`;
-    });
-    const args = given.map((t) => (t === undefined ? "a function" : this.ctx.tables.typing.show(t)));
+      let parts: string[] = [];
+      for (let i: usize = 0; i < params.length; i++) {
+        const name = patternName(params[i]!.pattern);
+        const type = types !== undefined ? this.ctx.tables.typing.show(types[i]!) : "_";
+        parts.push(name.startsWith("argument ") ? type : `${params[i]!.rest ? "..." : ""}${name}${params[i]!.optional ? "?" : ""}: ${type}`);
+      }
+      const body = this.ctx.tables.arenas.bodyOf(id);
+      const node = body.returnType !== undefined ? cloneTypeNode(body.returnType) : undefined;
+      let returns = "_";
+      if (node !== undefined) {
+        const t = this.ctx.resolveType(node);
+        returns = this.ctx.tables.typing.show(t);
+      }
+      shown.push(`(${parts.join(", ")}): ${returns}`);
+    }
+    let args: string[] = [];
+    for (const t of given) args.push(t === undefined ? "a function" : this.ctx.tables.typing.show(t));
     throw new CompileError("E0507", `no overload of '${impl.name}' takes (${args.join(", ")}); its overloads are ${shown.join(", ")}`, e.start, e.end);
+  }
+
+  // Whether an overload's parameters take a call's arguments.
+  /** @throws {CompileError} */
+  private overloadFits(this: Mut<this>, e: Ref<Call>, id: BodyId, given: Ref<(Type | undefined)[]>): boolean {
+    const params = this.bodyParams(id);
+    let required: usize = 0;
+    for (const p of params) if (!p.optional && !p.rest) required++;
+    const restLast = params.length > 0 && params[params.length - 1]!.rest;
+    if (e.args.length < required || (e.args.length > params.length && !restLast)) return false;
+    const types = this.signatureTypes(id);
+    if (types === undefined) return true;
+    for (let i: usize = 0; i < e.args.length; i++) {
+      const t = i < types.length - 1 ? i : types.length - 1;
+      const p = i < params.length - 1 ? i : params.length - 1;
+      if (!this.passes(e.args[i]!, given[i], types[t]!, params[p]!)) return false;
+    }
+    return true;
   }
 
   // What an overload's body gives back: the implementation's value, as the members of its type the
@@ -4885,13 +5080,15 @@ export class Expressions<C extends Context> implements Union<C> {
     const to = this.ctx.resolveType(node);
     if (this.ctx.tables.typing.fits(from, to)) return from;
     const r = this.recOf(from);
-    const kept = r?.kind === "union" ? r.members.filter((m) => this.ctx.tables.typing.fits(m, to)) : [];
+    let kept: Type[] = [];
+    if (r !== undefined && r.kind === "union") for (const m of r.members) if (this.ctx.tables.typing.fits(m, to)) kept.push(m);
     if (kept.length === 0 && this.ctx.tables.typing.fits(to, from)) throw new CompileError("E0410", `it returns '${this.ctx.tables.typing.show(to)}', narrower than the implementation's '${this.ctx.tables.typing.show(from)}', which isn't a union whose members it could be narrowed to; give the implementation a union return type, as in '${this.ctx.tables.typing.show(to)} | ...'`, node.start, node.end);
     if (kept.length === 0) throw new CompileError("E0410", `this overload signature is not compatible with its implementation, which returns '${this.ctx.tables.typing.show(from)}', never a '${this.ctx.tables.typing.show(to)}'`, node.start, node.end);
     return kept.length === 1 ? kept[0]! : this.ctx.tables.typing.unionType(kept);
   }
 
   // An argument's type before it meets a parameter, or nothing when it needs one to be typed.
+  /** @throws {CompileError} */
   private tried(this: Mut<this>, a: Ref<Expr>): Type | undefined {
     try {
       return this.value(a);
@@ -4903,16 +5100,39 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // A signature's parameter types, unless it is generic, when each call's instance decides them.
   /** @throws {CompileError} */
-  private signatureTypes(this: Mut<this>, f: Ref<Body>): Type[] | undefined {
-    if ((f.typeParams ?? []).some((p) => !isLifetime(p)) || f.params.some((p) => p.comptime)) return undefined;
-    const bounds = this.ctx.implicitOf(f.bodyId);
+  private signatureTypes(this: Mut<this>, id: BodyId): Type[] | undefined {
+    const body = this.ctx.tables.arenas.bodyOf(id);
+    let generic = false;
+    if (body.typeParams !== undefined) for (const p of body.typeParams) if (!isLifetime(p)) generic = true;
+    let optional: boolean[] = [];
+    let rest: boolean[] = [];
+    for (const p of body.params) {
+      if (p.comptime) generic = true;
+      optional.push(p.optional);
+      rest.push(p.rest);
+    }
+    if (generic) return undefined;
+    const bounds = this.ctx.implicitOf(id);
     // With an implicit parameter, an instance would check the signature's body against bounds,
     // so the others are read as declared.
-    const known = bounds.size > 0 ? this.ctx.members().paramTypesOf(f.bodyId) : this.ctx.paramTypes(this.ctx.instanceOf(f.bodyId, undefined));
-    return f.params.map((p, i) => {
-      const t = bounds.get(i) ?? known[i]!;
-      return p.optional ? this.ctx.tables.typing.unionType([t, "null"]) : p.rest && this.isArray(this.ctx.tables.typing.lower(t)) ? this.ctx.tables.typing.rec(this.ctx.tables.typing.lower(t) as ArrayType).element : t;
-    });
+    let known: Type[] = [];
+    if (bounds.size > 0) known = this.ctx.members().paramTypesOf(id);
+    else {
+      const instance = this.ctx.instanceOf(id, undefined);
+      known = this.ctx.paramTypes(instance);
+    }
+    let out: Type[] = [];
+    for (let i: usize = 0; i < optional.length; i++) {
+      const bound = bounds.get(i);
+      const t = bound !== undefined ? bound : known[i]!;
+      if (optional[i]!) out.push(this.ctx.tables.typing.unionType([t, "null"]));
+      else if (rest[i]!) {
+        const lowered = this.ctx.tables.typing.lower(t);
+        const r = this.recOf(lowered);
+        out.push(r !== undefined && r.kind === "array" ? r.element : t);
+      } else out.push(t);
+    }
+    return out;
   }
 
   // Whether an argument passes for a parameter, as choosing an overload asks before the call
@@ -4931,26 +5151,42 @@ export class Expressions<C extends Context> implements Union<C> {
       return typeof n === "bigint" && isInteger(to) && n >= range(to)[0] && n <= range(to)[1];
     }
     const r = this.ctx.tables.typing.rec(to);
-    if (r.kind === "union") return r.members.some((m) => this.passes(a, given, m, p));
-    if (r.kind === "interface") return unsatisfied(given, to as InterfaceType, this.ctx.members(), a) === undefined;
-    if (r.kind === "literal") return (a.kind === "string" || a.kind === "bool") ? a.value === r.value : n !== undefined && n === r.value;
+    if (r.kind === "union") {
+      const members = r.members.slice();
+      for (const m of members) if (this.passes(a, given, m, p)) return true;
+      return false;
+    }
+    if (this.isInterface(to)) return unsatisfied(given, to, this.ctx.members(), a) === undefined;
+    if (r.kind === "literal") {
+      if (a.kind === "string") return a.value === r.value;
+      if (a.kind === "bool") return a.value === r.value;
+      return n !== undefined && n === r.value;
+    }
     return false;
   }
 
   // Whether an arrow passes for a function type: no more parameters than it takes, each one
   // written with a type taking what it is given. Without a function type, the call decides.
+  /** @throws {CompileError} */
   private arrowPasses(this: Mut<this>, a: Ref<Extract<Expr, { kind: "arrow" }>>, to: Type): boolean {
     const r = this.recOf(to);
-    if (r?.kind === "union") return r.members.some((m) => this.arrowPasses(a, m));
-    if (r?.kind !== "function" || (r.generic !== undefined)) return true;
-    if (a.params.length > r.params.length) return false;
-    return a.params.every((q, i) => {
-      if ((q.type === undefined)) return true;
-      const written = this.tryType(q.type);
-      return written === undefined || this.ctx.tables.typing.fits(r.params[i]!, written);
-    });
+    if (r !== undefined && r.kind === "union") {
+      const members = r.members.slice();
+      for (const m of members) if (this.arrowPasses(a, m)) return true;
+      return false;
+    }
+    if (r === undefined || r.kind !== "function" || r.generic !== undefined) return true;
+    const takes = r.params.slice();
+    if (a.params.length > takes.length) return false;
+    for (let i: usize = 0; i < a.params.length; i++) {
+      if (a.params[i]!.type === undefined) continue;
+      const written = this.tryType(a.params[i]!.type!);
+      if (written !== undefined && !this.ctx.tables.typing.fits(takes[i]!, written)) return false;
+    }
+    return true;
   }
 
+  /** @throws {CompileError} */
   private tryType(this: Mut<this>, t: Ref<TypeNode>): Type | undefined {
     try {
       return this.ctx.resolveType(t);
@@ -4966,6 +5202,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (a.kind === "float") return a.value;
     if (a.kind === "unary" && a.op === "-") {
       const n = this.numberLiteral(a.operand);
+      if (typeof n === "bigint") return -n;
       return n === undefined ? undefined : -n;
     }
     return undefined;
@@ -4974,85 +5211,122 @@ export class Expressions<C extends Context> implements Union<C> {
   // A call's arguments against a JS declaration's parameters: a trailing Option may be left out,
   // as an optional parameter.
   /** @throws {CompileError} */
-  private jsArgs(this: Mut<this>, e: Call | Extract<Expr, { kind: "new" }>, params: Type[], optional: boolean[]) {
-    this.ctx.tables.jsCrossings.add(e);
-    this.ctx.tables.jsOptionalOf.set(e, optional);
-    const list = e.args ?? [];
+  private jsArgs(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" | "new" }>>, params: Ref<Type[]>, optional: boolean[]): void {
+    this.ctx.tables.jsCrossings.add(cloneExpr(e));
+    this.ctx.tables.jsOptionalOf.set(cloneExpr(e), optional);
+    const count = e.args !== undefined ? e.args.length : 0;
     let required = params.length;
     while (required > 0 && this.ctx.tables.typing.isOption(params[required - 1]!)) required--;
-    if (list.length < required || list.length > params.length) {
+    if (count < required || count > params.length) {
       const expected = required === params.length ? `${required}` : `${required}-${params.length}`;
-      throw new CompileError("E0501", `expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${list.length}`, e.start, e.end);
+      throw new CompileError("E0501", `expected ${expected} argument${expected === "1" ? "" : "s"}, but got ${count}`, e.start, e.end);
     }
-    list.forEach((a, i) => {
-      if (a.kind === "spread") throw new CompileError("E1005", "spreading arguments into a package's functions isn't supported yet", a.start, a.end);
-      this.expect(a, params[i]!);
-      const given = this.value(a);
-      this.coerce(a, given, params[i]!, `argument of type '${this.ctx.tables.typing.show(given)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(params[i]!)}'`);
-      this.givenToJs(a, given);
-    });
+    if (e.args === undefined) return;
+    for (let i: usize = 0; i < e.args.length; i++) this.jsArg(e.args[i]!, params[i]!);
+  }
+
+  // An argument given to a JS declaration's parameter.
+  /** @throws {CompileError} */
+  private jsArg(this: Mut<this>, a: Ref<Expr>, param: Type): void {
+    if (a.kind === "spread") throw new CompileError("E1005", "spreading arguments into a package's functions isn't supported yet", a.start, a.end);
+    this.expect(a, param);
+    const given = this.value(a);
+    const message = `argument of type '${this.ctx.tables.typing.show(given)}' is not assignable to parameter of type '${this.ctx.tables.typing.show(param)}'`;
+    this.coerce(a, given, param, message);
+    this.givenToJs(a, given);
   }
 
   // A value given to JS, which the call or write converts: refused when it has no JS form.
   /** @throws {CompileError} */
-  private givenToJs(this: Mut<this>, a: Ref<Expr>, given: Type) {
+  private givenToJs(this: Mut<this>, a: Ref<Expr>, written: Type): void {
     this.ctx.tables.jsGiven.add(cloneExpr(a));
     // A type parameter is what it stands for in this instance.
-    for (let r = this.recOf(given); r?.kind === "param" && r.concrete !== undefined; r = this.recOf(given)) given = r.concrete;
+    let given = written;
+    while (true) {
+      const r = this.recOf(given);
+      if (r === undefined || r.kind !== "param" || r.concrete === undefined) break;
+      given = r.concrete;
+    }
     // A callback given to JS is kept by JS, which may call it later from whichever task calls
     // into JS next, so what it holds goes with it to any thread.
     // A future given to JS is a promise, running as a task from when it is given.
-    if (typeof given !== "string" && (this.ctx.tables.typing.rec(given).kind === "future" || this.ctx.tables.typing.rec(given).kind === "handle")) {
+    const kind = this.recOf(given)?.kind;
+    if (kind === "future" || kind === "handle") {
       if (!this.ctx.async) throw new CompileError("E1005", "a Promise given to JS starts running as a task when it is given, so it is given only inside an 'async' function", a.start, a.end);
       const blocker = this.unsent(given);
-      if (blocker) throw new CompileError("E1005", `a Promise given to JS runs as a task of its own, so it must own everything it uses; it holds a '${this.ctx.tables.typing.show(blocker)}'`, a.start, a.end);
+      if (blocker !== undefined) throw new CompileError("E1005", `a Promise given to JS runs as a task of its own, so it must own everything it uses; it holds a '${this.ctx.tables.typing.show(blocker)}'`, a.start, a.end);
       return;
     }
-    if (typeof given !== "string" && (this.ctx.tables.typing.rec(given).kind === "closure" || this.ctx.tables.typing.rec(given).kind === "function" || this.ctx.tables.typing.rec(given).kind === "dyn")) {
+    if (kind === "closure" || kind === "function" || kind === "dyn") {
       const blocker = this.unsent(given);
-      if (blocker) throw new CompileError("E1005", `a callback given to JS must own everything it uses, as JS may keep it and call it from another task; it holds a '${this.ctx.tables.typing.show(blocker)}'`, a.start, a.end);
+      if (blocker !== undefined) throw new CompileError("E1005", `a callback given to JS must own everything it uses, as JS may keep it and call it from another task; it holds a '${this.ctx.tables.typing.show(blocker)}'`, a.start, a.end);
       return;
     }
     // JS keeps a callback or a future, so one only borrowed here can't be given; one inside
     // another value would be dropped by Fish as well as kept by JS.
     if (this.isRefType(given) && this.ctx.tables.typing.keptByJs(this.ctx.tables.typing.rec(given).to)) throw new CompileError("E1005", "JS keeps a callback or a Promise given to it, so it is given owned, not borrowed; give it a clone, or take it owned", a.start, a.end);
-    if (this.ctx.tables.typing.holdsPart(given, (u) => u !== given && this.ctx.tables.typing.keptByJs(u))) throw new CompileError("E1005", "a callback or a Promise inside another value isn't supported yet; give it to JS on its own", a.start, a.end);
-    const open = this.ctx.tables.typing.holdsPart(given, (p) => this.placeholder(p));
+    const parts = this.ctx.tables.typing.partsOf(given);
+    let inside = false;
+    let open = false;
+    for (const u of parts) {
+      if (u !== given && this.ctx.tables.typing.keptByJs(u)) inside = true;
+      if (this.placeholder(u)) open = true;
+    }
+    if (inside) throw new CompileError("E1005", "a callback or a Promise inside another value isn't supported yet; give it to JS on its own", a.start, a.end);
     if (!open && !this.ctx.tables.typing.jsConverts(given)) throw new CompileError("E1005", `a '${this.ctx.tables.typing.show(given)}' has no JS form yet, so it can't be given to JS`, a.start, a.end);
   }
 
   // A package's declared parameters as Fish types: an optional one is an Option.
   /** @throws {CompileError} */
   private jsParams(this: Mut<this>, params: Ref<Param[]>): Type[] {
-    return params.map((p) => {
+    let out: Type[] = [];
+    for (const p of params) {
       const written = p.type !== undefined ? this.ctx.resolveType(p.type) : this.ctx.tables.typing.blockType("JsValue");
-    const declared = this.ctx.tables.typing.jsTakes(written);
-      return p.optional ? this.ctx.tables.typing.unionType([declared, "null"]) : declared;
-    });
+      const declared = this.ctx.tables.typing.jsTakes(written);
+      out.push(p.optional ? this.ctx.tables.typing.unionType([declared, "null"]) : declared);
+    }
+    return out;
   }
 
   // `new C(...)` of a package's class: its constructor's parameters, giving a handle.
   /** @throws {CompileError} */
-  private jsNew(this: Mut<this>, e: Ref<Extract<Expr, { kind: "new" }>>, c: Interface): Type {
+  private jsNew(this: Mut<this>, e: Ref<Extract<Expr, { kind: "new" }>>, c: Ref<Interface>): Type {
     if (c.typeParams.length > 0) throw unsupported("generic classes of a package", e);
-    const constructor = this.jsChain(c).find((k) => k.jsClass!.constructors.length > 0)?.jsClass!.constructors[0] ?? [];
+    // A class without its own constructor takes its base's, as in JS.
+    let constructor: Param[] = [];
+    let found = false;
+    if (c.jsClass !== undefined && c.jsClass.constructors.length > 0) {
+      for (const p of c.jsClass.constructors[0]!) constructor.push(cloneParam(p));
+      found = true;
+    }
+    if (!found) for (const name of this.jsBases(c)) {
+      const k = this.ctx.tables.jsClasses.get(name)!;
+      if (found || k.jsClass === undefined || k.jsClass.constructors.length === 0) continue;
+      for (const p of k.jsClass.constructors[0]!) constructor.push(cloneParam(p));
+      found = true;
+    }
     const params = this.jsParams(constructor);
-    params.forEach((p) => this.crossing(p, `'${c.name}''s constructor takes a`, e));
-    this.jsArgs(e, params, constructor.map((p) => p.optional));
-    this.ctx.tables.jsNews.set(e, c.js!);
+    const takes = `'${c.name}''s constructor takes a`;
+    for (const p of params) this.crossing(p, takes, e);
+    let optional: boolean[] = [];
+    for (const p of constructor) optional.push(p.optional);
+    this.jsArgs(e, params, optional);
+    this.ctx.tables.jsNews.set(cloneExpr(e), cloneJsName(c.js!));
     return this.ctx.resolveType({ id: nextId(this.ctx.tables.ids), kind: "ref", name: c.name, args: [], start: e.start, end: e.end });
   }
 
-  // A package's class and the classes it extends, nearest first: a class without its own
-  // constructor takes its base's, and inherits its statics, as in JS.
-  private jsChain(c: Interface): Interface[] {
-    const chain = [c];
-    for (let at = c; ; ) {
-      const base = at.extends[0]?.kind === "ref" ? this.ctx.tables.jsClasses.get(at.extends[0].name) : undefined;
-      if (!base || chain.includes(base)) return chain;
-      chain.push(base);
-      at = base;
+  // The names of the classes a package's class extends, nearest first: it inherits its bases'
+  // statics, as in JS.
+  private jsBases(c: Ref<Interface>): string[] {
+    let names: string[] = [];
+    let at = c.extends.length > 0 ? refName(c.extends[0]!) : undefined;
+    while (at !== undefined) {
+      const base = this.ctx.tables.jsClasses.get(at);
+      if (base === undefined || base.id === c.id || names.includes(at)) return names;
+      names.push(at);
+      at = base.extends.length > 0 ? refName(base.extends[0]!) : undefined;
     }
+    return names;
   }
 
   // A property or method of an `unknown`, which has none until a check says what it holds.
@@ -5062,10 +5336,15 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // A package's class's static member: a property read, or a method called.
   /** @throws {CompileError} */
-  private jsStatic(this: Mut<this>, c: Interface, name: string, at: Ref<Expr>): TypeMember {
-    const found = this.jsChain(c).flatMap((k) => k.jsClass!.statics).find((m) => "name" in m && m.name === name);
-    if (!found) throw new CompileError("E0502", `property '${name}' does not exist on '${c.name}'`, at.start, at.end);
-    this.ctx.tables.jsStatics.set(at, c.js!);
+  private jsStatic(this: Mut<this>, c: Ref<Interface>, name: string, at: Ref<Expr>): TypeMember {
+    let found: TypeMember | undefined = undefined;
+    if (c.jsClass !== undefined) for (const m of c.jsClass.statics) if (found === undefined && memberName(m) === name) found = cloneTypeMember(m);
+    if (found === undefined) for (const base of this.jsBases(c)) {
+      const k = this.ctx.tables.jsClasses.get(base)!;
+      if (k.jsClass !== undefined) for (const m of k.jsClass.statics) if (found === undefined && memberName(m) === name) found = cloneTypeMember(m);
+    }
+    if (found === undefined) throw new CompileError("E0502", `property '${name}' does not exist on '${c.name}'`, at.start, at.end);
+    this.ctx.tables.jsStatics.set(cloneExpr(at), cloneJsName(c.js!));
     return found;
   }
 
@@ -8961,4 +9240,26 @@ const shownPath = (path: string) => path.replaceAll(`.${EMBEDDED}`, "");
 // How an index reads in a message: a name or a number as written, anything else as `...`.
 export function indexText(e: Ref<Expr>): string {
   return e.kind === "ident" ? e.name : e.kind === "int" ? String(e.value) : "...";
+}
+
+// Whether a value a timer passes on is a name or a literal, read the same when set and when run.
+function plainArg(x: Ref<Expr>): boolean {
+  if (x.kind === "unary") return x.op === "-" && plainArg(x.operand);
+  return x.kind === "ident" || x.kind === "int" || x.kind === "float" || x.kind === "bigint" || x.kind === "string" || x.kind === "bool" || x.kind === "null";
+}
+
+// The name a parameter's pattern binds, as a signature shows it, or `_`.
+function patternName(p: Ref<Pattern>): string {
+  return p.kind === "ident" || p.kind === "variant" ? p.name : "_";
+}
+
+// The name a type reference names, as a package's class's base is written.
+function refName(t: Ref<TypeNode>): string | undefined {
+  return t.kind === "ref" ? t.name : undefined;
+}
+
+// The name an object type's member is written with, unless computed or a signature.
+function memberName(m: Ref<TypeMember>): string | undefined {
+  if (m.kind !== "property" && m.kind !== "method" && m.kind !== "get" && m.kind !== "set") return undefined;
+  return typeof m.name === "string" ? m.name : undefined;
 }
