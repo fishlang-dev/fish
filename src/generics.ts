@@ -922,7 +922,8 @@ export class Instancing<H extends InstancingHost> {
   // The parameter types an instance's callers pass, or with `scopeOf(instance)`, the ones its
   // body sees.
   /** @throws {CompileError} */
-  paramTypes(this: Mut<this>, instance: Ref<Instance>, given?: Map<string, Type>): Type[] {
+  paramTypes(this: Mut<this>, id: InstanceId, given?: Map<string, Type>): Type[] {
+    const instance = this.host.tables.arenas.instanceOf(id);
     const scope = given !== undefined ? given : merged(instance.bindings, undefined);
     const f = cloneSignature(bodyOf(this.host.tables.arenas, instance));
     const implicit = this.implicitOf(f.bodyId);
@@ -949,43 +950,45 @@ export class Instancing<H extends InstancingHost> {
   // class it belongs to, offering only its bound, as at the definition, while holding the
   // concrete type for codegen.
   /** @throws {CompileError} */
-  scopeOf(this: Mut<this>, instance: Ref<Instance>): Map<string, Type> {
-    const f = cloneSignature(bodyOf(this.host.tables.arenas, instance));
+  scopeOf(this: Mut<this>, id: InstanceId): Map<string, Type> {
+    const f = cloneSignature(bodyOf(this.host.tables.arenas, this.host.tables.arenas.instanceOf(id)));
+    // What the instance's type parameters stand for, copied, as checking may add instances.
+    const bindings = merged(this.host.tables.arenas.instanceOf(id).bindings, undefined);
     const outer = this.host.classParams(f);
     const outerCount = outer.length;
     let scope = new Map<string, Type>();
-    if (outer.length > 0 && this.known(instance, outer.map((p) => p.name))) scope = placeholders(this.host, outer, undefined, merged(instance.bindings, undefined));
+    if (outer.length > 0 && this.known(bindings, outer.map((p) => p.name))) scope = placeholders(this.host, outer, undefined, merged(bindings, undefined));
     else if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
     // A constructor taking its base's parameters also holds the base's type arguments.
     if (f.scope !== undefined) for (const [name, t] of f.scope) if (!scope.has(name)) scope.set(name, t);
     const names = [...typeParamsOf(f).map((p) => p.name), ...[...this.implicitOf(f.bodyId).keys()].map((i) => `#${i}`)];
     // A function-typed parameter of a class's member is seen in terms of the class's parameters
     // as this body holds them, even while the parameter itself is still open.
-    if (!this.known(instance, names)) {
-      if (outerCount === 0) return merged(instance.bindings, undefined);
+    if (!this.known(bindings, names)) {
+      if (outerCount === 0) return merged(bindings, undefined);
       // A generic method's own parameters are open here too, offering their bounds.
-      for (const [name, t] of this.explicitPlaceholders(f.bodyId)) if (!scope.has(name)) scope.set(name, instance.bindings.get(name) ?? t);
+      for (const [name, t] of this.explicitPlaceholders(f.bodyId)) if (!scope.has(name)) scope.set(name, bindings.get(name) ?? t);
       for (const [i, bound] of this.implicitOf(f.bodyId)) {
-        if (this.host.tables.typing.rec(bound).kind !== "function" || !instance.bindings.has(`#${i}`)) continue;
+        if (this.host.tables.typing.rec(bound).kind !== "function" || !bindings.has(`#${i}`)) continue;
         const shown = this.host.tables.typing.show(bound);
         const same = this.sameParams(f.bodyId, i, bound, merged(scope, undefined));
-        scope.set(`#${i}`, this.host.tables.typing.wrapped(shown, same, instance.bindings.get(`#${i}`)!));
+        scope.set(`#${i}`, this.host.tables.typing.wrapped(shown, same, bindings.get(`#${i}`)!));
       }
       return scope;
     }
-    for (const [name, t] of placeholders(this.host, typeParamsOf(f), merged(scope, undefined), merged(instance.bindings, undefined))) scope.set(name, t);
+    for (const [name, t] of placeholders(this.host, typeParamsOf(f), merged(scope, undefined), merged(bindings, undefined))) scope.set(name, t);
     for (const [i, bound] of this.implicitOf(f.bodyId)) {
       const shown = this.host.tables.typing.show(bound);
       const same = this.sameParams(f.bodyId, i, bound, merged(scope, undefined));
-      scope.set(`#${i}`, this.host.tables.typing.wrapped(shown, same, instance.bindings.get(`#${i}`)!));
+      scope.set(`#${i}`, this.host.tables.typing.wrapped(shown, same, bindings.get(`#${i}`)!));
     }
     return scope;
   }
 
   // Whether an instance gives each of `names` a concrete type.
-  private known(this: Mut<this>, instance: Ref<Instance>, names: string[]): boolean {
+  private known(this: Mut<this>, bindings: Ref<Map<string, Type>>, names: string[]): boolean {
     for (const n of names) {
-      const t = instance.bindings.get(n);
+      const t = bindings.get(n);
       if (t === undefined || !this.host.instancingState.concreteness.concrete(t)) return false;
     }
     return true;

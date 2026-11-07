@@ -99,7 +99,7 @@ export interface ResolverHost {
   conforms(this: Mut<this>, from: Type, to: Type, at: Span): boolean;
   typeNames(at: usize): string[];
   /** @throws {CompileError} */
-  replaced(this: Mut<this>, t: Type, swap: TypeMap<Type, Type>): Type;
+  replaced(this: Mut<this>, t: Type, swap: Ref<TypeMap<Type, Type>>): Type;
   /** @throws {CompileError} */
   resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type;
 }
