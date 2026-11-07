@@ -313,7 +313,7 @@ function noting<F extends (this: object, node: Id, ...rest: never[]) => unknown>
   } as F;
 }
 type Held = { table: Map<number, unknown> };
-const inMap = (t: object, id: number) => ((t as unknown as Held).table.get(id) as { node: object } | undefined)?.node;
+const inMap = (t: object, id: number) => (t as unknown as { nodes: Map<number, object> }).nodes.get(id);
 const inSet = (t: object, id: number) => (t as unknown as Held).table.get(id) as object | undefined;
 for (const m of ["get", "has", "set", "delete"] as const) NodeMap.prototype[m] = noting(NodeMap.prototype[m] as never, inMap);
 for (const m of ["has", "add", "delete"] as const) NodeSet.prototype[m] = noting(NodeSet.prototype[m] as never, inSet);

@@ -9,7 +9,7 @@ import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } fro
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
-import { cloneExpr, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
+import { cloneExpr, cloneInterface, cloneParam, cloneStmt, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots, patternNames } from "./flow.ts";
@@ -365,7 +365,7 @@ function frameOf(tables: Mut<Tables>, instance: Mut<Instance>, generator: Genera
         const g = typeof generator === "string" ? undefined : tables.typing.rec(generator);
         // A boxed one awaits the boxed future its vtable's `next()` gives.
         const next = g?.kind === "generator" ? tables.typing.leafFuture("next", generator)
-          : g?.kind === "dyn" ? tables.typing.lentPromise(tables.typing.nextResult(tables.typing.yieldsOf(held, true)!)) : tables.typing.promiseInterface(tables.typing.nextResult(tables.typing.yieldsOf(held, true)!));
+          : g?.kind === "dyn" ? lentNext(tables.typing, held) : promisedNext(tables.typing, held);
         fields.push({ name: "loop", type: kept });
         fields.push({ name: "at", type: "i64" });
         fields.push({ name: "await", type: next });
@@ -582,7 +582,8 @@ function lowered(tables: Mut<Tables>, given: Stmt[], library: boolean): Stmt[] {
   });
   lowerDefaults(tables, written);
   if (!library) timersRunAsync(tables.ids, written, tables.timerMains);
-  let program = [...lowerOverloads(tables.ids, stdFor(tables, written)), ...written];
+  let std = stdFor(tables, written);
+  let program = [...lowerOverloads(tables.ids, std), ...written];
   separatePrivateNames(program);
   return program;
 }
@@ -609,18 +610,20 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
       if (s.kind === "typeAlias" && trait === undefined) {
         // An alias's lifetimes, like a class's, are checked and erased.
         if (s.typeParams.some(isLifetime)) decls.slots.set(s.name, s.typeParams.map(isLifetime));
-        addAlias(decls.aliases, s.typeParams.some(isLifetime) ? { ...s, typeParams: s.typeParams.filter((p) => !isLifetime(p)) } : s, namedIn(top, decls, s.name));
+        let alias = cloneTypeAlias(s);
+        if (s.typeParams.some(isLifetime)) alias.typeParams = alias.typeParams.filter((p) => !isLifetime(p));
+        addAlias(decls.aliases, alias, namedIn(top, decls, s.name));
         continue;
       }
       if (trait !== undefined) {
-        typeName(trait.name, s, decls.aliases.has(trait.name) || namedIn(top, decls, trait.name));
+        typeName(trait.name, { start: s.start, end: s.end }, decls.aliases.has(trait.name) || namedIn(top, decls, trait.name));
         decls.interfaces.set(trait.name, trait);
         continue;
       }
       if (s.kind === "interface") {
         typeName(s.name, s, decls.aliases.has(s.name) || namedIn(top, decls, s.name));
-        decls.interfaces.set(s.name, s);
-        if (s.jsClass) tables.jsClasses.set(s.name, s);
+        decls.interfaces.set(s.name, cloneInterface(s));
+        if (s.jsClass !== undefined) tables.jsClasses.set(s.name, cloneInterface(s));
         continue;
       }
       if (s.kind === "class" && s.name !== undefined) {
@@ -895,7 +898,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           const rest: Ref<Param> = f.params[f.params.length - 1]!;
           throw new CompileError("E1102", "a function with comptime parameters can't take a rest parameter yet, unless it is a tag, whose values follow its strings, as in 'comptime strings: TemplateStringsArray, ...values: T[]'", rest.start, rest.end);
         }
-        const named = f.name.startsWith("const ") ? f.name.slice("const ".length) : f.name;
+        const named = f.name.startsWith("const ") ? f.name.slice("const ".length as i64) : f.name;
         if (this.byName.has(f.name) || this.byName.has(named) || this.byName.has(`const ${named}`) || this.classes.has(named) || this.templates.has(named) || this.enums.has(named)) throw new CompileError("E0402", `'${named}' is already defined`, f.start, f.end);
         this.byName.set(f.name, f.bodyId);
       } catch (e) {
@@ -910,7 +913,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       if (names === undefined) continue;
       let ids: BodyId[] = [];
       for (const w of names) ids.push(this.byName.get(w)!);
-      this.tables.arenas.bodyMut(id).overloads = ids;
+      let body = this.tables.arenas.bodyMut(id);
+      body.overloads = ids;
     }
     // A body using a declaration that failed would only say it can't find it.
     this.stopOnErrors();
@@ -1270,16 +1274,17 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.tables.typing.jsUncalled.set(cloneSignature(this.tables.arenas.bodyOf(id)), e);
       }
     }
-    for (const { body, type, arrow, name } of this.typedArrows) {
+    while (this.typedArrows.length > 0) {
+      const { body, type, arrow, name } = this.typedArrows.shift()!;
       try {
         const want = this.resolveType(type);
         const got = this.functionTypeOf(this.tables.arenas.bodyOf(body), arrow);
         if (!this.tables.typing.fits(got, want)) throw new CompileError("E0101", `type '${this.tables.typing.show(got)}' is not assignable to type '${this.tables.typing.show(want)}'`, arrow.start, arrow.end);
         // The function type `typeof` gives carries no error type, so the arrow's is checked here.
-        const thrown = arrow.throws && this.resolveType(arrow.throws);
+        const thrown = arrow.throws !== undefined ? this.resolveType(arrow.throws!) : undefined;
         const wanted = this.recOf(want);
         const allowed = wanted?.kind === "function" ? wanted.throws : undefined;
-        if (thrown && (allowed === undefined || !this.tables.typing.fits(thrown, allowed))) {
+        if (thrown !== undefined && (allowed === undefined || !this.tables.typing.fits(thrown, allowed))) {
           throw new CompileError("E0602", `'${name}' can throw '${this.tables.typing.show(thrown)}', which its type '${this.tables.typing.show(want)}' doesn't declare; add 'throws ${this.tables.typing.show(thrown)}' to the const's type`, arrow.throws!.start, arrow.throws!.end);
         }
       } catch (e) {
@@ -1441,7 +1446,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     try {
       if (constant === undefined) return this.functionTypeOf(f, at);
       const declared = this.instancing().returnTypeOf(constant, new Map<string, Type>());
-      if (!declared || this.isInterface(declared)) this.unlaid(name, at);
+      if (declared === undefined || this.isInterface(declared)) this.unlaid(name, at);
       const id = this.instanceOf(constant.bodyId);
       return this.tables.typing.widenLet(this.returnOf(id, at));
     } finally {
@@ -1508,7 +1513,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       this.unlaid(f.name, at);
       const returns = this.returnOf(def.id, at);
       const future = this.recOf(returns);
-      result = f.async && future?.kind === "future" ? this.tables.typing.promiseInterface(future.gives) : returns;
+      result = f.async === true && future !== undefined && future.kind === "future" ? this.tables.typing.promiseInterface(future.gives) : returns;
     }
     const open = openParam(this.tables.typing, result, true);
     if (open) {
@@ -1552,12 +1557,17 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const member = this.recOf(given);
     if (member?.kind === "literal" && member.owner !== undefined) return given!;
     // The interpreter reads a plain tree, and this body's replacements aren't in place yet.
-    const tagged = comptimeArgument(this, site, rebuiltExpr(cloneExpr(arg), this.tables.rewrites));
+    const plain = rebuiltExpr(cloneExpr(arg), this.tables.rewrites);
+    const tagged = comptimeArgument(this, site, plain);
     const tag = tagged !== null && typeof tagged === "object" && tagged.kind === "member" ? tagged.type : undefined;
     if (this.recOf(tag)?.kind === "literal") return tag!;
     const v = untagged(tagged);
     if (typeof v === "bigint" || typeof v === "string" || typeof v === "boolean") return this.tables.typing.literalType(v);
-    if (typeof v === "object" && v?.kind === "array" && v.items.every((x) => typeof x === "string")) return stringsType(this.tables, v.items as string[]);
+    if (v !== null && typeof v === "object" && v.kind === "array") {
+      let strings: string[] = [];
+      for (const x of v.items) if (typeof x === "string") strings.push(x);
+      if (strings.length === v.items.length) return stringsType(this.tables, strings);
+    }
     throw new CompileError("E1102", "a comptime parameter takes an integer, a boolean, a string, an enum member or a string array", arg.start, arg.end);
   }
 
@@ -1574,7 +1584,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const base = this.classes.get(named);
     if (base === undefined) return undefined;
     const ctor = this.tables.arenas.classOf(base).constructor;
-    return ctor === undefined ? undefined : cloneParams(this.tables.arenas.bodyOf(ctor).params);
+    return cloneParams(this.tables.arenas.bodyOf(ctor).params);
   }
 
   // Whether a value of type `from` meeting `to` would become a JS value somewhere inside it: a
@@ -1659,9 +1669,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (t === undefined) return found;
     walk({ of: "typeNode", node: t }, (n) => {
       if (n.of !== "typeNode" || n.node.kind !== "ref") return;
-      const args = n.node.args;
+      const args: Ref<TypeNode[]> = n.node.args;
       if ((n.node.name === "Ref" || n.node.name === "Mut") && args.length === 2) {
-        const life = args[1]!;
+        const life: Ref<TypeNode> = args[1]!;
         if (life.kind === "ref") found.add(life.name);
       }
       const lifetime = this.decls.slots.get(n.node.name);
@@ -1704,13 +1714,17 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     let declared = new Set<string>();
     if (f.typeParams !== undefined) for (const p of f.typeParams) if (isLifetime(p)) declared.add(p.name);
     if (f.owner !== undefined) for (const name of this.classLifetimeNames(this.tables.typing.rec(f.owner).name)) declared.add(name);
-    const types = [...f.params.flatMap((p) => p.type ?? []), ...(f.returnType ? [f.returnType] : [])];
+    let types: TypeNode[] = [];
+    for (const p of f.params) if (p.type !== undefined) types.push(cloneTypeNode(p.type!));
+    if (f.returnType !== undefined) types.push(cloneTypeNode(f.returnType!));
     for (const root of types) {
       walk({ of: "typeNode", node: root }, (n) => {
         if (n.of !== "typeNode" || n.node.kind !== "ref") return;
         const node = n.node;
-        const lives = (node.name === "Ref" || node.name === "Mut") && node.args.length === 2 ? [node.args[1]!]
-          : this.decls.slots.get(node.name)?.length === node.args.length ? node.args.filter((_, i) => this.decls.slots.get(node.name)![i]) : [];
+        const slots = this.decls.slots.get(node.name);
+        let lives: TypeNode[] = [];
+        if ((node.name === "Ref" || node.name === "Mut") && node.args.length === 2) lives.push(cloneTypeNode(node.args[1]!));
+        else if (slots !== undefined && slots!.length === node.args.length) for (let i: usize = 0; i < node.args.length; i++) if (slots![i]!) lives.push(cloneTypeNode(node.args[i]!));
         for (const life of lives) {
           if (life.kind === "ref" && !declared.has(life.name)) throw new CompileError("E0209", `cannot find lifetime '${life.name}'; declare it as '<${life.name} extends Lifetime>'`, life.start, life.end);
         }
@@ -1783,8 +1797,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.lowerMade(coercions[i]![1], made);
     {
       let instance = this.tables.arenas.instanceMut(id);
-      for (const [e, t] of types) instance.types.set(e, t);
-      for (const [e, t] of coercions) instance.coercions.set(e, t);
+      while (types.length > 0) {
+        const [e, t] = types.shift()!;
+        instance.types.set(e, t);
+      }
+      while (coercions.length > 0) {
+        const [e, t] = coercions.shift()!;
+        instance.coercions.set(e, t);
+      }
     }
     // A pipe's topic written in as a field read would run a getter once for each `%`.
     for (const e of this.tables.arenas.instanceOf(id).types.keys()) {
@@ -1796,11 +1816,29 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     {
       let instance = this.tables.arenas.instanceMut(id);
-      instance.patterns.forEach((info, p) => instance.patterns.set(p, lowerPattern(this.tables.typing, info)));
-      instance.raises.forEach((r, at) => instance.raises.set(at, { ...r, from: this.tables.typing.lower(r.from), to: this.tables.typing.lower(r.to), ...(r.param && { param: this.tables.typing.lower(r.param) }) }));
-      instance.caught.forEach((t, st) => instance.caught.set(st, this.tables.typing.lower(t)));
-      instance.predicates?.forEach((pr, e) => instance.predicates!.set(e, { ...pr, type: this.tables.typing.lower(pr.type) }));
-      if (instance.throws) instance.throws = this.tables.typing.lower(instance.throws);
+      for (const k of instance.patterns.ids()) {
+        const lowered = lowerPattern(this.tables.typing, instance.patterns.getById(k)!);
+        instance.patterns.setValueById(k, lowered);
+      }
+      for (const k of instance.raises.ids()) {
+        const r = instance.raises.getById(k)!;
+        const from = this.tables.typing.lower(r.from);
+        const to = this.tables.typing.lower(r.to);
+        const param = r.param !== undefined ? this.tables.typing.lower(r.param) : undefined;
+        instance.raises.setValueById(k, param !== undefined ? { ...r, from, to, param } : { ...r, from, to });
+      }
+      for (const k of instance.caught.ids()) {
+        const lowered = this.tables.typing.lower(instance.caught.getById(k)!);
+        instance.caught.setValueById(k, lowered);
+      }
+      if (instance.predicates !== undefined) {
+        for (const k of instance.predicates.ids()) {
+          const pr = instance.predicates.getById(k)!;
+          const type = this.tables.typing.lower(pr.type);
+          instance.predicates?.setValueById(k, { ...pr, type });
+        }
+      }
+      if (instance.throws !== undefined) instance.throws = this.tables.typing.lower(instance.throws);
     }
     let localIds: LocalId[] = [];
     for (const l of new Set(this.tables.arenas.instanceOf(id).locals.values())) localIds.push(l);
@@ -2185,8 +2223,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const have = names.size > 0 ? this.instancing().paramTypes(instance) : this.instancing().declaredParams(f);
     // Parameters past the declaration's must be optional, as the calls through it leave them out.
     const extra = f.params.slice(want.length as i64).some((p) => !p.optional);
-    if (have.length < want.length || extra || want.some((t, i) => !this.tables.typing.fits(t, have[i]!))) throw why(`must take (${want.map((t) => this.tables.typing.show(t)).join(", ")})`);
-    if (!!f.async !== !!declared.async) throw why(declared.async ? "must be async" : "can't be async");
+    let mismatched = false;
+    for (let i: usize = 0; i < want.length && i < have.length; i++) if (!this.tables.typing.fits(want[i]!, have[i]!)) mismatched = true;
+    if (have.length < want.length || extra || mismatched) throw why(`must take (${want.map((t) => this.tables.typing.show(t)).join(", ")})`);
+    if ((f.async === true) !== (declared.async === true)) throw why(declared.async === true ? "must be async" : "can't be async");
     if (!!f.generator !== !!declared.generator) throw why(declared.generator ? "must be a generator" : "can't be a generator");
     if (f.self!.mutable && !declared.self!.mutable) throw why("can't change 'this'; it borrows 'this' read-only");
     if (!!f.self!.owned !== !!declared.self!.owned) throw why(declared.self!.owned ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
@@ -4676,9 +4716,18 @@ class BodyChecker implements Context, GuardHost {
     // An error the declared type doesn't take may be wrapped by a class of it that
     // implements `From` for it.
     const union = this.cx.recOf(this.errorType);
-    const classes = (union?.kind === "union" ? union.members : [this.errorType])
-      .filter((m): m is ClassType => typeof m !== "string" && this.cx.tables.typing.rec(m).kind === "class");
-    const wrappers = classes.flatMap((c) => this.cx.registry().wrapsOf(this.cx.registry().classOf(c).classId).filter(([x]) => this.cx.tables.typing.fits(type, x)).map(([, body, param]) => ({ wrapper: c, param, via: this.cx.instancing().instanceOf(this.cx.tables.arenas.bodyOf(body)).id })));
+    let candidates: Type[] = [];
+    if (union !== undefined && union.kind === "union") for (const m of union.members) candidates.push(m);
+    else candidates.push(this.errorType);
+    let classes: ClassType[] = [];
+    for (const m of candidates) if (typeof m !== "string" && this.cx.tables.typing.rec(m).kind === "class") classes.push(m as ClassType);
+    let wrappers: { wrapper: ClassType; param: Type; via: InstanceId }[] = [];
+    for (const c of classes) {
+      const id = this.cx.registry().classIdOf(c);
+      let taking: [BodyId, Type][] = [];
+      for (const [x, body, param] of this.cx.registry().wrapsOf(id)) if (this.cx.tables.typing.fits(type, x)) taking.push([body, param]);
+      for (const [body, param] of taking) wrappers.push({ wrapper: c, param, via: this.cx.instanceOf(body) });
+    }
     const does = "kind" in at && at.kind === "throw" ? `this 'throw' throws '${this.cx.tables.typing.show(type)}'` : `${what} can throw '${this.cx.tables.typing.show(type)}'`;
     if (wrappers.length === 0) {
       const hint = classes.length > 0 ? `convert it, or have '${this.cx.tables.typing.rec(classes[0]!).name}' implement 'From<${this.cx.tables.typing.show(type)}>'` : `convert it to '${this.cx.tables.typing.show(this.errorType)}'`;
@@ -4751,7 +4800,7 @@ export type Origin = usize | "this";
 const hasBody = (f: Declared): f is Func => f.body !== undefined;
 
 // An abstract class a type holds as a value, not one embedded as a concrete class's base.
-function abstractPart(typing: Typing, t: Type): ClassType | undefined {
+function abstractPart(typing: Ref<Typing>, t: Type): ClassType | undefined {
   let bases = new TypeSet<Type>();
   let found: ClassType | undefined = undefined;
   typing.holdsPart(t, (u) => {
@@ -4806,13 +4855,30 @@ function identName(e: Ref<Expr>): string | undefined {
   return e.kind === "ident" ? e.name : undefined;
 }
 
+// What a generator's `next()` gives, as the frame of a `for await` over one awaits it: a boxed
+// one's lent promise, or another's promise.
+function nextOf(typing: Mut<Typing>, held: Type): Type {
+  const yields = typing.yieldsOf(held, true)!;
+  return typing.nextResult(yields);
+}
+
+function lentNext(typing: Mut<Typing>, held: Type): Type {
+  const next = nextOf(typing, held);
+  return typing.lentPromise(next);
+}
+
+function promisedNext(typing: Mut<Typing>, held: Type): Type {
+  const next = nextOf(typing, held);
+  return typing.promiseInterface(next);
+}
+
 function calledName(callee: Ref<Expr>): string | undefined {
   if (callee.kind === "ident" || callee.kind === "member") return callee.name;
   return undefined;
 }
 
 /** @throws {CompileError} */
-export function unreached(typing: Typing, equalities: Tables["equalities"], arenas: Arenas, compiled: InstanceId[], dropped: (i: Ref<Instance>) => boolean) {
+export function unreached(typing: Ref<Typing>, equalities: Ref<Tables["equalities"]>, arenas: Ref<Arenas>, compiled: Ref<InstanceId[]>, dropped: (i: Ref<Instance>) => boolean) {
   for (const each of compiled) {
     const i = arenas.instanceOf(each);
     let hit: Reach | undefined = undefined;

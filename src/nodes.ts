@@ -471,7 +471,10 @@ function idOf(node: Ref<Id>): usize {
 // A `Map` from nodes, keyed by their ids, holding each node as a `Map` holds its keys. Iterating
 // gives each node as it was first stored, not a replacement lowering made for it since.
 export class NodeMap<K extends Id, V> {
-  private table = new Map<usize, { node: K; value: V }>();
+  // Each node and its value under the node's id, apart so a value can change while the node
+  // stored for it stays.
+  private nodes = new Map<usize, K>();
+  private nodeValues = new Map<usize, V>();
 
   constructor(entries?: [K, V][]) {
     if (entries !== undefined) {
@@ -484,48 +487,62 @@ export class NodeMap<K extends Id, V> {
   }
 
   get size(): usize {
-    return this.table.size;
+    return this.nodes.size;
   }
 
   get(node: Ref<K>): V | undefined {
-    return this.table.get(idOf(node))?.value;
+    return this.nodeValues.get(idOf(node));
   }
 
   has(node: Ref<K>): boolean {
-    return this.table.has(idOf(node));
+    return this.nodes.has(idOf(node));
   }
 
   // The value for a node by its id, for a reader holding a node of a wider type than `K`.
   getById(id: usize): V | undefined {
-    return this.table.get(id)?.value;
+    return this.nodeValues.get(id);
   }
 
   set(this: Mut<this>, node: K, value: V): Mut<this> {
-    this.table.set(idOf(node), { node, value });
+    const id = idOf(node);
+    this.nodes.set(id, node);
+    this.nodeValues.set(id, value);
     return this;
   }
 
+  // The ids of the nodes held, in the order they were first stored.
+  ids(): usize[] {
+    let out: usize[] = [];
+    for (const id of this.nodes.keys()) out.push(id);
+    return out;
+  }
+
+  // Gives the node of id `id`, if one is held, a new value, keeping the node stored for it.
+  setValueById(this: Mut<this>, id: usize, value: V): void {
+    if (this.nodes.has(id)) this.nodeValues.set(id, value);
+  }
+
   delete(this: Mut<this>, node: Ref<K>): boolean {
-    return this.table.delete(idOf(node));
+    const id = idOf(node);
+    this.nodeValues.delete(id);
+    return this.nodes.delete(id);
   }
 
   clear(this: Mut<this>): void {
-    this.table.clear();
+    this.nodes.clear();
+    this.nodeValues.clear();
   }
 
   *keys(): IterableIterator<K> {
-    for (const k of this.table.keys()) yield this.table.get(k)!.node;
+    for (const k of this.nodes.keys()) yield this.nodes.get(k)!;
   }
 
   *values(): IterableIterator<V> {
-    for (const k of this.table.keys()) yield this.table.get(k)!.value;
+    for (const k of this.nodes.keys()) yield this.nodeValues.get(k)!;
   }
 
   *entries(): IterableIterator<[K, V]> {
-    for (const k of this.table.keys()) {
-      const e = this.table.get(k)!;
-      yield [e.node, e.value];
-    }
+    for (const k of this.nodes.keys()) yield [this.nodes.get(k)!, this.nodeValues.get(k)!];
   }
 
   [Symbol.iterator](): IterableIterator<[K, V]> {
@@ -533,10 +550,7 @@ export class NodeMap<K extends Id, V> {
   }
 
   forEach(each: (value: V, node: K) => void): void {
-    for (const k of this.table.keys()) {
-      const e = this.table.get(k)!;
-      each(e.value, e.node);
-    }
+    for (const k of this.nodes.keys()) each(this.nodeValues.get(k)!, this.nodes.get(k)!);
   }
 }
 
