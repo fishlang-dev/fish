@@ -9,13 +9,13 @@ export const FILE_SPAN = 2 ** 24;
 
 // The file a source offset is in, among a compilation's `files`, as written relative to the
 // entry's directory.
-export function fileAt(files: Compilation["files"], offset: usize): string {
+export function fileAt(files: Ref<Compilation["files"]>, offset: usize): string {
   return files.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
 // The name std's module holding a source offset is shown by, as "node:fs", or nothing when the
 // offset is in a file of the program's own, whatever that file is named.
-export function stdModuleAt(files: Compilation["files"], offset: usize): string | undefined {
+export function stdModuleAt(files: Ref<Compilation["files"]>, offset: usize): string | undefined {
   const f = files.findLast((f) => offset >= f.base);
   return f !== undefined && f.std ? f.file : undefined;
 }

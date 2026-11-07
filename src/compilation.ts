@@ -478,19 +478,19 @@ export function newDeclarations(): Declarations {
 }
 
 // When a timed stage started, and the time stages inside the one around it had taken by then.
-export type Started = { outer: f64; start: f64 };
+export type Started = { timing: boolean; outer: f64; start: f64 };
 
 // Starts timing a stage of a compilation, when it is timed.
-export function timingStart(tables: Mut<Tables>): Started | undefined {
-  if (tables.timings === undefined) return undefined;
+export function timingStart(tables: Mut<Tables>): Started {
+  if (tables.timings === undefined) return { timing: false, outer: 0, start: 0 };
   const outer = tables.timings.inner;
   tables.timings.inner = 0;
-  return { outer, start: now(tables.timings) };
+  return { timing: true, outer, start: now(tables.timings) };
 }
 
 // Adds a stage's own time to stage `name`, leaving out the stages inside it.
-export function timingEnd(tables: Mut<Tables>, name: string, started: Ref<Started> | undefined) {
-  if (tables.timings === undefined || started === undefined) return;
+export function timingEnd(tables: Mut<Tables>, name: string, started: Ref<Started>) {
+  if (!started.timing || tables.timings === undefined) return;
   const spent = now(tables.timings) - started.start;
   tables.timings.ms.set(name, (tables.timings.ms.get(name) ?? 0) + spent - tables.timings.inner);
   tables.timings.inner = started.outer + spent;
