@@ -3202,7 +3202,7 @@ export class Typing {
   }
 
   // How a type reads in a diagnostic, as TypeScript would print it.
-  show(this: Mut<this>, t: Type): string {
+  show(t: Type): string {
     if (t === "f64") return "number";
     if (typeof t === "string") return t;
     if (this.describing && this.madeFor.has(t)) return this.madeFor.get(t)!;
@@ -3222,12 +3222,7 @@ export class Typing {
     if (r.kind === "pointer") return `${r.mutable ? "MutPtr" : "Ptr"}<${this.show(r.to)}>`;
     if (r.kind === "regex") return "RegExp";
     if (r.kind === "array" && r.typed !== undefined) return r.typed;
-    if (r.kind === "array") {
-      const e = r.element;
-      const er = this.recOf(e);
-      const wrap = er !== undefined && ((er.kind === "union" && er.name === undefined) || er.kind === "function" || er.kind === "closure" || (er.kind === "dyn" && this.callableOf.has(er.of)));
-      return wrap ? `(${this.show(e)})[]` : `${this.show(e)}[]`;
-    }
+    if (r.kind === "array") return this.showArray(r.element);
     if (r.kind === "fixed") return `FixedArray<${this.show(r.element)}, ${r.size}>`;
     if (r.kind === "map") return r.set ? `Set<${this.show(r.key)}>` : r.dict === true ? `{ [key: string]: ${this.show(r.value)} }` : `Map<${this.show(r.key)}, ${this.show(r.value)}>`;
     if (r.kind === "generator") return `${r.async === true ? "Async" : ""}Generator<${this.show(r.yields)}>${r.throws !== undefined ? ` throws ${this.show(r.throws)}` : ""}`;
@@ -3246,22 +3241,37 @@ export class Typing {
       const req = r.required ?? r.fields.length;
       const elems = this.elementsOf(t as ObjectType).map((e, i) => {
         if ((i as usize) < req) return this.show(e);
-        const w = this.withoutNull(e);
-        return `${this.show(w)}?`;
+        return `${this.showWithoutNull(e)}?`;
       });
       let restPart: string[] = [];
-      if (r.rest !== undefined) {
-        const restArr = this.arrayType(r.rest);
-        restPart = [`...${this.show(restArr)}`];
-      }
+      if (r.rest !== undefined) restPart = [`...${this.showArray(r.rest)}`];
       return `${this.readonlyTuple(t as ObjectType) ? "readonly " : ""}[${[...elems, ...restPart].join(", ")}]`;
     }
     if (r.fields.length === 0) return "{}";
     const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
     return `{ ${r.fields.map((f) => {
-      const inner = f.optional === "added" ? this.withoutNull(f.type) : f.type;
-      return `${f.readonly === true ? "readonly " : ""}${name(f.name)}${f.optional !== undefined && f.optional !== "undefined" ? "?" : ""}: ${this.show(inner)}`;
+      const shown = f.optional === "added" ? this.showWithoutNull(f.type) : this.show(f.type);
+      return `${f.readonly === true ? "readonly " : ""}${name(f.name)}${f.optional !== undefined && f.optional !== "undefined" ? "?" : ""}: ${shown}`;
     }).join("; ")} }`;
+  }
+
+  // How a type reads without its `null`, as showing `withoutNull(t)` would, making no type.
+  private showWithoutNull(t: Type): string {
+    const r = this.recOf(t);
+    if (r?.kind !== "union") return this.show(t);
+    let rest: Type[] = [];
+    for (const m of r.members) if (m !== "null") rest.push(m);
+    if (rest.length === 1) return this.show(rest[0]!);
+    const made = this.unions.get(`union ${rest.map((m) => this.keyOf(m)).join("|")}`);
+    if (made !== undefined) return this.show(made);
+    return rest.map((m) => this.show(m)).join(" | ");
+  }
+
+  // How an array of `e` reads, as showing `arrayType(e)` would, making no type.
+  private showArray(e: Type): string {
+    const er = this.recOf(e);
+    const wrap = er !== undefined && ((er.kind === "union" && er.name === undefined) || er.kind === "function" || er.kind === "closure" || (er.kind === "dyn" && this.callableOf.has(er.of)));
+    return wrap ? `(${this.show(e)})[]` : `${this.show(e)}[]`;
   }
 }
 
