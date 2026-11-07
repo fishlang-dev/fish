@@ -1778,8 +1778,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const returns = this.resolver().resolveType(f.returnType);
     if (returns !== "void" && !this.crossesToC(returns, f.start)) throw new CompileError("E1002", `a C function can't return a '${this.tables.typing.show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
     {
-      let made = this.tables.arenas.instanceMut(id);
-      made.returns = returns;
+      let record = this.tables.arenas.instanceMut(id);
+      record.returns = returns;
     }
     this.done.add(id);
   }
@@ -1812,8 +1812,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       if (!isError && rustClassOf(this.tables.typing, error) === undefined) throw new CompileError("E1004", `${what} throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a '${this.tables.typing.show(error)}'`, f.throws.start, f.throws.end);
       if (isError) this.registry().classOf(error as ClassType);
       {
-        let made = this.tables.arenas.instanceMut(id);
-        made.throws = error;
+        let record = this.tables.arenas.instanceMut(id);
+        record.throws = error;
       }
     }
     if (f.returnType === undefined && !constructor) throw new CompileError("E1004", `${what} needs its return type written, 'void' if it returns nothing`, f.start, f.end);
@@ -1833,8 +1833,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // A constructor gives the handle to the value it made.
     const gives = constructor ? f.owner! : returns;
     {
-      let made = this.tables.arenas.instanceMut(id);
-      made.returns = gives;
+      let record = this.tables.arenas.instanceMut(id);
+      record.returns = gives;
     }
     // Every declaration of one Rust function calls the one shim function, so they agree on types.
     // The receiver and what it throws are part of how the shim calls it, so they have to agree too.
@@ -1920,8 +1920,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const why = returns === "void" ? undefined : this.tables.typing.uncrossable(returns);
     if (why !== undefined) throw refusedJs(`${named} gives a '${this.tables.typing.show(returns)}', which can't cross between Fish and JS yet: ${why}`, f.returnType!, f.js!.name, at);
     {
-      let made = this.tables.arenas.instanceMut(id);
-      made.returns = returns;
+      let record = this.tables.arenas.instanceMut(id);
+      record.returns = returns;
     }
     this.done.add(id);
   }
@@ -2199,8 +2199,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (f.abstract === true) {
       const returns = this.instancing().returnTypeOf(f, instance.bindings) ?? "void";
       {
-        let made = this.tables.arenas.instanceMut(id);
-        made.returns = returns;
+        let record = this.tables.arenas.instanceMut(id);
+        record.returns = returns;
       }
       this.done.add(id);
       return;

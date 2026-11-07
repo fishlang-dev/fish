@@ -1287,11 +1287,11 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const event of events) {
       if (event.assigned) throw new CompileError("E0004", "'%' can't be assigned; it stands for the pipe's value, so assign to what you piped instead", event.node.start, event.node.end);
       if (event.walk) this.topics(event.node, place);
-      else if (place === undefined) this.ctx.tables.rewrites.replaceAt(idOfExpr(event.node), { id: nextId(this.ctx.tables.ids), kind: "ident", name: "%", start: event.node.start, end: event.node.end });
+      else if (place === undefined) this.ctx.tables.rewrites.replace({ id: idOfExpr(event.node) }, { id: nextId(this.ctx.tables.ids), kind: "ident", name: "%", start: event.node.start, end: event.node.end });
       else {
         const fresh = this.freshCopy(place);
         const copy = this.spanned(fresh, event.node);
-        const placed = this.ctx.tables.rewrites.replaceAt(idOfExpr(event.node), copy);
+        const placed = this.ctx.tables.rewrites.replace({ id: idOfExpr(event.node) }, copy);
         this.substitutedIn(placed);
       }
     }
@@ -1313,7 +1313,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (made !== undefined) return made;
     this.topics(e.body, place);
     const body = rebuiltExpr(cloneExpr(e.body), this.ctx.tables.rewrites);
-    return this.ctx.tables.rewrites.replaceAt(idOfExpr(e.body), body);
+    return this.ctx.tables.rewrites.replace({ id: idOfExpr(e.body) }, body);
   }
 
   // A copy of `e` with fresh ids, as checking has left it so far.
@@ -1515,7 +1515,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const variant = this.ctx.tables.promiseVariants.get(e);
     if (variant !== undefined) {
       const nothing = this.ctx.tables.typing.lower(this.ctx.resolveType(variant.typeArgs[0]!)) === "void";
-      const named = this.ctx.tables.rewrites.replaceAt(idOfExpr(e.callee), { id: 0, kind: "ident", name: nothing ? `${variant.name} void` : variant.name, start: e.callee.start, end: e.callee.end });
+      const named = this.ctx.tables.rewrites.replace({ id: idOfExpr(e.callee) }, { id: 0, kind: "ident", name: nothing ? `${variant.name} void` : variant.name, start: e.callee.start, end: e.callee.end });
       const made = this.ctx.tables.rewrites.replace(e, { ...callNode(e), callee: named, typeArgs: nothing ? variant.typeArgs.slice(1) : variant.typeArgs });
       if (made.kind === "call") return this.callNamed(made);
     }
@@ -4182,7 +4182,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (!any) return undefined;
     let parts: Expr[] = [];
     for (let i: usize = 0; i < args.length; i++) this.spreadParts(args[i]!, tuples[i], parts);
-    return this.ctx.tables.rewrites.replaceAt(e.id, withArgs(e, parts));
+    return this.ctx.tables.rewrites.replace(e, withArgs(e, parts));
   }
 
   // An argument as `spreadTuples` passes it: itself, or a tuple's elements read from its variable.
@@ -6867,7 +6867,7 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // Replaces `e` with `to`, keeping its own span and id.
   private become(this: Mut<this>, e: Ref<Expr>, to: Expr): Expr {
-    return this.ctx.tables.rewrites.replaceAt(idOfExpr(e), withIdExpr(to, 0, 0, [e.start, e.end]));
+    return this.ctx.tables.rewrites.replace({ id: idOfExpr(e) }, withIdExpr(to, 0, 0, [e.start, e.end]));
   }
 
   // Checks a call made in place of another expression.
@@ -10154,17 +10154,13 @@ function infoOf(type: Type, test: PatternTest): PatternInfo {
 
 // A copy of a call, for one made from it.
 function callNode(e: Ref<Call>): Call {
-  const copy = cloneExpr(e);
-  if (copy.kind === "call") return copy;
-  return { id: e.id, kind: "call", callee: cloneExpr(e.callee), typeArgs: [], args: [], optional: e.optional, start: e.start, end: e.end };
+  return { ...e };
 }
 
 // A copy of a call or `new` with other arguments.
 function withArgs(e: Ref<Extract<Expr, { kind: "call" | "new" }>>, args: Expr[]): Expr {
-  let copy = cloneExpr(e);
-  if (copy.kind === "call") return { ...copy, args };
-  if (copy.kind === "new") return { ...copy, args };
-  return copy;
+  if (e.kind === "call") return { ...e, args };
+  return { ...e, args };
 }
 
 // Copies of type nodes, for a node made from another.
