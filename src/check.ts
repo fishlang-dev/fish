@@ -125,7 +125,8 @@ export type Instance = {
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
   captures?: Map<LocalId, LocalId | "this">;
-  captureUses?: Map<LocalId, Expr | ObjectProp>;
+  // Where a closure first uses each capture, as the name read there.
+  captureUses?: Map<LocalId, Expr>;
   // The captures it changes, which it captures mutably, and those it moves out of itself.
   changed?: Set<LocalId>;
   moved?: Set<LocalId>;
@@ -199,6 +200,12 @@ function nestedFunctions(list: Ref<Stmt[]>): usize[] {
 // The names a statement of a list declares.
 function declaredNames(s: Ref<Stmt>): string[] {
   return s.kind === "let" ? s.declarations.flatMap((d) => patternNames(d.target)) : s.kind === "function" ? [s.name] : [];
+}
+
+// A use of a captured binding, for messages: a name read, or a shorthand property naming it.
+function useOf(at: Ref<Expr | ObjectProp>): Expr {
+  if (at.kind === "shorthand") return { id: at.id, kind: "ident", name: at.name, start: at.start, end: at.end };
+  return cloneExpr(at as Ref<Expr>);
 }
 
 // What the innermost of a list of facts that knows of `key` says of it.
@@ -3094,7 +3101,7 @@ class BodyChecker implements Context, GuardHost {
     // An owned parameter is the body's own, as a `let` is; one holding a reference keeps the
     // caller's lifetime, which a new value could outlive.
     this.f().params.forEach((p, i) => {
-      this.declare(paramName(p), this.params[i]!, !this.cx.tables.typing.holdsRef(this.params[i]!), true, p);
+      this.declare(paramName(p), this.params[i]!, !this.cx.tables.typing.holdsRef(this.params[i]!), true, { ...p });
       if (assignsOwn(this.f().body, paramName(p))) this.assignedParams.add(this.locals().get(p)!);
     });
     this.hidden = false;
@@ -3248,7 +3255,7 @@ class BodyChecker implements Context, GuardHost {
 
   /** @throws {CompileError} */
   bind(this: Mut<this>, name: string, type: Type, node: Ref<Expr>): LocalId {
-    this.declare(name, type, false, false, node);
+    this.declare(name, type, false, false, cloneExpr(node));
     return this.locals().get(node)!;
   }
 
@@ -3595,7 +3602,7 @@ class BodyChecker implements Context, GuardHost {
     const kind = this.cx.recOf(bound)?.kind;
     if (kind !== "object" && kind !== "class") return undefined;
     const field = this.cx.tables.typing.field(bound as Exclude<Type, string>, e.name);
-    if (!field) return undefined;
+    if ((field === undefined)) return undefined;
     const root = this.pathKey(e.object);
     return root === undefined ? undefined : `${root}${/^\d+$/.test(e.name) ? `[${e.name}]` : `.${shownName(e.name)}`}`;
   }
@@ -3772,7 +3779,7 @@ class BodyChecker implements Context, GuardHost {
     if (this.cx.isInterface(type)) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
     const r = this.cx.recOf(type);
     if (r?.kind === "function" && r.generic !== undefined) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since a generic function type describes the generic function it holds`, d.start, d.end);
-    this.declare(name, type, true, false, s);
+    this.declare(name, type, true, false, { ...s });
     return undefined;
   }
 
@@ -4308,8 +4315,8 @@ class BodyChecker implements Context, GuardHost {
     if (this.cx.isRef(whole) && !this.cx.tables.typing.isCopy(type)) {
       const lent = this.cx.tables.typing.refType(type, false);
       this.exprs().coerce(init, type, lent, "");
-      this.declare(name, lent, s.keyword === "let", false, s);
-    } else this.declare(name, type, s.keyword === "let", false, s);
+      this.declare(name, lent, s.keyword === "let", false, { ...s });
+    } else this.declare(name, type, s.keyword === "let", false, { ...s });
     return undefined;
   }
 
@@ -4626,7 +4633,7 @@ class BodyChecker implements Context, GuardHost {
         if (this.cx.tables.loopParts.has(d)) return this.loopPart(s, d);
         if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
         if ((d.init === undefined) && s.keyword === "const") throw new CompileError("E0406", "a 'const' needs its value where it is declared, as TypeScript requires; use 'let' to assign it later", d.start, d.end);
-        if (!d.init) return this.unassigned(s, d, d.target.name);
+        if ((d.init === undefined)) return this.unassigned(s, d, d.target.name);
         if (isAwait(d.init)) this.awaiting(d.init);
         if (d.init.kind === "yield") this.yieldable.add(d.init);
         // A function type there makes the variable a stored callable.
@@ -4652,7 +4659,7 @@ class BodyChecker implements Context, GuardHost {
         }
         // So does a regex given as a 'RegExp', which keeps its pattern's captures.
         const describes = annotated && (this.cx.isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
-        this.declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, s);
+        this.declare(d.target.name, annotated && !describes ? annotated : widened, s.keyword === "let", false, { ...s });
         if (s.keyword === "let" && !annotated && type === "i64" && this.exprs().literalOnly(d.init, false)) this.cx.candidates.set(this.locals().get(s)!, s);
         const number = s.keyword === "const" ? numberKey(d.init) : undefined;
         if (number !== undefined) this.cx.tables.numberKeys.set(this.locals().get(s)!, number);
@@ -4710,7 +4717,7 @@ class BodyChecker implements Context, GuardHost {
         // A generic function lifted from here in an earlier check of this body.
         const lifted = this.cx.tables.liftedFunctions.get(s);
         if (lifted) {
-          this.declare(lifted.name, "void", false, false, s);
+          this.declare(lifted.name, "void", false, false, { ...s });
           this.cx.localOf(this.locals().get(s)!).generic = this.cx.byName.get(lifted.fn.name)!;
         }
         return;
@@ -4754,7 +4761,7 @@ class BodyChecker implements Context, GuardHost {
         }
         if (element !== undefined && (object === referred || call)) {
           this.pushScope(new Map<string, LocalId>());
-          this.declare(d.target.name, call ? this.cx.tables.typing.yieldsOf(this.types().get(call)!)! : element, left.keyword === "let", false, left);
+          this.declare(d.target.name, call ? this.cx.tables.typing.yieldsOf(this.types().get(call)!)! : element, left.keyword === "let", false, { ...left });
           this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
@@ -4787,7 +4794,7 @@ class BodyChecker implements Context, GuardHost {
         if (stringLike(this.cx.tables.typing, object)) {
           if (through !== "string") this.coercions().set(s.right, "string");
           this.pushScope(new Map<string, LocalId>());
-          this.declare(d.target.name, "string", left.keyword === "let", false, left);
+          this.declare(d.target.name, "string", left.keyword === "let", false, { ...left });
           this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
@@ -4800,7 +4807,7 @@ class BodyChecker implements Context, GuardHost {
           const error = this.cx.tables.typing.generatorThrows(object);
           if (error) this.raise(s.right, error, "this generator");
           this.pushScope(new Map<string, LocalId>());
-          this.declare(d.target.name, yields, left.keyword === "let", false, left);
+          this.declare(d.target.name, yields, left.keyword === "let", false, { ...left });
           this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
@@ -4808,7 +4815,7 @@ class BodyChecker implements Context, GuardHost {
         // A fixed array's elements, as an array's: borrowed, or copies when they copy.
         if (o?.kind === "fixed") {
           this.pushScope(new Map<string, LocalId>());
-          this.declare(d.target.name, this.cx.tables.typing.isCopy(o.element) ? o.element : this.cx.tables.typing.refType(o.element, false), left.keyword === "let", false, left);
+          this.declare(d.target.name, this.cx.tables.typing.isCopy(o.element) ? o.element : this.cx.tables.typing.refType(o.element, false), left.keyword === "let", false, { ...left });
           this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
@@ -4820,7 +4827,7 @@ class BodyChecker implements Context, GuardHost {
           if (object !== through) this.coercions().set(s.right, object);
           const lend = (u: Type) => (this.cx.tables.typing.isCopy(u) ? u : this.cx.tables.typing.refType(u, false));
           this.pushScope(new Map<string, LocalId>());
-          this.declare(d.target.name, o.set ? lend(o.key) : this.cx.tables.typing.tupleType([lend(o.key), lend(o.value)]), left.keyword === "let", false, left);
+          this.declare(d.target.name, o.set ? lend(o.key) : this.cx.tables.typing.tupleType([lend(o.key), lend(o.value)]), left.keyword === "let", false, { ...left });
           this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
@@ -4830,7 +4837,7 @@ class BodyChecker implements Context, GuardHost {
         if (o?.kind !== "array") throw new CompileError("E0119", `'for...of' needs an array, a Map, a Set, a string, a generator or an iterable class, not '${this.cx.tables.typing.show(object)}'`, s.right.start, s.right.end);
         if (object !== through) this.coercions().set(s.right, object);
         this.pushScope(new Map<string, LocalId>());
-        this.declare(d.target.name, this.cx.tables.typing.isCopy(o.element) ? o.element : this.cx.tables.typing.refType(o.element, false), left.keyword === "let", false, left);
+        this.declare(d.target.name, this.cx.tables.typing.isCopy(o.element) ? o.element : this.cx.tables.typing.refType(o.element, false), left.keyword === "let", false, { ...left });
         this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
         this.popScope();
         return;
@@ -4927,7 +4934,7 @@ class BodyChecker implements Context, GuardHost {
         this.pushScope(new Map<string, LocalId>());
         if (s.param) {
           if (s.param.kind !== "ident") throw unsupported("destructuring patterns", s.param);
-          this.declare(s.param.name, caught, true, false, s);
+          this.declare(s.param.name, caught, true, false, { ...s });
         }
         this.statements(s.id, "handler", s.handler!);
         this.popScope();
@@ -5003,7 +5010,7 @@ class BodyChecker implements Context, GuardHost {
     const error = this.cx.tables.typing.generatorThrows(object);
     if ((error !== undefined)) this.raise(s.right, error, "this generator");
     this.pushScope(new Map<string, LocalId>());
-    this.declare(name, yields ?? channel!, mutable, false, s.left as Stmt);
+    this.declare(name, yields ?? channel!, mutable, false, cloneStmt(s.left as Stmt));
     this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
     this.popScope();
   }
@@ -5110,14 +5117,14 @@ class BodyChecker implements Context, GuardHost {
   }
 
   /** @throws {CompileError} */
-  declare(this: Mut<this>, name: string, type: Type, mutable: boolean, param: boolean, node: Ref<Stmt | Param | Expr>): void {
+  declare(this: Mut<this>, name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr): void {
     // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
     if (this.innerScope().has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError("E0402", `cannot redeclare '${name}' in the same scope`, node.start, node.end);
     const localId = this.cx.tables.arenas.addLocal({ name, type, mutable, param, id: this.cx.nextLocal++ }).localId;
     this.depths.set(localId, this.scopeList().length);
     this.innerScope().set(name, localId);
-    this.locals().set({ ...node }, localId);
-    this.cx.tables.declarations.add(node);
+    this.cx.tables.declarations.add(node.id);
+    this.locals().set(node, localId);
   }
 
   lookup(this: Mut<this>, name: string, at: Ref<Expr | ObjectProp> | undefined): LocalId | undefined {
@@ -5397,7 +5404,7 @@ class BodyChecker implements Context, GuardHost {
   private noteCaptureUse(this: Mut<this>, alias: LocalId, at: Ref<Expr | ObjectProp>): void {
     let inst = this.instance();
     if (inst.captureUses === undefined || inst.captureUses.has(alias)) return;
-    inst.captureUses.set(alias, at.kind === "shorthand" ? cloneObjectProp(at as Ref<ObjectProp>) : cloneExpr(at as Ref<Expr>));
+    inst.captureUses.set(alias, useOf(at));
   }
 }
 

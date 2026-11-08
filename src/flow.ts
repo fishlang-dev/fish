@@ -197,7 +197,7 @@ export function fieldRootsIn(s: Ref<Stmt>): Set<string> {
   return fieldRootsOf({ of: "stmt", node: s });
 }
 
-function fieldRootsOf(node: Ref<AnyNode>): Set<string> {
+function fieldRootsOf(node: AnyNode): Set<string> {
   let roots = new Set<string>();
   const add = (target: Ref<Expr> | undefined) => {
     if (target === undefined) return;

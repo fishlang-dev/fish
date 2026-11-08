@@ -93,7 +93,8 @@ export type Tables = {
   generated: Compilation["generated"];
   // The `let` statements and parameters that declare a name, as the checker meets them; every
   // other node an instance's `locals` holds is a use of one.
-  declarations: NodeSet<Expr | Stmt | Param | ObjectProp>;
+  // The nodes that declare a binding, by id, apart from the names that only read one.
+  declarations: Set<usize>;
   // The names a loop's pattern binds, made as declarations of the parts; a generic body checked
   // again for another instance meets them already made.
   loopParts: NodeSet<Declarator>;
@@ -349,7 +350,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     files,
     rust,
     generated,
-    declarations: new NodeSet<Expr | Stmt | Param | ObjectProp>(),
+    declarations: new Set<usize>(),
     loopParts: new NodeSet<Declarator>(),
     numberKeys: new Map<LocalId, string>(),
     nestedFunctions: new NodeMap<Expr, string>(),
