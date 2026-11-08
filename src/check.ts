@@ -9,7 +9,7 @@ import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } fro
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
-import { cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
+import { cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts, withIdExpr } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, assignsOwnIn, closureAssigned, fieldRootsIn, patternNames } from "./flow.ts";
@@ -4083,11 +4083,6 @@ class BodyChecker implements Context, GuardHost {
     return ends;
   }
 
-  // `const { a, b: c = 1, ...rest } = v` and `const [x, , y = 0] = v`: the value goes to a
-  // variable named for the pattern, and each name becomes a declaration of its part after it,
-  // in the list being checked, so the names own the parts as Rust's `let` does. A nested
-  // pattern is a declaration of its own, destructured in turn. A default is taken when its
-  // part is null.
   // A declaration's type: as written, or as a later use demanded, or as the target its
   // destructured part goes to.
   /** @throws {CompileError} */
@@ -4106,91 +4101,96 @@ class BodyChecker implements Context, GuardHost {
     return (e.kind === "member" || e.kind === "index") && this.computedRead(e.object);
   }
 
+  // `const { a, b: c = 1, ...rest } = v` and `const [x, , y = 0] = v`: the value goes to a
+  // variable named for the pattern, and each name becomes a declaration of its part after it,
+  // in the list being checked, so the names own the parts as Rust's `let` does. A nested
+  // pattern is a declaration of its own, destructured in turn. A default is taken when its
+  // part is null.
   /** @throws {CompileError} */
-  destructured(this: Mut<this>, s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>): undefined {
+  destructured(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "let" }>>, d: Ref<Declarator>, pattern: Ref<Extract<Pattern, { kind: "array" | "object" }>>): undefined {
     if (this.walking !== s.id) throw unsupported("destructuring patterns here", pattern);
     // A place is read part by part where it is, so only the parts named move out of it, as in
     // Rust; any other value goes to a variable named for the pattern, as messages show it.
     if (d.init === undefined) throw new CompileError("E0406", "a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
-    const init = d.init;
+    const init: Ref<Expr> = d.init!;
     let type = readsPlace(init) && d.type === undefined ? this.exprs().value(init) : undefined;
     // A getter along the path runs each time the path is read, so its result is kept once.
     const inPlace = type !== undefined && !this.computedRead(init);
-    let from: (at: Span) => Expr;
     // An index that isn't a number written in place runs once, into a variable of its own, in
     // the order the path reads them.
-    const hoisted: Stmt[] = [];
+    let hoisted: Stmt[] = [];
+    let indexes = new Map<usize, string>();
+    const held = patternText(pattern);
     if (inPlace) {
-      const indexes = new NodeMap<Expr, string>();
-      for (let e = init; e.kind === "member" || e.kind === "index"; e = e.object) {
-        if (e.kind !== "index" || e.index.kind === "int") continue;
-        const name = `index ${e.index.start}`;
-        indexes.set(e, name);
-        const at = { start: e.index.start, end: e.index.end };
-        // An index into an array or a string is a `usize`, which gives a literal sum its type.
-        const usize: TypeNode = { id: nextId(this.cx.tables.ids), kind: "ref", name: "usize", args: [], ...at };
-        hoisted.unshift({ id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target: { id: nextId(this.cx.tables.ids), kind: "ident", name, ...at }, type: usize, init: e.index, ...at }], ...at });
+      let e: Ref<Expr> = init;
+      while (true) {
+        if (e.kind === "index" && e.index.kind !== "int") {
+          const name = `index ${e.index.start}`;
+          indexes.set(e.id, name);
+          const at = { start: e.index.start, end: e.index.end };
+          // An index into an array or a string is a `usize`, which gives a literal sum its type.
+          const usize: TypeNode = { id: nextId(this.cx.tables.ids), kind: "ref", name: "usize", args: [], ...at };
+          hoisted.unshift({ id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target: { id: nextId(this.cx.tables.ids), kind: "ident", name, ...at }, type: usize, init: cloneExpr(e.index), ...at }], ...at });
+        }
+        if (e.kind === "member" || e.kind === "index") e = e.object;
+        else break;
       }
-      const copy = (e: Expr, at: Span): Expr => {
-        if (e.kind === "member") return { ...e, id: nextId(this.cx.tables.ids), object: copy(e.object, at), start: at.start, end: at.end };
-        if (e.kind !== "index") return { ...e, id: nextId(this.cx.tables.ids), start: at.start, end: at.end };
-        const name = indexes.get(e);
-        const index: Expr = name ? { id: nextId(this.cx.tables.ids), kind: "ident", name, start: e.index.start, end: e.index.end } : { ...e.index, id: nextId(this.cx.tables.ids) };
-        return { ...e, id: nextId(this.cx.tables.ids), object: copy(e.object, at), index, start: at.start, end: at.end };
-      };
-      from = (at) => copy(init, at);
       this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "empty", start: s.start, end: s.end });
     } else {
-      const held = patternText(pattern);
       this.cx.tables.rewrites.replaceDeclarator(d, { ...d, target: { id: nextId(this.cx.tables.ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
       this.statement(s);
       type = this.cx.localOf(this.locals().get(s)!).type;
-      from = (at) => ({ id: nextId(this.cx.tables.ids), kind: "ident", name: held, start: at.start, end: at.end });
     }
     const destructuring: Type = type!;
     // A top-level const is read where it lives rather than lent.
-    let root = init;
-    while (root.kind === "member" || root.kind === "index") root = root.object;
+    let root: Ref<Expr> = init;
+    while (true) {
+      if (root.kind === "member" || root.kind === "index") root = root.object;
+      else break;
+    }
     const global = inPlace && root.kind === "ident" && !this.locals().has(root);
     const borrowed = this.cx.isRef(destructuring) && !global;
     const lowered = this.cx.tables.typing.lower(this.cx.isRef(destructuring) ? this.cx.tables.typing.rec(destructuring).to : destructuring);
     const l = this.cx.recOf(lowered);
     // An object-typed or interface-typed parameter stands for any type with its fields, which its
     // bound names.
-    const whole = l?.kind === "param" && l.bound && ["object", "interface"].includes(this.cx.tables.typing.rec(l.bound).kind) ? l.bound : lowered;
+    const bound = l?.kind === "param" ? l.bound : undefined;
+    const whole = bound !== undefined && ["object", "interface"].includes(this.cx.tables.typing.rec(bound).kind) ? bound : lowered;
     const w = this.cx.recOf(whole);
-    const parts: [Pattern, Expr, Type][] = [];
-    // A part with a default: what the part holds, or the default when it is null.
-    const part = (target: Pattern, read: Expr, t: Type) => {
-      if (target.kind !== "default") return parts.push([target, read, t]);
-      const u = this.cx.recOf(t);
-      const empty = t === "null" || (u?.kind === "union" && u.members.includes("null"));
-      parts.push([target.target, empty ? { id: nextId(this.cx.tables.ids), kind: "binary", op: "??", left: read, right: target.value, start: target.start, end: target.end } : read, t]);
-    };
+    let parts: [Pattern, Expr, Type][] = [];
+    const source: Ref<Expr> | undefined = inPlace ? init : undefined;
     if (pattern.kind === "object") {
       // A union of objects, as `as const` rows give, is read field by field, each field the union
       // of its members', as a member read of it is.
-      const members = w?.kind === "union" ? w.members : [whole];
+      const members = w?.kind === "union" ? w.members.slice() : [whole];
       if (!members.every((m) => this.cx.recOf(m)?.kind === "object" || this.cx.recOf(m)?.kind === "class" || (m === whole && this.cx.recOf(m)?.kind === "interface"))) {
         throw new CompileError("E0003", `'{ ... }' destructures an object or an instance, not '${this.cx.tables.typing.show(destructuring)}'`, pattern.start, pattern.end);
       }
-      const taken = new Set<string>();
+      let taken = new Set<string>();
       for (const p of pattern.props) {
         const key = typeof p.key === "string" ? p.key : this.exprs().knownKey(p.key);
         const found = members.map((m) => this.cx.tables.typing.field(m as ClassType | ObjectType, key));
         const method = w?.kind === "interface" && w.methods.some((m) => m.name === key);
         if (method) throw new CompileError("E0003", `'{ ... }' can't take method '${key}' out of '${this.cx.tables.typing.show(whole)}'; call it on the value, as in 'x.${key}()'`, p.start, p.end);
-        if (found.some((f) => !f)) throw new CompileError("E0502", `property '${key}' does not exist on type '${this.cx.tables.typing.show(whole)}'`, p.start, p.end);
+        if (found.some((f) => f === undefined)) throw new CompileError("E0502", `property '${key}' does not exist on type '${this.cx.tables.typing.show(whole)}'`, p.start, p.end);
         taken.add(key);
-        part(p.value, { id: nextId(this.cx.tables.ids), kind: "member", object: from(p), name: key, optional: false, start: p.start, end: p.end }, this.cx.tables.typing.unionType(found.map((f) => f!.type)));
+        const object = this.partFrom(source, indexes, held, { start: p.start, end: p.end });
+        const fieldType = this.cx.tables.typing.unionType(found.map((f) => f!.type));
+        this.addPart(parts, p.value, { id: nextId(this.cx.tables.ids), kind: "member", object, name: key, optional: false, start: p.start, end: p.end }, fieldType);
       }
-      if (pattern.rest && w?.kind === "union") throw unsupported("rest patterns over a union of objects", pattern.rest);
-      if (pattern.rest && w?.kind === "interface") throw unsupported("rest patterns over an interface's fields", pattern.rest);
+      if (pattern.rest !== undefined && w?.kind === "union") throw unsupported("rest patterns over a union of objects", pattern.rest!);
+      if (pattern.rest !== undefined && w?.kind === "interface") throw unsupported("rest patterns over an interface's fields", pattern.rest!);
       // The rest is an object of the fields the pattern didn't name, taken over.
-      if (pattern.rest && (w?.kind === "object" || w?.kind === "class")) {
-        const fields = w.kind === "class" ? this.cx.tables.typing.allFields(whole as ClassType) : w.fields;
-        const props = fields.filter((f) => !taken.has(f.name) && (f.access ?? "public") === "public").map((f): ObjectProp => ({ id: nextId(this.cx.tables.ids), kind: "property", key: f.name, value: { id: nextId(this.cx.tables.ids), kind: "member", object: from(pattern.rest!), name: f.name, optional: false, start: pattern.rest!.start, end: pattern.rest!.end }, start: pattern.rest!.start, end: pattern.rest!.end }));
-        parts.push([pattern.rest, { id: nextId(this.cx.tables.ids), kind: "object", props, start: pattern.rest.start, end: pattern.rest.end }, whole]);
+      if (pattern.rest !== undefined && (w?.kind === "object" || w?.kind === "class")) {
+        const rest: Ref<Pattern> = pattern.rest!;
+        const fields = w.kind === "class" ? this.cx.tables.typing.allFields(whole as ClassType) : w.fields.slice();
+        let props: ObjectProp[] = [];
+        for (const f of fields) {
+          if (taken.has(f.name) || (f.access ?? "public") !== "public") continue;
+          const object = this.partFrom(source, indexes, held, { start: rest.start, end: rest.end });
+          props.push({ id: nextId(this.cx.tables.ids), kind: "property", key: f.name, value: { id: nextId(this.cx.tables.ids), kind: "member", object, name: f.name, optional: false, start: rest.start, end: rest.end }, start: rest.start, end: rest.end });
+        }
+        parts.push([clonePattern(rest), { id: nextId(this.cx.tables.ids), kind: "object", props, start: rest.start, end: rest.end }, whole]);
       }
     } else if (this.cx.tables.typing.isTuple(whole)) {
       const elements = this.cx.tables.typing.elementsOf(whole as ObjectType);
@@ -4198,62 +4198,105 @@ class BodyChecker implements Context, GuardHost {
       if (pattern.elements.length > elements.length && many === undefined) throw new CompileError("E0117", `tuple type '${this.cx.tables.typing.show(whole)}' of length ${elements.length} has no element at index ${elements.length}`, pattern.start, pattern.end);
       // A rest tuple's `...rest` takes its array where its fixed elements end, or a copy of the
       // part after the names taken from it, as an array pattern's rest is, when they copy.
-      const later = pattern.elements.length - elements.length;
-      if (pattern.rest && (many === undefined || later < 0 || (later > 0 && !this.cx.tables.typing.isCopy(many)))) throw unsupported(many === undefined ? "rest elements in tuple patterns" : later < 0 ? "rest patterns that don't start where a tuple's rest elements do" : "rest patterns after names taken from rest elements whose type doesn't copy", pattern.rest);
-      pattern.elements.forEach((p, i) => {
-        if (!p) return;
+      const later = (pattern.elements.length as i64) - (elements.length as i64);
+      if (pattern.rest !== undefined && (many === undefined || later < 0 || (later > 0 && !this.cx.tables.typing.isCopy(many)))) throw unsupported(many === undefined ? "rest elements in tuple patterns" : later < 0 ? "rest patterns that don't start where a tuple's rest elements do" : "rest patterns after names taken from rest elements whose type doesn't copy", pattern.rest!);
+      for (let i: usize = 0; i < pattern.elements.length; i++) {
+        const p = pattern.elements[i];
+        if (p === undefined) continue;
         const at = { start: p.start, end: p.end };
         // With a default, an element past the fixed ones may be missing, so it is read as
         // `.at(i)` on the rest, which an array pattern's default reads too.
         if (i >= elements.length && p.kind === "default") {
           // Read with `.at(i)`, a value that doesn't copy would be copied where `t[i]` moves it.
           if (!this.cx.tables.typing.isCopy(many!)) throw new CompileError("E0117", `a default past a tuple's fixed elements would take a '${this.cx.tables.typing.show(many!)}' out of the tuple's rest when it is there, leaving a hole; destructure without the default, or index it and clone`, p.start, p.end);
-          const array: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: from(p), name: "...", optional: false, ...at };
-          this.cx.tables.restStarts.set(array, elements.length);
+          const array: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partFrom(source, indexes, held, at), name: "...", optional: false, ...at };
+          this.cx.tables.restStarts.set(cloneExpr(array), elements.length);
           const read: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee: { id: nextId(this.cx.tables.ids), kind: "member", object: array, name: "at", optional: false, ...at }, args: [{ id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(i - elements.length), ...at }], typeArgs: [], optional: false, ...at };
-          return part(p, read, this.cx.tables.typing.unionType([many!, "null"]));
+          this.addPart(parts, p, read, this.cx.tables.typing.unionType([many!, "null"]));
+          continue;
         }
-        part(p, { id: nextId(this.cx.tables.ids), kind: "index", object: from(p), index: { id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(i), ...at }, optional: false, ...at }, elements[i] ?? many!);
-      });
-      if (pattern.rest) {
-        const at = { start: pattern.rest.start, end: pattern.rest.end };
-        const array: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: from(pattern.rest), name: "...", optional: false, ...at };
-        this.cx.tables.restStarts.set(array, elements.length);
+        const object = this.partFrom(source, indexes, held, at);
+        this.addPart(parts, p, { id: nextId(this.cx.tables.ids), kind: "index", object, index: { id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(i), ...at }, optional: false, ...at }, i < elements.length ? elements[i]! : many!);
+      }
+      if (pattern.rest !== undefined) {
+        const rest: Ref<Pattern> = pattern.rest!;
+        const at = { start: rest.start, end: rest.end };
+        const array: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partFrom(source, indexes, held, at), name: "...", optional: false, ...at };
+        this.cx.tables.restStarts.set(cloneExpr(array), elements.length);
         const taken: Expr = later === 0 ? array : { id: nextId(this.cx.tables.ids), kind: "call", callee: { id: nextId(this.cx.tables.ids), kind: "member", object: array, name: "slice", optional: false, ...at }, args: [{ id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(later), ...at }], typeArgs: [], optional: false, ...at };
-        part(pattern.rest, taken, this.cx.tables.typing.arrayType(many!));
+        this.addPart(parts, rest, taken, this.cx.tables.typing.arrayType(many!));
       }
     } else if (w?.kind === "array") {
+      const element = w.element;
       // An array's elements are read as `xs[i]`, which a value that moves would leave a hole in.
-      if (!this.cx.tables.typing.isCopy(w.element)) throw new CompileError("E0202", `an array pattern reads each element as 'xs[i]', and a '${this.cx.tables.typing.show(w.element)}' would be moved out of the array, leaving a hole; index it and clone, or loop over it`, pattern.start, pattern.end);
-      pattern.elements.forEach((p, i) => {
-        if (!p) return;
+      if (!this.cx.tables.typing.isCopy(element)) throw new CompileError("E0202", `an array pattern reads each element as 'xs[i]', and a '${this.cx.tables.typing.show(element)}' would be moved out of the array, leaving a hole; index it and clone, or loop over it`, pattern.start, pattern.end);
+      for (let i: usize = 0; i < pattern.elements.length; i++) {
+        const p = pattern.elements[i];
+        if (p === undefined) continue;
         const at = { start: p.start, end: p.end };
         const index: Expr = { id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(i), ...at };
+        const object = this.partFrom(source, indexes, held, at);
         // With a default, a missing element is the default rather than a panic.
-        const read: Expr = p.kind === "default"
-          ? { id: nextId(this.cx.tables.ids), kind: "binary", op: "??", left: { id: nextId(this.cx.tables.ids), kind: "call", callee: { id: nextId(this.cx.tables.ids), kind: "member", object: from(p), name: "at", optional: false, ...at }, args: [index], typeArgs: [], optional: false, ...at }, right: p.value, ...at }
-          : { id: nextId(this.cx.tables.ids), kind: "index", object: from(p), index, optional: false, ...at };
-        parts.push([p.kind === "default" ? p.target : p, read, w.element]);
-      });
-      if (pattern.rest) {
-        const at = { start: pattern.rest.start, end: pattern.rest.end };
-        const slice: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee: { id: nextId(this.cx.tables.ids), kind: "member", object: from(pattern.rest), name: "slice", optional: false, ...at }, args: [{ id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(pattern.elements.length), ...at }], typeArgs: [], optional: false, ...at };
-        parts.push([pattern.rest, slice, whole]);
+        if (p.kind === "default") {
+          const read: Expr = { id: nextId(this.cx.tables.ids), kind: "binary", op: "??", left: { id: nextId(this.cx.tables.ids), kind: "call", callee: { id: nextId(this.cx.tables.ids), kind: "member", object, name: "at", optional: false, ...at }, args: [index], typeArgs: [], optional: false, ...at }, right: cloneExpr(p.value), ...at };
+          parts.push([clonePattern(p.target), read, element]);
+        } else parts.push([clonePattern(p), { id: nextId(this.cx.tables.ids), kind: "index", object, index, optional: false, ...at }, element]);
+      }
+      if (pattern.rest !== undefined) {
+        const rest: Ref<Pattern> = pattern.rest!;
+        const at = { start: rest.start, end: rest.end };
+        const slice: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee: { id: nextId(this.cx.tables.ids), kind: "member", object: this.partFrom(source, indexes, held, at), name: "slice", optional: false, ...at }, args: [{ id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(pattern.elements.length), ...at }], typeArgs: [], optional: false, ...at };
+        parts.push([clonePattern(rest), slice, whole]);
       }
     } else throw new CompileError("E0003", `'[ ... ]' destructures a tuple, like '[i64, string]', or an array, not '${this.cx.tables.typing.show(destructuring)}'`, pattern.start, pattern.end);
-    const lets: Stmt[] = parts.map(([target, init]): Stmt => {
+    let lets: Stmt[] = [];
+    while (parts.length > 0) {
+      const [target, partInit] = parts.shift()!;
       const at = { start: target.start, end: target.end };
-      const declarator: Declarator = { id: nextId(this.cx.tables.ids), target, type: undefined, init, ...at };
       // A part of a borrowed value is borrowed too, as a loop's pattern's parts are; an array's
       // parts copy.
-      if (borrowed && target.kind === "ident" && (init.kind === "member" || (init.kind === "index" && this.cx.tables.typing.isTuple(whole)))) this.cx.tables.loopParts.add(declarator);
-      return { id: nextId(this.cx.tables.ids), kind: "let", keyword: s.keyword, declarations: [declarator], ...at };
-    });
+      const lent = borrowed && target.kind === "ident" && (partInit.kind === "member" || (partInit.kind === "index" && this.cx.tables.typing.isTuple(whole)));
+      const declarator: Declarator = { id: nextId(this.cx.tables.ids), target, type: undefined, init: partInit, ...at };
+      if (lent) this.cx.tables.loopParts.add({ ...declarator });
+      lets.push({ id: nextId(this.cx.tables.ids), kind: "let", keyword: s.keyword, declarations: [declarator], ...at });
+    }
     // A parameter's parts come before a derived constructor's `super(...)`, as its whole did.
-    if (this.cx.tables.prologues.has(s)) for (const l of [...hoisted, ...lets]) this.cx.tables.prologues.add(l);
-    this.after.push(...hoisted, ...lets);
-    this.cx.tables.insertedAfter.set(s, [...hoisted, ...lets].map((x) => cloneStmt(x)));
+    let made: Stmt[] = [];
+    while (hoisted.length > 0) made.push(hoisted.shift()!);
+    while (lets.length > 0) made.push(lets.shift()!);
+    if (this.cx.tables.prologues.has(s)) for (const x of made) this.cx.tables.prologues.add(cloneStmt(x));
+    this.cx.tables.insertedAfter.set({ ...s }, made.map((x) => cloneStmt(x)));
+    while (made.length > 0) this.after.push(made.shift()!);
     return undefined;
+  }
+  // A part of a destructured value: its target, with a default taken when the part is null.
+  private addPart(this: Mut<this>, parts: Mut<[Pattern, Expr, Type][]>, target: Ref<Pattern>, read: Expr, t: Type): void {
+    if (target.kind !== "default") {
+      parts.push([clonePattern(target), read, t]);
+      return;
+    }
+    const u = this.cx.recOf(t);
+    const empty = t === "null" || (u?.kind === "union" && u.members.includes("null"));
+    parts.push([clonePattern(target.target), empty ? { id: nextId(this.cx.tables.ids), kind: "binary", op: "??", left: read, right: cloneExpr(target.value), start: target.start, end: target.end } : read, t]);
+  }
+  // Where a destructured part is read from: the place itself, read again at `at`, or the
+  // variable named for the pattern.
+  private partFrom(this: Mut<this>, init: Ref<Expr> | undefined, indexes: Ref<Map<usize, string>>, held: string, at: Ref<Span>): Expr {
+    if (init === undefined) return { id: nextId(this.cx.tables.ids), kind: "ident", name: held, start: at.start, end: at.end };
+    return this.placeCopy(init, indexes, at);
+  }
+  private placeCopy(this: Mut<this>, e: Ref<Expr>, indexes: Ref<Map<usize, string>>, at: Ref<Span>): Expr {
+    if (e.kind === "member") {
+      const object = this.placeCopy(e.object, indexes, at);
+      return { ...e, id: nextId(this.cx.tables.ids), object, start: at.start, end: at.end };
+    }
+    if (e.kind === "index") {
+      const object = this.placeCopy(e.object, indexes, at);
+      const name = indexes.get(e.id);
+      const index: Expr = name !== undefined ? { id: nextId(this.cx.tables.ids), kind: "ident", name, start: e.index.start, end: e.index.end } : withIdExpr(cloneExpr(e.index), nextId(this.cx.tables.ids), 0);
+      return { ...e, id: nextId(this.cx.tables.ids), object, index, start: at.start, end: at.end };
+    }
+    return withIdExpr(cloneExpr(e), nextId(this.cx.tables.ids), 0, [at.start, at.end]);
   }
 
   // `for (const [k, v] of pairs)` and `for (const { x, y } of points)`: the element goes to a
