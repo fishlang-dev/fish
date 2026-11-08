@@ -34,7 +34,7 @@ export function typeForm(kind: string): string | undefined {
 export const IMPORT_META_MEMBERS = ["path", "file", "dir", "url", "main", "dirname", "filename"];
 
 // Declarations that parse but have no meaning yet, wherever they appear.
-export function unsupportedDeclaration(s: Stmt): CompileError | undefined {
+export function unsupportedDeclaration(s: Ref<Stmt>): CompileError | undefined {
   switch (s.kind) {
     case "typeAlias":
       return unsupported("local type aliases", s);

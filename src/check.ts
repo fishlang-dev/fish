@@ -544,7 +544,7 @@ const MEMBERS = new Set(["field", "method", "constructor", "get", "set", "index"
 
 // A macro takes the declaration it is applied to, and no type parameters.
 /** @throws {CompileError} */
-function macroShape(f: Ref<Func>) {
+function macroShape(f: Ref<Declared>) {
   const shape = `as in 'macro function ${f.name.replace(/-fsh\d+$/, "")}(input: Ast): Ast'`;
   if (f.typeParams.length > 0) throw new CompileError("E1103", `a macro takes no type parameters, ${shape}`, f.typeParams[0]!.start, f.typeParams[0]!.end);
   if (f.params.length === 0 || f.params.some((p) => p.rest)) throw new CompileError("E1103", `a macro takes the declaration it is applied to, then any arguments, ${shape}`, f.start, f.end);
@@ -692,13 +692,19 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
       // exported macro is for other files.
       if (s.kind === "export" && s.body.kind === "function" && hasBody(s.body)) {
         if (s.body.macro) macroShape(s.body);
-        const exported = addBodyTo(tables, s.body.macro ? s.body : Object.assign({ ...s.body, id: nextId(tables.ids) }, { exported: true }));
+        let exported: BodyId;
+        if (s.body.macro) exported = addBodyTo(tables, withBody({ ...s.body }));
+        else {
+          exported = addBodyTo(tables, withBody({ ...s.body, id: nextId(tables.ids) }));
+          let record = tables.arenas.bodyMut(exported);
+          record.exported = true;
+        }
         if (s.body.macro) top.macroBodies.add(exported);
         top.funcs.push(exported);
         continue;
       }
       const declaration = unsupportedDeclaration(s);
-      if (declaration) throw declaration;
+      if (declaration !== undefined) throw declaration;
       if (s.kind === "empty") continue;
       // A top-level `const` is computed while compiling: comptime runs a function of no parameters
       // giving its value. A `comptime { }` block is a function giving nothing, run the same way.
@@ -745,7 +751,7 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
       }
       if (!hasBody(s)) throw new CompileError("E0410", `'${s.name}' has no implementation; follow its overload signatures with a 'function ${s.name}' that has a body`, s.start, s.end);
       if (s.macro) macroShape(s);
-      const declared = addBodyTo(tables, s);
+      const declared = addBodyTo(tables, { ...s });
       if (s.macro) top.macroBodies.add(declared);
       top.funcs.push(declared);
     } catch (e) {
@@ -754,6 +760,12 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
     }
   }
   return top;
+}
+
+// A declaration given its statements: one checked as having a body has them.
+function withBody(d: Declared): Func {
+  const body: Stmt[] = d.body !== undefined ? [...d.body!] : [];
+  return { ...d, body };
 }
 
 function addBodyTo(tables: Mut<Tables>, f: Func): BodyId {
@@ -1329,27 +1341,28 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // a bad initializer.
     for (const name of [...this.enums.keys()]) settleEnum(this, name);
     // The classes as declared, and generic classes' definitions; any other is an instance a call made.
-    const declaredClasses = new Set<ClassId>(this.registryState.unsettled);
+    const declaredClasses = new Set<ClassId>([...this.registryState.unsettled]);
     // A class's `implements` claims are checked before any body uses the class, so a refused one is
     // reported at the class rather than at each use.
     for (const c of declaredClasses) {
       try {
         this.registry().claims(c);
       } catch (e) {
-        if (e instanceof CompileError) this.claimErrors.push(e);
         if (!(e instanceof CompileError)) throw e;
+        this.claimErrors.push(e.clone());
         this.recover(e);
       }
     }
     for (const id of [...this.funcs]) {
       try {
-        this.checkBody(this.definition(id));
+        const definition = this.definition(id);
+        this.checkBody(definition);
       } catch (e) {
         // A package's function Fish can't type is refused where a program calls it.
         if (this.tables.arenas.bodyOf(id).js === undefined || !(e instanceof CompileError)) {
           // A bad signature fails before the body's check does, and fails each call of it as well.
-          if (e instanceof CompileError && !this.failed.has(id)) this.failed.set(id, e);
           if (!(e instanceof CompileError)) throw e;
+          if (!this.failed.has(id)) this.failed.set(id, e.clone());
           this.recover(e);
           continue;
         }
@@ -1930,10 +1943,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.views.set(id, this.tables.arenas.instanceOf(id).returns);
     // `JSON.stringify` and printing write a field by how it was spelled, which lowering forgets.
     let spelled: [Expr, Type][] = [];
-    for (const e of this.tables.arenas.instanceOf(id).types.keys()) {
+    const typed = this.tables.arenas.instanceOf(id).types;
+    for (const e of typed.keys()) {
       const instance = this.tables.arenas.instanceOf(id);
       if (e.kind === "call" && this.tables.jsonCalls.get(e) === "stringify" && e.args.length > 0) {
-        const x = e.args[0]!;
+        const x: Ref<Expr> = e.args[0]!;
         const type = instance.coercions.get(x) ?? instance.types.get(x);
         if (type !== undefined) spelled.push([cloneExpr(x), type]);
       }
@@ -1954,7 +1968,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // gives, which is the one compiled.
     let made = new TypeMap<Type, Type>();
     let targets: InstanceId[] = [];
-    for (const target of this.tables.arenas.instanceOf(id).calls.values()) targets.push(target);
+    const called = this.tables.arenas.instanceOf(id).calls;
+    for (const target of called.values()) targets.push(target);
     for (const target of targets) {
       const to = this.counterpart(target);
       const from = this.tables.arenas.instanceOf(target).generator;
@@ -1962,10 +1977,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       if (from !== undefined && into !== undefined && from !== into) made.set(from, into);
     }
     let types: [Expr, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).types) types.push([cloneExpr(e), t]);
+    const typesOf = this.tables.arenas.instanceOf(id).types;
+    for (const [e, t] of typesOf) types.push([cloneExpr(e), t]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.lowerMade(types[i]![1], made);
     let coercions: [Expr, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).coercions) coercions.push([cloneExpr(e), t]);
+    const coercionsOf = this.tables.arenas.instanceOf(id).coercions;
+    for (const [e, t] of coercionsOf) coercions.push([cloneExpr(e), t]);
     for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.lowerMade(coercions[i]![1], made);
     {
       let instance = this.tables.arenas.instanceMut(id);
@@ -1979,7 +1996,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       }
     }
     // A pipe's topic written in as a field read would run a getter once for each `%`.
-    for (const e of this.tables.arenas.instanceOf(id).types.keys()) {
+    const read = this.tables.arenas.instanceOf(id).types;
+    for (const e of read.keys()) {
       if (e.kind !== "member" || !this.tables.substituted.has(e)) continue;
       const instance = this.tables.arenas.instanceOf(id);
       const held = this.recOf(instance.types.get(e.object));
@@ -2019,7 +2037,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     let localIds: LocalId[] = [];
     let seenLocals = new Set<LocalId>();
-    for (const l of this.tables.arenas.instanceOf(id).locals.values()) {
+    const localsOf = this.tables.arenas.instanceOf(id).locals;
+    for (const l of localsOf.values()) {
       if (seenLocals.has(l)) continue;
       seenLocals.add(l);
       localIds.push(l);
@@ -2040,10 +2059,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     binding.type = lowered;
     }
     let calls: [Expr, InstanceId][] = [];
-    for (const [e, target] of this.tables.arenas.instanceOf(id).calls) calls.push([cloneExpr(e), target]);
+    const callsOf = this.tables.arenas.instanceOf(id).calls;
+    for (const [e, target] of callsOf) calls.push([cloneExpr(e), target]);
     for (let i: usize = 0; i < calls.length; i++) calls[i]![1] = this.counterpart(calls[i]![1]);
     let setters: [Expr, InstanceId][] = [];
-    for (const [e, target] of this.tables.arenas.instanceOf(id).setters) setters.push([cloneExpr(e), target]);
+    const settersOf = this.tables.arenas.instanceOf(id).setters;
+    for (const [e, target] of settersOf) setters.push([cloneExpr(e), target]);
     for (let i: usize = 0; i < setters.length; i++) setters[i]![1] = this.counterpart(setters[i]![1]);
     const returns = this.tables.typing.lower(this.tables.arenas.instanceOf(id).returns);
     let instance = this.tables.arenas.instanceMut(id);
@@ -5106,7 +5127,7 @@ function checkedOnly(tables: Ref<Tables>, i: Ref<Instance>): boolean {
 }
 
 // The span that starts first, the earlier one where two start together.
-function earliestOf(spans: Ref<Span[]>): { start: usize; end: usize } | undefined {
+function earliestOf(spans: Ref<Expr[]>): { start: usize; end: usize } | undefined {
   let first: { start: usize; end: usize } | undefined = undefined;
   for (const e of spans) if (first === undefined || e.start < first.start) first = { start: e.start, end: e.end };
   return first;
