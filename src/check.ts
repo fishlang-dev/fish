@@ -4264,80 +4264,111 @@ class BodyChecker implements Context, GuardHost {
   // as their union, or lent when they share one type that doesn't. A union of references to
   // different types can't be held, so those are refused.
   /** @throws {CompileError} */
-  private tupleLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, tuple: ObjectType): Stmt {
-    const typing = this.cx.tables.typing;
-    const ids = this.cx.tables.ids;
-    const { rest } = typing.rec(tuple);
-    const fixed = typing.elementsOf(tuple);
+  private tupleLoop(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>, tuple: ObjectType): Stmt {
+    const rest = this.cx.tables.typing.rec(tuple).rest;
+    const fixed = this.cx.tables.typing.elementsOf(tuple);
     let parts: Type[] = [...fixed];
     if (rest !== undefined) parts.push(rest);
     if (parts.length === 0) throw new CompileError("E0119", "this tuple is empty, so a 'for...of' over it would never run its body", s.right.start, s.right.end);
     const element = parts.every((p) => this.cx.tables.typing.isCopy(p)) ? this.cx.tables.typing.unionType(parts) : parts.every((p) => p === parts[0]) ? this.cx.tables.typing.refType(parts[0]!, false) : undefined;
     if (element === undefined) throw unsupported("'for...of' loops over a tuple whose elements differ in type and don't all copy", s.right);
     const at = { start: s.right.start, end: s.right.end };
-    // Each element reads the tuple again, so it has to be a place, not a value made for the loop.
-    const place = (x: Expr): Expr | undefined => {
-      x = this.cx.tables.rewrites.current(x);
-      if (x.kind === "ident" || x.kind === "this") return { ...x, id: nextId(ids) };
-      if (x.kind !== "member" || x.optional || this.calls().has(x)) return undefined;
-      const object = place(x.object);
-      return object && { ...x, id: nextId(ids), object };
-    };
     // JavaScript's loop keeps the tuple it started with, and this one reads the variable on each
     // pass, so a body giving the variable a new tuple is refused rather than read differently.
-    const root = this.cx.tables.rewrites.current(s.right);
+    const peeked = this.cx.tables.rewrites.getExpr(s.right.id);
+    const root: Ref<Expr> = peeked !== undefined ? peeked : s.right;
     if (root.kind === "ident" && assignsOwn(s.body, root.name)) throw new CompileError("E0203", `cannot give '${root.name}' a new tuple inside a 'for...of' over it, which reads it on each pass; change its elements, or loop over a copy, as in 'const each = ${root.name};'`, at.start, at.end);
-    const from = (): Expr => place(s.right) ?? (() => { throw new CompileError("E0212", "a 'for...of' over a tuple reads it once per element, so it needs a name; give the value one first, as in 'const t = ...;'", at.start, at.end); })();
-    const preset = (t: Type): TypeNode => {
-      const made: TypeNode = { id: nextId(ids), kind: "ref", name: typing.show(t), args: [], ...at };
-      this.cx.tables.presetTypes.set(made, t);
-      return made;
-    };
-    const counter = (): Expr => ({ id: nextId(ids), kind: "ident", name: "tuple position", ...at });
-    const int = (n: usize): Expr => ({ id: nextId(ids), kind: "int", value: BigInt(n), ...at });
-    const member = (name: string): Expr => ({ id: nextId(ids), kind: "member", object: from(), name, optional: false, ...at });
-    let chosen: Expr = rest === undefined ? member(String(fixed.length - 1)) : { id: nextId(ids), kind: "index", object: member("..."), index: { id: nextId(ids), kind: "binary", op: "-", left: counter(), right: int(fixed.length), ...at }, optional: false, ...at };
-    for (let i = rest === undefined ? fixed.length - 2 : fixed.length - 1; i >= 0; i--) {
-      chosen = { id: nextId(ids), kind: "conditional", cond: { id: nextId(ids), kind: "binary", op: "===", left: counter(), right: int(i), ...at }, then: member(String(i)), else: chosen, ...at };
+    // Each element reads the tuple again, so it has to be a place, not a value made for the loop.
+    if (this.tuplePlace(s.right) === undefined) throw new CompileError("E0212", "a 'for...of' over a tuple reads it once per element, so it needs a name; give the value one first, as in 'const t = ...;'", at.start, at.end);
+    let chosen: Expr = rest === undefined ? this.tupleMember(s.right, String(fixed.length - 1), at) : { id: nextId(this.cx.tables.ids), kind: "index", object: this.tupleMember(s.right, "...", at), index: { id: nextId(this.cx.tables.ids), kind: "binary", op: "-", left: this.tupleCounter(at), right: this.tupleInt(fixed.length, at), ...at }, optional: false, ...at };
+    for (let i = rest === undefined ? (fixed.length as i64) - 2 : (fixed.length as i64) - 1; i >= 0; i--) {
+      const n = i as usize;
+      const cond: Expr = { id: nextId(this.cx.tables.ids), kind: "binary", op: "===", left: this.tupleCounter(at), right: this.tupleInt(n, at), ...at };
+      const then = this.tupleMember(s.right, String(n), at);
+      chosen = { id: nextId(this.cx.tables.ids), kind: "conditional", cond, then, else: chosen, ...at };
     }
-    const left = s.left as Extract<Stmt, { kind: "let" }>;
+    const left = s.left as Ref<Extract<Stmt, { kind: "let" }>>;
     const d = left.declarations[0]!;
-    const each: Stmt = { id: nextId(ids), kind: "let", keyword: left.keyword, declarations: [{ ...d, id: nextId(ids), type: preset(element), init: chosen }], start: left.start, end: left.end };
-    const init: Stmt = { id: nextId(ids), kind: "let", keyword: "let", declarations: [{ id: nextId(ids), target: { id: nextId(ids), kind: "ident", name: "tuple position", ...at }, type: preset("usize"), init: int(0), ...at }], ...at };
-    const test: Expr = { id: nextId(ids), kind: "binary", op: "<", left: counter(), right: member("length"), ...at };
-    const update: Expr = { id: nextId(ids), kind: "update", op: "++", prefix: false, operand: counter(), ...at };
-    const body: Stmt = { id: nextId(ids), kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
+    const elementType = this.tuplePreset(element, at);
+    const each: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: left.keyword, declarations: [{ ...d, id: nextId(this.cx.tables.ids), type: elementType, init: chosen }], start: left.start, end: left.end };
+    const position = this.tuplePreset("usize", at);
+    const init: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: "let", declarations: [{ id: nextId(this.cx.tables.ids), target: { id: nextId(this.cx.tables.ids), kind: "ident", name: "tuple position", ...at }, type: position, init: this.tupleInt(0, at), ...at }], ...at };
+    const test: Expr = { id: nextId(this.cx.tables.ids), kind: "binary", op: "<", left: this.tupleCounter(at), right: this.tupleMember(s.right, "length", at), ...at };
+    const update: Expr = { id: nextId(this.cx.tables.ids), kind: "update", op: "++", prefix: false, operand: this.tupleCounter(at), ...at };
+    const body: Stmt = { id: nextId(this.cx.tables.ids), kind: "block", body: s.body.slice(), start: s.body.length > 0 ? s.body[0]!.start : s.end, end: s.end };
     return this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "for", init, test, update, body: [each, body], start: s.start, end: s.end });
+  }
+  // A fresh path to the place a tuple loop reads, or nothing when it isn't one.
+  private tuplePlace(this: Mut<this>, given: Ref<Expr>): Expr | undefined {
+    const peeked = this.cx.tables.rewrites.getExpr(given.id);
+    const x: Ref<Expr> = peeked !== undefined ? peeked : given;
+    if (x.kind === "ident") return { id: nextId(this.cx.tables.ids), kind: "ident", name: x.name, start: x.start, end: x.end };
+    if (x.kind === "this") return { id: nextId(this.cx.tables.ids), kind: "this", start: x.start, end: x.end };
+    if (x.kind !== "member" || x.optional || this.calls().has(x)) return undefined;
+    const object = this.tuplePlace(x.object);
+    if (object === undefined) return undefined;
+    return { id: nextId(this.cx.tables.ids), kind: "member", object, name: x.name, optional: false, start: x.start, end: x.end };
+  }
+  private tupleMember(this: Mut<this>, right: Ref<Expr>, name: string, at: Ref<Span>): Expr {
+    const object = this.tuplePlace(right)!;
+    return { id: nextId(this.cx.tables.ids), kind: "member", object, name, optional: false, start: at.start, end: at.end };
+  }
+  private tupleCounter(this: Mut<this>, at: Ref<Span>): Expr {
+    return { id: nextId(this.cx.tables.ids), kind: "ident", name: "tuple position", start: at.start, end: at.end };
+  }
+  private tupleInt(this: Mut<this>, n: usize, at: Ref<Span>): Expr {
+    return { id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(n), start: at.start, end: at.end };
+  }
+  private tuplePreset(this: Mut<this>, t: Type, at: Ref<Span>): TypeNode {
+    const name = this.cx.tables.typing.show(t);
+    const made: TypeNode = { id: nextId(this.cx.tables.ids), kind: "ref", name, args: [], start: at.start, end: at.end };
+    this.cx.tables.presetTypes.set(cloneTypeNode(made), t);
+    return made;
   }
 
   /** @throws {CompileError} */
-  loopPattern(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>) {
+  loopPattern(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>, d: Ref<Declarator>, pattern: Ref<Extract<Pattern, { kind: "array" | "object" }>>): Stmt {
     if (pattern.rest !== undefined) throw unsupported("rest patterns", pattern.rest!);
-    const named = (p: Pattern | undefined): Extract<Pattern, { kind: "ident" }> | undefined => {
-      if (p !== undefined && p.kind !== "ident") throw unsupported(p.kind === "default" ? "defaults in destructuring patterns" : "nested destructuring patterns", p);
-      return p;
-    };
-    const parts: [Extract<Pattern, { kind: "ident" }>, (from: Expr) => Expr][] = pattern.kind === "array"
-      ? pattern.elements.flatMap((p, i) => {
-        const n = named(p);
-        return n ? [[n, (from: Expr): Expr => ({ id: nextId(this.cx.tables.ids), kind: "index", object: from, index: { id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(i), start: n.start, end: n.end }, optional: false, start: n.start, end: n.end })]] : [];
-      })
-      : pattern.props.map((p) => {
+    // Each name the pattern binds, and how its part is read from the element: by position, or
+    // by key.
+    let parts: { id: usize; name: string; at: Span; index: usize | undefined; key: string; read: Span }[] = [];
+    if (pattern.kind === "array") {
+      for (let i: usize = 0; i < pattern.elements.length; i++) {
+        const p = pattern.elements[i];
+        if (p === undefined) continue;
+        if (p.kind !== "ident") throw unsupported(p.kind === "default" ? "defaults in destructuring patterns" : "nested destructuring patterns", p);
+        parts.push({ id: p.id, name: p.name, at: { start: p.start, end: p.end }, index: i, key: "", read: { start: p.start, end: p.end } });
+      }
+    } else {
+      for (const p of pattern.props) {
         const key = typeof p.key === "string" ? p.key : this.exprs().knownKey(p.key);
-        return [named(p.value)!, (from: Expr): Expr => ({ id: nextId(this.cx.tables.ids), kind: "member", object: from, name: key, optional: false, start: p.start, end: p.end })];
-      });
-    const held = pattern.kind === "array" ? `[${pattern.elements.map((p) => (p?.kind === "ident" ? p.name : "")).join(", ")}]` : `{ ${parts.map(([n]) => n.name).join(", ")} }`;
-    const lets: Stmt[] = parts.map(([n, part]) => {
-      const at = { start: n.start, end: n.end };
-      const declarator: Declarator = { id: nextId(this.cx.tables.ids), target: n, type: undefined, init: part({ id: nextId(this.cx.tables.ids), kind: "ident", name: held, ...at }), ...at };
-      this.cx.tables.loopParts.add(declarator);
-      return { id: nextId(this.cx.tables.ids), kind: "let", keyword: (s.left as Extract<Stmt, { kind: "let" }>).keyword, declarations: [declarator], ...at };
-    });
-    const left = s.left as Extract<Stmt, { kind: "let" }>;
+        const v = p.value;
+        if (v.kind !== "ident") throw unsupported(v.kind === "default" ? "defaults in destructuring patterns" : "nested destructuring patterns", v);
+        parts.push({ id: v.id, name: v.name, at: { start: v.start, end: v.end }, index: undefined, key, read: { start: p.start, end: p.end } });
+      }
+    }
+    let shown: string[] = [];
+    if (pattern.kind === "array") for (const p of pattern.elements) shown.push(p !== undefined && p.kind === "ident" ? p.name : "");
+    else for (const p of parts) shown.push(p.name);
+    const held = pattern.kind === "array" ? `[${shown.join(", ")}]` : `{ ${shown.join(", ")} }`;
+    const left = s.left as Ref<Extract<Stmt, { kind: "let" }>>;
+    let lets: Stmt[] = [];
+    for (const p of parts) {
+      const at = { start: p.at.start, end: p.at.end };
+      const whole: Expr = { id: nextId(this.cx.tables.ids), kind: "ident", name: held, ...at };
+      const init: Expr = p.index !== undefined
+        ? { id: nextId(this.cx.tables.ids), kind: "index", object: whole, index: { id: nextId(this.cx.tables.ids), kind: "int", value: BigInt(p.index), ...at }, optional: false, ...at }
+        : { id: nextId(this.cx.tables.ids), kind: "member", object: whole, name: p.key, optional: false, start: p.read.start, end: p.read.end };
+      const declarator: Declarator = { id: nextId(this.cx.tables.ids), target: { id: p.id, kind: "ident", name: p.name, ...at }, type: undefined, init, ...at };
+      this.cx.tables.loopParts.add({ ...declarator });
+      lets.push({ id: nextId(this.cx.tables.ids), kind: "let", keyword: left.keyword, declarations: [declarator], ...at });
+    }
     const target: Declarator = this.cx.tables.rewrites.replaceDeclarator(d, { ...d, target: { id: nextId(this.cx.tables.ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
     // The loop's own body is a block inside the parts' scope, so it may declare their names.
-    const body: Stmt = { id: nextId(this.cx.tables.ids), kind: "block", body: s.body, start: s.body[0]?.start ?? s.end, end: s.end };
-    return this.cx.tables.rewrites.replaceStmt(s, { ...s, left: this.cx.tables.rewrites.replaceStmt(left, { ...left, declarations: [target] }) as typeof left, body: [...lets, body] });
+    const body: Stmt = { id: nextId(this.cx.tables.ids), kind: "block", body: s.body.slice(), start: s.body.length > 0 ? s.body[0]!.start : s.end, end: s.end };
+    lets.push(body);
+    const declared = this.cx.tables.rewrites.replaceStmt(left, { ...left, declarations: [target] }) as Extract<Stmt, { kind: "let" }>;
+    return this.cx.tables.rewrites.replaceStmt(s, { ...s, left: declared, body: lets });
   }
 
   // A name a loop's pattern binds: its part of the element, borrowed when the element is.
@@ -4681,7 +4712,7 @@ class BodyChecker implements Context, GuardHost {
         // A generic function type describes the value, which keeps its own type, as an
         // interface's does.
         const named = this.cx.recOf(declared);
-        const family = named?.kind === "function" && named.generic ? declared : undefined;
+        const family = named?.kind === "function" && (named.generic !== undefined) ? declared : undefined;
         const annotated = family ? undefined : declared;
         if (annotated) this.exprs().expect(d.init, annotated);
         const type = this.exprs().value(d.init);
@@ -5074,7 +5105,7 @@ class BodyChecker implements Context, GuardHost {
     const yielded = this.yielded;
     if (yielded !== undefined) this.exprs().expect(e.value, yielded);
     const t = this.exprs().value(e.value);
-    if (!this.yielded) this.yielded = this.cx.tables.typing.widenLet(t);
+    if ((this.yielded === undefined)) this.yielded = this.cx.tables.typing.widenLet(t);
     if (this.cx.tables.typing.holdsRef(this.yielded)) throw unsupported("generators yielding references", e.value);
     this.exprs().coerce(e.value, t, this.yielded, `type '${this.cx.tables.typing.show(t)}' is not assignable to the generator's '${this.generatorName}<${this.cx.tables.typing.show(this.yielded)}>'`);
     return this.sends ?? "void";
