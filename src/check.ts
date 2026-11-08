@@ -202,10 +202,15 @@ function declaredNames(s: Ref<Stmt>): string[] {
   return s.kind === "let" ? s.declarations.flatMap((d) => patternNames(d.target)) : s.kind === "function" ? [s.name] : [];
 }
 
+// Whether an expression reads a place: a variable, `this`, or a field or element of one.
+function readsPlace(e: Ref<Expr>): boolean {
+  return e.kind === "ident" || e.kind === "this" || ((e.kind === "member" || e.kind === "index") && !e.optional && readsPlace(e.object));
+}
+
 // A use of a captured binding, for messages: a name read, or a shorthand property naming it.
 function useOf(at: Ref<Expr | ObjectProp>): Expr {
-  if (at.kind === "shorthand") return { id: at.id, kind: "ident", name: at.name, start: at.start, end: at.end };
-  return cloneExpr(at as Ref<Expr>);
+  if (at.kind === "shorthand" || at.kind === "ident") return { id: at.id, kind: "ident", name: at.name, start: at.start, end: at.end };
+  return { id: at.id, kind: "ident", name: "(...)", start: at.start, end: at.end };
 }
 
 // What the innermost of a list of facts that knows of `key` says of it.
@@ -3060,7 +3065,8 @@ class BodyChecker implements Context, GuardHost {
     this.copiedParams = [];
     this.depths = new Map<LocalId, usize>();
     this.caseOnly = new Set<LocalId>();
-    this.unset = new Set(this.f().self?.constructor ? this.cx.registry().classOf(this.f().self!.type).required : []);
+    const selfType = this.f().self?.type;
+    this.unset = new Set(this.f().self?.constructor === true ? this.cx.registry().classOf(selfType!).required : []);
     this.superCall = this.f().self?.constructor && this.cx.tables.typing.rec(this.f().self!.type).base ? (this.f().body.find((s) => !this.cx.tables.prologues.has(s)) as Extract<Stmt, { kind: "expr" }>).expr : undefined;
     if (this.superCall) this.unset.add(SUPER);
     this.built = false;
@@ -3370,7 +3376,8 @@ class BodyChecker implements Context, GuardHost {
   private topStatement(this: Mut<this>, s: Ref<Stmt>): Facts | undefined {
     const assigned = this.unset.size > 0 ? this.fieldAssignment(s) : undefined;
     this.exempt = assigned?.object.id;
-    this.hidden = this.f().self?.constructor === true && this.cx.registry().classOf(this.f().self!.type).initializers.has(s);
+    const selfType = this.f().self?.type;
+    this.hidden = this.f().self?.constructor === true && this.cx.registry().classOf(selfType!).initializers.has(s);
     const after = this.statement(s);
     this.exempt = undefined;
     this.hidden = false;
@@ -3393,7 +3400,8 @@ class BodyChecker implements Context, GuardHost {
       this.instance().throws = this.errorType;
     }
     if (this.unset.size > 0) {
-      const missing = this.cx.registry().classOf(this.f().self!.type).fields.find((d) => this.unset.has(d.name))!;
+      const selfType = this.f().self!.type;
+      const missing = this.cx.registry().classOf(selfType).fields.find((d) => this.unset.has(d.name))!;
       throw new CompileError("E0703", `property '${missing.name}' has no initializer and is not definitely assigned in the constructor`, missing.start, missing.end);
     }
     if (this.generatorType) {
@@ -3559,8 +3567,10 @@ class BodyChecker implements Context, GuardHost {
     if (outside !== undefined) {
       this.forget(l.localId, { start: at.start, end: at.end });
       const from = this.cx.localOf(outside);
-      this.outer!.lendsWhole(from.localId, at);
-      if (this.f().closure?.self !== undefined) this.outer!.lentPerCall(from.localId);
+      if (this.outer !== undefined) {
+        this.outer.lendsWhole(from.localId, at);
+        if (this.f().closure?.self !== undefined) this.outer.lentPerCall(from.localId);
+      }
       return;
     }
     this.loopChange(String(l.localId), "mutably borrow", l.name, at);
@@ -3648,7 +3658,10 @@ class BodyChecker implements Context, GuardHost {
     if (!this.loopChange(prefix, action, `${rootName}${path}`, at)) return;
     const kept = action !== "assign to" || this.exprsState.updating === at.id ? this.factOf(prefix) : undefined;
     const keeps = kept !== undefined && kept === this.types().get(at) && this.cx.recOf(kept)?.kind !== "union";
-    if (!keeps) return this.forgetPaths(prefix, { start: at.start, end: at.end });
+    if (!keeps) {
+      this.forgetPaths(prefix, { start: at.start, end: at.end });
+      return;
+    }
     const below = (k: string) => isPath(k) && k !== prefix && covers(prefix, k);
     for (const k of new Set(this.facts.flatMap((f) => [...f.keys()].filter(below)))) this.written.push({ local: k, at: at.start });
     this.drop(below);
@@ -3736,7 +3749,8 @@ class BodyChecker implements Context, GuardHost {
     if (functions.length === 0) return;
     for (let pass: usize = 0; pass < functions.length; pass++) {
       for (const id of functions) {
-        const fn = list.splice(list.findIndex((s) => s.id === id), 1)[0]!;
+        let removed = list.splice(list.findIndex((s) => s.id === id), 1);
+        const fn = removed.pop()!;
         const used = fn.kind === "function" ? freeNames(fn) : new Set<string>();
         const name = fn.kind === "function" ? fn.name : "";
         let at = 0;
@@ -3757,7 +3771,8 @@ class BodyChecker implements Context, GuardHost {
     const required = this.f().params.filter((p) => !p.optional && !p.rest).length;
     if (e.args.length < required || e.args.length > this.f().params.length) throw new CompileError("E0501", `expected ${required === this.f().params.length ? `${required}` : `${required}-${this.f().params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
     e.args.forEach((a, i) => {
-      const to = this.cx.localOf(this.locals().get(this.f().params[i]!)!).type;
+      const param = this.f().params[i as usize]!;
+      const to = this.cx.localOf(this.locals().get(param)!).type;
       this.exprs().expect(a, to);
       const t = this.exprs().value(a);
       this.exprs().coerce(a, t, to, `argument of type '${this.cx.tables.typing.show(t)}' is not assignable to parameter of type '${this.cx.tables.typing.show(to)}'`);
@@ -3771,7 +3786,7 @@ class BodyChecker implements Context, GuardHost {
   // `let x: T` declares a variable that holds nothing until assigned; the moves check refuses
   // every use before that, as TypeScript's definite assignment does.
   /** @throws {CompileError} */
-  unassigned(this: Mut<this>, s: Stmt, d: Declarator, name: string): undefined {
+  unassigned(this: Mut<this>, s: Ref<Stmt>, d: Ref<Declarator>, name: string): undefined {
     if ((d.type === undefined)) throw new CompileError("E0406", `'${name}' needs a type to be declared without a value, like 'let ${name}: string'; Fish doesn't work it out from later assignments`, d.start, d.end);
     const resolved = this.cx.resolver().resolveType(d.type);
     const type = this.cx.tables.typing.stored(resolved);
@@ -3779,7 +3794,7 @@ class BodyChecker implements Context, GuardHost {
     if (this.cx.isInterface(type)) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
     const r = this.cx.recOf(type);
     if (r?.kind === "function" && r.generic !== undefined) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since a generic function type describes the generic function it holds`, d.start, d.end);
-    this.declare(name, type, true, false, { ...s });
+    this.declare(name, type, true, false, cloneStmt(s));
     return undefined;
   }
 
@@ -3853,7 +3868,7 @@ class BodyChecker implements Context, GuardHost {
         }
         const name = this.freshPart();
         const typedAs = q !== undefined ? this.partTarget(q) : undefined;
-        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x), x, typedAs));
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x), { start: x.start, end: x.end }, typedAs));
         parts.push({ nested: undefined, read: this.partIdent(name, x) });
       }
       for (let i: usize = 0; i < p.elements.length; i++) {
@@ -3880,7 +3895,7 @@ class BodyChecker implements Context, GuardHost {
         const name = this.freshPart();
         const q = p.props.find((y) => y.key === key);
         const typedAs = q !== undefined ? this.partTarget(q.value) : undefined;
-        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x.value), x, typedAs));
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x.value), { start: x.start, end: x.end }, typedAs));
         parts.set(key, this.partIdent(name, x));
       }
       for (const prop of p.props) {
@@ -3910,24 +3925,24 @@ class BodyChecker implements Context, GuardHost {
         let elements: (Pattern | undefined)[] = [];
         for (let j: usize = 0; j < i; j++) elements.push(undefined);
         elements.push(this.partShape(leaves, q));
-        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "array", elements, rest: undefined, ...span }, cloneExpr(whole), q, undefined));
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "array", elements, rest: undefined, ...span }, cloneExpr(whole), { start: q.start, end: q.end }, undefined));
       }
       if (p.rest !== undefined) {
         let elements: (Pattern | undefined)[] = [];
         for (let j: usize = 0; j < p.elements.length; j++) elements.push(undefined);
         const rest = this.partShape(leaves, p.rest!);
-        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "array", elements, rest, ...span }, cloneExpr(whole), p.rest!, undefined));
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "array", elements, rest, ...span }, cloneExpr(whole), { start: p.rest!.start, end: p.rest!.end }, undefined));
       }
     } else if (p.rest !== undefined) {
       // An object's rest is read with every property it leaves out, in one declaration.
-      out.reads.push(this.partDeclared(this.partShape(leaves, p), cloneExpr(whole), p, undefined));
+      out.reads.push(this.partDeclared(this.partShape(leaves, p), cloneExpr(whole), { start: p.start, end: p.end }, undefined));
     } else {
       for (const prop of p.props) {
         const shaped = this.partShape(leaves, prop.value);
-        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "object", props: [{ ...clonePatternProp(prop), id: nextId(this.cx.tables.ids), value: shaped }], rest: undefined, ...span }, cloneExpr(whole), prop.value, undefined));
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "object", props: [{ ...clonePatternProp(prop), id: nextId(this.cx.tables.ids), value: shaped }], rest: undefined, ...span }, cloneExpr(whole), { start: prop.value.start, end: prop.value.end }, undefined));
       }
     }
-    for (const [q, name] of leaves) this.destructureWrite(out, q, this.partIdent(name, q));
+    for (const [q, name] of leaves) this.destructureWrite(out, q, this.partIdent(name, { start: q.start, end: q.end }));
   }
   /** @throws {CompileError} */
   private partShape(this: Mut<this>, leaves: Mut<[Pattern, string][]>, q: Ref<Pattern>): Pattern {
@@ -3946,7 +3961,8 @@ class BodyChecker implements Context, GuardHost {
       let elements: (Pattern | undefined)[] = [];
       for (const x of q.elements) elements.push(x === undefined ? undefined : this.partShape(leaves, x));
       const rest = q.rest !== undefined ? this.partShape(leaves, q.rest!) : undefined;
-      return { id: nextId(this.cx.tables.ids), kind: "array", elements, rest, start: q.start, end: q.end };
+      const shaped: Pattern = { id: nextId(this.cx.tables.ids), kind: "array", elements, rest, start: q.start, end: q.end };
+      return shaped;
     }
     if (q.kind === "object") {
       let props: PatternProp[] = [];
@@ -3955,7 +3971,8 @@ class BodyChecker implements Context, GuardHost {
         props.push({ ...clonePatternProp(x), id: nextId(this.cx.tables.ids), value });
       }
       const rest = q.rest !== undefined ? this.partShape(leaves, q.rest!) : undefined;
-      return { id: nextId(this.cx.tables.ids), kind: "object", props, rest, start: q.start, end: q.end };
+      const shaped: Pattern = { id: nextId(this.cx.tables.ids), kind: "object", props, rest, start: q.start, end: q.end };
+      return shaped;
     }
     throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", q.start, q.end);
   }
@@ -3971,7 +3988,7 @@ class BodyChecker implements Context, GuardHost {
     // A target with only a setter can't be read for its type; its part keeps its own.
     try {
       const read = renumberExpr(cloneExpr(target), () => nextId(this.cx.tables.ids));
-      this.exprsState.asDeclared.add(read);
+      this.exprsState.asDeclared.add(cloneExpr(read));
       const t = this.exprs().value(read);
       return this.cx.recOf(t)?.kind === "ref" ? undefined : t;
     } catch (err) {
@@ -3994,7 +4011,14 @@ class BodyChecker implements Context, GuardHost {
         continue;
       }
       if (s.kind === "let" && s.declarations.length > 1) {
-        list.splice(i, 1, ...s.declarations.map((d, n): Stmt => ({ ...s, id: nextId(this.cx.tables.ids), declarations: [d], start: n === 0 ? s.start : d.start, end: d.end })));
+        let parts: Stmt[] = [];
+        for (let n: usize = 0; n < s.declarations.length; n++) {
+          const d = s.declarations[n]!;
+          parts.push({ id: nextId(this.cx.tables.ids), kind: "let", keyword: s.keyword, declarations: [{ ...d }], start: n === 0 ? s.start : d.start, end: d.end });
+        }
+        list.splice(i as i64, 1);
+        let at = i;
+        while (parts.length > 0) list.splice(at++ as i64, 0, parts.shift()!);
         continue;
       }
       let loop = s;
@@ -4064,6 +4088,24 @@ class BodyChecker implements Context, GuardHost {
   // in the list being checked, so the names own the parts as Rust's `let` does. A nested
   // pattern is a declaration of its own, destructured in turn. A default is taken when its
   // part is null.
+  // A declaration's type: as written, or as a later use demanded, or as the target its
+  // destructured part goes to.
+  /** @throws {CompileError} */
+  private declaredType(this: Mut<this>, s: Ref<Stmt>, d: Ref<Declarator>): Type | undefined {
+    if (d.type !== undefined) {
+      const resolved = this.cx.resolver().resolveType(d.type);
+      return this.cx.tables.typing.stored(resolved);
+    }
+    const demanded = this.cx.demands.get(s);
+    return demanded !== undefined ? demanded : this.partType(s);
+  }
+
+  // Whether a path reads a getter on the way, which runs each time the path is read.
+  private computedRead(this: Mut<this>, e: Ref<Expr>): boolean {
+    if (e.kind === "member" && this.calls().has(e)) return true;
+    return (e.kind === "member" || e.kind === "index") && this.computedRead(e.object);
+  }
+
   /** @throws {CompileError} */
   destructured(this: Mut<this>, s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>): undefined {
     if (this.walking !== s.id) throw unsupported("destructuring patterns here", pattern);
@@ -4071,11 +4113,9 @@ class BodyChecker implements Context, GuardHost {
     // Rust; any other value goes to a variable named for the pattern, as messages show it.
     if (d.init === undefined) throw new CompileError("E0406", "a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
     const init = d.init;
-    const read = (e: Expr): boolean => e.kind === "ident" || e.kind === "this" || ((e.kind === "member" || e.kind === "index") && !e.optional && read(e.object));
+    let type = readsPlace(init) && d.type === undefined ? this.exprs().value(init) : undefined;
     // A getter along the path runs each time the path is read, so its result is kept once.
-    const computed = (e: Expr): boolean => (e.kind === "member" && this.calls().has(e)) || ((e.kind === "member" || e.kind === "index") && computed(e.object));
-    let type = read(init) && !d.type ? this.exprs().value(init) : undefined;
-    const inPlace = type !== undefined && !computed(init);
+    const inPlace = type !== undefined && !this.computedRead(init);
     let from: (at: Span) => Expr;
     // An index that isn't a number written in place runs once, into a variable of its own, in
     // the order the path reads them.
@@ -4232,7 +4272,7 @@ class BodyChecker implements Context, GuardHost {
     let parts: Type[] = [...fixed];
     if (rest !== undefined) parts.push(rest);
     if (parts.length === 0) throw new CompileError("E0119", "this tuple is empty, so a 'for...of' over it would never run its body", s.right.start, s.right.end);
-    const element = parts.every((p) => typing.isCopy(p)) ? typing.unionType(parts) : parts.every((p) => p === parts[0]) ? typing.refType(parts[0]!, false) : undefined;
+    const element = parts.every((p) => this.cx.tables.typing.isCopy(p)) ? this.cx.tables.typing.unionType(parts) : parts.every((p) => p === parts[0]) ? this.cx.tables.typing.refType(parts[0]!, false) : undefined;
     if (element === undefined) throw unsupported("'for...of' loops over a tuple whose elements differ in type and don't all copy", s.right);
     const at = { start: s.right.start, end: s.right.end };
     // Each element reads the tuple again, so it has to be a place, not a value made for the loop.
@@ -4325,8 +4365,8 @@ class BodyChecker implements Context, GuardHost {
   // back to reads already checked as narrowed.
   /** @throws {CompileError} */
   rewritten(this: Mut<this>, lId: LocalId, at: Ref<Expr>): void {
+    const outside = this.outsideOf(lId);
     const l = this.cx.localOf(lId);
-    const outside = this.outsideOf(l.localId);
     if ((outside !== undefined) && outside !== "this" && this.outer !== undefined && this.outer.narrowed(outside) !== undefined) {
       throw new CompileError("E0109", `can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
     }
@@ -4352,7 +4392,7 @@ class BodyChecker implements Context, GuardHost {
   // What holds after branches for the bindings they write: each one's types at the ends of the
   // branches that reach their end, joined. A binding a branch leaves alone has there what the
   // branch's condition proved, or what held before.
-  joined(after: Facts | undefined, entry: Facts[], branches: [boolean, Facts, Facts][]): Facts | undefined {
+  joined(this: Mut<this>, after: Facts | undefined, entry: Ref<Facts[]>, branches: Ref<[boolean, Facts, Facts][]>): Facts | undefined {
     const wrote = new Set(branches.flatMap(([, ends]) => [...ends.keys()]));
     if (wrote.size === 0) return after;
     let out: Facts = new Map();
@@ -4372,8 +4412,8 @@ class BodyChecker implements Context, GuardHost {
   settles(this: Mut<this>, e: Extract<Expr, { kind: "assign" }>): Facts | undefined {
     const target = this.cx.tables.rewrites.current(e.target);
     const id = target.kind === "ident" ? this.locals().get(target) : undefined;
-    const l = id === undefined ? undefined : this.cx.localOf(id);
     const given = this.types().get(e.value);
+    const l = id === undefined ? undefined : this.cx.localOf(id);
     const declared = l !== undefined ? this.cx.recOf(l.type) : undefined;
     if (l === undefined || given === undefined || declared?.kind !== "union" || this.cx.tables.typing.holdsRef(l.type) || !this.narrowable(l)) return undefined;
     const r = this.cx.recOf(given);
@@ -4637,7 +4677,7 @@ class BodyChecker implements Context, GuardHost {
         if (isAwait(d.init)) this.awaiting(d.init);
         if (d.init.kind === "yield") this.yieldable.add(d.init);
         // A function type there makes the variable a stored callable.
-        const declared = (d.type && this.cx.tables.typing.stored(this.cx.resolver().resolveType(d.type))) || this.cx.demands.get(s) || this.partType(s);
+        const declared = this.declaredType(s, d);
         // A generic function type describes the value, which keeps its own type, as an
         // interface's does.
         const named = this.cx.recOf(declared);
@@ -5031,7 +5071,8 @@ class BodyChecker implements Context, GuardHost {
     if (this.finalizing > 0) throw unsupported("'yield' statements in a 'try' with a 'finally'", e);
     if (e.delegate) throw unsupported("'yield*'", e);
     if ((e.value === undefined)) throw new CompileError("E0606", "a generator's 'yield' gives a value, like 'yield x;'", e.start, e.end);
-    if ((this.yielded !== undefined)) this.exprs().expect(e.value, this.yielded);
+    const yielded = this.yielded;
+    if (yielded !== undefined) this.exprs().expect(e.value, yielded);
     const t = this.exprs().value(e.value);
     if (!this.yielded) this.yielded = this.cx.tables.typing.widenLet(t);
     if (this.cx.tables.typing.holdsRef(this.yielded)) throw unsupported("generators yielding references", e.value);
@@ -5055,14 +5096,18 @@ class BodyChecker implements Context, GuardHost {
     if (s.kind !== "expr" || s.expr.kind !== "assign" || s.expr.op !== "=") return undefined;
     // This runs before the statement is checked; a `!` here that can unwrap is refused there.
     let target: Ref<Expr> = s.expr.target;
-    while (target.kind === "nonNull") target = target.expr;
+    while (true) {
+      if (target.kind !== "nonNull") break;
+      target = target.expr;
+    }
     if (target.kind !== "member" || target.object.kind !== "this") return undefined;
     // Once `super(...)` has run, the base's fields are set, and may be set again before the
     // class's own are.
     const { base } = this.cx.tables.typing.rec(this.f().self!.type);
     const inherited = !this.unset.has(SUPER) && base !== undefined && this.cx.tables.typing.field(base, target.name) !== undefined;
     const name = target.name;
-    return this.cx.registry().classOf(this.f().self!.type).fields.some((d) => d.name === name) || inherited ? { ...target } : undefined;
+    const selfType = this.f().self!.type;
+    return this.cx.registry().classOf(selfType).fields.some((d) => d.name === name) || inherited ? { ...target } : undefined;
   }
 
   /** @throws {CompileError} */
@@ -5080,7 +5125,7 @@ class BodyChecker implements Context, GuardHost {
     while (at > 0 && !(this.targets[at - 1]!.kind === "arm" || fits(this.targets[at - 1]!))) at--;
     const found = at > 0 ? this.targets[at - 1] : undefined;
     // A match arm is a body of its own, as an arrow's is.
-    if (found?.kind === "arm" && this.targets.some(fits)) {
+    if (found?.kind === "arm" && this.targets.some((t) => fits(t))) {
       throw new CompileError("E0604", `'${s.kind}' can't leave a match arm, which is a body of its own like an arrow's; 'return' a value and act on it after the match`, s.start, s.end);
     }
     const target = found?.kind === "arm" ? undefined : found;
@@ -5121,7 +5166,8 @@ class BodyChecker implements Context, GuardHost {
     // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
     if (this.innerScope().has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError("E0402", `cannot redeclare '${name}' in the same scope`, node.start, node.end);
     const localId = this.cx.tables.arenas.addLocal({ name, type, mutable, param, id: this.cx.nextLocal++ }).localId;
-    this.depths.set(localId, this.scopeList().length);
+    const depth = this.scopeList().length;
+    this.depths.set(localId, depth);
     this.innerScope().set(name, localId);
     this.cx.tables.declarations.add(node.id);
     this.locals().set(node, localId);
@@ -5184,7 +5230,7 @@ class BodyChecker implements Context, GuardHost {
   // is, and the arrow becomes its name.
   /** @throws {CompileError} */
   liftArrow(this: Mut<this>, e: Ref<Extract<Expr, { kind: "arrow" }>>): Expr {
-    const fn = this.lifted(e, "", arrowFunction(this.cx.tables.ids, "", e, e), "this arrow");
+    const fn = this.lifted(e, "", arrowFunction(this.cx.tables.ids, "", { ...e }, e), "this arrow");
     return this.cx.tables.rewrites.replace(e, { id: 0, kind: "ident", name: fn.name, start: e.start, end: e.end });
   }
 
@@ -5235,25 +5281,27 @@ class BodyChecker implements Context, GuardHost {
   // closure is made.
   /** @throws {CompileError} */
   changesCapture(this: Mut<this>, lId: LocalId | undefined, path: string, action: string, target: Ref<Expr>, throughMut: boolean): void {
-    const l = lId === undefined ? undefined : this.cx.localOf(lId);
-    const alias = l?.localId ?? [...this.captures!].find(([, from]) => from === "this")![0];
-    const held = this.captures!.get(alias)!;
+    const alias = lId !== undefined ? lId : this.captureOf("this")!;
+    const held = this.outsideOf(alias)!;
     let inst = this.instance();
     if (inst.changed !== undefined) inst.changed.add(alias);
-    const from = held === "this" ? held : this.cx.localOf(held);
-    if (from === "this") this.outer!.changesThis(path, action, target);
+    if (this.outer === undefined) return;
+    if (held === "this") {
+      this.outer.changesThis(path, action, target);
+      return;
+    }
+    const type = this.cx.localOf(held).type;
+    const name = this.cx.localOf(held).name;
     // What a `move` closure holds is its own to change, unless the change goes through a
     // mutable reference it holds a copy of; as in Rust, only a copy of a `let` may change.
-    else if (this.f().closure!.move && !(this.cx.isRef(from.type) && (path || throughMut))) {
-      if (this.outer!.constant(from.localId)) {
-        throw new CompileError("E0207", `cannot ${action} '${from.name}${path}' in this closure because '${from.name}' is a constant; declare it with 'let'`, target.start, target.end);
+    if (this.f().closure!.move && !(this.cx.isRef(type) && (path !== "" || throughMut))) {
+      if (this.outer.constant(held)) {
+        throw new CompileError("E0207", `cannot ${action} '${name}${path}' in this closure because '${name}' is a constant; declare it with 'let'`, target.start, target.end);
       }
       return;
     }
-    else {
-      if (!path && action === "assign to" && this.cx.isRef(from.type) && !this.cx.tables.typing.rec(from.type).mutable) throw unsupported("closures that point captured references elsewhere", target);
-      this.outer!.changesLocal(from, path, action, target, throughMut);
-    }
+    if (path === "" && action === "assign to" && this.cx.isRef(type) && !this.cx.tables.typing.rec(type).mutable) throw unsupported("closures that point captured references elsewhere", target);
+    this.outer.changesLocal(this.cx.localOf(held), path, action, target, throughMut);
   }
 
   constant(this: Mut<this>, lId: LocalId): boolean {
@@ -5275,7 +5323,8 @@ class BodyChecker implements Context, GuardHost {
     const errorType = this.errorType;
     const into = errorType !== undefined && this.handlers.length === 0 && (this.cx.tables.typing.fits(type, errorType) || this.exprs().adapt(thrownValue, errorType));
     if (into) this.exprs().coerce(thrownValue, type, this.errorType!, `type '${this.cx.tables.typing.show(type)}' can't be thrown here: ${this.who()} throws '${this.cx.tables.typing.show(this.errorType!)}'`);
-    this.raiseAt(at, span, into ? this.errorType! : this.types().get(thrownValue)!, "'throw'", true);
+    const raised = into ? this.errorType! : this.types().get(thrownValue)!;
+    this.raiseAt(at, span, raised, "'throw'", true);
   }
 
   // An error raised by a call or a `throw` goes to the function's caller, which needs a
@@ -5395,7 +5444,7 @@ class BodyChecker implements Context, GuardHost {
     return alias;
   }
   // The binding a closure reads `from` through, when it has made one.
-  private captureOf(from: LocalId): LocalId | undefined {
+  private captureOf(from: LocalId | "this"): LocalId | undefined {
     if (this.captures === undefined) return undefined;
     for (const [alias, l] of this.captures) if (l === from) return alias;
     return undefined;
