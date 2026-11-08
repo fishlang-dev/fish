@@ -468,8 +468,7 @@ const LOWERING = ["check", "values", "narrow", "classes", "generics", "overloads
 const CHILDREN = [...new Set([...readFileSync(join(src, "rebuild.ts"), "utf8").matchAll(/^\s+m\.(\w+)/gm)].map((m) => m[1]!))].filter((f) => f !== "name").join("|");
 // What may still change in place, each for its reason:
 const IN_PLACE = [
-  // the spans and children of nodes just made, before any tree holds them;
-  "check.ts: made.elements = elements;",
+  // the spans of nodes just made, before any tree holds them;
   "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
   // a Body's overloads, given as ids, an enum's record and a Body's template mark, which are no nodes;
   "check.ts: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true",
