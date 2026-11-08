@@ -681,8 +681,11 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
       // `declare function f(...): T;` names a C function, called inside `unsafe`.
       if (s.kind === "declare" && s.body.kind === "function" && !hasBody(s.body)) {
         const rest = s.body.params.find((p) => p.rest);
-        if (rest) throw unsupported("variadic C functions", rest);
-        top.funcs.push(addBodyTo(tables, Object.assign({ ...s.body, id: nextId(tables.ids), body: [] }, { foreign: true })));
+        if (rest !== undefined) throw unsupported("variadic C functions", rest);
+        const declared = addBodyTo(tables, { ...s.body, id: nextId(tables.ids), body: [] });
+      let record = tables.arenas.bodyMut(declared);
+      record.foreign = true;
+      top.funcs.push(declared);
         continue;
       }
       // `export function f() {}` is an ordinary function, and in a library a C function too; an
@@ -1001,7 +1004,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.stopOnErrors();
     this.main = this.byName.get("main");
     if (this.main === undefined && !this.library && !this.macros && !this.module) throw new CompileError("E0405", "no main() function; execution starts there", 0, 0);
-    this.classes.forEach((c) => this.registry().register(c));
+    for (const c of [...this.classes.values()]) this.registry().register(c);
   }
 
   // Checks a method changing an object that holds references, unless it is being checked or
@@ -1400,10 +1403,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     // What follows reads every body's results.
     this.stopOnErrors();
-    if (this.main !== undefined) {
-      const main = cloneSignature(this.tables.arenas.bodyOf(this.main));
+    const mainId = this.main;
+    if (mainId !== undefined) {
+      const main = cloneSignature(this.tables.arenas.bodyOf(mainId));
       if (main.params.length > 0) throw new CompileError("E0405", "main() takes no parameters", main.start, main.end);
-      const started = this.tables.arenas.instanceOf(this.instanceOf(this.main)).returns;
+      const started = this.tables.arenas.instanceOf(this.instanceOf(mainId)).returns;
       const future = this.recOf(started);
       if ((future !== undefined && future.kind === "future" ? future.gives : started) !== "void") throw new CompileError("E0405", "main() can't return a value yet", main.start, main.end);
     }
@@ -1414,45 +1418,72 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     if (this.library && !this.funcs.some((id) => this.tables.arenas.bodyOf(id).exported === true)) throw new CompileError("E1003", "a library has nothing for C to call; mark functions with 'export'", 0, 0);
     // An abstract member and a template are checked but never compiled; each concrete class's copy is.
-    const compiled = new NodeSet([...this.funcs.filter((id) => !this.macroBodies.has(id) || this.macros).map((id) => this.tables.arenas.bodyOf(id)), ...[...this.registryState.infoOf.values()].flatMap((c) => this.registry().bodiesOf(c).map((b) => this.tables.arenas.bodyOf(b))).filter((f) => !f.abstract && !f.template)]);
+    // By node id, as a body's copies share one.
+    let compiled = new Set<usize>();
+    for (const id of this.funcs) if (!this.macroBodies.has(id) || this.macros) compiled.add(this.tables.arenas.bodyOf(id).id);
+    for (const c of [...this.registryState.infoOf.values()]) {
+      for (const b of this.registry().bodiesOf(c)) {
+        const f = this.tables.arenas.bodyOf(b);
+        if (f.abstract !== true && f.template !== true) compiled.add(f.id);
+      }
+    }
     // So is an instance made for an abstract class, which only a template's check makes.
-    const checkedOnly = (i: Instance): boolean => bodyOf(this.tables.arenas, i).template === true || [...i.bindings.values()].some((t) => abstractPart(this.tables.typing, t)) || (bodyOf(this.tables.arenas, i).closure !== undefined && checkedOnly(this.tables.arenas.instanceOf(bodyOf(this.tables.arenas, i).closure!.parent)));
-    const compiledInstances = [...this.instancing().all().map((i) => this.tables.arenas.instanceOf(i)).filter((i) => i.concrete && compiled.has(bodyOf(this.tables.arenas, i)) && !bodyOf(this.tables.arenas, i).js && !checkedOnly(i)), ...this.closures.map((c) => this.tables.arenas.instanceOf(c)).filter((i) => i.concrete && !checkedOnly(i))];
-    unreached(this.tables.typing, this.tables.equalities, this.tables.arenas, compiledInstances.map((i) => i.id), (i) => bodyOf(this.tables.arenas, i).abstract === true || checkedOnly(i));
+    let compiledIds: InstanceId[] = [];
+    for (const id of this.instancing().all()) {
+      const i = this.tables.arenas.instanceOf(id);
+      const b = bodyOf(this.tables.arenas, i);
+      if (i.concrete && compiled.has(b.id) && b.js === undefined && !checkedOnly(this.tables, i)) compiledIds.push(id);
+    }
+    for (const c of this.closures) {
+      const i = this.tables.arenas.instanceOf(c);
+      if (i.concrete && !checkedOnly(this.tables, i)) compiledIds.push(c);
+    }
+    const tables: Ref<Tables> = this.tables;
+    unreached(this.tables.typing, this.tables.equalities, this.tables.arenas, compiledIds, (i) => bodyOf(tables.arenas, i).abstract === true || checkedOnly(tables, i));
     // A package's const whose value has no JS form yet stops the program where it is read.
-    const earliest = (spans: Span[]) => spans.reduce<Span | undefined>((first, e) => (first === undefined || e.start < first.start ? e : first), undefined);
-    const used = earliest(this.tables.jsUses);
-    if (used) throw new CompileError("E1005", "reading this package's const isn't supported yet, as its value has no JS form", used.start, used.end);
+    const used = earliestOf(this.tables.jsUses);
+    if (used !== undefined) throw new CompileError("E1005", "reading this package's const isn't supported yet, as its value has no JS form", used.start, used.end);
     // A package's function called with a value, or giving one, that has no JS form.
-    const unconverted = earliest(compiledInstances.flatMap((i) => [...i.calls.keys()].filter((x) => {
-      if (x.kind !== "call" || !this.tables.jsCalls.has(x)) return false;
-      const gives = this.tables.arenas.instanceOf(i.calls.get(x))?.returns ?? "void";
-      // A callback crosses as the stored callable it meets.
-      const given = (a: Expr) => {
-        const to = i.coercions.get(a);
-        return to !== undefined && this.tables.typing.holdsPart(to, (u) => this.recOf(u)?.kind === "dyn") ? to : i.types.get(a)!;
-      };
-      return x.args.some((a) => !this.tables.typing.jsConverts(given(a))) || (gives !== "void" && !this.tables.typing.jsConverts(gives));
-    })));
-    if (unconverted) throw new CompileError("E1005", "this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
+    let unconverted: { start: usize; end: usize } | undefined = undefined;
+    for (const id of compiledIds) {
+      const i = this.tables.arenas.instanceOf(id);
+      for (const [k] of i.calls) {
+        const x: Ref<Expr> = k;
+        if (x.kind !== "call" || !this.tables.jsCalls.has(x)) continue;
+        const target = i.calls.get(x);
+        const gives = target !== undefined ? this.tables.arenas.instanceOf(target).returns : "void";
+        let refused = false;
+        for (const a of x.args) if (!refused && !this.tables.typing.jsConverts(crossingType(this.tables.typing, i, a))) refused = true;
+        if (!refused && gives !== "void" && !this.tables.typing.jsConverts(gives)) refused = true;
+        if (refused && (unconverted === undefined || x.start < unconverted.start)) unconverted = { start: x.start, end: x.end };
+      }
+    }
+    if (unconverted !== undefined) throw new CompileError("E1005", "this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
     // A value given to JS becomes a JS value as the call or write converts it.
-    const crossing = earliest(compiledInstances.flatMap((i) => [...i.coercions].filter(([x, t]) => !this.tables.jsGiven.has(x as Expr) && this.intoJs(i.types.get(x as Expr) ?? "void", t)).map(([x]) => x)));
-    if (crossing) throw new CompileError("E1005", "turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
+    let given: { start: usize; end: usize; from: Type; to: Type }[] = [];
+    for (const id of compiledIds) {
+      const i = this.tables.arenas.instanceOf(id);
+      for (const [k, t] of i.coercions) {
+        const x: Ref<Expr> = k;
+        if (!this.tables.jsGiven.has(x)) given.push({ start: x.start, end: x.end, from: i.types.get(x) ?? "void", to: t });
+      }
+    }
+    let crossing: { start: usize; end: usize } | undefined = undefined;
+    for (const g of given) if (this.intoJs(g.from, g.to) && (crossing === undefined || g.start < crossing.start)) crossing = { start: g.start, end: g.end };
+    if (crossing !== undefined) throw new CompileError("E1005", "turning a Fish value into a JS value isn't supported yet, outside a call or a write that gives it to JS; a 'JsValue' or a package's object comes only from JS", crossing.start, crossing.end);
     // A package's declarations have no body to compile.
     // An interface's method may be any class's, as interfaces are met by shape.
-    const signed = new Set([...this.decls.interfaces.values()].flatMap((x) => x.members.flatMap((m) => (m.kind === "method" && typeof m.name === "string" ? [m.name] : []))));
-    // A method's body is named for its class, as in `C.m`.
-    const method = (b: Body) => b.name.slice(b.name.lastIndexOf(".") + 1);
-    const overrides = (b: Body) => {
-      const base = this.tables.arenas.classOf(this.registry().classOf(b.owner!).base);
-      return base !== undefined && inherited(this.tables.arenas, base, "methods", method(b)) !== undefined;
-    };
-    const required = (b: Body) => b.exported === true || b.accessor === true || b.signature === true || (b.owner !== undefined && (signed.has(method(b)) || overrides(b)));
-    const compiledIds = compiledInstances.map((i) => i.id);
+    let signed = new Set<string>();
+    for (const x of this.decls.interfaces.values()) for (const m of x.members) if (m.kind === "method" && typeof m.name === "string") signed.add(m.name);
+    let required = new Set<BodyId>();
+    for (const id of compiledIds) {
+      const b = cloneSignature(bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id)));
+      if (this.requiredBody(b, signed)) required.add(b.bodyId);
+    }
     this.tables.typing.closeUnknown();
     this.unknownJson();
     this.tables.typing.layOutForCodegen();
-    return { instances: compiledIds, tables: this.tables, warnings: warnings(this.tables, compiledIds, required) };
+    return { instances: compiledIds, tables: this.tables, warnings: warnings(this.tables, compiledIds, (b) => required.has(b.bodyId)) };
   }
 
   // A value given to `JSON.stringify` holding an `unknown` needs each type stored in one to have a
@@ -1473,6 +1504,20 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       known.set(part as ClassType, this.derivesJson(part as ClassType));
     }
     if (part !== undefined) throw new CompileError("E0509", `this 'unknown' can't be written as JSON, since the program puts a '${this.tables.typing.show(part)}' in one, which has no JSON form`, at.start, at.end);
+  }
+
+  // A body whose parameters are kept even when unused: an export, an accessor, a signature, or a
+  // method an interface or a base class names.
+  /** @throws {CompileError} */
+  private requiredBody(this: Mut<this>, b: Ref<Body>, signed: Ref<Set<string>>): boolean {
+    if (b.exported === true || b.accessor === true || b.signature === true) return true;
+    if (b.owner === undefined) return false;
+    // A method's body is named for its class, as in `C.m`.
+    const name = b.name.slice(b.name.lastIndexOf(".") + 1);
+    if (signed.has(name)) return true;
+    const baseId = this.registry().classOf(b.owner!).base;
+    const base = this.tables.arenas.classOf(baseId);
+    return base !== undefined && inherited(this.tables.arenas, base, "methods", name) !== undefined;
   }
 
   /** @throws {CompileError} */
@@ -1604,25 +1649,30 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     if (f.generator === true) throw unsupported("generator functions in 'typeof' types", at);
     const def = this.instancing().definition(f);
+    const defId = def.id;
+    const bindings = copyScope(def.bindings);
     // An async function's written `Promise<T>` is its type; any other interface result, or one
     // left to inference, is worked out from the body.
-    const declared = this.instancing().returnTypeOf(f, def.bindings);
+    const declared = this.instancing().returnTypeOf(f, copyScope(bindings));
     let result: Type;
     if (declared !== undefined && (f.async === true || !this.isInterface(declared))) result = declared;
     else {
       this.unlaid(f.name, at);
-      const returns = this.returnOf(def.id, at);
+      const returns = this.returnOf(defId, at);
       const future = this.recOf(returns);
       result = f.async === true && future !== undefined && future.kind === "future" ? this.tables.typing.promiseInterface(future.gives) : returns;
     }
     const open = openParam(this.tables.typing, result, true);
     if (open !== undefined) {
       let given: string | undefined = undefined;
-      for (let i: usize = 0; i < f.params.length; i++) if (given === undefined && def.bindings.get(`#${i}`) === open) given = boundName(f.params[i]!.pattern) ?? this.tables.typing.rec(open).name;
+      for (let i: usize = 0; i < f.params.length; i++) if (given === undefined && bindings.get(`#${i}`) === open) given = boundName(f.params[i]!.pattern) ?? this.tables.typing.rec(open).name;
       if (given === undefined) given = this.tables.typing.rec(open).name;
       throw new CompileError("E0114", `'typeof ${f.name}' can't name its result, which depends on the type of the argument given for '${given}'; write the return type`, at.start, at.end);
     }
-    return this.tables.typing.functionType(f.params.map((p) => (p.pattern.kind === "ident" ? writtenName(this.tables, p) : "_")), this.instancing().declaredParams(f), result);
+    let names: string[] = [];
+    for (const p of f.params) names.push(p.pattern.kind === "ident" ? writtenName(this.tables, p) : "_");
+    const params = this.instancing().declaredParams(f);
+    return this.tables.typing.functionType(names, params, result);
   }
 
   // A comptime parameter's argument: its value, computed in the calling instance, as a literal
@@ -1968,7 +2018,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       if (thrown !== undefined) instance.throws = this.tables.typing.lower(thrown);
     }
     let localIds: LocalId[] = [];
-    for (const l of new Set(this.tables.arenas.instanceOf(id).locals.values())) localIds.push(l);
+    let seenLocals = new Set<LocalId>();
+    for (const l of this.tables.arenas.instanceOf(id).locals.values()) {
+      if (seenLocals.has(l)) continue;
+      seenLocals.add(l);
+      localIds.push(l);
+    }
     let params = new Map<LocalId, Type>();
     for (const l of localIds) {
       const local = this.tables.arenas.localOf(l);
@@ -1981,7 +2036,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     for (const l of localIds) {
       const lowered = this.lowerMade(this.tables.arenas.localOf(l).type, made);
-      this.tables.arenas.localMut(l).type = lowered;
+      let binding = this.tables.arenas.localMut(l);
+    binding.type = lowered;
     }
     let calls: [Expr, InstanceId][] = [];
     for (const [e, target] of this.tables.arenas.instanceOf(id).calls) calls.push([cloneExpr(e), target]);
@@ -1991,8 +2047,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (let i: usize = 0; i < setters.length; i++) setters[i]![1] = this.counterpart(setters[i]![1]);
     const returns = this.tables.typing.lower(this.tables.arenas.instanceOf(id).returns);
     let instance = this.tables.arenas.instanceMut(id);
-    for (const [e, target] of calls) instance.calls.set(e, target);
-    for (const [e, target] of setters) instance.setters.set(e, target);
+    while (calls.length > 0) {
+      const [e, target] = calls.shift()!;
+      instance.calls.set(e, target);
+    }
+    while (setters.length > 0) {
+      const [e, target] = setters.shift()!;
+      instance.setters.set(e, target);
+    }
     instance.returns = returns;
   }
 
@@ -2358,10 +2420,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (f.self!.mutable && !declared.self!.mutable) throw why("can't change 'this'; it borrows 'this' read-only");
     if ((f.self!.owned === true) !== (declared.self!.owned === true)) throw why(declared.self!.owned === true ? "must take 'this: Own<this>'" : "can't take 'this: Own<this>'");
     const error = this.errorOf(instance);
-    const allowed = this.errorOf(this.instanceOf(declaredId));
+    const declaredInstance = this.instanceOf(declaredId);
+    const allowed = this.errorOf(declaredInstance);
     if (error !== undefined && (allowed === undefined || !this.tables.typing.fits(error, allowed))) throw why(allowed !== undefined ? `can only throw '${this.tables.typing.show(allowed)}'` : "can't throw");
     const gives = this.returnOf(instance, { start: f.start, end: f.end });
-    const wanted = this.returnOf(this.instanceOf(declaredId), { start: declared.start, end: declared.end });
+    const declaredFor = this.instanceOf(declaredId);
+    const wanted = this.returnOf(declaredFor, { start: declared.start, end: declared.end });
     if (!this.tables.typing.fits(gives, wanted)) throw why(`must return '${this.tables.typing.show(wanted)}', not '${this.tables.typing.show(gives)}'`);
   }
 
@@ -2742,11 +2806,11 @@ class BodyChecker implements Context, GuardHost {
   // A field initializer runs before the constructor's body, out of reach of its parameters.
   hidden: boolean;
 
-  /** @throws {CompileError} */
-
   macroBody(id: BodyId): boolean {
     return this.cx.macroBodies.has(id);
   }
+
+  /** @throws {CompileError} */
   constructor(cx: Mut<Checker>, instance: Instance, outer: Mut<BodyChecker> | undefined, f: Body) {
     this.cx = cx;
     this.instance = instance;
@@ -5030,6 +5094,28 @@ function isJs(typing: Ref<Typing>, t: Type): boolean {
 
 function holdsJs(typing: Ref<Typing>, t: Type): boolean {
   return typing.holdsPart(t, (u) => isJs(typing, u), true);
+}
+
+// Whether an instance is checked and never compiled: a template's, one made for an abstract
+// class, or a closure of either.
+function checkedOnly(tables: Ref<Tables>, i: Ref<Instance>): boolean {
+  const b = bodyOf(tables.arenas, i);
+  if (b.template === true) return true;
+  for (const t of i.bindings.values()) if (abstractPart(tables.typing, t) !== undefined) return true;
+  return b.closure !== undefined && checkedOnly(tables, tables.arenas.instanceOf(b.closure!.parent));
+}
+
+// The span that starts first, the earlier one where two start together.
+function earliestOf(spans: Ref<Span[]>): { start: usize; end: usize } | undefined {
+  let first: { start: usize; end: usize } | undefined = undefined;
+  for (const e of spans) if (first === undefined || e.start < first.start) first = { start: e.start, end: e.end };
+  return first;
+}
+
+// The type an argument crosses into JS as: the stored callable a callback meets, or its own.
+function crossingType(typing: Ref<Typing>, i: Ref<Instance>, a: Ref<Expr>): Type {
+  const to = i.coercions.get(a);
+  return to !== undefined && typing.holdsPart(to, (u) => typeof u !== "string" && typing.rec(u).kind === "dyn") ? to : i.types.get(a)!;
 }
 
 function calledName(callee: Ref<Expr>): string | undefined {
