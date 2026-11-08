@@ -708,7 +708,9 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
       if (s.kind === "empty") continue;
       // A top-level `const` is computed while compiling: comptime runs a function of no parameters
       // giving its value. A `comptime { }` block is a function giving nothing, run the same way.
-      const made = { kind: "function" as const, async: false, generator: false, macro: false, typeParams: [], params: [], start: s.start, end: s.end };
+      const none: TypeParam[] = [];
+      const noParams: Param[] = [];
+      const made = { kind: "function" as const, async: false, generator: false, macro: false, typeParams: none, params: noParams, start: s.start, end: s.end };
       if (s.kind === "let" && s.keyword === "const") {
         for (const d of s.declarations) {
           if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
@@ -721,19 +723,19 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
             const signature = signatureIn(program, d.type);
             const genericType = signature !== undefined && signature.typeParams.some((p) => !isLifetime(p));
             if (d.type !== undefined && (generic || genericType)) throw new CompileError("E0801", "a const holding a generic arrow takes its type from the arrow; drop the const's written type", d.type.start, d.type.end);
-            const body = addBodyTo(tables, arrowFunction(tables.ids, d.target.name, typedBy({ ...d.init }, signature), d));
+            const body = addBodyTo(tables, arrowFunction(tables.ids, d.target.name, typedBy({ ...d.init }, signature), { start: d.start, end: d.end }));
             top.funcs.push(body);
             if (d.type !== undefined) top.typedArrows.push({ body, type: cloneTypeNode(d.type!), arrow: { start: d.init.start, end: d.init.end, throws: d.init.throws === undefined ? undefined : cloneTypeNode(d.init.throws!) }, name: d.target.name });
             continue;
           }
           const giving: Stmt = { id: nextId(tables.ids), kind: "return", value: cloneExpr(d.init), start: d.init.start, end: d.init.end };
-          const constant: Func & { comptime: "const" } = { ...made, id: nextId(tables.ids), name: `const ${d.target.name}`, returnType: d.type === undefined ? undefined : cloneTypeNode(d.type!), body: [giving], start: d.start, end: d.end, comptime: "const" };
+          const constant: Func & { comptime: "const" } = { ...made, id: nextId(tables.ids), name: `const ${d.target.name}`, returnType: d.type === undefined ? undefined : cloneTypeNode(d.type!), body: [giving], start: d.start, end: d.end, comptime: "const" as const };
           top.funcs.push(addBodyTo(tables, constant));
         }
         continue;
       }
       if (s.kind === "comptime") {
-        const block: Func & { comptime: "block" } = { ...made, id: nextId(tables.ids), name: `comptime ${s.start}`, returnType: undefined, body: [...s.body], comptime: "block" };
+        const block: Func & { comptime: "block" } = { ...made, id: nextId(tables.ids), name: `comptime ${s.start}`, returnType: undefined, body: [...s.body], comptime: "block" as const };
         top.funcs.push(addBodyTo(tables, block));
         continue;
       }
@@ -741,19 +743,24 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
       // Top-level code with side effects belongs in main(); the migration lint moves it there.
       if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
       const rust = tables.rust.names.get(s);
-      if (rust) {
-        top.funcs.push(addBodyTo(tables, Object.assign({ ...s, id: nextId(tables.ids), body: [] }, { foreign: true, rust })));
+      if (rust !== undefined) {
+        const foreign = addBodyTo(tables, { ...s, id: nextId(tables.ids), body: [] });
+        const symbol = { ...rust };
+        let record = tables.arenas.bodyMut(foreign);
+        record.foreign = true;
+        record.rust = symbol;
+        top.funcs.push(foreign);
         continue;
       }
-      if (s.js) {
+      if (s.js !== undefined) {
         const body = addBodyTo(tables, { ...s, id: nextId(tables.ids), body: [] });
-        tables.jsBodies.set(s, body);
+        tables.jsBodies.set({ ...s }, body);
         top.funcs.push(body);
         continue;
       }
       if (!hasBody(s)) throw new CompileError("E0410", `'${s.name}' has no implementation; follow its overload signatures with a 'function ${s.name}' that has a body`, s.start, s.end);
       if (s.macro) macroShape(s);
-      const declared = addBodyTo(tables, { ...s });
+      const declared = addBodyTo(tables, withBody({ ...s }));
       if (s.macro) top.macroBodies.add(declared);
       top.funcs.push(declared);
     } catch (e) {
@@ -1403,15 +1410,20 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       }
       try {
         if (this.registryState.unsettled.length > 0) {
-          for (const f of this.registry().settle(this.registryState.unsettled.shift()!)) {
+          const next = this.registryState.unsettled.shift()!;
+          for (const f of this.registry().settle(next)) {
             try {
-              this.checkBody(this.definition(f));
+              const definition = this.definition(f);
+            this.checkBody(definition);
             } catch (e) {
               if (!(e instanceof CompileError)) throw e;
               this.recover(e);
             }
           }
-        } else this.checkBody(this.instancingState.pending.shift()!);
+        } else {
+          const pending = this.instancingState.pending.shift()!;
+          this.checkBody(pending);
+        }
       } catch (e) {
         if (!(e instanceof CompileError)) throw e;
         this.recover(e);
@@ -1423,7 +1435,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (mainId !== undefined) {
       const main = cloneSignature(this.tables.arenas.bodyOf(mainId));
       if (main.params.length > 0) throw new CompileError("E0405", "main() takes no parameters", main.start, main.end);
-      const started = this.tables.arenas.instanceOf(this.instanceOf(mainId)).returns;
+      const mainInstance = this.instanceOf(mainId);
+      const started = this.tables.arenas.instanceOf(mainInstance).returns;
       const future = this.recOf(started);
       if ((future !== undefined && future.kind === "future" ? future.gives : started) !== "void") throw new CompileError("E0405", "main() can't return a value yet", main.start, main.end);
     }
@@ -1636,7 +1649,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const start = init.start;
     const end = init.end;
     const giving: Stmt = { id: nextId(this.tables.ids), kind: "return", value: init, start, end };
-    const made: Func & { comptime: "const" } = { id: nextId(this.tables.ids), kind: "function", async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start, end, comptime: "const" };
+    const made: Func & { comptime: "const" } = { id: nextId(this.tables.ids), kind: "function", async: false, generator: false, macro: false, typeParams: [], params: [], name: `const ${owner}.${member}`, returnType: undefined, body: [giving], start, end, comptime: "const" as const };
     const f = this.addBody(made);
     const instance = this.definition(f);
     this.checkBody(instance);
