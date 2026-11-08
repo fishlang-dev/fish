@@ -468,7 +468,8 @@ const LOWERING = ["check", "values", "narrow", "classes", "generics", "overloads
 const CHILDREN = [...new Set([...readFileSync(join(src, "rebuild.ts"), "utf8").matchAll(/^\s+m\.(\w+)/gm)].map((m) => m[1]!))].filter((f) => f !== "name").join("|");
 // What may still change in place, each for its reason:
 const IN_PLACE = [
-  // the spans of nodes just made, before any tree holds them;
+  // the spans and children of nodes just made, before any tree holds them;
+  "check.ts: made.elements = elements;",
   "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
   // a Body's overloads, given as ids, an enum's record and a Body's template mark, which are no nodes;
   "check.ts: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true",
@@ -477,7 +478,7 @@ const IN_PLACE = [
   // hoisted, statements added after the one being checked, and the same edits given to a later
   // copy of a list; and, before checking, a local declaration hoisted out and an export a library
   // lists, each where the list is read next;
-  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(this.cx.tables.ids), kind: \"block\"", "check.ts: while (added.length > 0) list.splice(", "check.ts: while (parts.length > 0) list.splice(", "check.ts: let removed = list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
+  "check.ts: list.splice(", "check.ts: list[i] = block;", "check.ts: while (added.length > 0) list.splice(", "check.ts: while (parts.length > 0) list.splice(", "check.ts: let removed = list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
   "check.ts: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.ts: if (inserted !== undefined && inserted.length > 0",
   "modules.ts: l.body[at] =", "macros.ts: statements.splice(",
 ];

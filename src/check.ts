@@ -6,7 +6,7 @@ import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
 import { FILE_SPAN, stdModuleAt } from "./program.ts";
 import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } from "./comptime.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, PropertyName, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
 import { cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts, withIdExpr } from "./rebuild.ts";
@@ -209,26 +209,51 @@ function readsPlace(e: Ref<Expr>): boolean {
 
 // A path's root: what its fields and elements are read from.
 function pathRoot(e: Ref<Expr>): Ref<Expr> {
-  return e.kind === "member" || e.kind === "index" ? pathRoot(e.object) : e;
+  if (e.kind === "member" || e.kind === "index") return pathRoot(e.object);
+  return e;
 }
 
 // An expression under the `!`s around it.
 function unwrapped(e: Ref<Expr>): Ref<Expr> {
-  return e.kind === "nonNull" ? unwrapped(e.expr) : e;
+  if (e.kind === "nonNull") return unwrapped(e.expr);
+  return e;
+}
+
+// The statement a chain of labels names, as rewritten.
+function unlabeled(r: Ref<Rewrites>, s: Ref<Stmt>): Ref<Stmt> {
+  if (s.kind !== "labeled") return s;
+  const peeked = r.getStmt(s.body.id);
+  if (peeked !== undefined) return unlabeled(r, peeked);
+  return unlabeled(r, s.body);
 }
 
 // A loop's `let`, which is what its left side is once a loop's pattern is lowered.
+/** @throws {CompileError} */
 function loopLet(left: Ref<Stmt | Pattern>): Ref<Extract<Stmt, { kind: "let" }>> {
   if (left.kind === "let") return left;
-  throw new Error("a loop's left side is a declaration here");
+  throw unsupported("loops whose left side isn't a declaration here", left);
 }
 
 // Array and object nodes from their parts, typed where they are made.
 function arrayExpr(id: usize, elements: Expr[], at: Ref<Span>): Expr {
-  return { id, kind: "array", elements, start: at.start, end: at.end };
+  let made: Extract<Expr, { kind: "array" }> = { id, kind: "array", elements: [], start: at.start, end: at.end };
+  made.elements = elements;
+  return made;
 }
 function arrayPattern(id: usize, elements: (Pattern | undefined)[], rest: Pattern | undefined, at: Ref<Span>): Pattern {
-  return { id, kind: "array", elements, rest, start: at.start, end: at.end };
+  let made: Extract<Pattern, { kind: "array" }> = { id, kind: "array", elements: [], rest, start: at.start, end: at.end };
+  made.elements = elements;
+  return made;
+}
+// A declaration of one name.
+function letOf(id: usize, keyword: "let" | "const" | "var", declarator: Declarator, at: Ref<Span>): Stmt {
+  let made: Extract<Stmt, { kind: "let" }> = { id, kind: "let", keyword, declarations: [], start: at.start, end: at.end };
+  made.declarations.push(declarator);
+  return made;
+}
+// A property's key as written, when it is a name.
+function keyText(key: Ref<PropertyName>): string {
+  return typeof key === "string" ? key : "";
 }
 function objectPattern(id: usize, props: PatternProp[], rest: Pattern | undefined, at: Ref<Span>): Pattern {
   return { id, kind: "object", props, rest, start: at.start, end: at.end };
@@ -3599,10 +3624,9 @@ class BodyChecker implements Context, GuardHost {
     if (outside === "this") return;
     if (outside !== undefined) {
       this.forget(l.localId, { start: at.start, end: at.end });
-      const from = this.cx.localOf(outside);
       if (this.outer !== undefined) {
-        this.outer.lendsWhole(from.localId, at);
-        if (this.f().closure?.self !== undefined) this.outer.lentPerCall(from.localId);
+        this.outer.lendsWhole(outside, at);
+        if (this.f().closure?.self !== undefined) this.outer.lentPerCall(outside);
       }
       return;
     }
@@ -3805,7 +3829,8 @@ class BodyChecker implements Context, GuardHost {
     if (e.args.length < required || e.args.length > this.f().params.length) throw new CompileError("E0501", `expected ${required === this.f().params.length ? `${required}` : `${required}-${this.f().params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
     e.args.forEach((a, i) => {
       const paramId = this.f().params[i as usize]!.id;
-      const to = this.cx.localOf(this.locals().getById(paramId)!).type;
+      const bound = this.locals().getById(paramId)!;
+      const to = this.cx.localOf(bound).type;
       this.exprs().expect(a, to);
       const t = this.exprs().value(a);
       this.exprs().coerce(a, t, to, `argument of type '${this.cx.tables.typing.show(t)}' is not assignable to parameter of type '${this.cx.tables.typing.show(to)}'`);
@@ -3935,7 +3960,7 @@ class BodyChecker implements Context, GuardHost {
         const part = parts.get(prop.key as string);
         if (part !== undefined) this.destructureWrite(out, prop.value, cloneExpr(part));
         else if (prop.value.kind === "default") this.destructureWrite(out, prop.value.target, cloneExpr(prop.value.value));
-        else throw new CompileError("E0003", `the object on the right has no property '${String(prop.key)}' for this target`, prop.start, prop.end);
+        else throw new CompileError("E0003", `the object on the right has no property '${keyText(prop.key)}' for this target`, prop.start, prop.end);
       }
       return;
     }
@@ -4053,12 +4078,13 @@ class BodyChecker implements Context, GuardHost {
         while (parts.length > 0) list.splice(at++ as i64, 0, parts.shift()!);
         continue;
       }
-      let loop = s;
-      while (loop.kind === "labeled") loop = this.cx.tables.rewrites.currentStmt(loop.body);
-      if (loop.kind === "for" && loop.init?.kind === "let" && loop.init.declarations.length > 1) {
-        list[i] = { id: nextId(this.cx.tables.ids), kind: "block", body: [loop.init, s], start: s.start, end: s.end };
-        this.cx.tables.wrappedIn.set(s, cloneStmt(list[i]!));
-        this.cx.tables.rewrites.replaceStmt(loop, { ...loop, init: undefined });
+      const loop = unlabeled(this.cx.tables.rewrites, s);
+      if (loop.kind === "for" && loop.init !== undefined && loop.init.kind === "let" && loop.init.declarations.length > 1) {
+        const block: Stmt = { id: nextId(this.cx.tables.ids), kind: "block", body: [cloneStmt(loop.init), cloneStmt(s)], start: s.start, end: s.end };
+        const unwrapped: Stmt = { ...loop, init: undefined };
+        this.cx.tables.wrappedIn.set(standIn(s), cloneStmt(block));
+        list[i] = block;
+        this.cx.tables.rewrites.replaceStmt(unwrapped, unwrapped);
         continue;
       }
       // Inside the block it was moved into, the loop is already where it belongs.
@@ -4274,7 +4300,7 @@ class BodyChecker implements Context, GuardHost {
       const lent = borrowed && target.kind === "ident" && (partInit.kind === "member" || (partInit.kind === "index" && this.cx.tables.typing.isTuple(whole)));
       const declarator: Declarator = { id: nextId(this.cx.tables.ids), target, type: undefined, init: partInit, ...at };
       if (lent) this.cx.tables.loopParts.add({ ...declarator });
-      lets.push({ id: nextId(this.cx.tables.ids), kind: "let", keyword: s.keyword, declarations: [declarator], ...at });
+      lets.push(letOf(nextId(this.cx.tables.ids), s.keyword, declarator, at));
     }
     // A parameter's parts come before a derived constructor's `super(...)`, as its whole did.
     let made: Stmt[] = [];
@@ -4360,7 +4386,7 @@ class BodyChecker implements Context, GuardHost {
       chosen = { id: nextId(this.cx.tables.ids), kind: "conditional", cond, then, else: chosen, ...at };
     }
     const left = loopLet(s.left);
-    const d = left.declarations[0]!;
+    const d: Ref<Declarator> = left.declarations[0]!;
     const elementType = this.tuplePreset(element, at);
     const each: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: left.keyword, declarations: [{ ...d, id: nextId(this.cx.tables.ids), type: elementType, init: chosen }], start: left.start, end: left.end };
     const position = this.tuplePreset("usize", at);
@@ -4433,7 +4459,7 @@ class BodyChecker implements Context, GuardHost {
         : { id: nextId(this.cx.tables.ids), kind: "member", object: whole, name: p.key, optional: false, start: p.read.start, end: p.read.end };
       const declarator: Declarator = { id: nextId(this.cx.tables.ids), target: { id: p.id, kind: "ident", name: p.name, ...at }, type: undefined, init, ...at };
       this.cx.tables.loopParts.add({ ...declarator });
-      lets.push({ id: nextId(this.cx.tables.ids), kind: "let", keyword: left.keyword, declarations: [declarator], ...at });
+      lets.push(letOf(nextId(this.cx.tables.ids), left.keyword, declarator, at));
     }
     const target: Declarator = this.cx.tables.rewrites.replaceDeclarator(d, { ...d, target: { id: nextId(this.cx.tables.ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
     // The loop's own body is a block inside the parts' scope, so it may declare their names.
@@ -4445,7 +4471,7 @@ class BodyChecker implements Context, GuardHost {
 
   // A name a loop's pattern binds: its part of the element, borrowed when the element is.
   /** @throws {CompileError} */
-  loopPart(this: Mut<this>, s: Extract<Stmt, { kind: "let" }>, d: Declarator): undefined {
+  loopPart(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "let" }>>, d: Ref<Declarator>): undefined {
     const init = d.init!;
     const object: Ref<Expr> = init.kind === "index" || init.kind === "member" ? init.object : init;
     const whole = this.exprs().value(object);
@@ -5184,7 +5210,7 @@ class BodyChecker implements Context, GuardHost {
     const gives = now !== undefined ? now : this.cx.tables.typing.widenLet(t);
     this.yielded = gives;
     if (this.cx.tables.typing.holdsRef(gives)) throw unsupported("generators yielding references", e.value);
-    this.exprs().coerce(e.value, t, this.yielded, `type '${this.cx.tables.typing.show(t)}' is not assignable to the generator's '${this.generatorName}<${this.cx.tables.typing.show(this.yielded)}>'`);
+    this.exprs().coerce(e.value, t, gives, `type '${this.cx.tables.typing.show(t)}' is not assignable to the generator's '${this.generatorName}<${this.cx.tables.typing.show(gives)}>'`);
     return this.sends ?? "void";
   }
 
@@ -5234,7 +5260,7 @@ class BodyChecker implements Context, GuardHost {
     }
     const target = found?.kind === "arm" ? undefined : found;
     if (s.label === undefined) {
-      if (target) return target.stmt;
+      if ((target !== undefined)) return target.stmt;
       const message = s.kind === "break" ? "'break' can only be used inside a loop or 'switch'" : "'continue' can only be used inside a loop";
       throw new CompileError("E0604", message, s.start, s.end);
     }
