@@ -472,12 +472,12 @@ const IN_PLACE = [
   "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
   // a Body's overloads, given as ids, an enum's record and a Body's template mark, which are no nodes;
   "check.ts: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true",
-  // the rebuild itself, putting replacements in place once a body is checked;
-  "check.ts: for (let i = 0; i < this.f.params.length; i++) this.f.params[i] = rebuiltParam",
-  // lists of statements, which have no id to key a replacement by: a statement that becomes
-  // several, nested functions hoisted, a local declaration hoisted out, and an export a library
-  // lists, each where the list is read next, and the same edits given to a later copy of a list;
-  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(this.cx.tables.ids), kind: \"block\"", "check.ts: place.list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
+  // lists of statements the checker walks, which it edits as a copy recorded by the list's owner
+  // in the rewrite table for the rebuild: a statement that becomes several, nested functions
+  // hoisted, statements added after the one being checked, and the same edits given to a later
+  // copy of a list; and, before checking, a local declaration hoisted out and an export a library
+  // lists, each where the list is read next;
+  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(this.cx.tables.ids), kind: \"block\"", "check.ts: if (added.length > 0) list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
   "check.ts: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.ts: if (inserted !== undefined && inserted.length > 0",
   "modules.ts: l.body[at] =", "macros.ts: statements.splice(",
 ];

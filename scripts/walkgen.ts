@@ -149,7 +149,9 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
   // The rebuild: each node replaced by what the rewrite table holds for it, its children first
   // rebuilt in turn. `get` reads a place holding nodes of type `t`, `set` writes it.
   let rebuildDepth = 0;
-  const rebuilds = (t: TypeNode, get: string, set: string): string[] => {
+  // `field` names the node field the value is read from, when it is one, as `m.else` for an
+  // optional `else` read into a local first.
+  const rebuilds = (t: TypeNode, get: string, set: string, field: string = set): string[] => {
     const f = formOf(t);
     switch (f.form) {
       case "json":
@@ -161,7 +163,12 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
       case "union":
         return holdsNodes(f.members) ? [`${set} = rebuilt${unionName(f.members).slice("visit".length)}(${get}, r);`] : [];
       case "array": {
-        if (ref(f.element, "Stmt")) return [`rebuiltStmts(${get}, r);`];
+        if (ref(f.element, "Stmt")) {
+          const owned = /^(\w+)\.(\w+)$/.exec(field);
+          if (owned === null) return [`rebuiltStmts(${get}, r);`];
+          const l = `l${++rebuildDepth}`;
+          return [`const ${l} = r.currentList(${owned[1]}.id, ${JSON.stringify(owned[2])});`, `if (${l} !== undefined) ${get} = ${l};`, `rebuiltStmts(${get}, r);`];
+        }
         const i = `i${++rebuildDepth}`;
         const x = `e${rebuildDepth}`;
         const ef = formOf(f.element);
@@ -203,7 +210,7 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
       }
       case "option": {
         const v = `o${++rebuildDepth}`;
-        const inner = rebuilds(f.inner, v, v);
+        const inner = rebuilds(f.inner, v, v, set);
         return inner.length ? [`if (${set} !== undefined) {`, `  let ${v} = ${set}!;`, ...inner.map((l) => `  ${l}`), `  ${set} = ${v};`, `}`] : [];
       }
       case "object":
@@ -301,6 +308,8 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
     `export interface Replacements {`,
     `  isEmpty(): boolean;`,
     ...nodes.filter(hasId).map((name) => `  ${currentMethod(name)}(node: ${name}): ${name};`),
+    `  // A statement list checking edited, by its owner's id and the field holding it.`,
+    `  currentList(owner: usize, field: string): Stmt[] | undefined;`,
     `}`,
     ``,
   ];

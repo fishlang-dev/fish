@@ -26,6 +26,8 @@ export interface Replacements {
   currentTypeAlias(node: TypeAlias): TypeAlias;
   currentInterface(node: Interface): Interface;
   currentFunc(node: Func): Func;
+  // A statement list checking edited, by its owner's id and the field holding it.
+  currentList(owner: usize, field: string): Stmt[] | undefined;
 }
 
 export function rebuiltTypeNode(n: TypeNode, r: Ref<Replacements>): TypeNode {
@@ -268,36 +270,38 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
         o10 = rebuiltTypeNode(o10, r);
         m.returnType = o10;
       }
+      const l11 = r.currentList(m.id, "body");
+      if (l11 !== undefined) m.body = l11;
       rebuiltStmts(m.body, r);
       break;
     case "arrow":
       if (m.typeParams.length > 0) {
-        let i11 = m.typeParams.splice(0);
-        i11.reverse();
-        while (i11.length > 0) {
-          let e11 = i11.pop()!;
-          e11 = rebuiltTypeParam(e11, r);
-          m.typeParams.push(e11);
-        }
-      }
-      if (m.params.length > 0) {
-        let i12 = m.params.splice(0);
+        let i12 = m.typeParams.splice(0);
         i12.reverse();
         while (i12.length > 0) {
           let e12 = i12.pop()!;
-          e12 = rebuiltParam(e12, r);
-          m.params.push(e12);
+          e12 = rebuiltTypeParam(e12, r);
+          m.typeParams.push(e12);
+        }
+      }
+      if (m.params.length > 0) {
+        let i13 = m.params.splice(0);
+        i13.reverse();
+        while (i13.length > 0) {
+          let e13 = i13.pop()!;
+          e13 = rebuiltParam(e13, r);
+          m.params.push(e13);
         }
       }
       if (m.returnType !== undefined) {
-        let o13 = m.returnType!;
-        o13 = rebuiltTypeNode(o13, r);
-        m.returnType = o13;
+        let o14 = m.returnType!;
+        o14 = rebuiltTypeNode(o14, r);
+        m.returnType = o14;
       }
       if (m.throws !== undefined) {
-        let v14 = m.throws!;
-        v14 = rebuiltTypeNode(v14, r);
-        m.throws = v14;
+        let v15 = m.throws!;
+        v15 = rebuiltTypeNode(v15, r);
+        m.throws = v15;
       }
       m.body = rebuiltOneOf0(m.body, r);
       break;
@@ -311,78 +315,78 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
     case "call":
       m.callee = rebuiltExpr(m.callee, r);
       if (m.typeArgs.length > 0) {
-        let i15 = m.typeArgs.splice(0);
-        i15.reverse();
-        while (i15.length > 0) {
-          let e15 = i15.pop()!;
-          e15 = rebuiltTypeNode(e15, r);
-          m.typeArgs.push(e15);
-        }
-      }
-      if (m.args.length > 0) {
-        let i16 = m.args.splice(0);
+        let i16 = m.typeArgs.splice(0);
         i16.reverse();
         while (i16.length > 0) {
           let e16 = i16.pop()!;
-          e16 = rebuiltExpr(e16, r);
-          m.args.push(e16);
+          e16 = rebuiltTypeNode(e16, r);
+          m.typeArgs.push(e16);
+        }
+      }
+      if (m.args.length > 0) {
+        let i17 = m.args.splice(0);
+        i17.reverse();
+        while (i17.length > 0) {
+          let e17 = i17.pop()!;
+          e17 = rebuiltExpr(e17, r);
+          m.args.push(e17);
         }
       }
       break;
     case "new":
       m.callee = rebuiltExpr(m.callee, r);
       if (m.typeArgs.length > 0) {
-        let i19 = m.typeArgs.splice(0);
-        i19.reverse();
-        while (i19.length > 0) {
-          let e19 = i19.pop()!;
-          e19 = rebuiltTypeNode(e19, r);
-          m.typeArgs.push(e19);
+        let i20 = m.typeArgs.splice(0);
+        i20.reverse();
+        while (i20.length > 0) {
+          let e20 = i20.pop()!;
+          e20 = rebuiltTypeNode(e20, r);
+          m.typeArgs.push(e20);
         }
       }
       if (m.args !== undefined) {
-        let o20 = m.args!;
-        if (o20.length > 0) {
-          let i21 = o20.splice(0);
-          i21.reverse();
-          while (i21.length > 0) {
-            let e21 = i21.pop()!;
-            e21 = rebuiltExpr(e21, r);
-            o20.push(e21);
+        let o21 = m.args!;
+        if (o21.length > 0) {
+          let i22 = o21.splice(0);
+          i22.reverse();
+          while (i22.length > 0) {
+            let e22 = i22.pop()!;
+            e22 = rebuiltExpr(e22, r);
+            o21.push(e22);
           }
         }
-        m.args = o20;
+        m.args = o21;
       }
       break;
     case "instantiation":
       m.expr = rebuiltExpr(m.expr, r);
       if (m.typeArgs.length > 0) {
-        let i22 = m.typeArgs.splice(0);
-        i22.reverse();
-        while (i22.length > 0) {
-          let e22 = i22.pop()!;
-          e22 = rebuiltTypeNode(e22, r);
-          m.typeArgs.push(e22);
+        let i23 = m.typeArgs.splice(0);
+        i23.reverse();
+        while (i23.length > 0) {
+          let e23 = i23.pop()!;
+          e23 = rebuiltTypeNode(e23, r);
+          m.typeArgs.push(e23);
         }
       }
       break;
     case "import":
       if (m.args.length > 0) {
-        let i23 = m.args.splice(0);
-        i23.reverse();
-        while (i23.length > 0) {
-          let e23 = i23.pop()!;
-          e23 = rebuiltExpr(e23, r);
-          m.args.push(e23);
+        let i24 = m.args.splice(0);
+        i24.reverse();
+        while (i24.length > 0) {
+          let e24 = i24.pop()!;
+          e24 = rebuiltExpr(e24, r);
+          m.args.push(e24);
         }
       }
       break;
     case "nonNull":
       m.expr = rebuiltExpr(m.expr, r);
       if (m.narrows !== undefined) {
-        let v24 = m.narrows!;
-        v24 = rebuiltTypeNode(v24, r);
-        m.narrows = v24;
+        let v25 = m.narrows!;
+        v25 = rebuiltTypeNode(v25, r);
+        m.narrows = v25;
       }
       break;
     case "throw":
@@ -390,44 +394,44 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
       break;
     case "class":
       if (m.decorators.length > 0) {
-        let i28 = m.decorators.splice(0);
-        i28.reverse();
-        while (i28.length > 0) {
-          let e28 = i28.pop()!;
-          e28 = rebuiltExpr(e28, r);
-          m.decorators.push(e28);
-        }
-      }
-      if (m.typeParams.length > 0) {
-        let i29 = m.typeParams.splice(0);
+        let i29 = m.decorators.splice(0);
         i29.reverse();
         while (i29.length > 0) {
           let e29 = i29.pop()!;
-          e29 = rebuiltTypeParam(e29, r);
-          m.typeParams.push(e29);
+          e29 = rebuiltExpr(e29, r);
+          m.decorators.push(e29);
+        }
+      }
+      if (m.typeParams.length > 0) {
+        let i30 = m.typeParams.splice(0);
+        i30.reverse();
+        while (i30.length > 0) {
+          let e30 = i30.pop()!;
+          e30 = rebuiltTypeParam(e30, r);
+          m.typeParams.push(e30);
         }
       }
       if (m.extends !== undefined) {
-        let o30 = m.extends!;
-        o30 = rebuiltExpr(o30, r);
-        m.extends = o30;
+        let o31 = m.extends!;
+        o31 = rebuiltExpr(o31, r);
+        m.extends = o31;
       }
       if (m.implements.length > 0) {
-        let i31 = m.implements.splice(0);
-        i31.reverse();
-        while (i31.length > 0) {
-          let e31 = i31.pop()!;
-          e31 = rebuiltTypeNode(e31, r);
-          m.implements.push(e31);
-        }
-      }
-      if (m.members.length > 0) {
-        let i32 = m.members.splice(0);
+        let i32 = m.implements.splice(0);
         i32.reverse();
         while (i32.length > 0) {
           let e32 = i32.pop()!;
-          e32 = rebuiltClassMember(e32, r);
-          m.members.push(e32);
+          e32 = rebuiltTypeNode(e32, r);
+          m.implements.push(e32);
+        }
+      }
+      if (m.members.length > 0) {
+        let i33 = m.members.splice(0);
+        i33.reverse();
+        while (i33.length > 0) {
+          let e33 = i33.pop()!;
+          e33 = rebuiltClassMember(e33, r);
+          m.members.push(e33);
         }
       }
       break;
@@ -457,12 +461,12 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
     case "match":
       m.subject = rebuiltExpr(m.subject, r);
       if (m.arms.length > 0) {
-        let i35 = m.arms.splice(0);
-        i35.reverse();
-        while (i35.length > 0) {
-          let e35 = i35.pop()!;
-          e35 = rebuiltMatchArm(e35, r);
-          m.arms.push(e35);
+        let i36 = m.arms.splice(0);
+        i36.reverse();
+        while (i36.length > 0) {
+          let e36 = i36.pop()!;
+          e36 = rebuiltMatchArm(e36, r);
+          m.arms.push(e36);
         }
       }
       break;
@@ -478,20 +482,20 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
       break;
     case "sequence":
       if (m.exprs.length > 0) {
-        let i36 = m.exprs.splice(0);
-        i36.reverse();
-        while (i36.length > 0) {
-          let e36 = i36.pop()!;
-          e36 = rebuiltExpr(e36, r);
-          m.exprs.push(e36);
+        let i37 = m.exprs.splice(0);
+        i37.reverse();
+        while (i37.length > 0) {
+          let e37 = i37.pop()!;
+          e37 = rebuiltExpr(e37, r);
+          m.exprs.push(e37);
         }
       }
       break;
     case "yield":
       if (m.value !== undefined) {
-        let o37 = m.value!;
-        o37 = rebuiltExpr(o37, r);
-        m.value = o37;
+        let o38 = m.value!;
+        o38 = rebuiltExpr(o38, r);
+        m.value = o38;
       }
       break;
     case "as":
@@ -536,30 +540,38 @@ export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
       break;
     case "if":
       m.cond = rebuiltExpr(m.cond, r);
+      const l3 = r.currentList(m.id, "then");
+      if (l3 !== undefined) m.then = l3;
       rebuiltStmts(m.then, r);
       if (m.else !== undefined) {
-        let o3 = m.else!;
-        rebuiltStmts(o3, r);
-        m.else = o3;
+        let o4 = m.else!;
+        const l5 = r.currentList(m.id, "else");
+        if (l5 !== undefined) o4 = l5;
+        rebuiltStmts(o4, r);
+        m.else = o4;
       }
       break;
     case "while":
       m.cond = rebuiltExpr(m.cond, r);
+      const l6 = r.currentList(m.id, "body");
+      if (l6 !== undefined) m.body = l6;
       rebuiltStmts(m.body, r);
       break;
     case "doWhile":
+      const l7 = r.currentList(m.id, "body");
+      if (l7 !== undefined) m.body = l7;
       rebuiltStmts(m.body, r);
       m.cond = rebuiltExpr(m.cond, r);
       break;
     case "switch":
       m.discriminant = rebuiltExpr(m.discriminant, r);
       if (m.cases.length > 0) {
-        let i4 = m.cases.splice(0);
-        i4.reverse();
-        while (i4.length > 0) {
-          let e4 = i4.pop()!;
-          e4 = rebuiltSwitchCase(e4, r);
-          m.cases.push(e4);
+        let i8 = m.cases.splice(0);
+        i8.reverse();
+        while (i8.length > 0) {
+          let e8 = i8.pop()!;
+          e8 = rebuiltSwitchCase(e8, r);
+          m.cases.push(e8);
         }
       }
       break;
@@ -570,126 +582,146 @@ export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
       m.value = rebuiltExpr(m.value, r);
       break;
     case "try":
+      const l11 = r.currentList(m.id, "block");
+      if (l11 !== undefined) m.block = l11;
       rebuiltStmts(m.block, r);
       if (m.param !== undefined) {
-        let o7 = m.param!;
-        o7 = rebuiltPattern(o7, r);
-        m.param = o7;
+        let o12 = m.param!;
+        o12 = rebuiltPattern(o12, r);
+        m.param = o12;
       }
       if (m.paramType !== undefined) {
-        let o8 = m.paramType!;
-        o8 = rebuiltTypeNode(o8, r);
-        m.paramType = o8;
+        let o13 = m.paramType!;
+        o13 = rebuiltTypeNode(o13, r);
+        m.paramType = o13;
       }
       if (m.handler !== undefined) {
-        let o9 = m.handler!;
-        rebuiltStmts(o9, r);
-        m.handler = o9;
+        let o14 = m.handler!;
+        const l15 = r.currentList(m.id, "handler");
+        if (l15 !== undefined) o14 = l15;
+        rebuiltStmts(o14, r);
+        m.handler = o14;
       }
       if (m.finalizer !== undefined) {
-        let o10 = m.finalizer!;
-        rebuiltStmts(o10, r);
-        m.finalizer = o10;
+        let o16 = m.finalizer!;
+        const l17 = r.currentList(m.id, "finalizer");
+        if (l17 !== undefined) o16 = l17;
+        rebuiltStmts(o16, r);
+        m.finalizer = o16;
       }
       break;
     case "for":
       if (m.init !== undefined) {
-        let o11 = m.init!;
-        o11 = rebuiltStmt(o11, r);
-        m.init = o11;
+        let o18 = m.init!;
+        o18 = rebuiltStmt(o18, r);
+        m.init = o18;
       }
       if (m.test !== undefined) {
-        let o12 = m.test!;
-        o12 = rebuiltExpr(o12, r);
-        m.test = o12;
+        let o19 = m.test!;
+        o19 = rebuiltExpr(o19, r);
+        m.test = o19;
       }
       if (m.update !== undefined) {
-        let o13 = m.update!;
-        o13 = rebuiltExpr(o13, r);
-        m.update = o13;
+        let o20 = m.update!;
+        o20 = rebuiltExpr(o20, r);
+        m.update = o20;
       }
+      const l21 = r.currentList(m.id, "body");
+      if (l21 !== undefined) m.body = l21;
       rebuiltStmts(m.body, r);
       break;
     case "forIn":
       m.left = rebuiltOneOf1(m.left, r);
       m.right = rebuiltExpr(m.right, r);
+      const l22 = r.currentList(m.id, "body");
+      if (l22 !== undefined) m.body = l22;
       rebuiltStmts(m.body, r);
       break;
     case "forOf":
       m.left = rebuiltOneOf1(m.left, r);
       m.right = rebuiltExpr(m.right, r);
+      const l23 = r.currentList(m.id, "body");
+      if (l23 !== undefined) m.body = l23;
       rebuiltStmts(m.body, r);
       break;
     case "block":
+      const l24 = r.currentList(m.id, "body");
+      if (l24 !== undefined) m.body = l24;
       rebuiltStmts(m.body, r);
       break;
     case "enum":
       if (m.typeParams.length > 0) {
-        let i14 = m.typeParams.splice(0);
-        i14.reverse();
-        while (i14.length > 0) {
-          let e14 = i14.pop()!;
-          e14 = rebuiltTypeParam(e14, r);
-          m.typeParams.push(e14);
+        let i25 = m.typeParams.splice(0);
+        i25.reverse();
+        while (i25.length > 0) {
+          let e25 = i25.pop()!;
+          e25 = rebuiltTypeParam(e25, r);
+          m.typeParams.push(e25);
         }
       }
       if (m.members.length > 0) {
-        let i15 = m.members.splice(0);
-        i15.reverse();
-        while (i15.length > 0) {
-          let e15 = i15.pop()!;
-          e15 = rebuiltEnumMember(e15, r);
-          m.members.push(e15);
+        let i26 = m.members.splice(0);
+        i26.reverse();
+        while (i26.length > 0) {
+          let e26 = i26.pop()!;
+          e26 = rebuiltEnumMember(e26, r);
+          m.members.push(e26);
         }
       }
       if (m.decorators !== undefined) {
-        let v16 = m.decorators!;
-        if (v16.length > 0) {
-          let i17 = v16.splice(0);
-          i17.reverse();
-          while (i17.length > 0) {
-            let e17 = i17.pop()!;
-            e17 = rebuiltExpr(e17, r);
-            v16.push(e17);
+        let v27 = m.decorators!;
+        if (v27.length > 0) {
+          let i28 = v27.splice(0);
+          i28.reverse();
+          while (i28.length > 0) {
+            let e28 = i28.pop()!;
+            e28 = rebuiltExpr(e28, r);
+            v27.push(e28);
           }
         }
-        m.decorators = v16;
+        m.decorators = v27;
       }
       break;
     case "namespace":
       if (m.body !== undefined) {
-        let o20 = m.body!;
-        rebuiltStmts(o20, r);
-        m.body = o20;
+        let o31 = m.body!;
+        const l32 = r.currentList(m.id, "body");
+        if (l32 !== undefined) o31 = l32;
+        rebuiltStmts(o31, r);
+        m.body = o31;
       }
       break;
     case "declare":
       m.body = rebuiltStmt(m.body, r);
       break;
     case "comptime":
+      const l33 = r.currentList(m.id, "body");
+      if (l33 !== undefined) m.body = l33;
       rebuiltStmts(m.body, r);
       break;
     case "unsafe":
+      const l34 = r.currentList(m.id, "body");
+      if (l34 !== undefined) m.body = l34;
       rebuiltStmts(m.body, r);
       break;
     case "import":
       if (m.named !== undefined) {
-        let o23 = m.named!;
-        if (o23.length > 0) {
-          let i24 = o23.splice(0);
-          i24.reverse();
-          while (i24.length > 0) {
-            let e24 = i24.pop()!;
-            e24 = rebuiltSpecifier(e24, r);
-            o23.push(e24);
+        let o37 = m.named!;
+        if (o37.length > 0) {
+          let i38 = o37.splice(0);
+          i38.reverse();
+          while (i38.length > 0) {
+            let e38 = i38.pop()!;
+            e38 = rebuiltSpecifier(e38, r);
+            o37.push(e38);
           }
         }
-        m.named = o23;
+        m.named = o37;
       }
       if (m.attributes !== undefined) {
-        let o25 = m.attributes!;
-        o25 = rebuiltExpr(o25, r);
-        m.attributes = o25;
+        let o39 = m.attributes!;
+        o39 = rebuiltExpr(o39, r);
+        m.attributes = o39;
       }
       break;
     case "export":
@@ -697,24 +729,24 @@ export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
       break;
     case "exportDefault":
       if (m.declaration !== undefined) {
-        let o28 = m.declaration!;
-        o28 = rebuiltStmt(o28, r);
-        m.declaration = o28;
+        let o42 = m.declaration!;
+        o42 = rebuiltStmt(o42, r);
+        m.declaration = o42;
       }
       if (m.value !== undefined) {
-        let o29 = m.value!;
-        o29 = rebuiltExpr(o29, r);
-        m.value = o29;
+        let o43 = m.value!;
+        o43 = rebuiltExpr(o43, r);
+        m.value = o43;
       }
       break;
     case "exportNamed":
       if (m.specifiers.length > 0) {
-        let i30 = m.specifiers.splice(0);
-        i30.reverse();
-        while (i30.length > 0) {
-          let e30 = i30.pop()!;
-          e30 = rebuiltSpecifier(e30, r);
-          m.specifiers.push(e30);
+        let i44 = m.specifiers.splice(0);
+        i44.reverse();
+        while (i44.length > 0) {
+          let e44 = i44.pop()!;
+          e44 = rebuiltSpecifier(e44, r);
+          m.specifiers.push(e44);
         }
       }
       break;
@@ -723,209 +755,211 @@ export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
       break;
     case "typeAlias":
       if (m.typeParams.length > 0) {
-        let i33 = m.typeParams.splice(0);
-        i33.reverse();
-        while (i33.length > 0) {
-          let e33 = i33.pop()!;
-          e33 = rebuiltTypeParam(e33, r);
-          m.typeParams.push(e33);
+        let i47 = m.typeParams.splice(0);
+        i47.reverse();
+        while (i47.length > 0) {
+          let e47 = i47.pop()!;
+          e47 = rebuiltTypeParam(e47, r);
+          m.typeParams.push(e47);
         }
       }
       m.type = rebuiltTypeNode(m.type, r);
       if (m.decorators !== undefined) {
-        let v34 = m.decorators!;
-        if (v34.length > 0) {
-          let i35 = v34.splice(0);
-          i35.reverse();
-          while (i35.length > 0) {
-            let e35 = i35.pop()!;
-            e35 = rebuiltExpr(e35, r);
-            v34.push(e35);
+        let v48 = m.decorators!;
+        if (v48.length > 0) {
+          let i49 = v48.splice(0);
+          i49.reverse();
+          while (i49.length > 0) {
+            let e49 = i49.pop()!;
+            e49 = rebuiltExpr(e49, r);
+            v48.push(e49);
           }
         }
-        m.decorators = v34;
+        m.decorators = v48;
       }
       if (m.js !== undefined) {
-        let v36 = m.js!;
-        v36 = rebuiltJsName(v36, r);
-        m.js = v36;
+        let v50 = m.js!;
+        v50 = rebuiltJsName(v50, r);
+        m.js = v50;
       }
       break;
     case "interface":
       if (m.typeParams.length > 0) {
-        let i38 = m.typeParams.splice(0);
-        i38.reverse();
-        while (i38.length > 0) {
-          let e38 = i38.pop()!;
-          e38 = rebuiltTypeParam(e38, r);
-          m.typeParams.push(e38);
+        let i52 = m.typeParams.splice(0);
+        i52.reverse();
+        while (i52.length > 0) {
+          let e52 = i52.pop()!;
+          e52 = rebuiltTypeParam(e52, r);
+          m.typeParams.push(e52);
         }
       }
       if (m.extends.length > 0) {
-        let i39 = m.extends.splice(0);
-        i39.reverse();
-        while (i39.length > 0) {
-          let e39 = i39.pop()!;
-          e39 = rebuiltTypeNode(e39, r);
-          m.extends.push(e39);
+        let i53 = m.extends.splice(0);
+        i53.reverse();
+        while (i53.length > 0) {
+          let e53 = i53.pop()!;
+          e53 = rebuiltTypeNode(e53, r);
+          m.extends.push(e53);
         }
       }
       if (m.members.length > 0) {
-        let i40 = m.members.splice(0);
-        i40.reverse();
-        while (i40.length > 0) {
-          let e40 = i40.pop()!;
-          e40 = rebuiltTypeMember(e40, r);
-          m.members.push(e40);
+        let i54 = m.members.splice(0);
+        i54.reverse();
+        while (i54.length > 0) {
+          let e54 = i54.pop()!;
+          e54 = rebuiltTypeMember(e54, r);
+          m.members.push(e54);
         }
       }
       if (m.decorators !== undefined) {
-        let v41 = m.decorators!;
-        if (v41.length > 0) {
-          let i42 = v41.splice(0);
-          i42.reverse();
-          while (i42.length > 0) {
-            let e42 = i42.pop()!;
-            e42 = rebuiltExpr(e42, r);
-            v41.push(e42);
+        let v55 = m.decorators!;
+        if (v55.length > 0) {
+          let i56 = v55.splice(0);
+          i56.reverse();
+          while (i56.length > 0) {
+            let e56 = i56.pop()!;
+            e56 = rebuiltExpr(e56, r);
+            v55.push(e56);
           }
         }
-        m.decorators = v41;
+        m.decorators = v55;
       }
       if (m.js !== undefined) {
-        let v43 = m.js!;
-        v43 = rebuiltJsName(v43, r);
-        m.js = v43;
+        let v57 = m.js!;
+        v57 = rebuiltJsName(v57, r);
+        m.js = v57;
       }
       if (m.jsClass !== undefined) {
-        let v44 = m.jsClass!;
-        if (v44.constructors.length > 0) {
-          let i45 = v44.constructors.splice(0);
-          i45.reverse();
-          while (i45.length > 0) {
-            let e45 = i45.pop()!;
-            if (e45.length > 0) {
-              let i46 = e45.splice(0);
-              i46.reverse();
-              while (i46.length > 0) {
-                let e46 = i46.pop()!;
-                e46 = rebuiltParam(e46, r);
-                e45.push(e46);
+        let v58 = m.jsClass!;
+        if (v58.constructors.length > 0) {
+          let i59 = v58.constructors.splice(0);
+          i59.reverse();
+          while (i59.length > 0) {
+            let e59 = i59.pop()!;
+            if (e59.length > 0) {
+              let i60 = e59.splice(0);
+              i60.reverse();
+              while (i60.length > 0) {
+                let e60 = i60.pop()!;
+                e60 = rebuiltParam(e60, r);
+                e59.push(e60);
               }
             }
-            v44.constructors.push(e45);
+            v58.constructors.push(e59);
           }
         }
-        if (v44.statics.length > 0) {
-          let i47 = v44.statics.splice(0);
-          i47.reverse();
-          while (i47.length > 0) {
-            let e47 = i47.pop()!;
-            e47 = rebuiltTypeMember(e47, r);
-            v44.statics.push(e47);
+        if (v58.statics.length > 0) {
+          let i61 = v58.statics.splice(0);
+          i61.reverse();
+          while (i61.length > 0) {
+            let e61 = i61.pop()!;
+            e61 = rebuiltTypeMember(e61, r);
+            v58.statics.push(e61);
           }
         }
-        m.jsClass = v44;
+        m.jsClass = v58;
       }
       if (m.jsSource !== undefined) {
-        let v48 = m.jsSource!;
-        v48 = rebuiltStmt(v48, r);
-        m.jsSource = v48;
+        let v62 = m.jsSource!;
+        v62 = rebuiltStmt(v62, r);
+        m.jsSource = v62;
       }
       break;
     case "function":
       if (m.typeParams.length > 0) {
-        let i49 = m.typeParams.splice(0);
-        i49.reverse();
-        while (i49.length > 0) {
-          let e49 = i49.pop()!;
-          e49 = rebuiltTypeParam(e49, r);
-          m.typeParams.push(e49);
+        let i63 = m.typeParams.splice(0);
+        i63.reverse();
+        while (i63.length > 0) {
+          let e63 = i63.pop()!;
+          e63 = rebuiltTypeParam(e63, r);
+          m.typeParams.push(e63);
         }
       }
       if (m.params.length > 0) {
-        let i50 = m.params.splice(0);
-        i50.reverse();
-        while (i50.length > 0) {
-          let e50 = i50.pop()!;
-          e50 = rebuiltParam(e50, r);
-          m.params.push(e50);
+        let i64 = m.params.splice(0);
+        i64.reverse();
+        while (i64.length > 0) {
+          let e64 = i64.pop()!;
+          e64 = rebuiltParam(e64, r);
+          m.params.push(e64);
         }
       }
       if (m.returnType !== undefined) {
-        let o51 = m.returnType!;
-        o51 = rebuiltTypeNode(o51, r);
-        m.returnType = o51;
+        let o65 = m.returnType!;
+        o65 = rebuiltTypeNode(o65, r);
+        m.returnType = o65;
       }
       if (m.throws !== undefined) {
-        let v52 = m.throws!;
-        v52 = rebuiltTypeNode(v52, r);
-        m.throws = v52;
+        let v66 = m.throws!;
+        v66 = rebuiltTypeNode(v66, r);
+        m.throws = v66;
       }
       if (m.body !== undefined) {
-        let o53 = m.body!;
-        rebuiltStmts(o53, r);
-        m.body = o53;
+        let o67 = m.body!;
+        const l68 = r.currentList(m.id, "body");
+        if (l68 !== undefined) o67 = l68;
+        rebuiltStmts(o67, r);
+        m.body = o67;
       }
       if (m.decorators !== undefined) {
-        let v54 = m.decorators!;
-        if (v54.length > 0) {
-          let i55 = v54.splice(0);
-          i55.reverse();
-          while (i55.length > 0) {
-            let e55 = i55.pop()!;
-            e55 = rebuiltExpr(e55, r);
-            v54.push(e55);
+        let v69 = m.decorators!;
+        if (v69.length > 0) {
+          let i70 = v69.splice(0);
+          i70.reverse();
+          while (i70.length > 0) {
+            let e70 = i70.pop()!;
+            e70 = rebuiltExpr(e70, r);
+            v69.push(e70);
           }
         }
-        m.decorators = v54;
+        m.decorators = v69;
       }
       if (m.js !== undefined) {
-        let v56 = m.js!;
-        v56 = rebuiltJsName(v56, r);
-        m.js = v56;
+        let v71 = m.js!;
+        v71 = rebuiltJsName(v71, r);
+        m.js = v71;
       }
       break;
     case "class":
       if (m.decorators.length > 0) {
-        let i61 = m.decorators.splice(0);
-        i61.reverse();
-        while (i61.length > 0) {
-          let e61 = i61.pop()!;
-          e61 = rebuiltExpr(e61, r);
-          m.decorators.push(e61);
+        let i76 = m.decorators.splice(0);
+        i76.reverse();
+        while (i76.length > 0) {
+          let e76 = i76.pop()!;
+          e76 = rebuiltExpr(e76, r);
+          m.decorators.push(e76);
         }
       }
       if (m.typeParams.length > 0) {
-        let i62 = m.typeParams.splice(0);
-        i62.reverse();
-        while (i62.length > 0) {
-          let e62 = i62.pop()!;
-          e62 = rebuiltTypeParam(e62, r);
-          m.typeParams.push(e62);
+        let i77 = m.typeParams.splice(0);
+        i77.reverse();
+        while (i77.length > 0) {
+          let e77 = i77.pop()!;
+          e77 = rebuiltTypeParam(e77, r);
+          m.typeParams.push(e77);
         }
       }
       if (m.extends !== undefined) {
-        let o63 = m.extends!;
-        o63 = rebuiltExpr(o63, r);
-        m.extends = o63;
+        let o78 = m.extends!;
+        o78 = rebuiltExpr(o78, r);
+        m.extends = o78;
       }
       if (m.implements.length > 0) {
-        let i64 = m.implements.splice(0);
-        i64.reverse();
-        while (i64.length > 0) {
-          let e64 = i64.pop()!;
-          e64 = rebuiltTypeNode(e64, r);
-          m.implements.push(e64);
+        let i79 = m.implements.splice(0);
+        i79.reverse();
+        while (i79.length > 0) {
+          let e79 = i79.pop()!;
+          e79 = rebuiltTypeNode(e79, r);
+          m.implements.push(e79);
         }
       }
       if (m.members.length > 0) {
-        let i65 = m.members.splice(0);
-        i65.reverse();
-        while (i65.length > 0) {
-          let e65 = i65.pop()!;
-          e65 = rebuiltClassMember(e65, r);
-          m.members.push(e65);
+        let i80 = m.members.splice(0);
+        i80.reverse();
+        while (i80.length > 0) {
+          let e80 = i80.pop()!;
+          e80 = rebuiltClassMember(e80, r);
+          m.members.push(e80);
         }
       }
       break;
@@ -1123,42 +1157,48 @@ export function rebuiltObjectProp(n: ObjectProp, r: Ref<Replacements>): ObjectPr
         o4 = rebuiltTypeNode(o4, r);
         m.returnType = o4;
       }
+      const l5 = r.currentList(m.id, "body");
+      if (l5 !== undefined) m.body = l5;
       rebuiltStmts(m.body, r);
       break;
     case "get":
       m.key = rebuiltOneOf2(m.key, r);
       if (m.params.length > 0) {
-        let i5 = m.params.splice(0);
-        i5.reverse();
-        while (i5.length > 0) {
-          let e5 = i5.pop()!;
-          e5 = rebuiltParam(e5, r);
-          m.params.push(e5);
+        let i6 = m.params.splice(0);
+        i6.reverse();
+        while (i6.length > 0) {
+          let e6 = i6.pop()!;
+          e6 = rebuiltParam(e6, r);
+          m.params.push(e6);
         }
       }
       if (m.returnType !== undefined) {
-        let o6 = m.returnType!;
-        o6 = rebuiltTypeNode(o6, r);
-        m.returnType = o6;
+        let o7 = m.returnType!;
+        o7 = rebuiltTypeNode(o7, r);
+        m.returnType = o7;
       }
+      const l8 = r.currentList(m.id, "body");
+      if (l8 !== undefined) m.body = l8;
       rebuiltStmts(m.body, r);
       break;
     case "set":
       m.key = rebuiltOneOf2(m.key, r);
       if (m.params.length > 0) {
-        let i7 = m.params.splice(0);
-        i7.reverse();
-        while (i7.length > 0) {
-          let e7 = i7.pop()!;
-          e7 = rebuiltParam(e7, r);
-          m.params.push(e7);
+        let i9 = m.params.splice(0);
+        i9.reverse();
+        while (i9.length > 0) {
+          let e9 = i9.pop()!;
+          e9 = rebuiltParam(e9, r);
+          m.params.push(e9);
         }
       }
       if (m.returnType !== undefined) {
-        let o8 = m.returnType!;
-        o8 = rebuiltTypeNode(o8, r);
-        m.returnType = o8;
+        let o10 = m.returnType!;
+        o10 = rebuiltTypeNode(o10, r);
+        m.returnType = o10;
       }
+      const l11 = r.currentList(m.id, "body");
+      if (l11 !== undefined) m.body = l11;
       rebuiltStmts(m.body, r);
       break;
   }
@@ -1277,143 +1317,153 @@ export function rebuiltClassMember(n: ClassMember, r: Ref<Replacements>): ClassM
       }
       if (m.body !== undefined) {
         let o11 = m.body!;
+        const l12 = r.currentList(m.id, "body");
+        if (l12 !== undefined) o11 = l12;
         rebuiltStmts(o11, r);
         m.body = o11;
       }
       break;
     case "constructor":
       if (m.decorators.length > 0) {
-        let i16 = m.decorators.splice(0);
-        i16.reverse();
-        while (i16.length > 0) {
-          let e16 = i16.pop()!;
-          e16 = rebuiltExpr(e16, r);
-          m.decorators.push(e16);
-        }
-      }
-      if (m.params.length > 0) {
-        let i17 = m.params.splice(0);
+        let i17 = m.decorators.splice(0);
         i17.reverse();
         while (i17.length > 0) {
           let e17 = i17.pop()!;
-          e17 = rebuiltParam(e17, r);
-          m.params.push(e17);
+          e17 = rebuiltExpr(e17, r);
+          m.decorators.push(e17);
+        }
+      }
+      if (m.params.length > 0) {
+        let i18 = m.params.splice(0);
+        i18.reverse();
+        while (i18.length > 0) {
+          let e18 = i18.pop()!;
+          e18 = rebuiltParam(e18, r);
+          m.params.push(e18);
         }
       }
       if (m.throws !== undefined) {
-        let v18 = m.throws!;
-        v18 = rebuiltTypeNode(v18, r);
-        m.throws = v18;
+        let v19 = m.throws!;
+        v19 = rebuiltTypeNode(v19, r);
+        m.throws = v19;
       }
       if (m.body !== undefined) {
-        let o19 = m.body!;
-        rebuiltStmts(o19, r);
-        m.body = o19;
+        let o20 = m.body!;
+        const l21 = r.currentList(m.id, "body");
+        if (l21 !== undefined) o20 = l21;
+        rebuiltStmts(o20, r);
+        m.body = o20;
       }
       break;
     case "get":
       if (m.decorators.length > 0) {
-        let i21 = m.decorators.splice(0);
-        i21.reverse();
-        while (i21.length > 0) {
-          let e21 = i21.pop()!;
-          e21 = rebuiltExpr(e21, r);
-          m.decorators.push(e21);
+        let i23 = m.decorators.splice(0);
+        i23.reverse();
+        while (i23.length > 0) {
+          let e23 = i23.pop()!;
+          e23 = rebuiltExpr(e23, r);
+          m.decorators.push(e23);
         }
       }
       m.name = rebuiltOneOf2(m.name, r);
       if (m.params.length > 0) {
-        let i22 = m.params.splice(0);
-        i22.reverse();
-        while (i22.length > 0) {
-          let e22 = i22.pop()!;
-          e22 = rebuiltParam(e22, r);
-          m.params.push(e22);
+        let i24 = m.params.splice(0);
+        i24.reverse();
+        while (i24.length > 0) {
+          let e24 = i24.pop()!;
+          e24 = rebuiltParam(e24, r);
+          m.params.push(e24);
         }
       }
       if (m.returnType !== undefined) {
-        let o23 = m.returnType!;
-        o23 = rebuiltTypeNode(o23, r);
-        m.returnType = o23;
+        let o25 = m.returnType!;
+        o25 = rebuiltTypeNode(o25, r);
+        m.returnType = o25;
       }
       if (m.throws !== undefined) {
-        let v24 = m.throws!;
-        v24 = rebuiltTypeNode(v24, r);
-        m.throws = v24;
+        let v26 = m.throws!;
+        v26 = rebuiltTypeNode(v26, r);
+        m.throws = v26;
       }
       if (m.body !== undefined) {
-        let o25 = m.body!;
-        rebuiltStmts(o25, r);
-        m.body = o25;
+        let o27 = m.body!;
+        const l28 = r.currentList(m.id, "body");
+        if (l28 !== undefined) o27 = l28;
+        rebuiltStmts(o27, r);
+        m.body = o27;
       }
       break;
     case "set":
       if (m.decorators.length > 0) {
-        let i27 = m.decorators.splice(0);
-        i27.reverse();
-        while (i27.length > 0) {
-          let e27 = i27.pop()!;
-          e27 = rebuiltExpr(e27, r);
-          m.decorators.push(e27);
+        let i30 = m.decorators.splice(0);
+        i30.reverse();
+        while (i30.length > 0) {
+          let e30 = i30.pop()!;
+          e30 = rebuiltExpr(e30, r);
+          m.decorators.push(e30);
         }
       }
       m.name = rebuiltOneOf2(m.name, r);
       if (m.params.length > 0) {
-        let i28 = m.params.splice(0);
-        i28.reverse();
-        while (i28.length > 0) {
-          let e28 = i28.pop()!;
-          e28 = rebuiltParam(e28, r);
-          m.params.push(e28);
+        let i31 = m.params.splice(0);
+        i31.reverse();
+        while (i31.length > 0) {
+          let e31 = i31.pop()!;
+          e31 = rebuiltParam(e31, r);
+          m.params.push(e31);
         }
       }
       if (m.returnType !== undefined) {
-        let o29 = m.returnType!;
-        o29 = rebuiltTypeNode(o29, r);
-        m.returnType = o29;
+        let o32 = m.returnType!;
+        o32 = rebuiltTypeNode(o32, r);
+        m.returnType = o32;
       }
       if (m.throws !== undefined) {
-        let v30 = m.throws!;
-        v30 = rebuiltTypeNode(v30, r);
-        m.throws = v30;
+        let v33 = m.throws!;
+        v33 = rebuiltTypeNode(v33, r);
+        m.throws = v33;
       }
       if (m.body !== undefined) {
-        let o31 = m.body!;
-        rebuiltStmts(o31, r);
-        m.body = o31;
+        let o34 = m.body!;
+        const l35 = r.currentList(m.id, "body");
+        if (l35 !== undefined) o34 = l35;
+        rebuiltStmts(o34, r);
+        m.body = o34;
       }
       break;
     case "index":
       if (m.decorators.length > 0) {
-        let i33 = m.decorators.splice(0);
-        i33.reverse();
-        while (i33.length > 0) {
-          let e33 = i33.pop()!;
-          e33 = rebuiltExpr(e33, r);
-          m.decorators.push(e33);
+        let i37 = m.decorators.splice(0);
+        i37.reverse();
+        while (i37.length > 0) {
+          let e37 = i37.pop()!;
+          e37 = rebuiltExpr(e37, r);
+          m.decorators.push(e37);
         }
       }
       if (m.params.length > 0) {
-        let i34 = m.params.splice(0);
-        i34.reverse();
-        while (i34.length > 0) {
-          let e34 = i34.pop()!;
-          e34 = rebuiltParam(e34, r);
-          m.params.push(e34);
+        let i38 = m.params.splice(0);
+        i38.reverse();
+        while (i38.length > 0) {
+          let e38 = i38.pop()!;
+          e38 = rebuiltParam(e38, r);
+          m.params.push(e38);
         }
       }
       m.type = rebuiltTypeNode(m.type, r);
       break;
     case "staticBlock":
       if (m.decorators.length > 0) {
-        let i36 = m.decorators.splice(0);
-        i36.reverse();
-        while (i36.length > 0) {
-          let e36 = i36.pop()!;
-          e36 = rebuiltExpr(e36, r);
-          m.decorators.push(e36);
+        let i40 = m.decorators.splice(0);
+        i40.reverse();
+        while (i40.length > 0) {
+          let e40 = i40.pop()!;
+          e40 = rebuiltExpr(e40, r);
+          m.decorators.push(e40);
         }
       }
+      const l41 = r.currentList(m.id, "body");
+      if (l41 !== undefined) m.body = l41;
       rebuiltStmts(m.body, r);
       break;
   }
@@ -1579,6 +1629,8 @@ export function rebuiltSwitchCase(n: SwitchCase, r: Ref<Replacements>): SwitchCa
     o1 = rebuiltExpr(o1, r);
     m.test = o1;
   }
+  const l2 = r.currentList(m.id, "body");
+  if (l2 !== undefined) m.body = l2;
   rebuiltStmts(m.body, r);
   return m;
 }
@@ -1792,26 +1844,28 @@ export function rebuiltFunc(n: Func, r: Ref<Replacements>): Func {
       }
       if (m.body !== undefined) {
         let o5 = m.body!;
+        const l6 = r.currentList(m.id, "body");
+        if (l6 !== undefined) o5 = l6;
         rebuiltStmts(o5, r);
         m.body = o5;
       }
       if (m.decorators !== undefined) {
-        let v6 = m.decorators!;
-        if (v6.length > 0) {
-          let i7 = v6.splice(0);
-          i7.reverse();
-          while (i7.length > 0) {
-            let e7 = i7.pop()!;
-            e7 = rebuiltExpr(e7, r);
-            v6.push(e7);
+        let v7 = m.decorators!;
+        if (v7.length > 0) {
+          let i8 = v7.splice(0);
+          i8.reverse();
+          while (i8.length > 0) {
+            let e8 = i8.pop()!;
+            e8 = rebuiltExpr(e8, r);
+            v7.push(e8);
           }
         }
-        m.decorators = v6;
+        m.decorators = v7;
       }
       if (m.js !== undefined) {
-        let v8 = m.js!;
-        v8 = rebuiltJsName(v8, r);
-        m.js = v8;
+        let v9 = m.js!;
+        v9 = rebuiltJsName(v9, r);
+        m.js = v9;
       }
       break;
   }

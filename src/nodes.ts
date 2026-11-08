@@ -205,6 +205,9 @@ class Applier implements Replacements {
   isEmpty(): boolean {
     return false;
   }
+  currentList(_owner: usize, _field: string): Stmt[] | undefined {
+    return undefined;
+  }
   current(n: Expr): Expr {
     if (!this.hasShared) {
       const id = idOfExpr(n);
@@ -618,6 +621,10 @@ export class NodeSet<K extends Id> {
 export class Rewrites implements Replacements {
   private exprs: Map<usize, Expr> = new Map<usize, Expr>();
   private stmts = new Map<usize, Stmt>();
+  // Statement lists checking edited, keyed by the body they are in, their owner's id and field:
+  // each copy of a generic class's body edits its own. A rebuild reads those of `rebuilding`.
+  private lists = new Map<string, Stmt[]>();
+  rebuilding: usize | undefined = undefined;
   private funcs = new Map<usize, Func>();
   private typeAliases = new Map<usize, TypeAlias>();
   private interfaces = new Map<usize, Interface>();
@@ -674,6 +681,21 @@ export class Rewrites implements Replacements {
   currentStmt(node: Stmt): Stmt {
     if (this.stmts.size === 0) return node;
     return this.stmts.get(idOfStmt(node)) ?? node;
+  }
+
+  // Records the list `owner` holds in `field`, in the body `body`, once checking has edited it.
+  replaceList(this: Mut<this>, body: usize, owner: usize, field: string, list: Stmt[]): void {
+    this.hasChanges = true;
+    this.lists.set(`${body} ${owner} ${field}`, list);
+  }
+
+  listIn(body: usize, owner: usize, field: string): Stmt[] | undefined {
+    if (this.lists.size === 0) return undefined;
+    return this.lists.get(`${body} ${owner} ${field}`);
+  }
+
+  currentList(owner: usize, field: string): Stmt[] | undefined {
+    return this.rebuilding === undefined ? undefined : this.listIn(this.rebuilding, owner, field);
   }
 
   replaceFunc(this: Mut<this>, node: Ref<Id>, by: Func): Func {

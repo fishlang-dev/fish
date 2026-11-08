@@ -9,7 +9,7 @@ import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } fro
 import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
-import { cloneExpr, cloneInterface, cloneParam, cloneStmt, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
+import { cloneExpr, cloneInterface, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, closureAssigned, fieldRoots, patternNames } from "./flow.ts";
@@ -169,14 +169,37 @@ type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 // records of where it goes.
 type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: usize; wanted?: boolean; gives?: [Expr, Type][] };
 
+// The statements a destructuring assignment becomes: every part read, then every target written.
+type Destructured = { reads: Stmt[]; writes: Stmt[] };
+
 // A statement's stand-in as a jump's target: its id and span.
 function standIn(s: Ref<Stmt>): Stmt {
   return { id: s.id, kind: "empty", start: s.start, end: s.end };
 }
 
+// What a closure's local captures, when it captures something.
+function capturedFrom(arenas: Ref<Arenas>, at: InstanceId, local: LocalId): LocalId | "this" | undefined {
+  const captures = arenas.instanceOf(at).captures;
+  return captures !== undefined ? captures.get(local) : undefined;
+}
+
+// The instance a closure is written in.
+function parentOf(arenas: Ref<Arenas>, at: InstanceId): InstanceId | undefined {
+  const closure = bodyOf(arenas, arenas.instanceOf(at)).closure;
+  return closure !== undefined ? closure.parent : undefined;
+}
+
+// The function declarations of a list, with bodies, that aren't async.
+function nestedFunctions(list: Ref<Stmt[]>): Extract<Stmt, { kind: "function" }>[] {
+  let out: Extract<Stmt, { kind: "function" }>[] = [];
+  for (const s of list) if (s.kind === "function" && s.body !== undefined && !s.async) out.push(s);
+  return out;
+}
+
 // The binding a fact's key names, which is its id as text.
 function keyId(key: string): LocalId {
-  return parseInt(key) as LocalId;
+  const n = parseInt(key);
+  return (n !== undefined ? n : 0) as LocalId;
 }
 
 function copyOptionalScope(scope: Ref<Map<string, Type> | undefined>): Map<string, Type> | undefined {
@@ -2816,7 +2839,9 @@ class BodyChecker implements Context, GuardHost {
   narrowReads: { local: string; at: usize }[] = [];
   loops: { facts: usize; reads: usize }[] = [];
   // The list being checked and the place in it, for a statement that becomes several.
-  siblings: { list: Stmt[]; at: usize } | undefined = undefined;
+  // The statement being checked directly in a list, by id, and what is to go after it there.
+  walking: usize | undefined = undefined;
+  after: Stmt[] = [];
   // For each enclosing `try`, the errors its block raises so far, where and of what type.
   handlers: [Expr | Stmt, Type][][] = [];
   // How many comptime blocks or expressions the code being checked is inside, and for each
@@ -2958,14 +2983,14 @@ class BodyChecker implements Context, GuardHost {
     // take that type.
     const expected = this.f().closure?.expected;
     const given = expected !== undefined ? this.cx.tables.typing.rec(expected).returns : undefined;
-    this.declared = (this.f().closure !== undefined) ? (this.f().returnType ? this.cx.tables.typing.stored(this.cx.resolver().resolveType(this.f().returnType!)) : given && isNumeric(given) ? given : undefined) : this.cx.instancing().returnTypeOf(this.f(), this.cx.instancing().scopeOf(this.instance().id));
+    this.declared = (this.f().closure !== undefined) ? (this.f().returnType !== undefined ? this.cx.tables.typing.stored(this.cx.resolver().resolveType(this.f().returnType!)) : given !== undefined && isNumeric(given) ? given : undefined) : this.cx.instancing().returnTypeOf(this.f(), this.cx.instancing().scopeOf(this.instance().id));
     if (this.f().generator === true && this.instance().generator === undefined) {
       const symbol = this.instance().symbol;
       const made = madeBy(this.cx.tables.typing, this.cx.tables.typing.generatorType(this.f().name, this.instance().concrete, this.f().async === true), symbol);
       this.instance().generator = made;
     }
     this.generatorType = this.f().generator === true ? this.instance().generator : undefined;
-    this.generatorName = this.f().async ? "AsyncGenerator" : "Generator";
+    this.generatorName = (this.f().async === true) ? "AsyncGenerator" : "Generator";
     this.yielded = this.generatorType && this.declared ? this.cx.tables.typing.generatorElement(this.declared, this.f().async === true) : undefined;
     // What `next(x)` sends, which a `yield` whose value is used gives.
     this.sends = this.generatorType && this.declared ? this.cx.tables.typing.generatorSends(this.declared) : undefined;
@@ -3151,25 +3176,41 @@ class BodyChecker implements Context, GuardHost {
 
   envOf(this: Mut<this>, e: Ref<Expr>, of: InstanceId, env: LocalId[]): void {
     let inst = this.instance();
-    if (inst.envs === undefined) inst.envs = new NodeMap<Expr, { of: InstanceId; env: LocalId[] }>();
-    inst.envs.set(e, { of, env });
+    if (inst.envs !== undefined) inst.envs.set(e, { of, env });
+    else {
+      let made = new NodeMap<Expr, { of: InstanceId; env: LocalId[] }>();
+      made.set(e, { of, env });
+      inst.envs = made;
+    }
   }
 
   dynOf(this: Mut<this>, e: Ref<Expr>, table: DynTable): void {
     let inst = this.instance();
-    if (inst.dyns === undefined) inst.dyns = new NodeMap<Expr, DynTable>();
-    inst.dyns.set(e, table);
+    if (inst.dyns !== undefined) inst.dyns.set(e, table);
+    else {
+      let made = new NodeMap<Expr, DynTable>();
+      made.set(e, table);
+      inst.dyns = made;
+    }
   }
 
   private markUnreached(this: Mut<this>, s: Ref<Stmt>): void {
     let inst = this.instance();
-    if (inst.unreached === undefined) inst.unreached = new NodeSet<Stmt>();
-    inst.unreached.add(s);
+    if (inst.unreached !== undefined) inst.unreached.add(s);
+    else {
+      let made = new NodeSet<Stmt>();
+      made.add(s);
+      inst.unreached = made;
+    }
   }
   private recordIterator(this: Mut<this>, s: Ref<Stmt>, call: Expr): void {
     let inst = this.instance();
-    if (inst.iterators === undefined) inst.iterators = new NodeMap<Stmt, Expr>();
-    inst.iterators.set(s, call);
+    if (inst.iterators !== undefined) inst.iterators.set(s, call);
+    else {
+      let made = new NodeMap<Stmt, Expr>();
+      made.set(s, call);
+      inst.iterators = made;
+    }
   }
 
   // A match arm runs in a scope of its own, holding the names its pattern binds.
@@ -3270,13 +3311,16 @@ class BodyChecker implements Context, GuardHost {
   // A closure's capture stands for the variable it captures. The first demand decides,
   // and a different one is the usual mismatch once it applies.
   infer(this: Mut<this>, e: Ref<Expr>, to: Type): boolean {
-    let local = e.kind === "ident" ? this.cx.tables.arenas.localOf(this.locals().get(e)) : undefined;
-    for (let at: Instance | undefined = this.instance(); local && at?.captures?.has(local.localId); at = this.cx.tables.arenas.instanceOf(bodyOf(this.cx.tables.arenas, at).closure?.parent)) {
-      const from = at.captures.get(local.localId)!;
-      local = from === "this" ? undefined : this.cx.localOf(from);
+    let local = e.kind === "ident" ? this.locals().get(e) : undefined;
+    let at: InstanceId | undefined = this.instanceId;
+    while (local !== undefined && at !== undefined) {
+      const from = capturedFrom(this.cx.tables.arenas, at, local);
+      if (from === undefined) break;
+      local = from === "this" ? undefined : from;
+      at = parentOf(this.cx.tables.arenas, at);
     }
-    const s = local && this.cx.candidates.get(local.localId);
-    if (!s || !isInteger(to) || to === "i64") return false;
+    const s = local !== undefined ? this.cx.candidates.get(local) : undefined;
+    if (s === undefined || !isInteger(to) || to === "i64") return false;
     if (this.cx.demands.has(s)) return this.cx.demands.get(s) === to;
     this.cx.demands.set(s, to);
     this.cx.demanded++;
@@ -3286,14 +3330,14 @@ class BodyChecker implements Context, GuardHost {
   // A closure's change to what it captures, which a call of it could make at any time, so all
   // that was known of the root's fields is forgotten.
   /** @throws {CompileError} */
-  changesLocal(this: Mut<this>, l: Local, path: string, action: string, target: Expr, throughMut: boolean) {
+  changesLocal(this: Mut<this>, l: Ref<Local>, path: string, action: string, target: Ref<Expr>, throughMut: boolean): void {
     this.closureChanged.add(String(l.localId));
     this.changesPath(l.localId, "", action, target);
     this.exprs().changesLocal(l.localId, path, action, target, throughMut);
   }
 
   /** @throws {CompileError} */
-  changesThis(this: Mut<this>, path: string, action: string, target: Expr) {
+  changesThis(this: Mut<this>, path: string, action: string, target: Ref<Expr>): void {
     this.closureChanged.add("this");
     this.changesPath("this", "", action, target);
     this.exprs().changesThis(path, action, target);
@@ -3311,13 +3355,13 @@ class BodyChecker implements Context, GuardHost {
     this.hidden = false;
     if ((assigned !== undefined)) this.unset.delete(assigned.name);
     if (s.kind === "expr" && s.expr === this.superCall) this.unset.delete(SUPER);
-    if (assigned || (s.kind === "expr" && s.expr === this.superCall)) this.built = true;
+    if (assigned !== undefined || (s.kind === "expr" && s.expr === this.superCall)) this.built = true;
     return after;
   }
 
   /** @throws {CompileError} */
   check(this: Mut<this>) {
-    this.statements(this.f().body, true);
+    this.statements(this.f().id, "body", this.f().body, true);
     this.exprs().finish();
     const stale = this.copiedParams.find((c) => this.changedParams.has(c.local.localId));
     if (stale) throw new CompileError("E0210", `the async nested function '${stale.nested}' takes its own copy of '${stale.local.name}' when it is made, so a change to it wouldn't reach the function; pass '${stale.local.name}' as a parameter, or leave it unchanged`, stale.at.start, stale.at.end);
@@ -3368,8 +3412,14 @@ class BodyChecker implements Context, GuardHost {
       throw new CompileError("E0601", "not all code paths return a value", at.start, at.end);
     }
     // From here on the body is read as a plain tree, its replacements in place.
-    for (let i = 0; i < this.f().params.length; i++) this.f().params[i] = rebuiltParam(this.f().params[i]!, this.cx.tables.rewrites);
-    rebuiltStmts(this.f().body, this.cx.tables.rewrites);
+    const bodyId = this.f().bodyId;
+    const edited = this.cx.tables.rewrites.listIn(bodyId, this.f().id, "body");
+    let body = this.cx.tables.arenas.bodyMut(bodyId);
+    if (edited !== undefined) body.body = edited;
+    for (let i = 0; i < body.params.length; i++) body.params[i] = rebuiltParam(body.params[i]!, this.cx.tables.rewrites);
+    this.cx.tables.rewrites.rebuilding = bodyId;
+    rebuiltStmts(body.body, this.cx.tables.rewrites);
+    this.cx.tables.rewrites.rebuilding = undefined;
     // A method this body calls on an object holding references is checked first, so the move
     // check knows whether it keeps what it is lent.
     for (const target of this.instance().calls.values()) this.cx.keepsKnown(target, this.instance().id);
@@ -3420,8 +3470,8 @@ class BodyChecker implements Context, GuardHost {
   }
   // The innermost scope, where a declaration goes.
   private innerScope(this: Mut<this>): Mut<Map<string, LocalId>> {
-    let scopes = this.cx.resolverState.sights[this.sight]!.scopes;
-    return scopes[scopes.length - 1]!;
+    const at = this.cx.resolverState.sights[this.sight]!.scopes.length - 1;
+    return this.cx.resolverState.sights[this.sight]!.scopes[at]!;
   }
   // A `Mut` variable is never pointed elsewhere, so assigning it doesn't stop it narrowing.
   // A capture narrows as a variable of the closure's would. A binding holding no reference
@@ -3439,7 +3489,8 @@ class BodyChecker implements Context, GuardHost {
   // A write to a binding holding no reference forgets what any check or assignment said of it.
   forget(this: Mut<this>, lId: LocalId, at: Ref<Span>): void {
     this.forgetPaths(String(lId), at);
-    if (this.cx.tables.typing.holdsRef(this.cx.localOf(lId).type)) return;
+    const type = this.cx.localOf(lId).type;
+    if (this.cx.tables.typing.holdsRef(type)) return;
     this.written.push({ local: bindingKey(lId), at: at.start });
     const key = bindingKey(lId);
     this.drop((k) => k === key);
@@ -3458,7 +3509,7 @@ class BodyChecker implements Context, GuardHost {
   }
   // Forgets, before a loop, what is known of the bindings it assigns, since a later iteration
   // could reach any read in it with another member.
-  forgetLoop(this: Mut<this>, loop: Stmt) {
+  forgetLoop(this: Mut<this>, loop: Ref<Stmt>): void {
     const known = new Set(this.facts.flatMap((f) => [...f.keys()]));
     const roots = fieldRoots([loop]);
     for (const id of known) {
@@ -3491,7 +3542,7 @@ class BodyChecker implements Context, GuardHost {
     }
     this.loopChange(String(l.localId), "mutably borrow", l.name, at);
     const from = this.facts.findIndex((f) => f.has(bindingKey(l.localId)));
-    const loop = from < 0 ? undefined : this.loops.find((x) => x.facts > from);
+    const loop = from < 0 ? undefined : this.loops.find((x) => (x.facts as i64) > from);
     if (loop && this.narrowReads.slice(loop.reads).some((r) => r.local === bindingKey(l.localId) && r.at !== at.id)) {
       throw new CompileError("E0109", `can't lend '${l.name}' mutably here: earlier in this loop it was read as narrowed by what was known before the loop, and the next time round it may hold another member; check or assign it inside the loop`, at.start, at.end);
     }
@@ -3501,7 +3552,7 @@ class BodyChecker implements Context, GuardHost {
     const l = this.cx.localOf(lId);
     this.narrowReads.push({ local: bindingKey(l.localId), at: at.id });
     const outside = this.outsideOf(l.localId);
-    if (outside !== undefined && outside !== "this") this.outer!.narrowRead(outside, at);
+    if (outside !== undefined && outside !== "this" && this.outer !== undefined) this.outer.narrowRead(outside, at);
   }
   lentPerCall(this: Mut<this>, l: LocalId): void {
     this.nestedLent.add(l);
@@ -3538,7 +3589,7 @@ class BodyChecker implements Context, GuardHost {
   loopChange(this: Mut<this>, prefix: string, action: string, shown: string, at: Ref<Expr>): boolean {
     const from = this.facts.findIndex((f) => [...f.keys()].some((k) => isPath(k) && covers(prefix, k)));
     if (from < 0) return false;
-    const loop = this.loops.find((x) => x.facts > from);
+    const loop = this.loops.find((x) => (x.facts as i64) > from);
     if (loop && this.narrowReads.slice(loop.reads).some((r) => isPath(r.local) && covers(prefix, r.local) && r.at !== at.id)) {
       throw new CompileError("E0109", `can't ${action} '${shown}' here: earlier in this loop a field it reaches was read as narrowed by what was known before the loop, and the next time round it may hold another member; check it inside the loop`, at.start, at.end);
     }
@@ -3586,7 +3637,7 @@ class BodyChecker implements Context, GuardHost {
     if (targetId === undefined) return undefined;
     const target = this.cx.tables.arenas.instanceOf(targetId);
     const f = bodyOf(this.cx.tables.arenas, target);
-    const p = f.returnType;
+    const p: Ref<TypeNode> | undefined = f.returnType;
     if (p === undefined || p.kind !== "predicate" || p.type === undefined) return undefined;
     const name = p.name;
     const index = f.params.findIndex((x) => x.pattern.kind === "ident" && x.pattern.name === name) as usize;
@@ -3599,8 +3650,12 @@ class BodyChecker implements Context, GuardHost {
   predicateNarrows(this: Mut<this>, call: Ref<Extract<Expr, { kind: "call" }>>, index: usize, type: Type, yes: boolean, no: boolean): void {
     if (!yes && !no) return;
     let inst = this.instance();
-    if (inst.predicates === undefined) inst.predicates = new NodeMap<Expr, { index: usize; type: Type; yes: boolean; no: boolean }>();
-    inst.predicates.set(call, { index, type, yes, no });
+    if (inst.predicates !== undefined) inst.predicates.set(call, { index, type, yes, no });
+    else {
+      let made = new NodeMap<Expr, { index: usize; type: Type; yes: boolean; no: boolean }>();
+      made.set(call, { index, type, yes, no });
+      inst.predicates = made;
+    }
   }
   typeChecked(e: Ref<Expr>): Type | undefined {
     return this.held().types.get(e);
@@ -3614,7 +3669,7 @@ class BodyChecker implements Context, GuardHost {
     const proven = guard(this, e);
     const inside = this.written.filter((w) => w.at >= e.start && w.at < e.end);
     // A variable compared as declared, in a check it was already narrowed past, stays as narrow.
-    const declared = new Set<LocalId>();
+    let declared = new Set<LocalId>();
     walk({ of: "expr", node: e }, (n) => {
       if (n.of === "expr" && n.node.kind === "ident" && this.exprsState.asDeclared.has(n.node)) declared.add(this.locals().get(n.node)!);
     });
@@ -3629,7 +3684,7 @@ class BodyChecker implements Context, GuardHost {
       const r = this.cx.recOf(x);
       return r?.kind === "union" ? r.members : [x];
     };
-    const kept = now === undefined ? [] : members(t).filter((m) => members(now).some((k) => this.cx.tables.typing.fits(m, k)));
+    const kept: Type[] = now === undefined ? [] : members(t).filter((m) => members(now).some((k) => this.cx.tables.typing.fits(m, k)));
     return kept.length === 0 ? t : this.cx.tables.typing.unionType(kept);
   }
 
@@ -3638,7 +3693,7 @@ class BodyChecker implements Context, GuardHost {
   // hoisting does. A function using another goes after it.
   hoist(list: Stmt[]) {
     // An async one takes over what it uses when it is made, so it stays where it is written.
-    const functions = list.filter((s): s is Extract<Stmt, { kind: "function" }> => s.kind === "function" && s.body !== undefined && !s.async);
+    const functions = nestedFunctions(list);
     if (functions.length === 0) return;
     const declared = (s: Stmt): string[] => (s.kind === "let" ? s.declarations.flatMap((d) => patternNames(d.target)) : s.kind === "function" ? [s.name] : []);
     for (let pass = 0; pass < functions.length; pass++) {
@@ -3659,7 +3714,7 @@ class BodyChecker implements Context, GuardHost {
     // A name the body declares itself is that, not the function.
     if (this.f().closure?.self !== name || this.scopeList().some((scope) => scope.has(name))) return undefined;
     if ((this.f().returnType === undefined)) throw new CompileError("E0104", `'${name}' calls itself, so its return type has to be written, as TypeScript requires, as in 'function ${name}(...): T'`, e.start, e.end);
-    if (this.f().async) throw unsupported("async nested functions that call themselves", e);
+    if (this.f().async === true) throw unsupported("async nested functions that call themselves", e);
     const required = this.f().params.filter((p) => !p.optional && !p.rest).length;
     if (e.args.length < required || e.args.length > this.f().params.length) throw new CompileError("E0501", `expected ${required === this.f().params.length ? required : `${required}-${this.f().params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
     e.args.forEach((a, i) => {
@@ -3683,7 +3738,7 @@ class BodyChecker implements Context, GuardHost {
     if (this.cx.tables.typing.lower(type) === "void") throw new CompileError("E0118", `'${name}' can't be of type 'void', which no value has`, d.start, d.end);
     if (this.cx.isInterface(type)) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since an interface describes a value of some concrete type`, d.start, d.end);
     const r = this.cx.recOf(type);
-    if (r?.kind === "function" && r.generic) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since a generic function type describes the generic function it holds`, d.start, d.end);
+    if (r?.kind === "function" && r.generic !== undefined) throw new CompileError("E0406", `'${name}' needs its value where it is declared, since a generic function type describes the generic function it holds`, d.start, d.end);
     this.declare(name, type, true, false, s);
     return undefined;
   }
@@ -3694,112 +3749,175 @@ class BodyChecker implements Context, GuardHost {
   // part by part, each part typed as its target is, so a swap of values that move needs no
   // array and a literal meets its target's type.
   /** @throws {CompileError} */
-  destructuring(this: Mut<this>, e: Extract<Expr, { kind: "destructure" }>): Stmt[] {
+  destructuring(this: Mut<this>, e: Ref<Extract<Expr, { kind: "destructure" }>>): Stmt[] {
     // Every part is read first, then every target written, so a target can't change what a
     // later part reads, as in '({ a: o.b, b: o.a } = o)'.
-    const reads: Stmt[] = [];
-    const writes: Stmt[] = [];
-    const fresh = () => `destructured ${this.cx.tables.counts.destructures++}`;
-    const ident = (name: string, at: Span): Expr => ({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end });
-    const declare = (target: Pattern, init: Expr, at: Span, typedAs?: Expr): Stmt => {
-      const s: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target, type: undefined, init, start: at.start, end: at.end }], start: at.start, end: at.end };
-      if ((typedAs !== undefined)) this.cx.tables.destructuredParts.set(s, typedAs);
-      return s;
-    };
-    const targetOf = (p: Pattern): Expr | undefined => (p.kind === "ident" ? ident(p.name, p) : p.kind === "expr" ? p.expr : p.kind === "default" ? targetOf(p.target) : undefined);
-    // Writes what `part` reads to a target, its default taken when the part is an empty Option.
-    const write = (p: Pattern, part: Expr) => {
-      if (p.kind === "default") {
-        const or: Expr = { id: nextId(this.cx.tables.ids), kind: "binary", op: "??", left: part, right: p.value, start: p.start, end: p.end };
-        this.cx.tables.unusedDefaults.add(or);
-        return write(p.target, or);
-      }
-      if (p.kind === "ident" || p.kind === "expr") return void writes.push({ id: nextId(this.cx.tables.ids), kind: "expr", expr: { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: targetOf(p)!, value: part, start: p.start, end: p.end }, start: p.start, end: p.end });
-      // A nested pattern takes apart what the part holds, from its fresh variable.
-      from(p, part);
-    };
-    // A place is read where it is, piece by piece, so only the pieces named move out of it,
-    // as a declaration's destructuring does; anything else is held in a fresh variable first.
-    // A chain reading a getter isn't one: its getter runs once, into a fresh variable.
-    const place = (v: Expr): boolean => v.kind === "ident" || v.kind === "this" || (v.kind === "member" && !v.optional && !this.cx.tables.getterNames.has(v.name) && place(v.object));
-    const from = (p: Pattern, value: Expr) => {
-      if (p.kind !== "array" && p.kind !== "object") throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
-      // A literal is taken part by part, each part typed as its target.
-      if (p.kind === "array" && value.kind === "array" && !value.elements.some((x) => x?.kind === "spread" || x === undefined)) {
-        const parts = (value.elements as Expr[]).map((x, i) => {
-          const q = p.elements[i];
-          const inner = q && (q.kind === "default" ? q.target : q);
-          // A nested literal for a nested pattern is taken apart in turn.
-          if (inner && (inner.kind === "array" || inner.kind === "object") && (x.kind === "array" || x.kind === "object") && q.kind !== "default") return { nested: x };
-          const name = fresh();
-          reads.push(declare({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: x.start, end: x.end }, x, x, q && targetOf(q)));
-          return { read: ident(name, x) };
-        });
-        p.elements.forEach((q, i) => {
-          if (!q) return;
-          const part = parts[i];
-          if (part?.nested) return from(q, part.nested);
-          if (part?.read) return write(q, part.read);
-          if (q.kind !== "default") throw new CompileError("E0003", `the array on the right has no element at index ${i} for this target`, q.start, q.end);
-          write(q.target, q.value);
-        });
-        if (p.rest) write(p.rest, { id: nextId(this.cx.tables.ids), kind: "array", elements: parts.slice(p.elements.length).map((x) => x.read!), start: value.start, end: value.end });
-        return;
-      }
-      if (p.kind === "object" && !p.rest && value.kind === "object" && value.props.every((x) => x.kind === "property" && typeof x.key === "string") && p.props.every((x) => typeof x.key === "string")) {
-        const parts = new Map(value.props.map((x) => {
-          const prop = x as Extract<ObjectProp, { kind: "property" }>;
-          const name = fresh();
-          const q = p.props.find((y) => y.key === prop.key)?.value;
-          reads.push(declare({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: prop.start, end: prop.end }, prop.value, prop, q && targetOf(q)));
-          return [prop.key as string, ident(name, prop)];
-        }));
-        for (const prop of p.props) {
-          const part = parts.get(prop.key as string);
-          if (part) write(prop.value, part);
-          else if (prop.value.kind === "default") write(prop.value.target, prop.value.value);
-          else throw new CompileError("E0003", `the object on the right has no property '${String(prop.key)}' for this target`, prop.start, prop.end);
+    let out: Destructured = { reads: [], writes: [] };
+    this.destructureFrom(out, e.pattern, cloneExpr(e.value));
+    return [...out.reads, ...out.writes];
+  }
+  private freshPart(this: Mut<this>): string {
+    return `destructured ${this.cx.tables.counts.destructures++}`;
+  }
+  private partIdent(this: Mut<this>, name: string, at: Ref<Span>): Expr {
+    return { id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end };
+  }
+  private partDeclared(this: Mut<this>, target: Pattern, init: Expr, at: Ref<Span>, typedAs: Expr | undefined): Stmt {
+    const s: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target, type: undefined, init, start: at.start, end: at.end }], start: at.start, end: at.end };
+    if (typedAs !== undefined) this.cx.tables.destructuredParts.set(cloneStmt(s), typedAs);
+    return s;
+  }
+  private partTarget(this: Mut<this>, p: Ref<Pattern>): Expr | undefined {
+    if (p.kind === "ident") return this.partIdent(p.name, p);
+    if (p.kind === "expr") return cloneExpr(p.expr);
+    if (p.kind === "default") return this.partTarget(p.target);
+    return undefined;
+  }
+  // Writes what `part` reads to a target, its default taken when the part is an empty Option.
+  /** @throws {CompileError} */
+  private destructureWrite(this: Mut<this>, out: Mut<Destructured>, p: Ref<Pattern>, part: Expr): void {
+    if (p.kind === "default") {
+      const or: Expr = { id: nextId(this.cx.tables.ids), kind: "binary", op: "??", left: part, right: cloneExpr(p.value), start: p.start, end: p.end };
+      this.cx.tables.unusedDefaults.add(cloneExpr(or));
+      this.destructureWrite(out, p.target, or);
+      return;
+    }
+    if (p.kind === "ident" || p.kind === "expr") {
+      const target = this.partTarget(p)!;
+      out.writes.push({ id: nextId(this.cx.tables.ids), kind: "expr", expr: { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target, value: part, start: p.start, end: p.end }, start: p.start, end: p.end });
+      return;
+    }
+    // A nested pattern takes apart what the part holds, from its fresh variable.
+    this.destructureFrom(out, p, part);
+  }
+  // A place is read where it is, piece by piece, so only the pieces named move out of it,
+  // as a declaration's destructuring does; anything else is held in a fresh variable first.
+  // A chain reading a getter isn't one: its getter runs once, into a fresh variable.
+  private partPlace(v: Ref<Expr>): boolean {
+    return v.kind === "ident" || v.kind === "this" || (v.kind === "member" && !v.optional && !this.cx.tables.getterNames.has(v.name) && this.partPlace(v.object));
+  }
+  /** @throws {CompileError} */
+  private destructureFrom(this: Mut<this>, out: Mut<Destructured>, p: Ref<Pattern>, value: Expr): void {
+    if (p.kind !== "array" && p.kind !== "object") throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
+    // A literal is taken part by part, each part typed as its target.
+    if (p.kind === "array" && value.kind === "array" && !value.elements.some((x) => x === undefined || x.kind === "spread")) {
+      let parts: { nested: Expr | undefined; read: Expr | undefined }[] = [];
+      for (let i: usize = 0; i < value.elements.length; i++) {
+        const x: Ref<Expr> = value.elements[i]!;
+        const q = i < p.elements.length ? p.elements[i] : undefined;
+        const inner = q === undefined ? undefined : q.kind === "default" ? q.target : q;
+        // A nested literal for a nested pattern is taken apart in turn.
+        if (inner !== undefined && (inner.kind === "array" || inner.kind === "object") && (x.kind === "array" || x.kind === "object") && q!.kind !== "default") {
+          parts.push({ nested: cloneExpr(x), read: undefined });
+          continue;
         }
-        return;
+        const name = this.freshPart();
+        const typedAs = q !== undefined ? this.partTarget(q) : undefined;
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x), x, typedAs));
+        parts.push({ nested: undefined, read: this.partIdent(name, x) });
       }
-      let whole = value;
-      if (!place(value)) {
-        const name = fresh();
-        reads.push(declare({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: value.start, end: value.end }, value, value));
-        whole = ident(name, value);
+      for (let i: usize = 0; i < p.elements.length; i++) {
+        const q = p.elements[i];
+        if (q === undefined) continue;
+        const part = i < parts.length ? parts[i] : undefined;
+        if (part !== undefined && part.nested !== undefined) this.destructureFrom(out, q, cloneExpr(part.nested));
+        else if (part !== undefined && part.read !== undefined) this.destructureWrite(out, q, cloneExpr(part.read));
+        else if (q.kind !== "default") throw new CompileError("E0003", `the array on the right has no element at index ${i} for this target`, q.start, q.end);
+        else this.destructureWrite(out, q.target, cloneExpr(q.value));
       }
-      // Each top-level piece is read by a declaration naming only it, nested patterns down to
-      // their leaves, so only the leaves move out of a place. A slot with a default reads
-      // nothing past the end; the default itself is taken at the target.
-      const span = { start: p.start, end: p.end };
-      const leaves: [Pattern, string][] = [];
-      const shape = (q: Pattern): Pattern => {
-        const at = { start: q.start, end: q.end };
-        if (q.kind === "default" && (q.target.kind === "ident" || q.target.kind === "expr")) {
-          const name = fresh();
-          leaves.push([q, name]);
-          return { id: nextId(this.cx.tables.ids), kind: "default", target: { id: nextId(this.cx.tables.ids), kind: "ident", name, ...at }, value: { id: nextId(this.cx.tables.ids), kind: "null", ...at }, ...at };
-        }
-        if (q.kind === "ident" || q.kind === "expr") {
-          const name = fresh();
-          leaves.push([q, name]);
-          return { id: nextId(this.cx.tables.ids), kind: "ident", name, ...at };
-        }
-        if (q.kind === "array") return { ...q, id: nextId(this.cx.tables.ids), elements: q.elements.map((x) => x && shape(x)), rest: q.rest && shape(q.rest) };
-        if (q.kind === "object") return { ...q, id: nextId(this.cx.tables.ids), props: q.props.map((x) => ({ ...x, id: nextId(this.cx.tables.ids), value: shape(x.value) })), rest: q.rest && shape(q.rest) };
-        throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", q.start, q.end);
-      };
-      if (p.kind === "array") {
-        p.elements.forEach((q, i) => q && reads.push(declare({ id: nextId(this.cx.tables.ids), kind: "array", elements: [...Array<undefined>(i).fill(undefined), shape(q)], rest: undefined, ...span }, whole, q)));
-        if (p.rest) reads.push(declare({ id: nextId(this.cx.tables.ids), kind: "array", elements: Array<undefined>(p.elements.length).fill(undefined), rest: shape(p.rest), ...span }, whole, p.rest));
-      } else if (p.rest) {
-        // An object's rest is read with every property it leaves out, in one declaration.
-        reads.push(declare(shape(p), whole, p));
-      } else for (const prop of p.props) reads.push(declare({ id: nextId(this.cx.tables.ids), kind: "object", props: [{ ...prop, id: nextId(this.cx.tables.ids), value: shape(prop.value) }], rest: undefined, ...span }, whole, prop.value));
-      for (const [q, name] of leaves) write(q, ident(name, q));
-    };
-    from(e.pattern, e.value);
-    return [...reads, ...writes];
+      if (p.rest !== undefined) {
+        let rest: Expr[] = [];
+        for (let i = p.elements.length; i < parts.length; i++) rest.push(cloneExpr(parts[i]!.read!));
+        this.destructureWrite(out, p.rest!, { id: nextId(this.cx.tables.ids), kind: "array", elements: rest, start: value.start, end: value.end });
+      }
+      return;
+    }
+    if (p.kind === "object" && p.rest === undefined && value.kind === "object" && value.props.every((x) => x.kind === "property" && typeof x.key === "string") && p.props.every((x) => typeof x.key === "string")) {
+      let parts = new Map<string, Expr>();
+      for (const x of value.props) {
+        if (x.kind !== "property") continue;
+        const key = x.key as string;
+        const name = this.freshPart();
+        const q = p.props.find((y) => y.key === key);
+        const typedAs = q !== undefined ? this.partTarget(q.value) : undefined;
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x.value), x, typedAs));
+        parts.set(key, this.partIdent(name, x));
+      }
+      for (const prop of p.props) {
+        const part = parts.get(prop.key as string);
+        if (part !== undefined) this.destructureWrite(out, prop.value, cloneExpr(part));
+        else if (prop.value.kind === "default") this.destructureWrite(out, prop.value.target, cloneExpr(prop.value.value));
+        else throw new CompileError("E0003", `the object on the right has no property '${String(prop.key)}' for this target`, prop.start, prop.end);
+      }
+      return;
+    }
+    let whole = value;
+    if (!this.partPlace(value)) {
+      const name = this.freshPart();
+      const at = { start: value.start, end: value.end };
+      out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end }, value, at, undefined));
+      whole = this.partIdent(name, at);
+    }
+    // Each top-level piece is read by a declaration naming only it, nested patterns down to
+    // their leaves, so only the leaves move out of a place. A slot with a default reads
+    // nothing past the end; the default itself is taken at the target.
+    const span = { start: p.start, end: p.end };
+    let leaves: [Pattern, string][] = [];
+    if (p.kind === "array") {
+      for (let i: usize = 0; i < p.elements.length; i++) {
+        const q = p.elements[i];
+        if (q === undefined) continue;
+        let elements: (Pattern | undefined)[] = [];
+        for (let j: usize = 0; j < i; j++) elements.push(undefined);
+        elements.push(this.partShape(leaves, q));
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "array", elements, rest: undefined, ...span }, cloneExpr(whole), q, undefined));
+      }
+      if (p.rest !== undefined) {
+        let elements: (Pattern | undefined)[] = [];
+        for (let j: usize = 0; j < p.elements.length; j++) elements.push(undefined);
+        const rest = this.partShape(leaves, p.rest!);
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "array", elements, rest, ...span }, cloneExpr(whole), p.rest!, undefined));
+      }
+    } else if (p.rest !== undefined) {
+      // An object's rest is read with every property it leaves out, in one declaration.
+      out.reads.push(this.partDeclared(this.partShape(leaves, p), cloneExpr(whole), p, undefined));
+    } else {
+      for (const prop of p.props) {
+        const shaped = this.partShape(leaves, prop.value);
+        out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "object", props: [{ ...clonePatternProp(prop), id: nextId(this.cx.tables.ids), value: shaped }], rest: undefined, ...span }, cloneExpr(whole), prop.value, undefined));
+      }
+    }
+    for (const [q, name] of leaves) this.destructureWrite(out, q, this.partIdent(name, q));
+  }
+  /** @throws {CompileError} */
+  private partShape(this: Mut<this>, leaves: Mut<[Pattern, string][]>, q: Ref<Pattern>): Pattern {
+    const at = { start: q.start, end: q.end };
+    if (q.kind === "default" && (q.target.kind === "ident" || q.target.kind === "expr")) {
+      const name = this.freshPart();
+      leaves.push([clonePattern(q), name]);
+      return { id: nextId(this.cx.tables.ids), kind: "default", target: { id: nextId(this.cx.tables.ids), kind: "ident", name, ...at }, value: { id: nextId(this.cx.tables.ids), kind: "null", ...at }, ...at };
+    }
+    if (q.kind === "ident" || q.kind === "expr") {
+      const name = this.freshPart();
+      leaves.push([clonePattern(q), name]);
+      return { id: nextId(this.cx.tables.ids), kind: "ident", name, ...at };
+    }
+    if (q.kind === "array") {
+      let elements: (Pattern | undefined)[] = [];
+      for (const x of q.elements) elements.push(x === undefined ? undefined : this.partShape(leaves, x));
+      const rest = q.rest !== undefined ? this.partShape(leaves, q.rest!) : undefined;
+      return { id: nextId(this.cx.tables.ids), kind: "array", elements, rest, start: q.start, end: q.end };
+    }
+    if (q.kind === "object") {
+      let props: PatternProp[] = [];
+      for (const x of q.props) {
+        const value = this.partShape(leaves, x.value);
+        props.push({ ...clonePatternProp(x), id: nextId(this.cx.tables.ids), value });
+      }
+      const rest = q.rest !== undefined ? this.partShape(leaves, q.rest!) : undefined;
+      return { id: nextId(this.cx.tables.ids), kind: "object", props, rest, start: q.start, end: q.end };
+    }
+    throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", q.start, q.end);
   }
 
   // The type a destructured part's fresh variable takes: its target's, as declared.
@@ -3808,7 +3926,7 @@ class BodyChecker implements Context, GuardHost {
     if ((target === undefined)) return undefined;
     if (target.kind === "ident") { const found = this.lookup(target.name, undefined); return found === undefined ? undefined : this.cx.localOf(found).type; }
     // A field of 'this' has its declared type, which a constructor may not read yet.
-    if (target.kind === "member" && target.object.kind === "this" && this.f().self) return this.cx.tables.typing.allFields(this.f().self!.type as ClassType).find((x) => x.name === target.name)?.type;
+    if (target.kind === "member" && target.object.kind === "this" && this.f().self !== undefined) return this.cx.tables.typing.allFields(this.f().self!.type as ClassType).find((x) => x.name === target.name)?.type;
     // A target with only a setter can't be read for its type; its part keeps its own.
     try {
       const read = renumberExpr(cloneExpr(target), () => nextId(this.cx.tables.ids));
@@ -3853,7 +3971,12 @@ class BodyChecker implements Context, GuardHost {
   // the statements after it, and so does what an assignment sets. Gives the type each binding
   // the list writes has at its end.
   /** @throws {CompileError} */
-  statements(this: Mut<this>, list: Stmt[], top = false): Facts {
+  statements(this: Mut<this>, owner: usize, field: string, given: Ref<Stmt[]>, top = false): Facts {
+    // A list is checked as a copy, edited where checking splits, moves or adds statements, and
+    // recorded for the rebuild; a list checked again starts from its edited form.
+    const bodyId = this.f().bodyId;
+    const edited = this.cx.tables.rewrites.listIn(bodyId, owner, field);
+    let list: Stmt[] = edited !== undefined ? edited.slice() : given.slice();
     this.separate(list);
     this.hoist(list);
     const before = this.facts.length;
@@ -3862,12 +3985,20 @@ class BodyChecker implements Context, GuardHost {
       const s = list[i]!;
       const inserted = this.cx.tables.insertedAfter.get(s);
       if (inserted !== undefined && inserted.length > 0 && list[i + 1]?.id !== inserted[0]!.id) list.splice(i + 1, 0, ...inserted.map((x) => cloneStmt(x)));
-      this.siblings = { list, at: i };
+      const outerWalking = this.walking;
+      const outerAfter = this.after;
+      this.walking = s.id;
+      this.after = [];
       const mark = this.changed.length;
       if (this.ruledOut()) this.markUnreached(s);
       const after = top ? this.topStatement(s) : this.statement(s);
+      const added = this.after;
+      this.walking = outerWalking;
+      this.after = outerAfter;
+      if (added.length > 0) list.splice(i + 1, 0, ...added);
       if (after) this.facts.push(this.current(after, mark));
     }
+    if (list.length !== given.length || list.some((x, i) => x.id !== given[i]!.id)) this.cx.tables.rewrites.replaceList(bodyId, owner, field, list);
     const ends: Facts = new Map();
     for (const { local } of this.written.slice(writes)) {
       // A field path written is forgotten wherever it was narrowed, so it is joined as declared;
@@ -3889,11 +4020,11 @@ class BodyChecker implements Context, GuardHost {
   // pattern is a declaration of its own, destructured in turn. A default is taken when its
   // part is null.
   /** @throws {CompileError} */
-  destructured(this: Mut<this>, s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>, place: { list: Stmt[]; at: usize } | undefined): undefined {
-    if ((place === undefined) || this.cx.tables.rewrites.currentStmt(place.list[place.at]!) !== s) throw unsupported("destructuring patterns here", pattern);
+  destructured(this: Mut<this>, s: Extract<Stmt, { kind: "let" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>): undefined {
+    if (this.walking !== s.id) throw unsupported("destructuring patterns here", pattern);
     // A place is read part by part where it is, so only the parts named move out of it, as in
     // Rust; any other value goes to a variable named for the pattern, as messages show it.
-    if (!d.init) throw new CompileError("E0406", "a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
+    if (d.init === undefined) throw new CompileError("E0406", "a destructuring declaration needs its value where it is declared, as TypeScript requires", d.start, d.end);
     const init = d.init;
     const read = (e: Expr): boolean => e.kind === "ident" || e.kind === "this" || ((e.kind === "member" || e.kind === "index") && !e.optional && read(e.object));
     // A getter along the path runs each time the path is read, so its result is kept once.
@@ -4035,7 +4166,7 @@ class BodyChecker implements Context, GuardHost {
     });
     // A parameter's parts come before a derived constructor's `super(...)`, as its whole did.
     if (this.cx.tables.prologues.has(s)) for (const l of [...hoisted, ...lets]) this.cx.tables.prologues.add(l);
-    place.list.splice(place.at + 1, 0, ...hoisted, ...lets);
+    this.after.push(...hoisted, ...lets);
     this.cx.tables.insertedAfter.set(s, [...hoisted, ...lets].map((x) => cloneStmt(x)));
     return undefined;
   }
@@ -4053,7 +4184,8 @@ class BodyChecker implements Context, GuardHost {
     const ids = this.cx.tables.ids;
     const { rest } = typing.rec(tuple);
     const fixed = typing.elementsOf(tuple);
-    const parts = [...fixed, ...(rest === undefined ? [] : [rest])];
+    let parts: Type[] = [...fixed];
+    if (rest !== undefined) parts.push(rest);
     if (parts.length === 0) throw new CompileError("E0119", "this tuple is empty, so a 'for...of' over it would never run its body", s.right.start, s.right.end);
     const element = parts.every((p) => typing.isCopy(p)) ? typing.unionType(parts) : parts.every((p) => p === parts[0]) ? typing.refType(parts[0]!, false) : undefined;
     if (element === undefined) throw unsupported("'for...of' loops over a tuple whose elements differ in type and don't all copy", s.right);
@@ -4095,7 +4227,7 @@ class BodyChecker implements Context, GuardHost {
 
   /** @throws {CompileError} */
   loopPattern(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, d: Declarator, pattern: Extract<Pattern, { kind: "array" | "object" }>) {
-    if ((pattern.rest !== undefined)) throw unsupported("rest patterns", pattern.rest);
+    if (pattern.rest !== undefined) throw unsupported("rest patterns", pattern.rest!);
     const named = (p: Pattern | undefined): Extract<Pattern, { kind: "ident" }> | undefined => {
       if (p !== undefined && p.kind !== "ident") throw unsupported(p.kind === "default" ? "defaults in destructuring patterns" : "nested destructuring patterns", p);
       return p;
@@ -4150,7 +4282,7 @@ class BodyChecker implements Context, GuardHost {
   rewritten(this: Mut<this>, lId: LocalId, at: Ref<Expr>): void {
     const l = this.cx.localOf(lId);
     const outside = this.outsideOf(l.localId);
-    if ((outside !== undefined) && outside !== "this" && this.outer!.narrowed(outside)) {
+    if ((outside !== undefined) && outside !== "this" && this.outer !== undefined && this.outer.narrowed(outside) !== undefined) {
       throw new CompileError("E0109", `can't give '${l.name}' another member inside a closure while a check outside it narrows it; assign its fields instead`, at.start, at.end);
     }
     const from = this.facts.findIndex((f) => f.has(bindingKey(l.localId)));
@@ -4172,7 +4304,8 @@ class BodyChecker implements Context, GuardHost {
   joined(after: Facts | undefined, entry: Facts[], branches: [boolean, Facts, Facts][]): Facts | undefined {
     const wrote = new Set(branches.flatMap(([, ends]) => [...ends.keys()]));
     if (wrote.size === 0) return after;
-    const out: Facts = new Map([...(after ?? [])].filter(([l]) => ![...wrote].some((w) => covers(w, l))));
+    let out: Facts = new Map();
+    if (after !== undefined) for (const [l, t] of after) if (![...wrote].some((w) => covers(w, l))) out.set(l, t);
     for (const id of wrote) {
       if (isPath(id)) continue;
       const l = this.cx.localOf(Number(id) as LocalId);
@@ -4187,7 +4320,7 @@ class BodyChecker implements Context, GuardHost {
   // A variable given a whole value holds one of its declared members the value can be.
   settles(this: Mut<this>, e: Extract<Expr, { kind: "assign" }>): Facts | undefined {
     const target = this.cx.tables.rewrites.current(e.target);
-    const id = target.kind === "ident" ? (this.locals() as NodeMap<Expr, LocalId>).get(target) : undefined;
+    const id = target.kind === "ident" ? this.locals().get(target) : undefined;
     const l = id === undefined ? undefined : this.cx.localOf(id);
     const given = this.types().get(e.value);
     const declared = l && this.cx.recOf(l.type);
@@ -4202,7 +4335,7 @@ class BodyChecker implements Context, GuardHost {
 
   // Facts proven before a statement that carry past it, less any it gave another member.
   current(proven: Facts, mark: usize): Facts {
-    const gone = this.changed.slice(mark);
+    const gone = this.changed.slice(mark as i64);
     return gone.length === 0 ? proven : new Map([...proven].filter(([l]) => isPath(l) || !gone.includes(Number(l) as LocalId)));
   }
 
@@ -4232,7 +4365,7 @@ class BodyChecker implements Context, GuardHost {
     const owning = owningGiven === true || e.async;
     const value = Array.isArray(e.body) ? undefined : e.body;
     const body = this.cx.tables.arenas.addBody({
-      id: nextId(this.cx.tables.ids), name: this.f().name, params: e.params, returnType: e.returnType, ...((e.throws !== undefined) && { throws: e.throws }), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: this.instance().id, expected, move: e.move || owning, unsafe, self: this.cx.tables.nestedFunctions.get(e), made: this.cx.tables.madeArrows.has(e) || undefined },
+      id: nextId(this.cx.tables.ids), name: this.f().name, params: e.params, returnType: e.returnType, ...(e.throws !== undefined ? { throws: e.throws } : {}), start: e.start, end: e.end, async: e.async || undefined, closure: { value, parent: this.instance().id, expected, move: e.move || owning, unsafe, self: this.cx.tables.nestedFunctions.get(e), made: this.cx.tables.madeArrows.has(e) || undefined },
       body: value ? [{ id: nextId(this.cx.tables.ids), kind: "return", value, start: value.start, end: value.end }] : (e.body as Stmt[]),
     });
     const inner = this.cx.tables.arenas.addInstance({
@@ -4344,7 +4477,7 @@ class BodyChecker implements Context, GuardHost {
   // A parameter's type is written, or else the one the function type the closure meets gives.
   /** @throws {CompileError} */
   closureParam(this: Mut<this>, p: Param, i: usize, expected: FunctionType | undefined): Type {
-    const takes = expected && this.cx.tables.typing.rec(expected).params;
+    const takes = expected !== undefined ? this.cx.tables.typing.rec(expected).params : undefined;
     const given = takes?.[i];
     if (expected && takes && !given && !p.type) {
       const n = takes.length;
@@ -4385,7 +4518,7 @@ class BodyChecker implements Context, GuardHost {
       case "expr":
         this.whole = s.expr;
         // `yield* g` gives each value `g` gives, as `for (const % of g) yield %;` does.
-        if (s.expr.kind === "yield" && s.expr.delegate && this.generatorType && s.expr.value) {
+        if (s.expr.kind === "yield" && s.expr.delegate && this.generatorType !== undefined && s.expr.value !== undefined) {
           const { value, start, end } = s.expr;
           const topic = { id: nextId(this.cx.tables.ids), kind: "ident" as const, name: "%", start, end };
           const each: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target: topic, type: undefined, init: undefined, start, end }], start, end };
@@ -4442,7 +4575,7 @@ class BodyChecker implements Context, GuardHost {
         if (s.keyword === "var") throw new CompileError("E0802", "'var' is not supported; use 'let' or 'const'", s.start, s.start + 3);
         const d = this.cx.tables.rewrites.currentDeclarator(s.declarations[0]!);
         if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) return this.lift(s, d.target.name, arrowFunction(this.cx.tables.ids, d.target.name, d.init, d));
-        if (d.target.kind === "array" || d.target.kind === "object") return this.destructured(s, d, d.target, this.siblings);
+        if (d.target.kind === "array" || d.target.kind === "object") return this.destructured(s, d, d.target);
         if (this.cx.tables.loopParts.has(d)) return this.loopPart(s, d);
         if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
         if (!d.init && s.keyword === "const") throw new CompileError("E0406", "a 'const' needs its value where it is declared, as TypeScript requires; use 'let' to assign it later", d.start, d.end);
@@ -4484,8 +4617,8 @@ class BodyChecker implements Context, GuardHost {
         this.exprs().condition(s.cond);
         const proven = this.proves(s.cond);
         const entry = [...this.facts];
-        const thenEnds = this.assume(proven.yes, () => this.scoped(s.then));
-        const elseEnds = s.else ? this.assume(proven.no, () => this.scoped(s.else!)) : new Map<string, Type>();
+        const thenEnds = this.assume(proven.yes, () => this.scoped(s.id, "then", s.then));
+        const elseEnds = s.else ? this.assume(proven.no, () => this.scoped(s.id, "else", s.else!)) : new Map<string, Type>();
         // A branch that never reaches its end leaves the other's facts for what follows.
         const [thenLeaves, elseLeaves] = [this.leaves(s.then), s.else ? this.leaves(s.else) : false];
         const after = thenLeaves && !elseLeaves ? proven.no : elseLeaves && !thenLeaves ? proven.yes : undefined;
@@ -4493,7 +4626,7 @@ class BodyChecker implements Context, GuardHost {
       }
       case "while":
         this.exprs().condition(s.cond);
-        this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.assume(this.proves(s.cond).yes, () => this.scoped(s.body)));
+        this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.assume(this.proves(s.cond).yes, () => this.scoped(s.id, "body", s.body)));
         return;
       // A nested function is a closure under its name, lending what it uses per call.
       case "function": {
@@ -4514,15 +4647,15 @@ class BodyChecker implements Context, GuardHost {
       case "comptime":
         this.comptimeDepth++;
         this.floors.push(this.targets.length);
-        this.scoped(s.body);
+        this.scoped(s.id, "body", s.body);
         this.floors.pop();
         this.comptimeDepth--;
         return;
       case "block":
-        this.scoped(s.body);
+        this.scoped(s.id, "body", s.body);
         return;
       case "unsafe":
-        this.exprs().unsafely(() => this.scoped(s.body));
+        this.exprs().unsafely(() => this.scoped(s.id, "body", s.body));
         return;
       case "debugger":
         throw unsupported("'debugger' statements", s);
@@ -4541,7 +4674,7 @@ class BodyChecker implements Context, GuardHost {
         if (s.init) this.statement(s.init);
         if (s.test) this.exprs().condition(s.test);
         if (s.update) this.exprs().effect(s.update);
-        this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+        this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
         this.popScope();
         return;
       case "forIn":
@@ -4575,7 +4708,7 @@ class BodyChecker implements Context, GuardHost {
         if (element !== undefined && (object === referred || call)) {
           this.pushScope(new Map<string, LocalId>());
           this.declare(d.target.name, call ? this.cx.tables.typing.yieldsOf(this.types().get(call)!)! : element, left.keyword === "let", false, left);
-          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
         }
@@ -4608,7 +4741,7 @@ class BodyChecker implements Context, GuardHost {
           if (through !== "string") this.coercions().set(s.right, "string");
           this.pushScope(new Map<string, LocalId>());
           this.declare(d.target.name, "string", left.keyword === "let", false, left);
-          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
         }
@@ -4621,7 +4754,7 @@ class BodyChecker implements Context, GuardHost {
           if (error) this.raise(s.right, error, "this generator");
           this.pushScope(new Map<string, LocalId>());
           this.declare(d.target.name, yields, left.keyword === "let", false, left);
-          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
         }
@@ -4629,7 +4762,7 @@ class BodyChecker implements Context, GuardHost {
         if (o?.kind === "fixed") {
           this.pushScope(new Map<string, LocalId>());
           this.declare(d.target.name, this.cx.tables.typing.isCopy(o.element) ? o.element : this.cx.tables.typing.refType(o.element, false), left.keyword === "let", false, left);
-          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
         }
@@ -4641,7 +4774,7 @@ class BodyChecker implements Context, GuardHost {
           const lend = (u: Type) => (this.cx.tables.typing.isCopy(u) ? u : this.cx.tables.typing.refType(u, false));
           this.pushScope(new Map<string, LocalId>());
           this.declare(d.target.name, o.set ? lend(o.key) : this.cx.tables.typing.tupleType([lend(o.key), lend(o.value)]), left.keyword === "let", false, left);
-          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+          this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
           this.popScope();
           return;
         }
@@ -4651,12 +4784,12 @@ class BodyChecker implements Context, GuardHost {
         if (object !== through) this.coercions().set(s.right, object);
         this.pushScope(new Map<string, LocalId>());
         this.declare(d.target.name, this.cx.tables.typing.isCopy(o.element) ? o.element : this.cx.tables.typing.refType(o.element, false), left.keyword === "let", false, left);
-        this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+        this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
         this.popScope();
         return;
       }
       case "doWhile":
-        this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+        this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
         this.exprs().condition(s.cond);
         return;
       case "switch": {
@@ -4690,7 +4823,7 @@ class BodyChecker implements Context, GuardHost {
             const tested: Facts = c.test ? this.proves({ id: nextId(this.cx.tables.ids), kind: "binary", op: "===", left: s.discriminant, right: c.test, start: c.start, end: c.end }).yes : new Map();
             const reaching: Facts = falling ? either(this.cx.tables.typing, falling, tested) : tested;
             const mark = this.changed.length;
-            const ends = this.assume(reaching, () => this.statements(c.body));
+            const ends = this.assume(reaching, () => this.statements(c.id, "body", c.body));
             for (const local of this.innerLocals()) if (!before.has(local)) this.caseOnly.add(local);
             falling = this.leaves(c.body) ? null : new Map([...this.current(reaching, mark)].filter(([l]) => !ends.has(l)));
           }
@@ -4725,8 +4858,8 @@ class BodyChecker implements Context, GuardHost {
         // Without a catch, what the block raises goes on out, after the `finally`.
         if (!s.handler) {
           this.finalizing++;
-          this.scoped(s.block);
-          this.scoped(s.finalizer!);
+          this.scoped(s.id, "block", s.block);
+          this.scoped(s.id, "finalizer", s.finalizer!);
           this.finalizing--;
           return;
         }
@@ -4734,7 +4867,7 @@ class BodyChecker implements Context, GuardHost {
         if (s.paramType) throw new CompileError("E0004", "a catch parameter takes no type annotation: its type is what the 'try' can throw", s.paramType.start, s.paramType.end);
         // What the block raises goes to the catch, which takes the union of it.
         this.handlers.push([]);
-        this.scoped(s.block);
+        this.scoped(s.id, "block", s.block);
         const sites = this.handlers.pop()!;
         if (sites.length === 0) {
           const never = new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
@@ -4749,10 +4882,10 @@ class BodyChecker implements Context, GuardHost {
           if (s.param.kind !== "ident") throw unsupported("destructuring patterns", s.param);
           this.declare(s.param.name, caught, true, false, s);
         }
-        this.statements(s.handler!);
+        this.statements(s.id, "handler", s.handler!);
         this.popScope();
         if (s.finalizer) {
-          this.scoped(s.finalizer);
+          this.scoped(s.id, "finalizer", s.finalizer);
           this.finalizing--;
         }
         return;
@@ -4824,7 +4957,7 @@ class BodyChecker implements Context, GuardHost {
     if ((error !== undefined)) this.raise(s.right, error, "this generator");
     this.pushScope(new Map<string, LocalId>());
     this.declare(name, yields ?? channel!, mutable, false, s.left as Stmt);
-    this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.body));
+    this.within({ stmt: standIn(s), kind: "loop" as const }, () => this.scoped(s.id, "body", s.body));
     this.popScope();
   }
 
@@ -4836,9 +4969,9 @@ class BodyChecker implements Context, GuardHost {
   /** @throws {CompileError} */
   yielding(this: Mut<this>, e: Ref<Extract<Expr, { kind: "yield" }>>): Type {
     if ((this.generatorType === undefined)) throw new CompileError("E0606", "'yield' can only be used inside a 'function*'", e.start, e.end);
-    if (this.yieldable.has(e) && this.f().async) throw unsupported("values sent into an async generator's 'next'", e);
+    if (this.yieldable.has(e) && this.f().async === true) throw unsupported("values sent into an async generator's 'next'", e);
     if (this.yieldable.has(e) && this.sends === undefined) {
-      throw new CompileError("E0606", `this 'yield' gives what 'next(x)' sends, so declare what that is, as in 'Generator<${this.yielded ? this.cx.tables.typing.show(this.yielded) : "T"}, void, string>'`, e.start, e.end);
+      throw new CompileError("E0606", `this 'yield' gives what 'next(x)' sends, so declare what that is, as in 'Generator<${(this.yielded !== undefined) ? this.cx.tables.typing.show(this.yielded) : "T"}, void, string>'`, e.start, e.end);
     }
     if (this.targets.some((t) => t.kind === "arm")) throw unsupported("'yield' inside match arms", e);
     if (this.finalizing > 0) throw unsupported("'yield' statements in a 'try' with a 'finally'", e);
@@ -4919,21 +5052,21 @@ class BodyChecker implements Context, GuardHost {
   }
 
   /** @throws {CompileError} */
-  scoped(this: Mut<this>, stmts: Stmt[]): Facts {
+  scoped(this: Mut<this>, owner: usize, field: string, stmts: Ref<Stmt[]>): Facts {
     this.pushScope(new Map<string, LocalId>());
-    const ends = this.statements(stmts);
+    const ends = this.statements(owner, field, stmts);
     this.popScope();
     return ends;
   }
 
   /** @throws {CompileError} */
-  declare(this: Mut<this>, name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr) {
+  declare(this: Mut<this>, name: string, type: Type, mutable: boolean, param: boolean, node: Ref<Stmt | Param | Expr>): void {
     // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
     if (this.innerScope().has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError("E0402", `cannot redeclare '${name}' in the same scope`, node.start, node.end);
-    const local = this.cx.tables.arenas.addLocal({ name, type, mutable, param, id: this.cx.nextLocal++ });
-    this.depths.set(local.localId, this.scopeList().length);
-    this.innerScope().set(name, local.localId);
-    this.locals().set(node, local.localId);
+    const localId = this.cx.tables.arenas.addLocal({ name, type, mutable, param, id: this.cx.nextLocal++ }).localId;
+    this.depths.set(localId, this.scopeList().length);
+    this.innerScope().set(name, localId);
+    this.locals().set(node, localId);
     this.cx.tables.declarations.add(node);
   }
 
@@ -5052,7 +5185,7 @@ class BodyChecker implements Context, GuardHost {
     // What a `move` closure holds is its own to change, unless the change goes through a
     // mutable reference it holds a copy of; as in Rust, only a copy of a `let` may change.
     else if (this.f().closure!.move && !(this.cx.isRef(from.type) && (path || throughMut))) {
-      if (this.outer!.constant(from)) {
+      if (this.outer!.constant(from.localId)) {
         throw new CompileError("E0207", `cannot ${action} '${from.name}${path}' in this closure because '${from.name}' is a constant; declare it with 'let'`, target.start, target.end);
       }
       return;
@@ -5063,9 +5196,10 @@ class BodyChecker implements Context, GuardHost {
     }
   }
 
-  constant(this: Mut<this>, l: Local): boolean {
+  constant(this: Mut<this>, lId: LocalId): boolean {
+    const l = this.cx.localOf(lId);
     const from = this.outsideOf(l.localId);
-    if ((from !== undefined) && from !== "this") return this.outer!.constant(this.cx.localOf(from));
+    if ((from !== undefined) && from !== "this" && this.outer !== undefined) return this.outer.constant(from);
     return !l.mutable;
   }
 
@@ -5146,7 +5280,8 @@ class BodyChecker implements Context, GuardHost {
 
   // Who throws, in messages: the function, or the closure or nested function it is in.
   who(): string {
-    return this.f().closure?.self !== undefined ? `'${this.f().closure!.self}'` : this.f().closure ? "this closure" : `'${this.f().name}'`;
+    const self = this.f().closure?.self;
+    return self !== undefined ? `'${self}'` : this.f().closure !== undefined ? "this closure" : `'${this.f().name}'`;
   }
 
   noteThis(this: Mut<this>, e: Ref<Expr>): void {
@@ -5160,7 +5295,7 @@ class BodyChecker implements Context, GuardHost {
   // Who a closure's body counts as for access to private members: its function's class.
   closureOwner(this: Mut<this>, b: Body): Body["owner"] {
     let outerBody = b;
-    while (outerBody.closure !== undefined) outerBody = bodyOf(this.cx.tables.arenas, this.cx.tables.arenas.instanceOf(outerBody.closure.parent));
+    while (outerBody.closure !== undefined) outerBody = bodyOf(this.cx.tables.arenas, this.cx.tables.arenas.instanceOf(outerBody.closure!.parent));
     return outerBody.declared ?? (outerBody.owner && outerBody.owner === this.enclosing?.type ? this.self!.type : outerBody.owner);
   }
 
@@ -5170,7 +5305,9 @@ class BodyChecker implements Context, GuardHost {
     const l = this.cx.localOf(lId);
     const outside = this.outsideOf(l.localId);
     const from = (outside !== undefined) && outside !== "this" ? this.cx.localOf(outside) : undefined;
-    return this.facts.findLast((f) => f.has(bindingKey(l.localId)))?.get(bindingKey(l.localId)) ?? (from && !this.outer!.reassigned(from) ? this.outer!.narrowed(from.localId) : undefined);
+    const known = this.factOf(bindingKey(l.localId));
+    if (known !== undefined) return known;
+    return from !== undefined && this.outer !== undefined && !this.outer.reassigned(from) ? this.outer.narrowed(from.localId) : undefined;
   }
 
   // A closure's body reads a variable it captures through a binding of its own, standing
