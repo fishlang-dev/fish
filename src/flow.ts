@@ -155,6 +155,11 @@ export function assignsOwn(body: Ref<Stmt[]>, name: string): boolean {
   return assignsOwnNode({ of: "stmts", node: body }, name);
 }
 
+// Whether one statement assigns the variable `name` of its own.
+export function assignsOwnIn(s: Ref<Stmt>, name: string): boolean {
+  return assignsOwnNode({ of: "stmt", node: s }, name);
+}
+
 // The variables a destructuring pattern assigns.
 export function patternNames(p: Ref<Pattern>): string[] {
   let names: string[] = [];
@@ -184,13 +189,22 @@ function rootName(e: Ref<Expr>): string {
 // The roots of the fields and elements any assignment, `++`, `--` or destructuring in these
 // statements writes, `this` among them: a loop writing one may reach a field narrowed before it.
 export function fieldRoots(body: Ref<Stmt[]>): Set<string> {
+  return fieldRootsOf({ of: "stmts", node: body });
+}
+
+// The variables whose fields one statement assigns.
+export function fieldRootsIn(s: Ref<Stmt>): Set<string> {
+  return fieldRootsOf({ of: "stmt", node: s });
+}
+
+function fieldRootsOf(node: Ref<AnyNode>): Set<string> {
   let roots = new Set<string>();
   const add = (target: Ref<Expr> | undefined) => {
     if (target === undefined) return;
     if (target.kind === "member") roots.add(rootName(target.object));
     else if (target.kind === "index") roots.add(rootName(target.object));
   };
-  walk({ of: "stmts", node: body }, (item) => {
+  walk(node, (item) => {
     if (item.of === "expr") {
       if (item.node.kind === "assign") add(item.node.target);
       else if (item.node.kind === "update") add(item.node.operand);

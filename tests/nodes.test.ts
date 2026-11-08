@@ -477,7 +477,7 @@ const IN_PLACE = [
   // hoisted, statements added after the one being checked, and the same edits given to a later
   // copy of a list; and, before checking, a local declaration hoisted out and an export a library
   // lists, each where the list is read next;
-  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(this.cx.tables.ids), kind: \"block\"", "check.ts: if (added.length > 0) list.splice(", "check.ts: const fn = list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
+  "check.ts: list.splice(", "check.ts: list[i] = { id: nextId(this.cx.tables.ids), kind: \"block\"", "check.ts: while (added.length > 0) list.splice(", "check.ts: while (parts.length > 0) list.splice(", "check.ts: const fn = list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
   "check.ts: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.ts: if (inserted !== undefined && inserted.length > 0",
   "modules.ts: l.body[at] =", "macros.ts: statements.splice(",
 ];
