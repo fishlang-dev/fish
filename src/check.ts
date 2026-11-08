@@ -621,10 +621,12 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
   for (const s of program) {
     try {
       // A `declare const enum` writes its values, so it is an enum like any other.
-      const e = s.kind === "declare" && s.body.kind === "enum" && s.body.const ? s.body : s;
-      if (e.kind === "enum") {
-        typeName(e.name, e, decls.aliases.has(e.name) || namedIn(top, decls, e.name));
-        top.enums.set(e.name, declareEnum(tables, e));
+      if (s.kind === "declare" && s.body.kind === "enum" && s.body.const) {
+        declareEnumIn(tables, top, decls, s.body);
+        continue;
+      }
+      if (s.kind === "enum") {
+        declareEnumIn(tables, top, decls, s);
         continue;
       }
       const trait = s.kind === "typeAlias" ? traitAlias(tables.ids, s) : undefined;
@@ -777,6 +779,12 @@ function withBody(d: Declared): Func {
   return { ...d, body };
 }
 
+/** @throws {CompileError} */
+function declareEnumIn(tables: Mut<Tables>, top: Mut<TopLevel>, decls: Ref<Declarations>, e: Ref<Extract<Stmt, { kind: "enum" }>>): void {
+  typeName(e.name, { start: e.start, end: e.end }, decls.aliases.has(e.name) || namedIn(top, decls, e.name));
+  top.enums.set(e.name, declareEnum(tables, e));
+}
+
 function addBodyTo(tables: Mut<Tables>, f: Func): BodyId {
   return tables.arenas.addBody(f).bodyId;
 }
@@ -873,12 +881,14 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
     throw e instanceof CompileError ? named(e, copyNames(tables.names)) : e;
   }
   let checker = new Checker(tables, program, top!, decls, exportsToC, macros, module);
+  let outcome: { instances: InstanceId[]; warnings: CompileError[] } | undefined = undefined;
   try {
     checker.prepare();
-    return checker.run();
+    outcome = checker.run();
   } catch (e) {
     throw e instanceof CompileError ? named(e, copyNames(checker.tables.names)) : e;
   }
+  return { instances: outcome!.instances, tables: checker.tables, warnings: outcome!.warnings };
 }
 
 class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost, EnumHost {
@@ -1316,7 +1326,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
-  run(this: Mut<this>): Checked {
+  run(this: Mut<this>): { instances: InstanceId[]; warnings: CompileError[] } {
 
     for (const c of [...this.classes.values()]) this.registry().link(c, new TypeSet<ClassType>());
     this.tables.typing.setJsError(this.tables.arenas.classOf(this.classes.get("JsError"))?.type);
@@ -1443,7 +1453,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (this.library) {
       let exported: BodyId[] = [];
       for (const id of this.funcs) if (this.tables.arenas.bodyOf(id).exported === true) exported.push(id);
-      for (const f of exported) this.exportable(this.definition(f));
+      for (const f of exported) {
+        const definition = this.definition(f);
+        this.exportable(definition);
+      }
     }
     if (this.library && !this.funcs.some((id) => this.tables.arenas.bodyOf(id).exported === true)) throw new CompileError("E1003", "a library has nothing for C to call; mark functions with 'export'", 0, 0);
     // An abstract member and a template are checked but never compiled; each concrete class's copy is.
@@ -1512,7 +1525,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.tables.typing.closeUnknown();
     this.unknownJson();
     this.tables.typing.layOutForCodegen();
-    return { instances: compiledIds, tables: this.tables, warnings: warnings(this.tables, compiledIds, (b) => required.has(b.bodyId)) };
+    return { instances: compiledIds, warnings: warnings(this.tables, compiledIds, (b) => required.has(b.bodyId)) };
   }
 
   // A value given to `JSON.stringify` holding an `unknown` needs each type stored in one to have a
@@ -5041,7 +5054,9 @@ const SUPER = "super()";
 // What a returned reference borrows from: a parameter, by index, or `this`.
 export type Origin = usize | "this";
 
-const hasBody = (f: Declared): f is Func => f.body !== undefined;
+function hasBody(f: Ref<Declared>): f is Func {
+  return f.body !== undefined;
+}
 
 // An abstract class a type holds as a value, not one embedded as a concrete class's base.
 function abstractPart(typing: Ref<Typing>, t: Type): ClassType | undefined {
