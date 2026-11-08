@@ -1562,7 +1562,40 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     // source borrowed too, so it can't be told apart from the original while held.
     this.lendTo(cx, holder, outer);
     this.inherit(cx, holder, e);
-    if (!this.inPlace(cx, e, to)) this.temporary(cx, holder, e);
+    if (!this.inPlace(cx, e, to) && !(this.sameReferent(cx, e, to) && this.heldThrough(cx, holder, outer, e))) this.temporary(cx, holder, e);
+  }
+
+  // A holder of a field or element read through a reference a call gives holds what that call's
+  // reference does; whether `e` reads through one.
+  /** @throws {CompileError} */
+  heldThrough(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, outer: Ref<Expr>, e: Ref<Expr>): boolean {
+    if (e.kind === "call") {
+      if (!this.isRef(cx, cx.instance.types.get(e)!)) return false;
+      this.holdFrom(cx, holder, outer, e, undefined);
+      return true;
+    }
+    if (e.kind === "member") return !e.optional && !cx.instance.calls.has(e) && this.heldThrough(cx, holder, outer, e.object);
+    if (e.kind === "index") return !e.optional && this.heldThrough(cx, holder, outer, e.object);
+    if (e.kind === "nonNull") return this.heldThrough(cx, holder, outer, e.expr);
+    return false;
+  }
+
+  // Whether a field or element read through a reference a call gives is read in place.
+  readsReturned(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): boolean {
+    if (e.kind === "call") return this.isRef(cx, cx.instance.types.get(e)!);
+    if (e.kind === "member") return !e.optional && !cx.instance.calls.has(e) && this.readsReturned(cx, e.object);
+    if (e.kind === "index") return !e.optional && this.readsReturned(cx, e.object);
+    if (e.kind === "nonNull") return this.readsReturned(cx, e.expr);
+    return false;
+  }
+
+  // Whether a reference made from `e` refers to `e` itself, not to a copy of it as another type.
+  sameReferent(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, to: RefType): boolean {
+    if (e.kind !== "member" && e.kind !== "index" && e.kind !== "nonNull") return false;
+    if (this.throughUnion(cx, e)) return false;
+    const type = cx.instance.types.get(e)!;
+    const target = cx.tables.typing.rec(to).to;
+    return cx.tables.typing.lower(type) === cx.tables.typing.lower(target) || cx.tables.typing.partOfItself(type, target);
   }
 
   // What a value lends, lent to a holder.
@@ -1597,7 +1630,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     const lent = this.coercionOf(cx, s);
     if (s.kind === "string" && !across && cx.f.generator !== true && cx.f.async !== true) return false;
     // A JsValue read out of JS is made for the statement, though it names a variable.
-    return lent !== undefined && this.isRef(cx, lent) && !this.isRef(cx, cx.instance.types.get(s)!) && (this.key(cx, s) === undefined || this.copiedOut(cx, s));
+    if (lent === undefined || !this.isRef(cx, lent) || this.isRef(cx, cx.instance.types.get(s)!)) return false;
+    if (this.key(cx, s) !== undefined) return this.copiedOut(cx, s);
+    // What a reference a call gives refers to lives where that reference points.
+    return !(this.readsReturned(cx, s) && !this.throughUnion(cx, s));
   }
 
   // Whether a source a call's result borrows from is a value made for the statement: a lent
@@ -1606,6 +1642,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (this.lentTemporary(cx, s, across)) return true;
     if (s.kind === "string" && !across && cx.f.generator !== true && cx.f.async !== true) return false;
     if (this.key(cx, s) !== undefined) return false;
+    if (this.readsReturned(cx, s) && !this.throughUnion(cx, s)) return false;
     const type = this.coercionOf(cx, s) ?? cx.instance.types.get(s)!;
     return !cx.tables.typing.holdsRef(type);
   }
@@ -1772,7 +1809,12 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         const t = this.coercionOf(cx, s) ?? cx.instance.types.get(s)!;
         if (this.isRef(cx, t) || (cx.tables.typing.holdsRef(t) && this.key(cx, s) === undefined)) for (const p of this.pointsInto(cx, s)) out.push(p);
         else if (this.key(cx, s) !== undefined && !this.throughUnion(cx, s)) for (const p of this.within(cx, s)) out.push(p);
-        else out.push(TEMPORARY);
+        else {
+          // A receiver read through a reference a call gives is lent where that reference points.
+          const returned = this.throughUnion(cx, s) ? undefined : this.returnedBase(cx, s);
+          if (returned !== undefined) for (const p of returned) out.push(p);
+          else out.push(TEMPORARY);
+        }
       }
       return out;
     }
@@ -1809,12 +1851,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // points, as Rust has it. A read through a union, or one met as another type, is a copy, and a
   // field of a value a call gives owned is a temporary.
   throughReturned(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, to: RefType): string[] | undefined {
-    if (e.kind !== "member" && e.kind !== "index" && e.kind !== "nonNull") return undefined;
-    if (this.throughUnion(cx, e)) return undefined;
-    const type = cx.instance.types.get(e)!;
-    const target = cx.tables.typing.rec(to).to;
-    if (cx.tables.typing.lower(type) !== cx.tables.typing.lower(target) && !cx.tables.typing.partOfItself(type, target)) return undefined;
-    return this.returnedBase(cx, e);
+    return this.sameReferent(cx, e, to) ? this.returnedBase(cx, e) : undefined;
   }
 
   // The places a reference a call gives points into, reached from a read of a field or an

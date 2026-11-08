@@ -501,3 +501,82 @@ function bad(p: Ref<Pair>): Ref<{ x: i64 }> {
 
 function main() {}
 // error: can't return a reference to a temporary or a copy
+// case: lifetime_method_through_returned_ref
+type Mark = { n: i64 }
+
+class Marks {
+  all: Mark[] = []
+  at(i: usize): Ref<Mark> {
+    return this.all[i]!
+  }
+}
+
+class Board {
+  marks: Marks = new Marks()
+  marksOf(this: Mut<this>): Mut<Marks> {
+    return this.marks
+  }
+  mark(this: Mut<this>, i: usize): Ref<Mark> {
+    return this.marksOf().at(i)
+  }
+}
+
+function main() {
+  let b = new Board()
+  b.marks.all.push({ n: 8 })
+  console.log(b.mark(0).n)
+}
+// expect: 8
+// case: lifetime_held_through_returned_ref
+type Square = { n: i64 }
+
+class Grid {
+  cells: Square[] = []
+  at(i: usize): Ref<Square> {
+    return this.cells[i]!
+  }
+}
+
+class Sheet {
+  grid: Grid = new Grid()
+  gridOf(this: Mut<this>): Mut<Grid> {
+    return this.grid
+  }
+  sum(this: Mut<this>, i: usize): i64 {
+    const a = this.gridOf().at(i)
+    const total = a.n
+    const b: Ref<Square> = this.gridOf().cells[i]!
+    return total + b.n
+  }
+}
+
+function main() {
+  let s = new Sheet()
+  s.grid.cells.push({ n: 5 })
+  console.log(s.sum(0))
+}
+// expect: 10
+// case: lifetime_held_through_returned_ref_conflict
+type Slot = { n: i64 }
+
+class Slots {
+  all: Slot[] = []
+  at(i: usize): Ref<Slot> {
+    return this.all[i]!
+  }
+}
+
+class Rack {
+  slots: Slots = new Slots()
+  slotsOf(this: Mut<this>): Mut<Slots> {
+    return this.slots
+  }
+  both(this: Mut<this>): i64 {
+    const a = this.slotsOf().at(0)
+    const b = this.slotsOf().at(1)
+    return a.n + b.n
+  }
+}
+
+function main() {}
+// error: cannot use 'this' while 'a' borrows 'this' mutably
