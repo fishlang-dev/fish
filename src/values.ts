@@ -9777,7 +9777,10 @@ export class Expressions<C extends Context> implements Union<C> {
     const t = this.ctx.types().get(object);
     const held = typeof t !== "string" && this.recOf(t)?.kind === "ref" ? this.ctx.tables().typing.rec(t as RefType).to : t;
     if (held === undefined || (typeof held !== "string" && this.ctx.tables().typing.rec(held).kind === "union")) return false;
-    return this.placeIn(this.bare(object));
+    // A field of what a call's reference points at lives there, as one through a variable does.
+    const base = this.bare(object);
+    if (base.kind === "call") return t !== undefined && this.isRefType(t);
+    return this.placeIn(base);
   }
 
   // Checks that a place, already typed, may change. `const` is deeply immutable, so no field
@@ -9844,6 +9847,9 @@ export class Expressions<C extends Context> implements Union<C> {
       this.changesThis(path, action, target);
       return;
     }
+    // Through a mutable reference a call gives, what it refers to may change; a shared one was
+    // refused on the way up.
+    if (root.kind === "call") return;
     const id = this.localOfId(idOfExpr(root))!.localId;
     this.changesLocal(id, path, action, target, throughMut);
   }

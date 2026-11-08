@@ -580,3 +580,40 @@ class Rack {
 
 function main() {}
 // error: cannot use 'this' while 'a' borrows 'this' mutably
+// case: lifetime_change_through_returned_ref
+type Bin = { items: i64[]; total: i64 }
+
+class Depot {
+  bin: Bin = { items: [], total: 0 }
+  binOf(this: Mut<this>): Mut<Bin> {
+    return this.bin
+  }
+  add(this: Mut<this>, n: i64): void {
+    this.binOf().items.push(n)
+    this.binOf().total += n
+  }
+}
+
+function main() {
+  let d = new Depot()
+  d.add(3)
+  d.add(4)
+  d.binOf().total = d.bin.total * 2
+  console.log(d.bin.items.length, d.bin.total)
+}
+// expect: 2 14
+// case: lifetime_change_through_returned_shared_ref
+type Crate = { items: i64[] }
+
+class Yard {
+  crate: Crate = { items: [] }
+  crateOf(): Ref<Crate> {
+    return this.crate
+  }
+  add(this: Mut<this>, n: i64): void {
+    this.crateOf().items.push(n)
+  }
+}
+
+function main() {}
+// error: is a shared reference ('Ref'), which only reads

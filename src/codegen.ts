@@ -10026,7 +10026,9 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // Whether an expression names somewhere a value lives: a variable, `this`, or a field of one,
   // but not a variable narrowed to part of a union, an enum's member or a union's shared field.
   function lendable(e: Expr): boolean {
+    let through = false;
     for (e = bare(e); e.kind === "member" && !calls.has(e); e = bare(e.object)) {
+      through = true;
       // A field narrowed to several members is read as a copy, laid out as the narrower union.
       if (current.narrowedFields?.has(e) && !inPayload(e)) return false;
       // A string's or an array's `length` is computed, not a field.
@@ -10038,6 +10040,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       if (kind !== "object" && kind !== "class") return false;
     }
     if (e.kind === "this") return true;
+    // A field of what a call's reference points at lives there, as one through a variable does.
+    if (through && e.kind === "call" && isRef(types.get(e)!)) return true;
     // An array's element lives in its buffer, wherever the array itself is.
     if (e.kind === "index") return indexes(valueType(e.object));
     // A JsValue read out of JS lives nowhere until the read makes it.
