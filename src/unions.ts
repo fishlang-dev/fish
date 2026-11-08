@@ -1,5 +1,6 @@
 import { CompileError } from "./diag.ts";
 import type { Tables } from "./compilation.ts";
+import type { InstanceId } from "./arenas.ts";
 import { unsupported } from "./unsupported.ts";
 import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind, type Verdict } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
@@ -12,6 +13,8 @@ import { cloneExpr, cloneOneOf2 } from "./rebuild.ts";
 
 // What these rules need from expression checking.
 export interface UnionContext {
+  // The instance being checked, whose tables are in the arenas.
+  checking(): InstanceId;
   tables(this: Mut<this>): Mut<Tables>;
   types(this: Mut<this>): Mut<NodeMap<Expr, Type>>;
   coercions(this: Mut<this>): Mut<NodeMap<Expr, Type>>;
@@ -354,7 +357,9 @@ export function intoUnion<B extends UnionContext, H extends Union<B>>(e: Ref<Exp
       let at: usize = 0;
       let count = 0;
       for (let i: usize = 0; i < targets.length; i++) {
-        const shape = literalShape(host.ctx.tables().typing, e, targets[i]!, host.ctx.types());
+        const checking = host.ctx.checking();
+        const tb = host.ctx.tables();
+        const shape = literalShape(tb.typing, e, targets[i]!, tb.arenas.instanceOf(checking).types);
         if (shape === undefined) continue;
         count++;
         if (shaped === undefined) {
@@ -363,7 +368,9 @@ export function intoUnion<B extends UnionContext, H extends Union<B>>(e: Ref<Exp
         }
       }
       if (count === 1 && shaped !== undefined) {
-        applyShape(shaped, host.ctx.coercions(), host.ctx.types());
+        const checking = host.ctx.checking();
+        const recorded = host.ctx.tables().arenas.instanceMut(checking);
+        applyShape(shaped, recorded.coercions, recorded.types);
         into = [targets[at]!];
       }
     }
@@ -442,7 +449,7 @@ export function unionComparison<B extends UnionContext, H extends Union<B>>(e: R
   }
   if (objectsMeet(host.ctx.tables().typing, left, right)) throw unsupported("comparisons of objects", { start: e.start, end: e.end });
   // A type parameter's argument may miss a value its bound has, which the definition compared.
-  if (!comparable(host.ctx.tables().typing, left, right) && !isParam(host.ctx.tables().typing, host.read(e.left)) && !isParam(host.ctx.tables().typing, host.read(e.right))) {
+  if (!comparable(host.ctx.tables().typing, left, right) && !paramRead<B, H>(host, e.left) && !paramRead<B, H>(host, e.right)) {
     throw new CompileError("E0112", `this comparison appears to be unintentional because the types '${host.ctx.tables().typing.show(left)}' and '${host.ctx.tables().typing.show(right)}' have no overlap`, e.start, e.end);
   }
   return "boolean";
@@ -467,6 +474,13 @@ function flat(typing: Mut<Typing>, t: Type): Type {
 
 function isParam(typing: Ref<Typing>, t: Type): boolean {
   return typeof t !== "string" && typing.rec(t).kind === "param";
+}
+
+// Whether a side, as read, is a type parameter.
+/** @throws {CompileError} */
+function paramRead<B extends UnionContext, H extends Union<B>>(host: Mut<H>, e: Ref<Expr>): boolean {
+  const t = host.read(e);
+  return isParam(host.ctx.tables().typing, t);
 }
 
 // Objects and instances have no equality until `Eq`, so a comparison where both sides might
