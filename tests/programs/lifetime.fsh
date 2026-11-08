@@ -617,3 +617,27 @@ class Yard {
 
 function main() {}
 // error: is a shared reference ('Ref'), which only reads
+
+// case: lifetime_return_narrowed_union_parts
+// A field of a narrowed recursive union, and the narrowed reference itself, are returned
+// where they live.
+type Tree = { kind: "leaf"; n: i64 } | { kind: "neg"; inner: Tree } | { kind: "pos"; inner: Tree };
+function innerOf(t: Ref<Tree>): Ref<Tree> {
+  if (t.kind === "neg") return t.inner;
+  return t;
+}
+function show(t: Ref<Tree>): string {
+  if (t.kind === "leaf") return `${t.n}`;
+  if (t.kind === "neg") return `-(${show(innerOf(t))})`;
+  return "+";
+}
+function main() {
+  const t: Tree = { kind: "neg", inner: { kind: "neg", inner: { kind: "leaf", n: 7 } } };
+  const once = innerOf(t);
+  const twice = innerOf(once);
+  console.log(show(t), show(once), show(twice));
+  const p: Tree = { kind: "pos", inner: { kind: "leaf", n: 1 } };
+  console.log(show(innerOf(p)));
+}
+// expect: -(-(7)) -(7) 7
+// expect: +

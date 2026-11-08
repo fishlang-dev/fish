@@ -109,7 +109,7 @@ export type Tables = {
   nestedBindings: Set<LocalId>;
   // The generic functions written inside bodies, each lifted to a function of its own, by the
   // statement that declared it, or the generic arrow written as a value.
-  liftedFunctions: NodeMap<Stmt | Expr, { name: string; fn: Declared & { body: Stmt[] } }>;
+  liftedFunctions: NodeMap<Stmt | Expr, { name: string; symbol: string }>;
   // Every name a class or object literal gives a getter, so a destructuring source reading one
   // runs it once.
   getterNames: Set<string>;
@@ -355,7 +355,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     numberKeys: new Map<LocalId, string>(),
     nestedFunctions: new NodeMap<Expr, string>(),
     nestedBindings: new Set<LocalId>(),
-    liftedFunctions: new NodeMap<Stmt | Expr, { name: string; fn: Declared & { body: Stmt[] } }>(),
+    liftedFunctions: new NodeMap<Stmt | Expr, { name: string; symbol: string }>(),
     getterNames: new Set<string>(),
     destructuredParts: new NodeMap<Stmt, Expr>(),
     insertedAfter: new NodeMap<Stmt, Stmt[]>(),

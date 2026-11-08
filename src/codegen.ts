@@ -9372,6 +9372,15 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const type = types.get(e)!;
     const [ref, given] = [recOf(to), recOf(type)];
     if (ref?.kind === "ref" && given?.kind !== "ref") return borrowed(e, ref.to);
+    // A narrowed reference read at the type it was declared with is the pointer it holds.
+    if (ref?.kind === "ref" && given?.kind === "ref" && e.kind === "ident" && !known.has(e)) {
+      const local = localAt(e);
+      if (local !== undefined && local.type !== type && typing.lower(local.type) === typing.lower(to!)) {
+        const held = temp();
+        emit(`${held} = load ptr, ptr ${slot(local)}`);
+        return held;
+      }
+    }
     const lent = typing.optionRef(to);
     if (lent && type !== "null" && !typing.optionRef(type) && given?.kind !== "ref") return convert(borrowed(e, typing.rec(lent).to), lent, to!);
     const result = known.get(e) ?? evaluate(e);

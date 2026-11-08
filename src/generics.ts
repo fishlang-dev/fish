@@ -1162,7 +1162,9 @@ function callsIn(n: AnyNode, name: string, repeated: boolean, count: Mut<Calls>)
   if (n.of === "pattern" && n.node.kind === "ident" && n.node.name === name) count.again = true;
   const kind = n.of === "stmt" ? n.node.kind : n.of === "expr" ? n.node.kind : undefined;
   const loops = kind === "while" || kind === "doWhile" || kind === "for" || kind === "forOf" || kind === "forIn" || kind === "arrow";
-  forEachChild(n, (c) => callsIn(c, name, repeated || loops, count));
+  forEachChild(n, (c) => {
+    callsIn(c, name, repeated || loops, count);
+  });
 }
 
 // What generic classes need from the checker.
@@ -1481,7 +1483,7 @@ export class GenericClasses<H extends GenericClassesHost> {
     if (typeArgs.length > 0) {
       let args: Type[] = [];
       for (const t of typeArgs) args.push(this.host.resolveType(cloneTypeNode(t)));
-      const made = this.classInstance(named(template), args, at, false);
+      const made = this.classInstance(named(template), args, { start: at.start, end: at.end }, false);
       return this.host.tables.arenas.classOf(made);
     }
     const bindings = this.inferred(named(template), argTypes, { start: at.start, end: at.end }, new NodeSet<ClassNode>());
@@ -1491,7 +1493,7 @@ export class GenericClasses<H extends GenericClassesHost> {
       if (type === undefined) throw new CompileError("E0104", `can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
       args.push(type);
     }
-    const made = this.classInstance(template, args, at, false);
+    const made = this.classInstance(template, args, { start: at.start, end: at.end }, false);
     return this.host.tables.arenas.classOf(made);
   }
 

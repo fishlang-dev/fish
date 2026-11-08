@@ -1687,6 +1687,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     const target = cx.tables.typing.rec(to).to;
     if (this.isRef(cx, type)) {
       const held = cx.tables.typing.rec(type).to;
+      // Read at the type it was declared with, it is the reference it holds.
+      const declared = local !== undefined ? cx.tables.arenas.localOf(local).type : undefined;
+      const declaredRef = declared === undefined ? undefined : this.isRef(cx, declared) ? declared : cx.tables.typing.optionRef(declared);
+      if (narrowedLocal && declaredRef !== undefined && cx.tables.typing.lower(cx.tables.typing.rec(declaredRef).to) === cx.tables.typing.lower(target)) return true;
       if (narrowedLocal && this.isUnion(cx, held)) return false;
       const from = cx.tables.typing.lower(held);
       const want = cx.tables.typing.lower(target);
@@ -1702,7 +1706,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   throughUnion(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): boolean {
     if (this.unionOnPath(cx, e)) return true;
     const stored = this.storedType(cx, e);
-    return stored !== undefined && cx.tables.typing.lower(stored) !== cx.tables.typing.lower(cx.instance.types.get(e)!);
+    if (stored === undefined) return false;
+    const unfolded = cx.tables.typing.unfolded(stored);
+    return cx.tables.typing.lower(unfolded) !== cx.tables.typing.lower(cx.instance.types.get(e)!);
   }
 
   // Whether an object a field path reads through is a union.

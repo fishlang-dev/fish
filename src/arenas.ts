@@ -34,6 +34,18 @@ export class Arenas {
     return id === undefined ? undefined : this.bodies[id - 1];
   }
 
+  // Takes an instance or a body out, leaving `by` in its place, so it can be lent beside the
+  // arena it was kept in; giving it back the same way puts it in place again.
+  swapInstance(this: Mut<this>, id: InstanceId, by: Instance): Instance {
+    let out = this.instances.splice((id - 1) as i64, 1, by);
+    return out.pop()!;
+  }
+
+  swapBody(this: Mut<this>, id: BodyId, by: Body): Body {
+    let out = this.bodies.splice((id - 1) as i64, 1, by);
+    return out.pop()!;
+  }
+
   // An instance, a body, a local or a class to change in place.
   instanceMut(this: Mut<this>, id: InstanceId): Mut<Instance> {
     return this.instances[id - 1]!;

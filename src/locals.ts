@@ -137,10 +137,14 @@ class Hoister {
       const head: string[] = ctx !== undefined ? headNamesStmt(s) : [];
       if (head.length > 0 && ctx !== undefined) {
         const here: Context = { typeParams: ctx.typeParams.map((p) => cloneTypeParam(p)), declared: new Set([...ctx.declared, ...head]) };
-        eachChild({ of: "stmt", node: s }, (c) => this.visit(c, here));
+        eachChild({ of: "stmt", node: s }, (c) => {
+          this.visit(c, here);
+        });
         return;
       }
-      eachChild({ of: "stmt", node: s }, (c) => this.visit(c, ctx));
+      eachChild({ of: "stmt", node: s }, (c) => {
+        this.visit(c, ctx);
+      });
       return;
     }
     if (node.of === "expr") {
@@ -172,19 +176,25 @@ class Hoister {
         });
         return;
       }
-      eachChild({ of: "expr", node: e }, (c) => this.visit(c, ctx));
+      eachChild({ of: "expr", node: e }, (c) => {
+        this.visit(c, ctx);
+      });
       return;
     }
     if (node.of === "typeNode") {
       const peeked = this.rewrites.getTypeNode(node.node.id);
       const t: Ref<TypeNode> = peeked !== undefined ? peeked : node.node;
-      eachChild({ of: "typeNode", node: t }, (c) => this.visit(c, ctx));
+      eachChild({ of: "typeNode", node: t }, (c) => {
+        this.visit(c, ctx);
+      });
       return;
     }
     if (node.of === "pattern") {
       const peeked = this.rewrites.getPattern(node.node.id);
       const p: Ref<Pattern> = peeked !== undefined ? peeked : node.node;
-      eachChild({ of: "pattern", node: p }, (c) => this.visit(c, ctx));
+      eachChild({ of: "pattern", node: p }, (c) => {
+        this.visit(c, ctx);
+      });
       return;
     }
     if (node.of === "classMember") {
@@ -205,7 +215,9 @@ class Hoister {
         this.visitCallable(ctx, [], m.params, m.body);
         return;
       }
-      eachChild(node, (c) => this.visit(c, ctx));
+      eachChild(node, (c) => {
+        this.visit(c, ctx);
+      });
       return;
     }
     if (node.of === "objectProp") {
@@ -222,10 +234,14 @@ class Hoister {
         this.visitCallable(ctx, [], p.params, p.body);
         return;
       }
-      eachChild(node, (c) => this.visit(c, ctx));
+      eachChild(node, (c) => {
+        this.visit(c, ctx);
+      });
       return;
     }
-    eachChild(node, (c) => this.visit(c, ctx));
+    eachChild(node, (c) => {
+      this.visit(c, ctx);
+    });
   }
 
   // A block's statements. Each local declaration in it is renamed throughout the block, as
@@ -450,7 +466,9 @@ function rename(written: AnyNode, r: Ref<Rename>, rewrites: Mut<Rewrites>, ids: 
   if (written.of === "stmt") {
     const peeked = rewrites.getStmt(written.node.id);
     const s: Ref<Stmt> = peeked !== undefined ? peeked : written.node;
-    eachChild({ of: "stmt", node: s }, (c) => rename(c, r, rewrites, ids));
+    eachChild({ of: "stmt", node: s }, (c) => {
+      rename(c, r, rewrites, ids);
+    });
     return;
   }
   if (written.of === "typeNode") {
@@ -463,7 +481,9 @@ function rename(written: AnyNode, r: Ref<Rename>, rewrites: Mut<Rewrites>, ids: 
         cloned.args = [...makeTypeArgs(r, ids), ...cloned.args];
       }
       const next = rewrites.replaceTypeNode(t, cloned);
-      eachChild({ of: "typeNode", node: next }, (c) => rename(c, r, rewrites, ids));
+      eachChild({ of: "typeNode", node: next }, (c) => {
+        rename(c, r, rewrites, ids);
+      });
       return;
     } else if (t.kind === "ref" && t.name.startsWith(`${from}.`)) {
       let cloned = cloneTypeNode(t);
@@ -471,10 +491,14 @@ function rename(written: AnyNode, r: Ref<Rename>, rewrites: Mut<Rewrites>, ids: 
         cloned.name = `${to}${t.name.slice(from.length as i64)}`;
       }
       const next = rewrites.replaceTypeNode(t, cloned);
-      eachChild({ of: "typeNode", node: next }, (c) => rename(c, r, rewrites, ids));
+      eachChild({ of: "typeNode", node: next }, (c) => {
+        rename(c, r, rewrites, ids);
+      });
       return;
     }
-    eachChild({ of: "typeNode", node: t }, (c) => rename(c, r, rewrites, ids));
+    eachChild({ of: "typeNode", node: t }, (c) => {
+      rename(c, r, rewrites, ids);
+    });
     return;
   }
   if (written.of === "expr") {
@@ -489,7 +513,9 @@ function rename(written: AnyNode, r: Ref<Rename>, rewrites: Mut<Rewrites>, ids: 
         cloned.typeArgs = [...makeTypeArgs(r, ids), ...cloned.typeArgs];
       }
       const next = rewrites.replace(e, cloned);
-      eachChild({ of: "expr", node: next }, (c) => rename(c, r, rewrites, ids));
+      eachChild({ of: "expr", node: next }, (c) => {
+        rename(c, r, rewrites, ids);
+      });
       return;
     } else if (r.values && e.kind === "instantiation" && r.paramNames.length > 0 && e.expr.kind === "ident" && e.expr.name === from) {
       if (e.typeArgs.length === 0 && own > 0) {
@@ -500,14 +526,20 @@ function rename(written: AnyNode, r: Ref<Rename>, rewrites: Mut<Rewrites>, ids: 
         cloned.typeArgs = [...makeTypeArgs(r, ids), ...cloned.typeArgs];
       }
       const next = rewrites.replace(e, cloned);
-      eachChild({ of: "expr", node: next }, (c) => rename(c, r, rewrites, ids));
+      eachChild({ of: "expr", node: next }, (c) => {
+        rename(c, r, rewrites, ids);
+      });
       return;
     } else if (r.values && e.kind === "ident" && e.name === from) {
       const next = rewrites.replace(e, { id: e.id, kind: "ident", name: to, start: e.start, end: e.end });
-      eachChild({ of: "expr", node: next }, (c) => rename(c, r, rewrites, ids));
+      eachChild({ of: "expr", node: next }, (c) => {
+        rename(c, r, rewrites, ids);
+      });
       return;
     }
-    eachChild({ of: "expr", node: e }, (c) => rename(c, r, rewrites, ids));
+    eachChild({ of: "expr", node: e }, (c) => {
+      rename(c, r, rewrites, ids);
+    });
     return;
   }
   if (written.of === "pattern") {
@@ -515,7 +547,9 @@ function rename(written: AnyNode, r: Ref<Rename>, rewrites: Mut<Rewrites>, ids: 
     const p: Ref<Pattern> = peeked !== undefined ? peeked : written.node;
     if (r.values && p.kind === "ident" && p.name === from) {
       const next = rewrites.replacePattern(p, { id: p.id, kind: "ident", name: to, start: p.start, end: p.end });
-      eachChild({ of: "pattern", node: next }, (c) => rename(c, r, rewrites, ids));
+      eachChild({ of: "pattern", node: next }, (c) => {
+        rename(c, r, rewrites, ids);
+      });
       return;
     } else if (p.kind === "variant" && p.name.startsWith(`${from}.`)) {
       let cloned = clonePattern(p);
@@ -523,13 +557,19 @@ function rename(written: AnyNode, r: Ref<Rename>, rewrites: Mut<Rewrites>, ids: 
         cloned.name = `${to}${p.name.slice(from.length as i64)}`;
       }
       const next = rewrites.replacePattern(p, cloned);
-      eachChild({ of: "pattern", node: next }, (c) => rename(c, r, rewrites, ids));
+      eachChild({ of: "pattern", node: next }, (c) => {
+        rename(c, r, rewrites, ids);
+      });
       return;
     }
-    eachChild({ of: "pattern", node: p }, (c) => rename(c, r, rewrites, ids));
+    eachChild({ of: "pattern", node: p }, (c) => {
+      rename(c, r, rewrites, ids);
+    });
     return;
   }
-  eachChild(written, (c) => rename(c, r, rewrites, ids));
+  eachChild(written, (c) => {
+    rename(c, r, rewrites, ids);
+  });
 }
 
 // Whether a node names a declaration, as a type, a value or an enum member's type.
