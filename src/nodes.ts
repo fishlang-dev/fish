@@ -719,6 +719,12 @@ export class Rewrites implements Replacements {
     return this.declarators.get(node.id) ?? node;
   }
 
+  // The declarator replacing `node`, if one does, for a caller holding `node` by reference.
+  rewrittenDeclarator(node: Ref<Declarator>): Declarator | undefined {
+    if (this.declarators.size === 0) return undefined;
+    return this.declarators.get(node.id);
+  }
+
   replaceParam(this: Mut<this>, node: Ref<Id>, by: Param): Param {
     this.hasChanges = true;
     const id = node.id;

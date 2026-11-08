@@ -811,7 +811,10 @@ export class Instancing<H extends InstancingHost> {
     }
     let bindings = new Map<string, Type>();
     if (typeArgs.length > 0) {
-      for (let i: usize = 0; i < params.length; i++) bindings.set(params[i]!.name, this.host.tables.typing.heldArgument(this.host.resolveType(cloneTypeNode(typeArgs[i]!))));
+      for (let i: usize = 0; i < params.length; i++) {
+        const resolved = this.host.resolveType(cloneTypeNode(typeArgs[i]!));
+        bindings.set(params[i]!.name, this.host.tables.typing.heldArgument(resolved));
+      }
     } else {
       const names = new Set(params.map((p) => p.name));
       for (let i: usize = 0; i < f.params.length && i < argTypes.length; i++) {
@@ -1058,10 +1061,12 @@ export class Instancing<H extends InstancingHost> {
     const r = typeof t === "string" ? undefined : this.host.tables.typing.rec(t);
     const held = r?.kind === "ref" ? r.to : t;
     if (this.host.tables.typing.recOf(held)?.kind !== "class") return t;
-    const members = this.host.members();
-    const method = inherited(members.arenas(), members.arenas().classOf(members.classIdOf(held as ClassType)), "methods", ITERATOR);
+    let members = this.host.members();
+    const classId = members.classIdOf(held as ClassType);
+    const method = inherited(members.arenas(), members.arenas().classOf(classId), "methods", ITERATOR);
     if (method === undefined) return t;
-    const gives = members.returnOf(method.bodyId, at);
+    const methodId = method.bodyId;
+    const gives = members.returnOf(methodId, at);
     return r?.kind === "ref" ? this.host.tables.typing.refType(gives, r.mutable) : gives;
   }
 

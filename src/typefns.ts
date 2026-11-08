@@ -100,16 +100,16 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
     this.host = host;
   }
 
-  get typing(): Mut<Typing> {
+  typing(this: Mut<this>): Mut<Typing> {
     return this.host.typingOf();
   }
 
-  private recOf(t: Type) {
-    return typeof t === "string" ? undefined : this.typing.rec(t);
+  private recOf(this: Mut<this>, t: Type) {
+    return typeof t === "string" ? undefined : this.typing().rec(t);
   }
 
   // What a type parameter that has been given a type stands for.
-  private concreteOf(t: Type): Type | undefined {
+  private concreteOf(this: Mut<this>, t: Type): Type | undefined {
     const r = this.recOf(t);
     return r !== undefined && r.kind === "param" ? r.concrete : undefined;
   }
@@ -128,7 +128,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
       const name = r.name;
       if (!this.host.fieldsKnown(t as ClassType)) throw new CompileError("E0114", `${what} of '${name}' is needed while the field types of '${name}' are being worked out, so it can't be computed yet`, at.start, at.end);
       let out: Field[] = [];
-      for (const f of this.typing.allFields(t as ClassType)) {
+      for (const f of this.typing().allFields(t as ClassType)) {
         if (f.access !== undefined && f.access !== "public") continue;
         let kept: Field = { name: f.name, type: f.type };
         if (f.readonly === true) kept.readonly = true;
@@ -140,9 +140,9 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
     const concrete = this.concreteOf(t);
     if (concrete !== undefined) return this.fieldsOf(concrete, what, at);
     if (r !== undefined && r.kind === "interface") {
-      throw new CompileError("E0114", `${what} takes an object type or a class, not the interface '${this.typing.show(t)}', whose methods aren't values in Fish; any type with a method is an interface, so move its fields into a 'type' with no methods and use that`, at.start, at.end);
+      throw new CompileError("E0114", `${what} takes an object type or a class, not the interface '${this.typing().show(t)}', whose methods aren't values in Fish; any type with a method is an interface, so move its fields into a 'type' with no methods and use that`, at.start, at.end);
     }
-    throw new CompileError("E0114", `${what} takes an object type or a class, not '${this.typing.show(t)}'`, at.start, at.end);
+    throw new CompileError("E0114", `${what} takes an object type or a class, not '${this.typing().show(t)}'`, at.start, at.end);
   }
 
   // The keys a type names: a string literal, or a union of them.
@@ -158,44 +158,44 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
       else all = false;
     }
     if (all) return keys;
-    throw new CompileError("E0114", `${what} takes keys written as string literals, like '"a" | "b"', not '${this.typing.show(k)}'`, at.start, at.end);
+    throw new CompileError("E0114", `${what} takes keys written as string literals, like '"a" | "b"', not '${this.typing().show(k)}'`, at.start, at.end);
   }
 
   // `keyof T`: the union of T's field names.
   /** @throws {CompileError} */
   keyofType(this: Mut<this>, t: Type, at: Ref<Span>): Type {
-    const held = standIn(this.typing, [t], "'keyof'", at, false, this.host.isDeferring());
+    const held = standIn(this.typing(), [t], "'keyof'", at, false, this.host.isDeferring());
     if (held !== undefined) return held;
     const fields = this.fieldsOf(t, "'keyof'", at);
-    if (fields.length === 0) throw new CompileError("E0114", `'${this.typing.show(t)}' has no public fields, so 'keyof' of it has no keys`, at.start, at.end);
+    if (fields.length === 0) throw new CompileError("E0114", `'${this.typing().show(t)}' has no public fields, so 'keyof' of it has no keys`, at.start, at.end);
     let keys: Type[] = [];
-    for (const f of fields) keys.push(this.typing.literalType(f.name));
-    return this.typing.unionType(keys);
+    for (const f of fields) keys.push(this.typing().literalType(f.name));
+    return this.typing().unionType(keys);
   }
 
   // `T[K]`: the type of the field K names, or the union of those a union of keys names; an array's
   // `T[number]` is its element type.
   /** @throws {CompileError} */
   indexedType(this: Mut<this>, t: Type, k: Type, at: Ref<Span>, keyAt: Ref<Span>): Type {
-    const held = standIn(this.typing, [t, k], "an indexed access type", at, false, this.host.isDeferring());
+    const held = standIn(this.typing(), [t, k], "an indexed access type", at, false, this.host.isDeferring());
     if (held !== undefined) return held;
     const concrete = this.concreteOf(t);
     if (concrete !== undefined) return this.indexedType(concrete, k, at, keyAt);
     const r = this.recOf(t);
     if (r !== undefined && r.kind === "array") {
       if (isNumeric(k)) return r.element;
-      throw new CompileError("E0114", `an array type is indexed by 'number', which gives its element type, here '${this.typing.show(r.element)}'`, keyAt.start, keyAt.end);
+      throw new CompileError("E0114", `an array type is indexed by 'number', which gives its element type, here '${this.typing().show(r.element)}'`, keyAt.start, keyAt.end);
     }
     // A tuple's `T[number]` is the union of its elements, and `T[0]` its first.
     if (r !== undefined && r.kind === "object" && r.tuple === true) {
       const rest = r.rest;
       if (isNumeric(k)) {
-        let all = this.typing.elementsOf(t as ObjectType);
+        let all = this.typing().elementsOf(t as ObjectType);
         if (rest !== undefined) all.push(rest);
-        return this.typing.unionType(all);
+        return this.typing().unionType(all);
       }
       const kr = this.recOf(k);
-      if (kr !== undefined && kr.kind === "literal" && kr.value === "length") return this.typing.tupleLength(t as ObjectType);
+      if (kr !== undefined && kr.kind === "literal" && kr.value === "length") return this.typing().tupleLength(t as ObjectType);
       let positions: bigint[] = [];
       let all = true;
       for (const m of this.membersOf(k)) {
@@ -204,14 +204,14 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
         else all = false;
       }
       if (all) {
-        const count = BigInt(this.typing.elementsOf(t as ObjectType).length);
+        const count = BigInt(this.typing().elementsOf(t as ObjectType).length);
         let types: Type[] = [];
         // A position past the fixed elements of a tuple with a rest element is the rest's type.
         for (const p of positions) {
           if (rest !== undefined && p >= count) types.push(rest);
           else types.push(this.fieldType(t, p.toString(), at, keyAt, undefined));
         }
-        return this.typing.unionType(types);
+        return this.typing().unionType(types);
       }
     }
     const names = this.keysOf(k, "an indexed access type", keyAt);
@@ -222,15 +222,15 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
         const mr = this.recOf(m);
         const kind = mr !== undefined ? mr.kind : undefined;
         if (kind !== "object" && kind !== "class" && kind !== "param") {
-          throw new CompileError("E0114", `an indexed access type of a union takes object types or classes, but '${this.typing.show(t)}' has the member '${this.typing.show(m)}'`, at.start, at.end);
+          throw new CompileError("E0114", `an indexed access type of a union takes object types or classes, but '${this.typing().show(t)}' has the member '${this.typing().show(m)}'`, at.start, at.end);
         }
         for (const name of names) types.push(this.fieldType(m, name, at, keyAt, t));
       }
-      return this.typing.unionType(types);
+      return this.typing().unionType(types);
     }
     let types: Type[] = [];
     for (const name of names) types.push(this.fieldType(t, name, at, keyAt, undefined));
-    return this.typing.unionType(types);
+    return this.typing().unionType(types);
   }
 
   // The type of the field `name` of t, which is a member of the union `whole` if given.
@@ -238,7 +238,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   private fieldType(this: Mut<this>, t: Type, name: string, at: Ref<Span>, keyAt: Ref<Span>, whole: Type | undefined): Type {
     let found: Type | undefined = undefined;
     for (const f of this.fieldsOf(t, "an indexed access type", at)) if (found === undefined && f.name === name) found = f.type;
-    if (found === undefined) throw new CompileError("E0114", `'${name}' isn't a field of '${this.typing.show(t)}'${whole !== undefined ? `, a member of '${this.typing.show(whole)}'` : ""}`, keyAt.start, keyAt.end);
+    if (found === undefined) throw new CompileError("E0114", `'${name}' isn't a field of '${this.typing().show(t)}'${whole !== undefined ? `, a member of '${this.typing().show(whole)}'` : ""}`, keyAt.start, keyAt.end);
     return found;
   }
 
@@ -249,7 +249,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
     const entry = UTILITIES.get(name)!;
     let read: Type[] = [];
     for (const i of entry[2]) read.push(args[i]!);
-    const held = standIn(this.typing, read, `'${name}'`, at, entry[3], this.host.isDeferring());
+    const held = standIn(this.typing(), read, `'${name}'`, at, entry[3], this.host.isDeferring());
     return held !== undefined ? held : this.applyUtility(name, args, at, argAt);
   }
 
@@ -276,10 +276,10 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   // when K is `string`.
   /** @throws {CompileError} */
   private recordType(this: Mut<this>, k: Type, v: Type, at: Ref<Span>, keyAt: Ref<Span>): Type {
-    if (k === "string") return collection(this.typing, "string", v, false, at, true);
+    if (k === "string") return collection(this.typing(), "string", v, false, at, true);
     let fields: Field[] = [];
     for (const name of this.keysOf(k, "'Record'", keyAt)) fields.push({ name, type: v });
-    return this.typing.objectType(fields);
+    return this.typing().objectType(fields);
   }
 
   // `Partial<T>`: every field optional.
@@ -291,12 +291,12 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
         fields.push(copyField(f));
         continue;
       }
-      let made = this.typing.optionalField(f.name, f.type);
+      let made = this.typing().optionalField(f.name, f.type);
       if (f.access !== undefined) made.access = f.access;
       if (f.readonly !== undefined) made.readonly = f.readonly;
       fields.push(made);
     }
-    return this.typing.objectType(fields);
+    return this.typing().objectType(fields);
   }
 
   // `Required<T>`: no field optional, each without the empty value `?` added to it.
@@ -304,12 +304,12 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   private requiredType(this: Mut<this>, t: Type, at: Ref<Span>): Type {
     let fields: Field[] = [];
     for (const f of this.fieldsOf(t, "'Required'", at)) {
-      let kept: Field = { name: f.name, type: f.optional === "added" ? this.typing.withoutNull(f.type) : f.type };
+      let kept: Field = { name: f.name, type: f.optional === "added" ? this.typing().withoutNull(f.type) : f.type };
       if (f.access !== undefined) kept.access = f.access;
       if (f.readonly !== undefined) kept.readonly = f.readonly;
       fields.push(kept);
     }
-    return this.typing.objectType(fields);
+    return this.typing().objectType(fields);
   }
 
   // `Readonly<T>`: every field read-only.
@@ -321,7 +321,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
       kept.readonly = true;
       fields.push(kept);
     }
-    return this.typing.objectType(fields);
+    return this.typing().objectType(fields);
   }
 
   // `Pick<T, K>`: only the fields K names, each of which T must have.
@@ -329,10 +329,10 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   private pickType(this: Mut<this>, t: Type, k: Type, at: Ref<Span>, keyAt: Ref<Span>): Type {
     const fields = this.fieldsOf(t, "'Pick'", at);
     const names = this.keysOf(k, "'Pick'", keyAt);
-    for (const name of names) if (!fields.some((f) => f.name === name)) throw new CompileError("E0114", `'${name}' isn't a field of '${this.typing.show(t)}', so 'Pick' can't keep it`, keyAt.start, keyAt.end);
+    for (const name of names) if (!fields.some((f) => f.name === name)) throw new CompileError("E0114", `'${name}' isn't a field of '${this.typing().show(t)}', so 'Pick' can't keep it`, keyAt.start, keyAt.end);
     let kept: Field[] = [];
     for (const f of fields) if (names.includes(f.name)) kept.push(copyField(f));
-    return this.typing.objectType(kept);
+    return this.typing().objectType(kept);
   }
 
   // `Omit<T, K>`: every field but those K names; as in TypeScript, K may name fields T lacks.
@@ -341,11 +341,11 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
     const names = this.keysOf(k, "'Omit'", keyAt);
     let kept: Field[] = [];
     for (const f of this.fieldsOf(t, "'Omit'", at)) if (!names.includes(f.name)) kept.push(copyField(f));
-    return this.typing.objectType(kept);
+    return this.typing().objectType(kept);
   }
 
   // The members of a union, or the one type that isn't one, through a type parameter given a type.
-  private membersOf(t: Type): Type[] {
+  private membersOf(this: Mut<this>, t: Type): Type[] {
     const concrete = this.concreteOf(t);
     if (concrete !== undefined) return this.membersOf(concrete);
     const r = this.recOf(t);
@@ -356,7 +356,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   }
 
   private kept(this: Mut<this>, members: Type[]): Type {
-    return members.length === 0 ? "never" : this.typing.unionType(members);
+    return members.length === 0 ? "never" : this.typing().unionType(members);
   }
 
   // `Exclude<T, U>`: T's members that don't fit U.
@@ -389,14 +389,14 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
     if (concrete !== undefined) return this.returnType(concrete, at);
     const r = this.recOf(f);
     if (r !== undefined && (r.kind === "function" || r.kind === "closure")) return r.returns;
-    throw new CompileError("E0114", `'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${this.typing.show(f)}'`, at.start, at.end);
+    throw new CompileError("E0114", `'ReturnType' takes a function type, like 'ReturnType<() => i64>' or 'ReturnType<typeof f>', not '${this.typing().show(f)}'`, at.start, at.end);
   }
 
   // `Awaited<T>`: what awaiting a T gives, through promises of promises; any other type is itself.
-  private awaitedType(t: Type): Type {
+  private awaitedType(this: Mut<this>, t: Type): Type {
     const concrete = this.concreteOf(t);
     if (concrete !== undefined) return this.awaitedType(concrete);
-    const promised = this.typing.promiseElement(t);
+    const promised = this.typing().promiseElement(t);
     if (promised !== undefined) return this.awaitedType(promised);
     const r = this.recOf(t);
     if (r !== undefined && r.kind === "future") return this.awaitedType(r.gives);
@@ -415,8 +415,8 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
       const hole = holes[i]!;
       let members: Type[] = [];
       if (hole === "boolean") {
-        members.push(this.typing.literalType(true));
-        members.push(this.typing.literalType(false));
+        members.push(this.typing().literalType(true));
+        members.push(this.typing().literalType(false));
       } else members = this.unionOrSelf(hole);
       let pieces: Spelled[] = [];
       for (const m of members) {
@@ -424,7 +424,7 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
         if (r !== undefined && r.kind === "literal") pieces.push({ quasis: [spelling(r.value)], holes: [] });
         else if (m === "string" || isNumeric(m)) pieces.push({ quasis: ["", ""], holes: [m] });
         else if (r !== undefined && r.kind === "pattern") pieces.push({ quasis: [...r.quasis], holes: [...r.holes] });
-        else throw new CompileError("E0114", `a template literal type's hole takes a string, a number type, or string, number or boolean literals, not '${this.typing.show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
+        else throw new CompileError("E0114", `a template literal type's hole takes a string, a number type, or string, number or boolean literals, not '${this.typing().show(m)}'`, holeAt[i]!.start, holeAt[i]!.end);
       }
       if (spelled.length * pieces.length > 10_000) throw new CompileError("E0114", "this template literal type spells more than 10000 strings, too many for one union", at.start, at.end);
       const after: Spelled = { quasis: [quasis[i + 1]!], holes: [] };
@@ -436,13 +436,13 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
     let made: Type[] = [];
     while (spelled.length > 0) {
       const s = spelled.shift()!;
-      made.push(s.holes.length === 0 ? this.typing.literalType(s.quasis[0]!) : this.typing.patternType(s.quasis, s.holes));
+      made.push(s.holes.length === 0 ? this.typing().literalType(s.quasis[0]!) : this.typing().patternType(s.quasis, s.holes));
     }
     return this.kept(made);
   }
 
   // A union's own members, without looking through a type parameter, or the one type.
-  private unionOrSelf(t: Type): Type[] {
+  private unionOrSelf(this: Mut<this>, t: Type): Type[] {
     const r = this.recOf(t);
     let out: Type[] = [];
     if (r !== undefined && r.kind === "union") for (const m of r.members) out.push(m);
@@ -456,8 +456,8 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
     let made: Type[] = [];
     for (const m of this.membersOf(s)) {
       const r = this.recOf(m);
-      if (r === undefined || r.kind !== "literal" || typeof r.value !== "string") throw new CompileError("E0114", `'${what}' takes string literals, like '${what}<"a" | "b">', not '${this.typing.show(m)}'`, at.start, at.end);
-      made.push(this.typing.literalType(changed(what, r.value)));
+      if (r === undefined || r.kind !== "literal" || typeof r.value !== "string") throw new CompileError("E0114", `'${what}' takes string literals, like '${what}<"a" | "b">', not '${this.typing().show(m)}'`, at.start, at.end);
+      made.push(this.typing().literalType(changed(what, r.value)));
     }
     return this.kept(made);
   }

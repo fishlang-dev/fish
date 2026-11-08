@@ -317,7 +317,8 @@ export class Registry<H extends RegistryHost> {
     if (declared !== undefined) return declared;
     let scope = new Map<string, Type>();
     for (const [n, t] of this.host.tables.arenas.classOf(c).scope) scope.set(n, t);
-    const type = this.host.resolveIn(scope, { id: nextId(this.host.tables.ids), kind: "ref", name, args, start: at.start, end: at.end }) as ClassType;
+    const refId = nextId(this.host.tables.ids);
+    const type = this.host.resolveIn(scope, { id: refId, kind: "ref", name, args, start: at.start, end: at.end }) as ClassType;
     return this.host.registryState.infoOf.get(type)!;
   }
 
@@ -365,7 +366,8 @@ export class Registry<H extends RegistryHost> {
       let field: Field = { name: f.name, type: resolved, access: f.access };
       if (f.readonly) field.readonly = true;
       if (f.written !== undefined) {
-        const optional = this.host.tables.typing.optionalField(f.name, this.host.resolveIn(scope, f.written)).optional;
+        const written = this.host.resolveIn(scope, f.written);
+        const optional = this.host.tables.typing.optionalField(f.name, written).optional;
         if (optional !== undefined) field.optional = optional;
       } else if (f.undefinedSpelled === true) field.optional = "undefined";
       return field;
