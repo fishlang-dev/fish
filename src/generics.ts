@@ -585,7 +585,7 @@ export class Instancing<H extends InstancingHost> {
   // function type, with the type parameters the other arguments, or the written type
   // arguments, have decided. What it gives decides the rest, through \`infer\`.
   /** @throws {CompileError} */
-  callbackType(this: Mut<this>, f: Ref<Body>, typeArgs: TypeNode[], argTypes: (Type | undefined)[], i: usize, at: Span): FunctionType | undefined {
+  callbackType(this: Mut<this>, f: Ref<Body>, typeArgs: Ref<TypeNode[]>, argTypes: (Type | undefined)[], i: usize, at: Ref<Span>): FunctionType | undefined {
     const written = i < f.params.length && f.params[i]!.type !== undefined ? cloneTypeNode(f.params[i]!.type!) : undefined;
     const params = typeParamsOf(f);
     // A parameter written as a type parameter given a function type, by the call as in
@@ -640,7 +640,7 @@ export class Instancing<H extends InstancingHost> {
 
   // A generic class's constructor lent a value as `Mut<T>` keeps its read-only fields too.
   /** @throws {CompileError} */
-  constructs(this: Mut<this>, f: Ref<Body>, args: Expr[], argTypes: Type[]) {
+  constructs(this: Mut<this>, f: Ref<Body>, args: Ref<Expr[]>, argTypes: Type[]) {
     let scope = new Map<string, Type>();
     if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
     const params = this.classParamsOf(f.bodyId);
@@ -791,11 +791,12 @@ export class Instancing<H extends InstancingHost> {
   // The instance a call runs: a generic function's type arguments come from the call, or are
   // inferred from its arguments, and must satisfy their bounds.
   /** @throws {CompileError} */
-  instantiate(this: Mut<this>, f: Ref<Body>, typeArgs: TypeNode[], args: Expr[], argTypes: Type[], at: Span & Id): Ref<Instance> {
+  instantiate(this: Mut<this>, f: Ref<Body>, typeArgs: Ref<TypeNode[]>, args: Ref<Expr[]>, argTypes: Type[], at: Ref<Span & Id>): Ref<Instance> {
     // A call of a body whose signature failed, or whose result only its body could tell, would
     // report the same mistake again in other words; one with a written signature is typed by it.
     const failed = this.host.failure(f);
-    const signature = { start: f.start, end: f.body.length > 0 ? f.body[0]!.start : f.end };
+    // The statements are read from the arena, since `f` may be a copy of the signature alone.
+    const signature = { start: f.start, end: firstStatementAt(this.host.tables.arenas.bodyOf(f.bodyId)) };
     if (failed !== undefined && (f.returnType === undefined || (failed.start >= signature.start && failed.end <= signature.end))) throw failed;
     const params = typeParamsOf(f);
     if (typeArgs.length > 0 && typeArgs.length !== params.length) {
@@ -834,7 +835,7 @@ export class Instancing<H extends InstancingHost> {
       if (r !== undefined && r.kind === "function" && r.generic !== undefined) throw unsupported("generic function types as type arguments", at);
       // A closure inferred for T is the closure's own type, compiled for it, unless the body holds
       // T in a type argument, which holds the boxed callable, as a written function type is.
-      if ((r?.kind === "closure" || r?.kind === "function") && heldInArgument(f, p.name)) bindings.set(p.name, this.host.tables.typing.heldArgument(type));
+      if ((r?.kind === "closure" || r?.kind === "function") && heldInArgument(this.host.tables.arenas.bodyOf(f.bodyId), p.name)) bindings.set(p.name, this.host.tables.typing.heldArgument(type));
     }
     // A bound may name the class's parameters too, as this instance of it holds them.
     let bounded = new Map<string, Type>();
@@ -896,7 +897,7 @@ export class Instancing<H extends InstancingHost> {
       const ref = this.host.instancingState.lent.get(f.bodyId)!.get(i);
       const unlocked = ref !== undefined && this.host.tables.typing.rec(ref).mutable ? this.host.tables.typing.unlocks(held, bound) : undefined;
       if (unlocked !== undefined) throw new CompileError("E0206", `'${unlocked}' is read-only here, but '${f.name}' takes it mutably as '${this.host.tables.typing.show(bound)}', which could change it`, args[i]!.start, args[i]!.end);
-      if (r !== undefined && r.kind === "closure" && r.once !== undefined && r.once !== "" && repeats(f, paramName(f.params[i]!))) {
+      if (r !== undefined && r.kind === "closure" && r.once !== undefined && r.once !== "" && repeats(this.host.tables.arenas.bodyOf(f.bodyId), paramName(f.params[i]!))) {
         throw new CompileError("E0210", `'${f.name}' may call '${paramName(f.params[i]!)}' more than once, but this closure moves '${r.once}' out, so it can run only once`, args[i]!.start, args[i]!.end);
       }
     }
@@ -1137,6 +1138,11 @@ function lacks(typing: Ref<Typing>, from: Type, to: Type, path = ""): string | u
 // Whether a body may call its function-typed parameter `name` more than once: it calls it
 // twice, or in a loop or a closure, which may run again, or uses it any other way, as passing
 // it on. A name shadowing the parameter counts too, which only errs towards caution.
+// Where a body's first statement starts, or its end when it has none.
+function firstStatementAt(f: Ref<Body>): usize {
+  return f.body.length > 0 ? f.body[0]!.start : f.end;
+}
+
 function repeats(f: Ref<Body>, name: string): boolean {
   let count: Calls = { calls: 0, again: false };
   for (const s of f.body) callsIn({ of: "stmt", node: s }, name, false, count);
@@ -1467,7 +1473,7 @@ export class GenericClasses<H extends GenericClassesHost> {
   // The class a `new` builds; a generic one's type arguments come from the expression or are
   // inferred from the constructor's arguments.
   /** @throws {CompileError} */
-  construct(this: Mut<this>, name: string, typeArgs: TypeNode[], argTypes: Type[], at: Span): Ref<ClassInfo> | undefined {
+  construct(this: Mut<this>, name: string, typeArgs: Ref<TypeNode[]>, argTypes: Type[], at: Ref<Span>): Ref<ClassInfo> | undefined {
     const c = this.host.tables.arenas.classOf(this.host.classes.get(name));
     if (c !== undefined && typeArgs.length > 0) throw new CompileError("E0106", `type '${name}' is not generic`, at.start, at.end);
     const template = this.host.templates.get(name);

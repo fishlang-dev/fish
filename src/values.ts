@@ -8,7 +8,7 @@ import type { Direct } from "./overloads.ts";
 import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { binaryType, SUPPORTED_OPERATORS } from "./operators.ts";
-import type { AssignOp, BinaryOp, Expr, Func, Interface, MatchArm, ObjectProp, Param, PropertyName, Pattern, Span, Stmt, TypeMember, TypeNode, TypeParam } from "./parser.ts";
+import type { AssignOp, BinaryOp, Expr, Func, Id, Interface, MatchArm, ObjectProp, Param, PropertyName, Pattern, Span, Stmt, TypeMember, TypeNode, TypeParam } from "./parser.ts";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.ts";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings, type InScope } from "./resolve.ts";
 import { infer } from "./generics.ts";
@@ -190,7 +190,7 @@ export interface Context {
   /** @throws {CompileError} */
   construct(this: Mut<this>, name: string, typeArgs: Ref<TypeNode[]>, argTypes: Type[], at: Ref<Span>): ClassId | undefined;
   // A generic class's constructor parameters as written.
-  templateParams(name: string): Param[] | undefined;
+  templateParams(this: Mut<this>, name: string): Param[] | undefined;
   // A generic class as its definition is checked, whose statics every instance shares.
   definedClass(this: Mut<this>, name: string): ClassId | undefined;
   members(): Members;
@@ -210,7 +210,7 @@ export interface Context {
   /** @throws {CompileError} */
   instanceOf(this: Mut<this>, f: BodyId, bindings: Map<string, Type> | undefined): InstanceId;
   /** @throws {CompileError} */
-  instantiate(this: Mut<this>, f: BodyId, typeArgs: Ref<TypeNode[]>, args: Ref<Expr[]>, argTypes: Type[], at: Ref<Span>): InstanceId;
+  instantiate(this: Mut<this>, f: BodyId, typeArgs: Ref<TypeNode[]>, args: Ref<Expr[]>, argTypes: Type[], at: Ref<Span & Id>): InstanceId;
   /** @throws {CompileError} */
   paramTypes(this: Mut<this>, instance: InstanceId): Type[];
   // The binding a name refers to; `at`, the use, is where a closure first captures it.
@@ -220,7 +220,7 @@ export interface Context {
   peek(name: string): LocalId | undefined;
   reach(this: Mut<this>, l: LocalId, at: Ref<Expr | ObjectProp> | undefined): LocalId;
   // The names a use at `at` reaches, its bindings in scope then top-level values, for suggesting one.
-  names(at: usize): string[];
+  names(this: Mut<this>, at: usize): string[];
   // The names of the classes, generic ones included, a use at `at` reaches.
   classNames(at: usize): string[];
   // Records the bindings a call of a nested function builds its environment from.
