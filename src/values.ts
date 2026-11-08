@@ -1519,7 +1519,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (variant !== undefined) {
       const nothing = this.ctx.tables.typing.lower(this.ctx.resolveType(variant.typeArgs[0]!)) === "void";
       const named = this.ctx.tables.rewrites.replace({ id: idOfExpr(e.callee) }, { id: 0, kind: "ident", name: nothing ? `${variant.name} void` : variant.name, start: e.callee.start, end: e.callee.end });
-      const made = this.ctx.tables.rewrites.replace(e, { ...callNode(e), callee: named, typeArgs: nothing ? variant.typeArgs.slice(1) : variant.typeArgs });
+      const made = this.ctx.tables.rewrites.replace(e, { ...callNode(e), callee: cloneExpr(named), typeArgs: cloneTypeNodes(nothing ? variant.typeArgs.slice(1) : variant.typeArgs) });
       if (made.kind === "call") return this.callNamed(made);
     }
     return this.callNamed(e);
@@ -1535,7 +1535,7 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private callResult(this: Mut<this>, e: Ref<Call>, result: { type: Type; what: string }): { type: Type; what: string } {
     if (e.optional && !this.ctx.tables.optionalCalls.has(e)) throw unsupported("optional calls", e);
-    return e.callee.kind === "member" && (this.linked(e.callee) || e.optional) && result.type !== "void" ? { type: this.optional(result.type, e), what: result.what } : result;
+    return e.callee.kind === "member" && (this.linked(e.callee) || e.optional) && result.type !== "void" ? { type: this.optional(result.type, { start: e.start, end: e.end }), what: result.what } : result;
   }
 
   // `super(...)`: the base class's constructor run on this object.
@@ -1588,7 +1588,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private iteratorCallee(this: Mut<this>, e: Ref<Call>, key: Ref<Expr>): Expr | undefined {
     if (key.kind !== "index" || !isIteratorKey(key.index)) return undefined;
     const member = this.ctx.tables.rewrites.replace(key, { id: 0, kind: "member", object: cloneExpr(key.object), name: ITERATOR, optional: key.optional, start: key.start, end: key.end });
-    return this.ctx.tables.rewrites.replace(e, { ...callNode(e), callee: member });
+    return this.ctx.tables.rewrites.replace(e, { ...callNode(e), callee: cloneExpr(member) });
   }
   /** @throws {CompileError} */
   private calleeKeyed(this: Mut<this>, e: Ref<Call>): { type: Type; what: string } {
@@ -1596,7 +1596,7 @@ export class Expressions<C extends Context> implements Union<C> {
     this.untuple(e.callee);
     const now = this.ctx.tables.rewrites.rewritten(e.callee);
     if (now !== undefined) {
-      const made = this.ctx.tables.rewrites.replace(e, { ...callNode(e), callee: now });
+      const made = this.ctx.tables.rewrites.replace(e, { ...callNode(e), callee: cloneExpr(now) });
       if (made.kind === "call") return this.calleeNow(made);
     }
     return this.calleeNow(e);
@@ -6696,7 +6696,7 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // What a link of an optional chain gives: an Option of what it reads.
   /** @throws {CompileError} */
-  private optional(this: Mut<this>, t: Type, at: Ref<Expr>): Type {
+  private optional(this: Mut<this>, t: Type, at: Ref<Span>): Type {
     if (this.ctx.tables.typing.holdsRef(t) && !this.isRefType(t)) throw unsupported("Options holding references", at);
     return this.ctx.tables.typing.unionType([t, "null"]);
   }
@@ -7921,7 +7921,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const shared = orKind === "union" ? unionField(this.ctx.tables.typing, object as UnionType, e.name, e) : undefined;
     if (shared !== undefined) {
       this.loadThrough(e, object, through);
-      return this.linked(e) ? this.optional(shared, e) : shared;
+      return this.linked(e) ? this.optional(shared, { start: e.start, end: e.end }) : shared;
     }
     if (orKind === "class") this.cls(object as ClassType);
     // A dictionary's property is the entry under that key, as `o[k]` reads it.
@@ -7938,13 +7938,13 @@ export class Expressions<C extends Context> implements Union<C> {
       if ((isSet ? SET_METHODS : MAP_METHODS).has(e.name)) throw new CompileError("E0503", `'${isSet ? "Set" : "Map"}' methods can only be called, like 'm.${e.name}(...)'`, e.start, e.end);
       if (e.name !== "size") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, ["size", ...(isSet ? SET_METHODS : MAP_METHODS)])}`, e.start, e.end);
       this.loadThrough(e, object, through);
-      return this.linked(e) ? this.optional("usize", e) : "usize";
+      return this.linked(e) ? this.optional("usize", { start: e.start, end: e.end }) : "usize";
     }
     // A tuple's one property is its length: the count of its elements, up to the last
     // optional one there.
     if (this.ctx.tables.typing.isTuple(object) && this.ctx.tables.typing.rec(object as ObjectType).match !== true && e.name === "length") {
       this.loadThrough(e, object, through);
-      return this.linked(e) ? this.optional("usize", e) : "usize";
+      return this.linked(e) ? this.optional("usize", { start: e.start, end: e.end }) : "usize";
     }
     // A fixed array's one property is its length, known while compiling.
     if (this.isFixed(object)) {
@@ -7962,7 +7962,7 @@ export class Expressions<C extends Context> implements Union<C> {
       if (e.name === "capacity" && this.ctx.copiesOut.has(e.object)) throw new CompileError("E0304", `a shared value's array is read as a copy, so read its capacity inside '${this.placeText(e.object).split(".")[0]}.update(...)'`, e.start, e.end);
       if (e.name !== "length" && e.name !== "capacity") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.tables.typing.show(object)}'${didYouMean(e.name, ["length", "capacity", ...ARRAY_METHODS])}`, e.start, e.end);
       this.loadThrough(e, object, through);
-      return this.linked(e) ? this.optional("usize", e) : "usize";
+      return this.linked(e) ? this.optional("usize", { start: e.start, end: e.end }) : "usize";
     }
     // A string's one property is its length in UTF-16 code units, a type parameter's bounded
     // by strings included.
@@ -7971,7 +7971,7 @@ export class Expressions<C extends Context> implements Union<C> {
       if (stringMethods(this.ctx.tables.typing)[e.name] !== undefined) throw new CompileError("E0503", `string methods can only be called, like 's.${e.name}(...)'`, e.start, e.end);
       if (e.name !== "length") throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type 'string'${didYouMean(e.name, ["length", ...Object.keys(stringMethods(this.ctx.tables.typing))])}`, e.start, e.end);
       this.text(e.object, plain, this.linked(e));
-      return this.linked(e) ? this.optional("usize", e) : "usize";
+      return this.linked(e) ? this.optional("usize", { start: e.start, end: e.end }) : "usize";
     }
     if (this.delegated(object, e.name)) {
       const through = this.throughEmbedded(e);
@@ -7995,7 +7995,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const returns = this.ctx.returnOf(run, e);
       // A getter's reference borrows from its object.
       if (this.ctx.tables.typing.holdsRef(returns)) this.ctx.borrowsFrom.set(cloneExpr(e), [cloneExpr(e.object)]);
-      return this.linked(e) ? this.optional(returns, e) : returns;
+      return this.linked(e) ? this.optional(returns, { start: e.start, end: e.end }) : returns;
     }
     if (found === undefined && classId !== undefined && inherited(this.ctx.tables.arenas, this.ctx.tables.arenas.classOf(classId), "methods", e.name) !== undefined) throw new CompileError("E0801", "methods can't be used as values yet; call it", e.start, e.end);
     if (found === undefined && classId !== undefined && inherited(this.ctx.tables.arenas, this.ctx.tables.arenas.classOf(classId), "setters", e.name) !== undefined) throw new CompileError("E0208", `property '${e.name}' has a setter but no getter`, e.start, e.end);
@@ -8016,7 +8016,7 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     if (!this.ctx.calls.has(e)) this.loadThrough(e, object, through);
     const unfolded = this.ctx.tables.typing.unfolded(found.type);
-    if (this.linked(e)) return this.optional(unfolded, e);
+    if (this.linked(e)) return this.optional(unfolded, { start: e.start, end: e.end });
     const narrowed = this.ctx.calls.has(e) || this.ctx.exprsState.asDeclared.has(e) ? undefined : this.ctx.narrowedField(e);
     if (narrowed === undefined) {
       this.ctx.instance.narrowedFields?.delete(e);
