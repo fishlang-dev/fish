@@ -713,26 +713,28 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         for (const d of s.declarations) {
           if (d.target.kind !== "ident") throw unsupported("destructuring top-level consts", d.target);
           if (["undefined", "console", "print"].includes(d.target.name)) throw new CompileError("E0407", `'${d.target.name}' already names something every program has; call the const something else`, d.target.start, d.target.end);
-          if (!d.init) throw new CompileError("E0404", "a top-level 'const' needs its value", d.start, d.end);
+          if (d.init === undefined) throw new CompileError("E0404", "a top-level 'const' needs its value", d.start, d.end);
           // An arrow held by a const is the function declaration it amounts to; the const's
           // written type is checked against it once its body is.
           if (d.init.kind === "arrow") {
             const generic = d.init.typeParams.some((p) => !isLifetime(p));
             const signature = signatureIn(program, d.type);
             const genericType = signature !== undefined && signature.typeParams.some((p) => !isLifetime(p));
-            if (d.type && (generic || genericType)) throw new CompileError("E0801", "a const holding a generic arrow takes its type from the arrow; drop the const's written type", d.type.start, d.type.end);
-            const body = addBodyTo(tables, arrowFunction(tables.ids, d.target.name, typedBy(d.init, signature), d));
+            if (d.type !== undefined && (generic || genericType)) throw new CompileError("E0801", "a const holding a generic arrow takes its type from the arrow; drop the const's written type", d.type.start, d.type.end);
+            const body = addBodyTo(tables, arrowFunction(tables.ids, d.target.name, typedBy({ ...d.init }, signature), d));
             top.funcs.push(body);
-            if (d.type) top.typedArrows.push({ body, type: d.type, arrow: d.init, name: d.target.name });
+            if (d.type !== undefined) top.typedArrows.push({ body, type: cloneTypeNode(d.type!), arrow: { start: d.init.start, end: d.init.end, throws: d.init.throws === undefined ? undefined : cloneTypeNode(d.init.throws!) }, name: d.target.name });
             continue;
           }
-          const giving: Stmt = { id: nextId(tables.ids), kind: "return", value: d.init, start: d.init.start, end: d.init.end };
-          top.funcs.push(addBodyTo(tables, Object.assign({ ...made, id: nextId(tables.ids), name: `const ${d.target.name}`, returnType: d.type, body: [giving], start: d.start, end: d.end }, { comptime: "const" as const })));
+          const giving: Stmt = { id: nextId(tables.ids), kind: "return", value: cloneExpr(d.init), start: d.init.start, end: d.init.end };
+          const constant: Func & { comptime: "const" } = { ...made, id: nextId(tables.ids), name: `const ${d.target.name}`, returnType: d.type === undefined ? undefined : cloneTypeNode(d.type!), body: [giving], start: d.start, end: d.end, comptime: "const" };
+          top.funcs.push(addBodyTo(tables, constant));
         }
         continue;
       }
       if (s.kind === "comptime") {
-        top.funcs.push(addBodyTo(tables, Object.assign({ ...made, id: nextId(tables.ids), name: `comptime ${s.start}`, returnType: undefined, body: s.body }, { comptime: "block" as const })));
+        const block: Func & { comptime: "block" } = { ...made, id: nextId(tables.ids), name: `comptime ${s.start}`, returnType: undefined, body: [...s.body], comptime: "block" };
+        top.funcs.push(addBodyTo(tables, block));
         continue;
       }
       if (s.kind === "let") throw new CompileError("E0404", "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
@@ -1373,14 +1375,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const { body, type, arrow, name } = this.typedArrows.shift()!;
       try {
         const want = this.resolveType(type);
-        const got = this.functionTypeOf(this.tables.arenas.bodyOf(body), arrow);
+        const got = this.functionTypeOf(cloneSignature(this.tables.arenas.bodyOf(body)), arrow);
         if (!this.tables.typing.fits(got, want)) throw new CompileError("E0101", `type '${this.tables.typing.show(got)}' is not assignable to type '${this.tables.typing.show(want)}'`, arrow.start, arrow.end);
         // The function type `typeof` gives carries no error type, so the arrow's is checked here.
+        const throwsAt = arrow.throws !== undefined ? { start: arrow.throws!.start, end: arrow.throws!.end } : undefined;
         const thrown = arrow.throws !== undefined ? this.resolveType(arrow.throws!) : undefined;
         const wanted = this.recOf(want);
         const allowed = wanted?.kind === "function" ? wanted.throws : undefined;
         if (thrown !== undefined && (allowed === undefined || !this.tables.typing.fits(thrown, allowed))) {
-          throw new CompileError("E0602", `'${name}' can throw '${this.tables.typing.show(thrown)}', which its type '${this.tables.typing.show(want)}' doesn't declare; add 'throws ${this.tables.typing.show(thrown)}' to the const's type`, arrow.throws!.start, arrow.throws!.end);
+          throw new CompileError("E0602", `'${name}' can throw '${this.tables.typing.show(thrown)}', which its type '${this.tables.typing.show(want)}' doesn't declare; add 'throws ${this.tables.typing.show(thrown)}' to the const's type`, throwsAt!.start, throwsAt!.end);
         }
       } catch (e) {
         if (!(e instanceof CompileError)) throw e;
@@ -2054,7 +2057,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       made.branded = { params, returns: brandedReturns };
     }
     for (const l of localIds) {
-      const lowered = this.lowerMade(this.tables.arenas.localOf(l).type, made);
+      const declaredType = this.tables.arenas.localOf(l).type;
+    const lowered = this.lowerMade(declaredType, made);
       let binding = this.tables.arenas.localMut(l);
     binding.type = lowered;
     }
