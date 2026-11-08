@@ -11,11 +11,11 @@ import { cloneExpr, cloneOneOf2 } from "./rebuild.ts";
 // The checker's rules for unions: what goes into one, and what comparing one means.
 
 // What these rules need from expression checking.
-export type UnionContext = {
-  tables: Tables;
-  types: NodeMap<Expr, Type>;
-  coercions: NodeMap<Expr, Type>;
-};
+export interface UnionContext {
+  tables(this: Mut<this>): Mut<Tables>;
+  types(this: Mut<this>): Mut<NodeMap<Expr, Type>>;
+  coercions(this: Mut<this>): Mut<NodeMap<Expr, Type>>;
+}
 export interface Union<B extends UnionContext> {
   ctx: Mut<B>;
   /** @throws {CompileError} */
@@ -176,20 +176,20 @@ export function unionField(typing: Mut<Typing>, union: UnionType, name: string, 
 /** @throws {CompileError} */
 export function instanceofCheck<B extends UnionContext, H extends Union<B>>(e: Ref<Extract<Expr, { kind: "binary" }>>, host: Mut<H>): Type {
   const left = host.read(e.left);
-  const l = typeof left === "string" ? undefined : host.ctx.tables.typing.rec(left);
+  const l = typeof left === "string" ? undefined : host.ctx.tables().typing.rec(left);
   const held = l !== undefined && l.kind === "ref" ? l.to : left;
-  const h = typeof held === "string" ? undefined : host.ctx.tables.typing.rec(held);
+  const h = typeof held === "string" ? undefined : host.ctx.tables().typing.rec(held);
   if (h !== undefined && h.kind === "dyn") {
-    throw new CompileError("E0109", `a '${host.ctx.tables.typing.show(held)}' keeps no record of its value's class, so 'instanceof' can't test it; add a method to the interface that says`, e.start, e.end);
+    throw new CompileError("E0109", `a '${host.ctx.tables().typing.show(held)}' keeps no record of its value's class, so 'instanceof' can't test it; add a method to the interface that says`, e.start, e.end);
   }
   const c = e.right.kind === "ident" ? host.classNamed(e.right.name) : undefined;
   // `Map`, `Set` and `Array` aren't classes in Fish; testing for one picks a union's member.
   if (c === undefined && e.right.kind === "ident" && (e.right.name === "Map" || e.right.name === "Set" || e.right.name === "Array")) {
     if (h === undefined || h.kind === "literal" || h.kind === "pattern") {
-      throw new CompileError("E0109", `'instanceof' tests an object, and a '${host.ctx.tables.typing.show(held)}' is never a ${e.right.name}`, e.start, e.end);
+      throw new CompileError("E0109", `'instanceof' tests an object, and a '${host.ctx.tables().typing.show(held)}' is never a ${e.right.name}`, e.start, e.end);
     }
     const kind: Kind = e.right.name === "Map" ? "Map" : e.right.name === "Set" ? "Set" : "Array";
-    host.ctx.tables.kindTests.set(cloneExpr(e), kind);
+    host.ctx.tables().kindTests.set(cloneExpr(e), kind);
     return "boolean";
   }
   // A generic class written without its type arguments is the instance of it the value may be.
@@ -200,10 +200,10 @@ export function instanceofCheck<B extends UnionContext, H extends Union<B>>(e: R
   if (c === undefined && name !== undefined) {
     for (const m of members) {
       if (typeof m === "string") continue;
-      const r = host.ctx.tables.typing.rec(m);
+      const r = host.ctx.tables().typing.rec(m);
       let x: ClassType | undefined = r.kind === "class" ? (m as ClassType) : undefined;
       while (x !== undefined) {
-        const xr = host.ctx.tables.typing.rec(x);
+        const xr = host.ctx.tables().typing.rec(x);
         if (xr.generic !== undefined && xr.generic.name === name) {
           instances.add(x);
           break;
@@ -216,7 +216,7 @@ export function instanceofCheck<B extends UnionContext, H extends Union<B>>(e: R
   if (found.length > 1) throw new CompileError("E0109", `'${name!}' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart; test a field that says which`, e.right.start, e.right.end);
   const tested = c !== undefined ? c : found.length > 0 ? found[0] : undefined;
   if (tested === undefined) throw new CompileError("E0109", "the right side of 'instanceof' must be a class, or a generic class this value may be an instance of", e.right.start, e.right.end);
-  host.ctx.types.set(cloneExpr(e.right), tested);
+  host.ctx.types().set(cloneExpr(e.right), tested);
   return "boolean";
 }
 
@@ -230,19 +230,19 @@ export function keyCheck<B extends UnionContext, H extends Union<B>>(e: Ref<Extr
   }
   host.read(e.left);
   const key = e.left.value;
-  const known = host.ctx.tables.keyTests.get(e);
+  const known = host.ctx.tables().keyTests.get(e);
   let verdicts = known !== undefined ? known : new TypeMap<Type, Verdict>();
   let visiting = new TypeSet<Type>();
   const right = host.read(e.right);
   keyVerdict<B, H>(host, e, key, right, verdicts, visiting);
-  host.ctx.tables.keyTests.set(cloneExpr(e), verdicts);
+  host.ctx.tables().keyTests.set(cloneExpr(e), verdicts);
   return "boolean";
 }
 
 // Whether a value of `t` has key `key`, recorded in `verdicts` for it and for it lowered.
 /** @throws {CompileError} */
 function keyVerdict<B extends UnionContext, H extends Union<B>>(host: Mut<H>, e: Ref<Extract<Expr, { kind: "binary" }>>, key: string, t: Type, verdicts: Mut<TypeMap<Type, Verdict>>, visiting: Mut<TypeSet<Type>>): Verdict {
-  const r = typeof t === "string" ? undefined : host.ctx.tables.typing.rec(t);
+  const r = typeof t === "string" ? undefined : host.ctx.tables().typing.rec(t);
   const known = verdicts.get(t);
   if (known !== undefined) return known;
   // A type that holds itself answers for its own members, which decide it.
@@ -263,19 +263,19 @@ function keyVerdict<B extends UnionContext, H extends Union<B>>(host: Mut<H>, e:
   } else if (r !== undefined && (r.kind === "object" || r.kind === "class")) {
     // A string key never names a `#` member. A class's declared field is always its own
     // property in JavaScript, even an optional one left unset.
-    const field = key.startsWith("#") ? undefined : host.ctx.tables.typing.field(t as Exclude<Type, string>, key);
+    const field = key.startsWith("#") ? undefined : host.ctx.tables().typing.field(t as Exclude<Type, string>, key);
     const method = !key.startsWith("#") && r.kind === "class" && host.declares(t as ClassType, key);
     found = field !== undefined && field.optional !== undefined && r.kind === "object" ? "both" : field !== undefined || method ? "yes" : "no";
   } else if (r !== undefined && r.kind === "dyn") {
-    throw new CompileError("E0109", `a '${host.ctx.tables.typing.show(t)}' keeps no record of its value's class, so 'in' can't test it; add a method to the interface that says`, e.start, e.end);
+    throw new CompileError("E0109", `a '${host.ctx.tables().typing.show(t)}' keeps no record of its value's class, so 'in' can't test it; add a method to the interface that says`, e.start, e.end);
   } else {
-    const shown = host.ctx.tables.typing.show(t);
+    const shown = host.ctx.tables().typing.show(t);
     throw new CompileError("E0109", `'in' tests an object or a class instance for a key, and ${/^[aeiou]/.test(shown) ? "an" : "a"} '${shown}' has none to test; narrow the value to an object first`, e.right.start, e.right.end);
   }
   visiting.delete(t);
   verdicts.set(t, found);
   // Codegen sees the type lowered, which drops the marks that say a field is optional.
-  const lowered = host.ctx.tables.typing.lower(t);
+  const lowered = host.ctx.tables().typing.lower(t);
   if (!verdicts.has(lowered)) verdicts.set(lowered, found);
   return found;
 }
@@ -305,15 +305,15 @@ export function holdsArgument(typing: Ref<Typing>, t: UnionType): boolean {
 // A `?:` whose sides have different types makes the union of both, as in TypeScript.
 /** @throws {CompileError} */
 export function bothSides<B extends UnionContext, H extends Union<B>>(host: Mut<H>, e: Ref<Extract<Expr, { kind: "conditional" }>>, then: Type, otherwise: Type): Type {
-  const kinds = [then, otherwise].map((t) => (typeof t === "string" ? t : host.ctx.tables.typing.rec(t).kind));
+  const kinds = [then, otherwise].map((t) => (typeof t === "string" ? t : host.ctx.tables().typing.rec(t).kind));
   if (kinds.includes("closure")) throw unsupported("unions holding functions", { start: e.start, end: e.end });
   if (kinds.includes("void") || kinds.includes("interface") || kinds.includes("param")) {
-    throw new CompileError("E0101", `both sides of '?:' must have the same type, not '${host.ctx.tables.typing.show(then)}' and '${host.ctx.tables.typing.show(otherwise)}'`, e.start, e.end);
+    throw new CompileError("E0101", `both sides of '?:' must have the same type, not '${host.ctx.tables().typing.show(then)}' and '${host.ctx.tables().typing.show(otherwise)}'`, e.start, e.end);
   }
-  const union = host.ctx.tables.typing.unionType([then, otherwise]);
-  const intoThen = `type '${host.ctx.tables.typing.show(then)}' is not assignable to type '${host.ctx.tables.typing.show(union)}'`;
+  const union = host.ctx.tables().typing.unionType([then, otherwise]);
+  const intoThen = `type '${host.ctx.tables().typing.show(then)}' is not assignable to type '${host.ctx.tables().typing.show(union)}'`;
   host.coerce(e.then, then, union, intoThen);
-  const intoElse = `type '${host.ctx.tables.typing.show(otherwise)}' is not assignable to type '${host.ctx.tables.typing.show(union)}'`;
+  const intoElse = `type '${host.ctx.tables().typing.show(otherwise)}' is not assignable to type '${host.ctx.tables().typing.show(union)}'`;
   host.coerce(e.else, otherwise, union, intoElse);
   return union;
 }
@@ -324,29 +324,29 @@ export function bothSides<B extends UnionContext, H extends Union<B>>(host: Mut<
 export function intoUnion<B extends UnionContext, H extends Union<B>>(e: Ref<Expr>, given: Type, to: UnionType, message: string, host: Mut<H>) {
   let type = given;
   // A literal goes into the one number type a union holds.
-  const numbers = numberMembers(host.ctx.tables.typing, to);
-  if (!host.ctx.tables.typing.rec(to).members.includes(type) && numbers.length === 1 && host.adapt(e, numbers[0]!)) type = numbers[0]!;
+  const numbers = numberMembers(host.ctx.tables().typing, to);
+  if (!host.ctx.tables().typing.rec(to).members.includes(type) && numbers.length === 1 && host.adapt(e, numbers[0]!)) type = numbers[0]!;
   // In an instance, a type parameter no member takes goes in as the members its type argument has.
   let sources: Type[] = [];
-  for (const m of unionMembers(host.ctx.tables.typing, type)) for (const s of sourceParts(host.ctx.tables.typing, m, to)) sources.push(s);
-  if (sources.some((s) => kindOf(host.ctx.tables.typing, s) === "generator")) throw unsupported("unions holding generators", { start: e.start, end: e.end });
-  if (sources.some((s) => kindOf(host.ctx.tables.typing, s) === "future")) throw unsupported("unions holding promises", { start: e.start, end: e.end });
-  const targets = host.ctx.tables.typing.rec(to).members;
+  for (const m of unionMembers(host.ctx.tables().typing, type)) for (const s of sourceParts(host.ctx.tables().typing, m, to)) sources.push(s);
+  if (sources.some((s) => kindOf(host.ctx.tables().typing, s) === "generator")) throw unsupported("unions holding generators", { start: e.start, end: e.end });
+  if (sources.some((s) => kindOf(host.ctx.tables().typing, s) === "future")) throw unsupported("unions holding promises", { start: e.start, end: e.end });
+  const targets = host.ctx.tables().typing.rec(to).members;
   for (const source of sources) {
     // A throw expression never gives a value, so it goes nowhere in particular.
     if (source === "never") continue;
     const value = literalValue(e);
     // A plain literal expression never becomes an enum's member.
     const literal = targets.find((m) => {
-      const r = typeof m === "string" ? undefined : host.ctx.tables.typing.rec(m);
+      const r = typeof m === "string" ? undefined : host.ctx.tables().typing.rec(m);
       return r !== undefined && r.kind === "literal" && r.owner === undefined && r.value === value;
     });
-    const r = literal === undefined || typeof literal === "string" ? undefined : host.ctx.tables.typing.rec(literal);
-    if (literal !== undefined && r !== undefined && r.kind === "literal" && sources.length === 1 && host.ctx.tables.typing.baseOf(literal as LiteralType) === type) {
-      host.ctx.types.set(cloneExpr(e), literal);
+    const r = literal === undefined || typeof literal === "string" ? undefined : host.ctx.tables().typing.rec(literal);
+    if (literal !== undefined && r !== undefined && r.kind === "literal" && sources.length === 1 && host.ctx.tables().typing.baseOf(literal as LiteralType) === type) {
+      host.ctx.types().set(cloneExpr(e), literal);
       break;
     }
-    let into = host.ctx.tables.typing.membersFor(source, to);
+    let into = host.ctx.tables().typing.membersFor(source, to);
     // A fresh object literal may fit a member through its literal fields, as `{ ok: true }`
     // fits `{ ok: true }`; when exactly one member takes it that way, it becomes that shape.
     if (into.length === 0 && sources.length === 1) {
@@ -354,7 +354,7 @@ export function intoUnion<B extends UnionContext, H extends Union<B>>(e: Ref<Exp
       let at: usize = 0;
       let count = 0;
       for (let i: usize = 0; i < targets.length; i++) {
-        const shape = literalShape(host.ctx.tables.typing, e, targets[i]!, host.ctx.types);
+        const shape = literalShape(host.ctx.tables().typing, e, targets[i]!, host.ctx.types());
         if (shape === undefined) continue;
         count++;
         if (shaped === undefined) {
@@ -363,17 +363,17 @@ export function intoUnion<B extends UnionContext, H extends Union<B>>(e: Ref<Exp
         }
       }
       if (count === 1 && shaped !== undefined) {
-        applyShape(shaped, host.ctx.coercions, host.ctx.types);
+        applyShape(shaped, host.ctx.coercions(), host.ctx.types());
         into = [targets[at]!];
       }
     }
     if (into.length === 0) throw new CompileError("E0101", message, e.start, e.end);
     if (into.length > 1) {
-      throw new CompileError("E0109", `type '${host.ctx.tables.typing.show(source)}' fits more than one member of '${host.ctx.tables.typing.show(to)}': ${into.map((m) => `'${host.ctx.tables.typing.show(m)}'`).join(" and ")}`, e.start, e.end);
+      throw new CompileError("E0109", `type '${host.ctx.tables().typing.show(source)}' fits more than one member of '${host.ctx.tables().typing.show(to)}': ${into.map((m) => `'${host.ctx.tables().typing.show(m)}'`).join(" and ")}`, e.start, e.end);
     }
     if (sources.length === 1) host.excess(e, into[0]!);
   }
-  host.ctx.coercions.set(cloneExpr(e), to);
+  host.ctx.coercions().set(cloneExpr(e), to);
 }
 
 function kindOf(typing: Ref<Typing>, t: Type): string | undefined {
@@ -401,11 +401,11 @@ export function typeofComparison<B extends UnionContext, H extends Union<B>>(e: 
   const test = typeofTest(e);
   if (test === undefined) return undefined;
   const tested = host.read(test.operand);
-  const t = typeof tested === "string" ? undefined : host.ctx.tables.typing.rec(tested);
+  const t = typeof tested === "string" ? undefined : host.ctx.tables().typing.rec(tested);
   const held = t !== undefined && t.kind === "ref" ? t.to : tested;
-  const h = typeof held === "string" ? undefined : host.ctx.tables.typing.rec(held);
-  if (h !== undefined && h.kind === "union" && h.members.some((m) => host.ctx.tables.typing.isPlainJs(m))) throw new CompileError("E1005", `'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own`, test.operand.start, test.operand.end);
-  const names = host.ctx.tables.typing.isPlainJs(held) ? JS_TYPEOF : TYPEOF;
+  const h = typeof held === "string" ? undefined : host.ctx.tables().typing.rec(held);
+  if (h !== undefined && h.kind === "union" && h.members.some((m) => host.ctx.tables().typing.isPlainJs(m))) throw new CompileError("E1005", `'typeof' can't tell what a 'JsValue' in a union holds yet; test the 'JsValue' on its own`, test.operand.start, test.operand.end);
+  const names = host.ctx.tables().typing.isPlainJs(held) ? JS_TYPEOF : TYPEOF;
   if (test.name.kind !== "string" || !names.has(test.name.value)) {
     throw new CompileError("E0109", `'typeof' can only be compared with ${[...names].map((n) => `"${n}"`).join(", ")} here`, test.name.start, test.name.end);
   }
@@ -419,31 +419,31 @@ export function unionComparison<B extends UnionContext, H extends Union<B>>(e: R
   let left = host.read(e.left);
   let right = host.read(e.right);
   // An `unknown` equals a value of the type it holds, compared as that type.
-  if (host.ctx.tables.typing.isUnknown(left) || host.ctx.tables.typing.isUnknown(right)) return "boolean";
+  if (host.ctx.tables().typing.isUnknown(left) || host.ctx.tables().typing.isUnknown(right)) return "boolean";
   // A literal compared with a union holding one number type takes that type.
-  const leftNumbers = numberMembers(host.ctx.tables.typing, left, true);
+  const leftNumbers = numberMembers(host.ctx.tables().typing, left, true);
   if (leftNumbers.length === 1 && host.adapt(e.right, leftNumbers[0]!)) right = leftNumbers[0]!;
-  const rightNumbers = numberMembers(host.ctx.tables.typing, right, true);
+  const rightNumbers = numberMembers(host.ctx.tables().typing, right, true);
   if (rightNumbers.length === 1 && host.adapt(e.left, rightNumbers[0]!)) left = rightNumbers[0]!;
   // In an instance, a union holding a type parameter is the union its type argument flattens into.
   // So is a type parameter the type it stands for.
-  const flatLeft = flat(host.ctx.tables.typing, left);
-  const flatRight = flat(host.ctx.tables.typing, right);
+  const flatLeft = flat(host.ctx.tables().typing, left);
+  const flatRight = flat(host.ctx.tables().typing, right);
   const instanced = flatLeft !== left || flatRight !== right;
   left = flatLeft;
   right = flatRight;
-  if (!isUnion(host.ctx.tables.typing, left) && !isUnion(host.ctx.tables.typing, right)) {
+  if (!isUnion(host.ctx.tables().typing, left) && !isUnion(host.ctx.tables().typing, right)) {
     if (!instanced) return undefined;
     // What's left is a plain value, which a literal on the other side becomes to be compared.
-    if (host.ctx.tables.typing.lower(left) === "string" && host.ctx.tables.typing.lower(right) !== "string" && host.ctx.tables.typing.widenLet(right) === "string") host.ctx.coercions.set(cloneExpr(e.right), "string");
-    if (host.ctx.tables.typing.lower(right) === "string" && host.ctx.tables.typing.lower(left) !== "string" && host.ctx.tables.typing.widenLet(left) === "string") host.ctx.coercions.set(cloneExpr(e.left), "string");
+    if (host.ctx.tables().typing.lower(left) === "string" && host.ctx.tables().typing.lower(right) !== "string" && host.ctx.tables().typing.widenLet(right) === "string") host.ctx.coercions().set(cloneExpr(e.right), "string");
+    if (host.ctx.tables().typing.lower(right) === "string" && host.ctx.tables().typing.lower(left) !== "string" && host.ctx.tables().typing.widenLet(left) === "string") host.ctx.coercions().set(cloneExpr(e.left), "string");
     if (isNumeric(left)) host.adapt(e.right, left);
     if (isNumeric(right)) host.adapt(e.left, right);
   }
-  if (objectsMeet(host.ctx.tables.typing, left, right)) throw unsupported("comparisons of objects", { start: e.start, end: e.end });
+  if (objectsMeet(host.ctx.tables().typing, left, right)) throw unsupported("comparisons of objects", { start: e.start, end: e.end });
   // A type parameter's argument may miss a value its bound has, which the definition compared.
-  if (!comparable(host.ctx.tables.typing, left, right) && !isParam(host.ctx.tables.typing, host.read(e.left)) && !isParam(host.ctx.tables.typing, host.read(e.right))) {
-    throw new CompileError("E0112", `this comparison appears to be unintentional because the types '${host.ctx.tables.typing.show(left)}' and '${host.ctx.tables.typing.show(right)}' have no overlap`, e.start, e.end);
+  if (!comparable(host.ctx.tables().typing, left, right) && !isParam(host.ctx.tables().typing, host.read(e.left)) && !isParam(host.ctx.tables().typing, host.read(e.right))) {
+    throw new CompileError("E0112", `this comparison appears to be unintentional because the types '${host.ctx.tables().typing.show(left)}' and '${host.ctx.tables().typing.show(right)}' have no overlap`, e.start, e.end);
   }
   return "boolean";
 }

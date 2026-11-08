@@ -83,7 +83,7 @@ type Test =
 // What narrowing needs from the body it checks: each expression's type and binding as checked,
 // which variables may narrow, the key a field path narrows under, and a type predicate's call.
 export interface GuardHost {
-  tables: Tables;
+  tables(this: Mut<this>): Mut<Tables>;
   typeChecked(e: Ref<Expr>): Type | undefined;
   localRead(e: Ref<Expr>): LocalId | undefined;
   narrowable(this: Mut<this>, l: Ref<Local>): boolean;
@@ -99,7 +99,7 @@ export interface GuardHost {
 // What a condition proves when it is true and when it is false.
 /** @throws {CompileError} */
 export function guard<H extends GuardHost>(host: Mut<H>, written: Ref<Expr>): Guard {
-  const peeked = host.tables.rewrites.getExpr(written.id);
+  const peeked = host.tables().rewrites.getExpr(written.id);
   const e: Ref<Expr> = peeked !== undefined ? peeked : written;
   // `isFish(x)` with `x is Fish` leaves x's members that are a Fish, and when false the rest.
   const proved = e.kind === "call" ? host.predicate(e) : undefined;
@@ -112,16 +112,16 @@ export function guard<H extends GuardHost>(host: Mut<H>, written: Ref<Expr>): Gu
     const inner = guard(host, e.operand);
     return { yes: inner.no, no: inner.yes };
   }
-  const presence = host.tables.presenceTests.get(e);
+  const presence = host.tables().presenceTests.get(e);
   if (presence !== undefined) {
     const root = host.pathKey(presence.object);
     if (root === undefined) return nothing();
     const there: Facts = new Map([[presentKey(root, presence.name), "boolean"]]);
     return presence.when ? { yes: there, no: new Map() } : { yes: new Map(), no: there };
   }
-  const keyed = host.tables.keyTests.get(e);
+  const keyed = host.tables().keyTests.get(e);
   if (keyed !== undefined && e.kind === "binary") return split(host, e.right, { kind: "keyed", verdicts: keyed }, true);
-  const kind = host.tables.kindTests.get(e);
+  const kind = host.tables().kindTests.get(e);
   if (kind !== undefined) {
     if (e.kind === "call") return split(host, e.args[0]!, { kind: "of", of: kind }, true);
     if (e.kind === "binary") return split(host, e.left, { kind: "of", of: kind }, true);
@@ -131,7 +131,7 @@ export function guard<H extends GuardHost>(host: Mut<H>, written: Ref<Expr>): Gu
     const a = guard(host, e.left);
     const b = guard(host, e.right);
     // `a && b` is true when both are, and false when either is; `||` the other way round.
-    return e.op === "&&" ? { yes: both(a.yes, b.yes), no: either(host.tables.typing, a.no, b.no) } : { yes: either(host.tables.typing, a.yes, b.yes), no: both(a.no, b.no) };
+    return e.op === "&&" ? { yes: both(a.yes, b.yes), no: either(host.tables().typing, a.no, b.no) } : { yes: either(host.tables().typing, a.yes, b.yes), no: both(a.no, b.no) };
   }
   if (e.op === "instanceof") {
     const c = host.typeChecked(e.right);
@@ -141,11 +141,11 @@ export function guard<H extends GuardHost>(host: Mut<H>, written: Ref<Expr>): Gu
   const test = typeofTest(e);
   if (test !== undefined) {
     const name = test.name.kind === "string" ? test.name.value : undefined;
-    const local = test.operand.kind === "ident" ? host.tables.arenas.localOf(host.localRead(test.operand)) : undefined;
+    const local = test.operand.kind === "ident" ? host.tables().arenas.localOf(host.localRead(test.operand)) : undefined;
     // A JsValue that is a string, number or boolean is read as a Fish one where that is known.
     const read = name !== undefined ? jsRead(name) : undefined;
     const tested = host.typeChecked(test.operand);
-    const plainJs = tested !== undefined && host.tables.typing.holdsPlainJs(tested);
+    const plainJs = tested !== undefined && host.tables().typing.holdsPlainJs(tested);
     if (local !== undefined && read !== undefined && plainJs && host.narrowable(local)) {
       const facts: Guard = { yes: new Map([[bindingKey(local.localId), read]]), no: new Map() };
       return e.op === "===" ? facts : { yes: facts.no, no: facts.yes };
@@ -183,43 +183,43 @@ function compared<H extends GuardHost>(host: Mut<H>, subject: Ref<Expr>, other: 
 // narrows it to that, and its failing leaves it as it was.
 /** @throws {CompileError} */
 function split<H extends GuardHost>(host: Mut<H>, subject: Ref<Expr>, test: Test, positive: boolean, unknownTo?: Type): Guard {
-  const local = subject.kind === "ident" ? host.tables.arenas.localOf(host.localRead(subject)) : undefined;
+  const local = subject.kind === "ident" ? host.tables().arenas.localOf(host.localRead(subject)) : undefined;
   const key = local !== undefined && host.narrowable(local) ? bindingKey(local.localId) : subject.kind === "member" ? host.pathKey(subject) : undefined;
   const type = host.typeChecked(subject);
   if (key === undefined || type === undefined) return nothing();
   // A reference narrows to a reference to fewer members; a mutable one only to a single
   // member, which it can point to inside the union.
-  const t = typeof type === "string" ? undefined : host.tables.typing.rec(type);
+  const t = typeof type === "string" ? undefined : host.tables().typing.rec(type);
   const ref = t !== undefined && t.kind === "ref" ? t : undefined;
   // A type parameter bounded by a union or primitive splits as what it stands for.
   const read = ref !== undefined ? ref.to : type;
-  const p = typeof read === "string" ? undefined : host.tables.typing.rec(read);
-  const held = p !== undefined && p.kind === "param" && p.concrete !== undefined && p.bound === undefined ? (p.within === true ? p.concrete : host.tables.typing.lowerKeepingBrands(read)) : read;
-  const h = typeof held === "string" ? undefined : host.tables.typing.rec(held);
+  const p = typeof read === "string" ? undefined : host.tables().typing.rec(read);
+  const held = p !== undefined && p.kind === "param" && p.concrete !== undefined && p.bound === undefined ? (p.within === true ? p.concrete : host.tables().typing.lowerKeepingBrands(read)) : read;
+  const h = typeof held === "string" ? undefined : host.tables().typing.rec(held);
   if (h !== undefined && h.kind === "unknown") {
     if (unknownTo === undefined) return nothing();
     // A number may be held as another kind, so a mutable reference to one can't point at it.
-    const facts: Guard = { yes: new Map([[key, ref !== undefined ? host.tables.typing.refType(unknownTo, ref.mutable && unknownTo !== "f64") : unknownTo]]), no: new Map() };
+    const facts: Guard = { yes: new Map([[key, ref !== undefined ? host.tables().typing.refType(unknownTo, ref.mutable && unknownTo !== "f64") : unknownTo]]), no: new Map() };
     return positive ? facts : { yes: facts.no, no: facts.yes };
   }
   // A member that holds itself stands for its own members, which the check may tell apart.
   let members: Type[] = [];
   for (const m of h !== undefined && h.kind === "union" ? h.members : [held]) {
-    const inner = host.tables.typing.unfold(m);
-    const r = inner === m || typeof inner === "string" ? undefined : host.tables.typing.rec(inner);
+    const inner = host.tables().typing.unfold(m);
+    const r = inner === m || typeof inner === "string" ? undefined : host.tables().typing.rec(inner);
     if (r === undefined || r.kind !== "union") {
       members.push(m);
       continue;
     }
     let verdicts = new Set<string>();
-    for (const x of r.members) verdicts.add(verdict(host.tables.typing, test, x));
+    for (const x of r.members) verdicts.add(verdict(host.tables().typing, test, x));
     if (verdicts.size > 1) for (const x of r.members) members.push(x);
     else members.push(m);
   }
   // An instance's argument a check rules out leaves the branch unreachable, as `never`.
   const ruledOut = held !== read && p !== undefined && p.kind === "param" && p.within !== true;
-  const yes = kept(host.tables.typing, members, test, "no", key, ref !== undefined ? ref.mutable : undefined, ruledOut);
-  const no = kept(host.tables.typing, members, test, "yes", key, ref !== undefined ? ref.mutable : undefined, ruledOut);
+  const yes = kept(host.tables().typing, members, test, "no", key, ref !== undefined ? ref.mutable : undefined, ruledOut);
+  const no = kept(host.tables().typing, members, test, "yes", key, ref !== undefined ? ref.mutable : undefined, ruledOut);
   return positive ? { yes, no } : { yes: no, no: yes };
 }
 
