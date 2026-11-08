@@ -207,6 +207,33 @@ function readsPlace(e: Ref<Expr>): boolean {
   return e.kind === "ident" || e.kind === "this" || ((e.kind === "member" || e.kind === "index") && !e.optional && readsPlace(e.object));
 }
 
+// A path's root: what its fields and elements are read from.
+function pathRoot(e: Ref<Expr>): Ref<Expr> {
+  return e.kind === "member" || e.kind === "index" ? pathRoot(e.object) : e;
+}
+
+// An expression under the `!`s around it.
+function unwrapped(e: Ref<Expr>): Ref<Expr> {
+  return e.kind === "nonNull" ? unwrapped(e.expr) : e;
+}
+
+// A loop's `let`, which is what its left side is once a loop's pattern is lowered.
+function loopLet(left: Ref<Stmt | Pattern>): Ref<Extract<Stmt, { kind: "let" }>> {
+  if (left.kind === "let") return left;
+  throw new Error("a loop's left side is a declaration here");
+}
+
+// Array and object nodes from their parts, typed where they are made.
+function arrayExpr(id: usize, elements: Expr[], at: Ref<Span>): Expr {
+  return { id, kind: "array", elements, start: at.start, end: at.end };
+}
+function arrayPattern(id: usize, elements: (Pattern | undefined)[], rest: Pattern | undefined, at: Ref<Span>): Pattern {
+  return { id, kind: "array", elements, rest, start: at.start, end: at.end };
+}
+function objectPattern(id: usize, props: PatternProp[], rest: Pattern | undefined, at: Ref<Span>): Pattern {
+  return { id, kind: "object", props, rest, start: at.start, end: at.end };
+}
+
 // A use of a captured binding, for messages: a name read, or a shorthand property naming it.
 function useOf(at: Ref<Expr | ObjectProp>): Expr {
   if (at.kind === "shorthand" || at.kind === "ident") return { id: at.id, kind: "ident", name: at.name, start: at.start, end: at.end };
@@ -3357,10 +3384,10 @@ class BodyChecker implements Context, GuardHost {
   // A closure's change to what it captures, which a call of it could make at any time, so all
   // that was known of the root's fields is forgotten.
   /** @throws {CompileError} */
-  changesLocal(this: Mut<this>, l: Ref<Local>, path: string, action: string, target: Ref<Expr>, throughMut: boolean): void {
-    this.closureChanged.add(String(l.localId));
-    this.changesPath(l.localId, "", action, target);
-    this.exprs().changesLocal(l.localId, path, action, target, throughMut);
+  changesLocal(this: Mut<this>, lId: LocalId, path: string, action: string, target: Ref<Expr>, throughMut: boolean): void {
+    this.closureChanged.add(String(lId));
+    this.changesPath(lId, "", action, target);
+    this.exprs().changesLocal(lId, path, action, target, throughMut);
   }
 
   /** @throws {CompileError} */
@@ -3506,6 +3533,11 @@ class BodyChecker implements Context, GuardHost {
   // A capture narrows as a variable of the closure's would. A binding holding no reference
   // narrows between its writes, unless a closure writes it, whose calls a check can't see.
   narrowable(this: Mut<this>, l: Ref<Local>): boolean {
+    return this.narrowableId(l.localId);
+  }
+  private narrowableId(this: Mut<this>, lId: LocalId): boolean {
+    const local = this.cx.localOf(lId);
+    const l = { localId: lId, name: local.name, type: local.type, param: local.param, mutable: local.mutable };
     const own = this.capturesHas(l.localId) ? !this.assigned.has(l.name) && !this.nestedLent.has(l.localId) : !this.cx.tables.typing.holdsRef(l.type) ? !this.closureAssigned.has(l.name) && !this.nestedLent.has(l.localId) : l.param ? !this.assignedParams.has(l.localId) : !l.mutable || !this.assigned.has(l.name);
     return own || (this.cx.isRef(l.type) && this.cx.tables.typing.rec(l.type).mutable);
   }
@@ -3560,8 +3592,9 @@ class BodyChecker implements Context, GuardHost {
   // refused.
   /** @throws {CompileError} */
   lendsWhole(this: Mut<this>, lId: LocalId, at: Ref<Expr>): void {
-    const l = this.cx.localOf(lId);
-    if (this.cx.tables.typing.holdsRef(l.type)) return;
+    const lType = this.cx.localOf(lId).type;
+    if (this.cx.tables.typing.holdsRef(lType)) return;
+    const l = { localId: lId, name: this.cx.localOf(lId).name };
     const outside = this.outsideOf(l.localId);
     if (outside === "this") return;
     if (outside !== undefined) {
@@ -3576,7 +3609,7 @@ class BodyChecker implements Context, GuardHost {
     this.loopChange(String(l.localId), "mutably borrow", l.name, at);
     const from = this.facts.findIndex((f) => f.has(bindingKey(l.localId)));
     const loop = from < 0 ? undefined : this.loops.find((x) => (x.facts as i64) > from);
-    if (loop && this.narrowReads.slice(loop.reads).some((r) => r.local === bindingKey(l.localId) && r.at !== at.id)) {
+    if (loop !== undefined && this.narrowReads.slice(loop.reads as i64).some((r) => r.local === bindingKey(l.localId) && r.at !== at.id)) {
       throw new CompileError("E0109", `can't lend '${l.name}' mutably here: earlier in this loop it was read as narrowed by what was known before the loop, and the next time round it may hold another member; check or assign it inside the loop`, at.start, at.end);
     }
     this.forget(l.localId, { start: at.start, end: at.end });
@@ -3663,8 +3696,8 @@ class BodyChecker implements Context, GuardHost {
       return;
     }
     const below = (k: string) => isPath(k) && k !== prefix && covers(prefix, k);
-    for (const k of new Set(this.facts.flatMap((f) => [...f.keys()].filter(below)))) this.written.push({ local: k, at: at.start });
-    this.drop(below);
+    for (const k of new Set(this.facts.flatMap((f) => [...f.keys()].filter((key) => below(key))))) this.written.push({ local: k, at: at.start });
+    this.drop((key) => below(key));
   }
   // A call of a function whose result is `x is T` narrows its argument for x to T.
   /** @throws {CompileError} */
@@ -3771,8 +3804,8 @@ class BodyChecker implements Context, GuardHost {
     const required = this.f().params.filter((p) => !p.optional && !p.rest).length;
     if (e.args.length < required || e.args.length > this.f().params.length) throw new CompileError("E0501", `expected ${required === this.f().params.length ? `${required}` : `${required}-${this.f().params.length}`} arguments, but got ${e.args.length}`, e.start, e.end);
     e.args.forEach((a, i) => {
-      const param = this.f().params[i as usize]!;
-      const to = this.cx.localOf(this.locals().get(param)!).type;
+      const paramId = this.f().params[i as usize]!.id;
+      const to = this.cx.localOf(this.locals().getById(paramId)!).type;
       this.exprs().expect(a, to);
       const t = this.exprs().value(a);
       this.exprs().coerce(a, t, to, `argument of type '${this.cx.tables.typing.show(t)}' is not assignable to parameter of type '${this.cx.tables.typing.show(to)}'`);
@@ -3869,7 +3902,7 @@ class BodyChecker implements Context, GuardHost {
         const name = this.freshPart();
         const typedAs = q !== undefined ? this.partTarget(q) : undefined;
         out.reads.push(this.partDeclared({ id: nextId(this.cx.tables.ids), kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x), { start: x.start, end: x.end }, typedAs));
-        parts.push({ nested: undefined, read: this.partIdent(name, x) });
+        parts.push({ nested: undefined, read: this.partIdent(name, { start: x.start, end: x.end }) });
       }
       for (let i: usize = 0; i < p.elements.length; i++) {
         const q = p.elements[i];
@@ -3883,7 +3916,7 @@ class BodyChecker implements Context, GuardHost {
       if (p.rest !== undefined) {
         let rest: Expr[] = [];
         for (let i = p.elements.length; i < parts.length; i++) rest.push(cloneExpr(parts[i]!.read!));
-        this.destructureWrite(out, p.rest!, { id: nextId(this.cx.tables.ids), kind: "array", elements: rest, start: value.start, end: value.end });
+        this.destructureWrite(out, p.rest!, arrayExpr(nextId(this.cx.tables.ids), rest, value));
       }
       return;
     }
@@ -3961,8 +3994,7 @@ class BodyChecker implements Context, GuardHost {
       let elements: (Pattern | undefined)[] = [];
       for (const x of q.elements) elements.push(x === undefined ? undefined : this.partShape(leaves, x));
       const rest = q.rest !== undefined ? this.partShape(leaves, q.rest!) : undefined;
-      const shaped: Pattern = { id: nextId(this.cx.tables.ids), kind: "array", elements, rest, start: q.start, end: q.end };
-      return shaped;
+      return arrayPattern(nextId(this.cx.tables.ids), elements, rest, q);
     }
     if (q.kind === "object") {
       let props: PatternProp[] = [];
@@ -3971,8 +4003,7 @@ class BodyChecker implements Context, GuardHost {
         props.push({ ...clonePatternProp(x), id: nextId(this.cx.tables.ids), value });
       }
       const rest = q.rest !== undefined ? this.partShape(leaves, q.rest!) : undefined;
-      const shaped: Pattern = { id: nextId(this.cx.tables.ids), kind: "object", props, rest, start: q.start, end: q.end };
-      return shaped;
+      return objectPattern(nextId(this.cx.tables.ids), props, rest, q);
     }
     throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", q.start, q.end);
   }
@@ -4002,7 +4033,8 @@ class BodyChecker implements Context, GuardHost {
   /** @throws {CompileError} */
   separate(this: Mut<this>, list: Stmt[]) {
     for (let i = list.length - 1; i >= 0; i--) {
-      const s = this.cx.tables.rewrites.currentStmt(list[i]!);
+      const peeked = this.cx.tables.rewrites.getStmt(list[i]!.id);
+      const s: Ref<Stmt> = peeked !== undefined ? peeked : list[i]!;
       if (s.kind === "expr" && s.expr.kind === "destructure") {
         let parts = this.destructuring(s.expr);
         list.splice(i as i64, 1);
@@ -4031,7 +4063,7 @@ class BodyChecker implements Context, GuardHost {
       }
       // Inside the block it was moved into, the loop is already where it belongs.
       const wrapped = this.cx.tables.wrappedIn.get(list[i]!);
-      if (wrapped !== undefined && wrapped.kind === "block" && list[i - 1]?.id !== wrapped.body[0]?.id) list[i] = cloneStmt(wrapped);
+      if (wrapped !== undefined && wrapped.kind === "block" && (i === 0 || wrapped.body.length === 0 || list[i - 1]!.id !== wrapped.body[0]!.id)) list[i] = cloneStmt(wrapped);
     }
   }
 
@@ -4122,19 +4154,7 @@ class BodyChecker implements Context, GuardHost {
     let indexes = new Map<usize, string>();
     const held = patternText(pattern);
     if (inPlace) {
-      let e: Ref<Expr> = init;
-      while (true) {
-        if (e.kind === "index" && e.index.kind !== "int") {
-          const name = `index ${e.index.start}`;
-          indexes.set(e.id, name);
-          const at = { start: e.index.start, end: e.index.end };
-          // An index into an array or a string is a `usize`, which gives a literal sum its type.
-          const usize: TypeNode = { id: nextId(this.cx.tables.ids), kind: "ref", name: "usize", args: [], ...at };
-          hoisted.unshift({ id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target: { id: nextId(this.cx.tables.ids), kind: "ident", name, ...at }, type: usize, init: cloneExpr(e.index), ...at }], ...at });
-        }
-        if (e.kind === "member" || e.kind === "index") e = e.object;
-        else break;
-      }
+      this.hoistIndexes(init, indexes, hoisted);
       this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "empty", start: s.start, end: s.end });
     } else {
       this.cx.tables.rewrites.replaceDeclarator(d, { ...d, target: { id: nextId(this.cx.tables.ids), kind: "ident", name: held, start: pattern.start, end: pattern.end } });
@@ -4143,11 +4163,7 @@ class BodyChecker implements Context, GuardHost {
     }
     const destructuring: Type = type!;
     // A top-level const is read where it lives rather than lent.
-    let root: Ref<Expr> = init;
-    while (true) {
-      if (root.kind === "member" || root.kind === "index") root = root.object;
-      else break;
-    }
+    const root = pathRoot(init);
     const global = inPlace && root.kind === "ident" && !this.locals().has(root);
     const borrowed = this.cx.isRef(destructuring) && !global;
     const lowered = this.cx.tables.typing.lower(this.cx.isRef(destructuring) ? this.cx.tables.typing.rec(destructuring).to : destructuring);
@@ -4269,6 +4285,19 @@ class BodyChecker implements Context, GuardHost {
     while (made.length > 0) this.after.push(made.shift()!);
     return undefined;
   }
+  // The indexes along a path that aren't numbers written in place, each run once into a variable
+  // of its own, in the order the path reads them.
+  private hoistIndexes(this: Mut<this>, e: Ref<Expr>, indexes: Mut<Map<usize, string>>, hoisted: Mut<Stmt[]>): void {
+    if (e.kind === "index" && e.index.kind !== "int") {
+      const name = `index ${e.index.start}`;
+      indexes.set(e.id, name);
+      const at = { start: e.index.start, end: e.index.end };
+      // An index into an array or a string is a `usize`, which gives a literal sum its type.
+      const usize: TypeNode = { id: nextId(this.cx.tables.ids), kind: "ref", name: "usize", args: [], ...at };
+      hoisted.unshift({ id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target: { id: nextId(this.cx.tables.ids), kind: "ident", name, ...at }, type: usize, init: cloneExpr(e.index), ...at }], ...at });
+    }
+    if (e.kind === "member" || e.kind === "index") this.hoistIndexes(e.object, indexes, hoisted);
+  }
   // A part of a destructured value: its target, with a default taken when the part is null.
   private addPart(this: Mut<this>, parts: Mut<[Pattern, Expr, Type][]>, target: Ref<Pattern>, read: Expr, t: Type): void {
     if (target.kind !== "default") {
@@ -4330,7 +4359,7 @@ class BodyChecker implements Context, GuardHost {
       const then = this.tupleMember(s.right, String(n), at);
       chosen = { id: nextId(this.cx.tables.ids), kind: "conditional", cond, then, else: chosen, ...at };
     }
-    const left = s.left as Ref<Extract<Stmt, { kind: "let" }>>;
+    const left = loopLet(s.left);
     const d = left.declarations[0]!;
     const elementType = this.tuplePreset(element, at);
     const each: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: left.keyword, declarations: [{ ...d, id: nextId(this.cx.tables.ids), type: elementType, init: chosen }], start: left.start, end: left.end };
@@ -4394,7 +4423,7 @@ class BodyChecker implements Context, GuardHost {
     if (pattern.kind === "array") for (const p of pattern.elements) shown.push(p !== undefined && p.kind === "ident" ? p.name : "");
     else for (const p of parts) shown.push(p.name);
     const held = pattern.kind === "array" ? `[${shown.join(", ")}]` : `{ ${shown.join(", ")} }`;
-    const left = s.left as Ref<Extract<Stmt, { kind: "let" }>>;
+    const left = loopLet(s.left);
     let lets: Stmt[] = [];
     for (const p of parts) {
       const at = { start: p.at.start, end: p.at.end };
@@ -4473,11 +4502,11 @@ class BodyChecker implements Context, GuardHost {
     if (after !== undefined) for (const [l, t] of after) if (![...wrote].some((w) => covers(w, l))) out.set(l, t);
     for (const id of wrote) {
       if (isPath(id)) continue;
-      const l = this.cx.localOf(keyId(id));
-      const types = branches.filter(([leaves]) => !leaves).map(([, ends, proved]) => ends.get(id) ?? proved.get(id) ?? factIn(entry, id) ?? l.type);
+      const declared = this.cx.localOf(keyId(id)).type;
+      const types = branches.filter(([leaves]) => !leaves).map(([, ends, proved]) => ends.get(id) ?? proved.get(id) ?? factIn(entry, id) ?? declared);
       if (types.length === 0) continue;
       const t = this.cx.tables.typing.unionType(types);
-      if (t !== l.type) out.set(id, t);
+      if (t !== declared) out.set(id, t);
     }
     return out;
   }
@@ -4487,9 +4516,11 @@ class BodyChecker implements Context, GuardHost {
     const target = this.cx.tables.rewrites.current(e.target);
     const id = target.kind === "ident" ? this.locals().get(target) : undefined;
     const given = this.types().get(e.value);
-    const l = id === undefined ? undefined : this.cx.localOf(id);
-    const declared = l !== undefined ? this.cx.recOf(l.type) : undefined;
-    if (l === undefined || given === undefined || declared?.kind !== "union" || this.cx.tables.typing.holdsRef(l.type) || !this.narrowable(l)) return undefined;
+    if (id === undefined || given === undefined) return undefined;
+    const lType = this.cx.localOf(id).type;
+    const declared = this.cx.recOf(lType);
+    if (declared?.kind !== "union" || this.cx.tables.typing.holdsRef(lType) || !this.narrowableId(id)) return undefined;
+    const l = { localId: id, type: lType };
     const r = this.cx.recOf(given);
     const parts = r?.kind === "union" ? r.members : [given];
     const kept = declared.members.filter((m) => parts.some((p) => this.cx.tables.typing.fits(p, m)));
@@ -4666,7 +4697,8 @@ class BodyChecker implements Context, GuardHost {
 
   /** @throws {CompileError} */
   statement(this: Mut<this>, written: Ref<Stmt>): Facts | undefined {
-    const s = this.cx.tables.rewrites.currentStmt(written);
+    const peeked = this.cx.tables.rewrites.getStmt(written.id);
+    const s: Ref<Stmt> = peeked !== undefined ? peeked : written;
     if (s.kind !== "while" && s.kind !== "doWhile" && s.kind !== "for" && s.kind !== "forOf") return this.statementOf(s);
     // A loop's condition and update are inside it, run again each time round.
     this.forgetLoop(s);
@@ -4679,7 +4711,7 @@ class BodyChecker implements Context, GuardHost {
   }
 
   /** @throws {CompileError} */
-  statementOf(this: Mut<this>, s: Stmt): Facts | undefined {
+  statementOf(this: Mut<this>, s: Ref<Stmt>): Facts | undefined {
     const declaration = unsupportedDeclaration(s);
     if ((declaration !== undefined)) throw declaration;
     switch (s.kind) {
@@ -4756,7 +4788,7 @@ class BodyChecker implements Context, GuardHost {
         // interface's does.
         const named = this.cx.recOf(declared);
         const family = named?.kind === "function" && (named.generic !== undefined) ? declared : undefined;
-        const annotated = family ? undefined : declared;
+        const annotated = (family !== undefined) ? undefined : declared;
         if (annotated) this.exprs().expect(d.init, annotated);
         const type = this.exprs().value(d.init);
         if (s.keyword === "let") this.exprs().readOnlySubarray(d.init);
@@ -5148,8 +5180,10 @@ class BodyChecker implements Context, GuardHost {
     const yielded = this.yielded;
     if (yielded !== undefined) this.exprs().expect(e.value, yielded);
     const t = this.exprs().value(e.value);
-    if ((this.yielded === undefined)) this.yielded = this.cx.tables.typing.widenLet(t);
-    if (this.cx.tables.typing.holdsRef(this.yielded)) throw unsupported("generators yielding references", e.value);
+    const now = this.yielded;
+    const gives = now !== undefined ? now : this.cx.tables.typing.widenLet(t);
+    this.yielded = gives;
+    if (this.cx.tables.typing.holdsRef(gives)) throw unsupported("generators yielding references", e.value);
     this.exprs().coerce(e.value, t, this.yielded, `type '${this.cx.tables.typing.show(t)}' is not assignable to the generator's '${this.generatorName}<${this.cx.tables.typing.show(this.yielded)}>'`);
     return this.sends ?? "void";
   }
@@ -5169,11 +5203,7 @@ class BodyChecker implements Context, GuardHost {
   fieldAssignment(this: Mut<this>, s: Ref<Stmt>): Extract<Expr, { kind: "member" }> | undefined {
     if (s.kind !== "expr" || s.expr.kind !== "assign" || s.expr.op !== "=") return undefined;
     // This runs before the statement is checked; a `!` here that can unwrap is refused there.
-    let target: Ref<Expr> = s.expr.target;
-    while (true) {
-      if (target.kind !== "nonNull") break;
-      target = target.expr;
-    }
+    const target = unwrapped(s.expr.target);
     if (target.kind !== "member" || target.object.kind !== "this") return undefined;
     // Once `super(...)` has run, the base's fields are set, and may be set again before the
     // class's own are.
@@ -5194,10 +5224,10 @@ class BodyChecker implements Context, GuardHost {
 
   /** @throws {CompileError} */
   jumpTarget(s: Jump): Stmt {
-    const fits = (t: Target) => (s.label === undefined ? t.kind === "loop" || (s.kind === "break" && t.kind === "switch") : t.label === s.label);
+    const fits = (t: Ref<Target>) => (s.label === undefined ? t.kind === "loop" || (s.kind === "break" && t.kind === "switch") : t.label === s.label);
     let at = this.targets.length;
     while (at > 0 && !(this.targets[at - 1]!.kind === "arm" || fits(this.targets[at - 1]!))) at--;
-    const found = at > 0 ? this.targets[at - 1] : undefined;
+    const found: Ref<Target> | undefined = at > 0 ? this.targets[at - 1] : undefined;
     // A match arm is a body of its own, as an arrow's is.
     if (found?.kind === "arm" && this.targets.some((t) => fits(t))) {
       throw new CompileError("E0604", `'${s.kind}' can't leave a match arm, which is a body of its own like an arrow's; 'return' a value and act on it after the match`, s.start, s.end);
@@ -5304,7 +5334,8 @@ class BodyChecker implements Context, GuardHost {
   // is, and the arrow becomes its name.
   /** @throws {CompileError} */
   liftArrow(this: Mut<this>, e: Ref<Extract<Expr, { kind: "arrow" }>>): Expr {
-    const fn = this.lifted(e, "", arrowFunction(this.cx.tables.ids, "", { ...e }, e), "this arrow");
+    const made = arrowFunction(this.cx.tables.ids, "", { ...e }, e);
+    const fn = this.lifted(e, "", made, "this arrow");
     return this.cx.tables.rewrites.replace(e, { id: 0, kind: "ident", name: fn.name, start: e.start, end: e.end });
   }
 
@@ -5375,7 +5406,7 @@ class BodyChecker implements Context, GuardHost {
       return;
     }
     if (path === "" && action === "assign to" && this.cx.isRef(type) && !this.cx.tables.typing.rec(type).mutable) throw unsupported("closures that point captured references elsewhere", target);
-    this.outer.changesLocal(this.cx.localOf(held), path, action, target, throughMut);
+    this.outer.changesLocal(held, path, action, target, throughMut);
   }
 
   constant(this: Mut<this>, lId: LocalId): boolean {
@@ -5438,10 +5469,10 @@ class BodyChecker implements Context, GuardHost {
     }
     // An error the declared type doesn't take may be wrapped by a class of it that
     // implements `From` for it.
-    const union = this.cx.recOf(this.errorType);
+    const union = this.cx.recOf(errorType);
     let candidates: Type[] = [];
     if (union !== undefined && union.kind === "union") for (const m of union.members) candidates.push(m);
-    else candidates.push(this.errorType);
+    else candidates.push(errorType);
     let classes: ClassType[] = [];
     for (const m of candidates) if (typeof m !== "string" && this.cx.tables.typing.rec(m).kind === "class") classes.push(m as ClassType);
     let wrappers: { wrapper: ClassType; param: Type; via: InstanceId }[] = [];
@@ -5453,13 +5484,13 @@ class BodyChecker implements Context, GuardHost {
     }
     const does = throwing ? `this 'throw' throws '${this.cx.tables.typing.show(type)}'` : `${what} can throw '${this.cx.tables.typing.show(type)}'`;
     if (wrappers.length === 0) {
-      const hint = classes.length > 0 ? `convert it, or have '${this.cx.tables.typing.rec(classes[0]!).name}' implement 'From<${this.cx.tables.typing.show(type)}>'` : `convert it to '${this.cx.tables.typing.show(this.errorType)}'`;
-      throw new CompileError("E0602", `${does}, which isn't the '${this.cx.tables.typing.show(this.errorType)}' that ${this.who()} throws; ${hint}`, span.start, span.end);
+      const hint = classes.length > 0 ? `convert it, or have '${this.cx.tables.typing.rec(classes[0]!).name}' implement 'From<${this.cx.tables.typing.show(type)}>'` : `convert it to '${this.cx.tables.typing.show(errorType)}'`;
+      throw new CompileError("E0602", `${does}, which isn't the '${this.cx.tables.typing.show(errorType)}' that ${this.who()} throws; ${hint}`, span.start, span.end);
     }
     if (wrappers.length > 1) {
       throw new CompileError("E0602", `${does}, which ${wrappers.map((w) => `'${this.cx.tables.typing.rec(w.wrapper).name}'`).join(" and ")} both wrap; throw one of them yourself`, span.start, span.end);
     }
-    this.instance().raises.set(at, { from: type, to: this.errorType, ...wrappers[0]! });
+    this.instance().raises.set(at, { from: type, to: errorType, ...wrappers[0]! });
   }
 
   // Who throws, in messages: the function, or the closure or nested function it is in.
