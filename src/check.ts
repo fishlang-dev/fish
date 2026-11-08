@@ -509,7 +509,7 @@ function declaredIn(f: Ref<{ params: Param[]; body?: Stmt[]; typeParams?: TypePa
 }
 
 // An arrow held by a const, as the function declaration it amounts to.
-function arrowFunction(ids: Ids, name: string, arrow: Extract<Expr, { kind: "arrow" }>, at: Span): Func {
+function arrowFunction(ids: Mut<Ids>, name: string, arrow: Extract<Expr, { kind: "arrow" }>, at: Ref<Span>): Func {
   let body: Stmt[] = [];
   if (Array.isArray(arrow.body)) body = arrow.body;
   else {
@@ -635,7 +635,8 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         if (s.typeParams.some(isLifetime)) decls.slots.set(s.name, s.typeParams.map(isLifetime));
         let alias = cloneTypeAlias(s);
         if (s.typeParams.some(isLifetime)) alias.typeParams = alias.typeParams.filter((p) => !isLifetime(p));
-        addAlias(decls.aliases, alias, namedIn(top, decls, s.name));
+        const named = namedIn(top, decls, s.name);
+        addAlias(decls.aliases, alias, named);
         continue;
       }
       if (trait !== undefined) {
@@ -655,17 +656,19 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         const node = { ...s, id: nextId(tables.ids), name: s.name, typeParams: s.typeParams.filter((p) => !isLifetime(p)) };
         if (s.typeParams.some(isLifetime)) decls.slots.set(s.name, s.typeParams.map(isLifetime));
         if (node.typeParams.length > 0) top.templates.set(s.name, node);
-        else top.classes.set(s.name, declareClass(tables, node));
+        else {
+          const declaredClass = declareClass(tables, node);
+          top.classes.set(s.name, declaredClass);
+        }
         const declared = top.classes.get(s.name);
         if (declared === undefined) continue;
         const type = tables.arenas.classOf(declared).type;
         const rust = tables.rust.classNodes.get(s);
-        if (rust !== undefined) tables.typing.setRust(type, rust);
+        if (rust !== undefined) tables.typing.setRust(type, { ...rust });
         // A Rust type declaring no constructor is never made with `new`, so its handle needs no
         // assigning in the empty one it is given.
         if (rust !== undefined && tables.arenas.bodyOf(tables.arenas.classOf(declared).constructor).rust === undefined) {
-          let info = tables.arenas.classMut(declared);
-          info.required.clear();
+          clearRequired(tables, declared);
         }
         // A `static readonly` field is a top-level const named `C.x`, which no source name can be.
         let statics: { name: string; init: Expr; type: TypeNode | undefined; start: usize; end: usize }[] = [];
@@ -684,10 +687,10 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
       if (s.kind === "declare" && s.body.kind === "function" && !hasBody(s.body)) {
         const rest = s.body.params.find((p) => p.rest);
         if (rest !== undefined) throw unsupported("variadic C functions", rest);
-        const declared = addBodyTo(tables, { ...s.body, id: nextId(tables.ids), body: [] });
-      let record = tables.arenas.bodyMut(declared);
-      record.foreign = true;
-      top.funcs.push(declared);
+        const madeId = nextId(tables.ids);
+        const declared = addBodyTo(tables, { ...s.body, id: madeId, body: [] });
+        markForeign(tables, declared, undefined);
+        top.funcs.push(declared);
         continue;
       }
       // `export function f() {}` is an ordinary function, and in a library a C function too; an
@@ -697,9 +700,9 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         let exported: BodyId;
         if (s.body.macro) exported = addBodyTo(tables, withBody({ ...s.body }));
         else {
-          exported = addBodyTo(tables, withBody({ ...s.body, id: nextId(tables.ids) }));
-          let record = tables.arenas.bodyMut(exported);
-          record.exported = true;
+          const madeId = nextId(tables.ids);
+          exported = addBodyTo(tables, withBody({ ...s.body, id: madeId }));
+          markExported(tables, exported);
         }
         if (s.body.macro) top.macroBodies.add(exported);
         top.funcs.push(exported);
@@ -725,7 +728,9 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
             const signature = signatureIn(program, d.type);
             const genericType = signature !== undefined && signature.typeParams.some((p) => !isLifetime(p));
             if (d.type !== undefined && (generic || genericType)) throw new CompileError("E0801", "a const holding a generic arrow takes its type from the arrow; drop the const's written type", d.type.start, d.type.end);
-            const body = addBodyTo(tables, arrowFunction(tables.ids, d.target.name, typedBy({ ...d.init }, signature), { start: d.start, end: d.end }));
+            const typed = typedBy({ ...d.init }, signature);
+            const lifted = arrowFunction(tables.ids, d.target.name, typed, { start: d.start, end: d.end });
+            const body = addBodyTo(tables, lifted);
             top.funcs.push(body);
             if (d.type !== undefined) top.typedArrows.push({ body, type: cloneTypeNode(d.type!), arrow: { start: d.init.start, end: d.init.end, throws: d.init.throws === undefined ? undefined : cloneTypeNode(d.init.throws!) }, name: d.target.name });
             continue;
@@ -746,16 +751,16 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
       if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
       const rust = tables.rust.names.get(s);
       if (rust !== undefined) {
-        const foreign = addBodyTo(tables, { ...s, id: nextId(tables.ids), body: [] });
+        const madeId = nextId(tables.ids);
+        const foreign = addBodyTo(tables, { ...s, id: madeId, body: [] });
         const symbol = { ...rust };
-        let record = tables.arenas.bodyMut(foreign);
-        record.foreign = true;
-        record.rust = symbol;
+        markForeign(tables, foreign, symbol);
         top.funcs.push(foreign);
         continue;
       }
       if (s.js !== undefined) {
-        const body = addBodyTo(tables, { ...s, id: nextId(tables.ids), body: [] });
+        const madeId = nextId(tables.ids);
+        const body = addBodyTo(tables, { ...s, id: madeId, body: [] });
         tables.jsBodies.set({ ...s }, body);
         top.funcs.push(body);
         continue;
@@ -782,7 +787,26 @@ function withBody(d: Declared): Func {
 /** @throws {CompileError} */
 function declareEnumIn(tables: Mut<Tables>, top: Mut<TopLevel>, decls: Ref<Declarations>, e: Ref<Extract<Stmt, { kind: "enum" }>>): void {
   typeName(e.name, { start: e.start, end: e.end }, decls.aliases.has(e.name) || namedIn(top, decls, e.name));
-  top.enums.set(e.name, declareEnum(tables, e));
+  const declared = declareEnum(tables, e);
+  top.enums.set(e.name, declared);
+}
+
+// A C or Rust function's body, which the program declares and doesn't write.
+function markForeign(tables: Mut<Tables>, id: BodyId, rust: Body["rust"]): void {
+  let record = tables.arenas.bodyMut(id);
+  record.foreign = true;
+  if (rust !== undefined) record.rust = rust;
+}
+
+function markExported(tables: Mut<Tables>, id: BodyId): void {
+  let record = tables.arenas.bodyMut(id);
+  record.exported = true;
+}
+
+// A Rust type's handle, which no constructor of its own assigns.
+function clearRequired(tables: Mut<Tables>, id: ClassId): void {
+  let info = tables.arenas.classMut(id);
+  info.required.clear();
 }
 
 function addBodyTo(tables: Mut<Tables>, f: Func): BodyId {
@@ -1525,7 +1549,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.tables.typing.closeUnknown();
     this.unknownJson();
     this.tables.typing.layOutForCodegen();
-    return { instances: compiledIds, warnings: warnings(this.tables, compiledIds, (b) => required.has(b.bodyId)) };
+    const found = warnings(this.tables, compiledIds, (b) => required.has(b.bodyId));
+    return { instances: compiledIds, warnings: found };
   }
 
   // A value given to `JSON.stringify` holding an `unknown` needs each type stored in one to have a
