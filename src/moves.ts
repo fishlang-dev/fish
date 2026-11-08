@@ -1798,8 +1798,33 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       const root = this.rootLocal(cx, e);
       return root !== undefined && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(root).type) ? this.heldBy(cx, root) : [];
     }
-    if (!this.inPlace(cx, e, to)) return [TEMPORARY];
+    if (!this.inPlace(cx, e, to)) {
+      const returned = this.throughReturned(cx, e, to);
+      return returned !== undefined ? returned : [TEMPORARY];
+    }
     return this.within(cx, e);
+  }
+
+  // Where a field or element read through a reference a call gives lives: where that reference
+  // points, as Rust has it. A read through a union, or one met as another type, is a copy, and a
+  // field of a value a call gives owned is a temporary.
+  throughReturned(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, to: RefType): string[] | undefined {
+    if (e.kind !== "member" && e.kind !== "index" && e.kind !== "nonNull") return undefined;
+    if (this.throughUnion(cx, e)) return undefined;
+    const type = cx.instance.types.get(e)!;
+    const target = cx.tables.typing.rec(to).to;
+    if (cx.tables.typing.lower(type) !== cx.tables.typing.lower(target) && !cx.tables.typing.partOfItself(type, target)) return undefined;
+    return this.returnedBase(cx, e);
+  }
+
+  // The places a reference a call gives points into, reached from a read of a field or an
+  // element of what it refers to.
+  returnedBase(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): string[] | undefined {
+    if (e.kind === "call") return this.isRef(cx, cx.instance.types.get(e)!) ? this.pointsInto(cx, e) : undefined;
+    if (e.kind === "member") return e.optional || cx.instance.calls.has(e) ? undefined : this.returnedBase(cx, e.object);
+    if (e.kind === "index") return e.optional ? undefined : this.returnedBase(cx, e.object);
+    if (e.kind === "nonNull") return this.returnedBase(cx, e.expr);
+    return undefined;
   }
 
   // The places a holder's loans are on, leaving out those inside other holders, whose own

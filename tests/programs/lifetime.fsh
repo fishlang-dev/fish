@@ -464,3 +464,40 @@ function first<A extends Lifetime>(x: Ref<P, A>, y: Ref<P>): Ref<P, A> {
 
 function main() {}
 // error: the returned reference points into 'y', but its lifetime ties it to 'x'
+// case: lifetime_through_returned_ref
+type Item = { n: i64 }
+type Shelf = { items: Item[] }
+
+class Store {
+  shelf: Shelf = { items: [] }
+  shelfOf(this: Mut<this>): Mut<Shelf> {
+    return this.shelf
+  }
+  items(this: Mut<this>): Mut<Item[]> {
+    return this.shelfOf().items
+  }
+  first(this: Mut<this>): Ref<Item> {
+    return this.shelfOf().items[0]!
+  }
+}
+
+function main() {
+  let s = new Store()
+  s.shelf.items.push({ n: 4 })
+  s.shelf.items.push({ n: 6 })
+  console.log(s.items().length, s.first().n)
+}
+// expect: 2 4
+// case: lifetime_field_of_owned_result
+type Pair = { left: { x: i64 }; right: i64 }
+
+function made(): Pair {
+  return { left: { x: 1 }, right: 2 }
+}
+
+function bad(p: Ref<Pair>): Ref<{ x: i64 }> {
+  return made().left
+}
+
+function main() {}
+// error: can't return a reference to a temporary or a copy
