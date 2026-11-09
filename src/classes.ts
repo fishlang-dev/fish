@@ -1305,7 +1305,7 @@ function modifiers(written: Ref<Modifier[]>, at: Span, name: string): Access {
     throw new CompileError("E0709", "an accessibility modifier can't be used with a private identifier", at.start, at.end);
   }
   if (name.startsWith("#")) return "private";
-  const first = list[0];
+  const first = list.length > 0 ? list[0] : undefined;
   return first === "private" ? "private" : first === "protected" ? "protected" : "public";
 }
 

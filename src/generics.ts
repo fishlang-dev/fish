@@ -889,7 +889,7 @@ export class Instancing<H extends InstancingHost> {
     for (const [i, bound] of this.implicitOf(f.bodyId)) {
       const meant = rebound(this.host, bound, decided);
       if (f.params[i]!.optional) {
-        own.set(`#${i}`, presentArgument(this.host, i < args.length ? args[i] : undefined, argTypes[i], meant));
+        own.set(`#${i}`, presentArgument(this.host, i < args.length ? args[i] : undefined, i < argTypes.length ? argTypes[i] : undefined, meant));
         continue;
       }
       const lentAs = this.host.instancingState.lent.get(f.bodyId)!.get(i);
