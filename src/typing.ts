@@ -2682,8 +2682,9 @@ export class Typing {
 
   private lowered = new TypeMap<Exclude<Type, string>, Type>();
 
-  // Once every body is checked, what futures give and generators yield and take are laid out as
-  // codegen holds values, a brand as its base; the checker kept the brands to check them.
+  // Once every body is checked, what futures give, generators yield and take, and closures take
+  // and give are laid out as codegen holds values, a brand as its base; the checker kept the
+  // brands to check them.
   layOutForCodegen(this: Mut<this>): void {
     for (const id of [...this.arena.keys()]) {
       let r = this.arena.get(id)!;
@@ -2694,6 +2695,13 @@ export class Typing {
         r.yields = this.lower(r.yields);
         const sends = r.sends;
         if (sends !== undefined) r.sends = this.lower(sends);
+        this.arena.set(id, r);
+      } else if (r.kind === "closure" && r.generic === undefined) {
+        // So do a closure's parameters and result, which its body was compiled with lowered.
+        r.params = r.params.map((t) => this.lower(t));
+        r.returns = this.lower(r.returns);
+        const throws = r.throws;
+        if (throws !== undefined) r.throws = this.lower(throws);
         this.arena.set(id, r);
       }
     }

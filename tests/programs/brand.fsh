@@ -599,3 +599,17 @@ async function main(): Promise<void> throws Error {
   const o: OrderId = v
 }
 // error: 8:22: error[E0101]: type 'Brand<usize, "UserId">' is not assignable to type 'Brand<usize, "OrderId">'
+
+// case: brand_union_given_to_a_callback
+// expect: true 2
+type A = Brand<usize, "a">;
+type B = Brand<usize, "b">;
+type T = "x" | "y" | A | B;
+function big(t: Exclude<T, string>, n: usize): boolean { return t > n; }
+function main() {
+  let objects: Exclude<T, string>[] = [];
+  objects.push(3 as A);
+  objects.push(5 as B);
+  const n: usize = 4;
+  console.log(objects.some((m) => big(m, n)), objects.filter((m) => big(m, 1)).length);
+}
