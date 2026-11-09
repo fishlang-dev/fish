@@ -685,3 +685,28 @@ function main() {
   const l = dup({ kind: "list", items: ["a"] });
   if (l !== null && typeof l !== "string" && l.kind === "list") console.log(l.items.length);
 }
+
+// case: recursive_member_holding_a_narrowed_self
+// expect: option
+type TypeId = Brand<usize, "TypeId">;
+type Type = string | TypeId;
+type C =
+  | { kind: "plain"; type: Type }
+  | { kind: "string" }
+  | { kind: "option"; of: C; inner: Type }
+  | { kind: "array"; element: C; elementType: Type; lent: boolean };
+
+function f(t: Type, n: i64): C | string {
+  if (n > 0) {
+    const e = f(t, n - 1);
+    if (typeof e === "string") return e;
+    if (e.kind === "array") return { kind: "option", of: e, inner: t };
+    return { kind: "array", element: e, elementType: t, lent: false };
+  }
+  return { kind: "plain", type: t };
+}
+
+function main() {
+  const r = f("x", 2);
+  if (typeof r !== "string") console.log(r.kind);
+}

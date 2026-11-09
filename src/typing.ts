@@ -382,7 +382,12 @@ export const SET_METHODS = new Set(["add", "has", "delete", "clear", "keys", "va
 
 // The ids the primitives key tables by, below every type record's.
 const PRIMITIVES: Extract<Type, string>[] = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "boolean", "void", "null", "never", "string", "bigint"];
-const PRIMITIVE_IDS = new Map(PRIMITIVES.map((p, i): [string, usize] => [p, (i + 1) as usize]));
+function primitiveIds(): Map<string, usize> {
+  let ids = new Map<string, usize>();
+  for (let i = 0; i < PRIMITIVES.length; i++) ids.set(PRIMITIVES[i]!, (i + 1) as usize);
+  return ids;
+}
+const PRIMITIVE_IDS = primitiveIds();
 
 // The id a type keys a table by: a primitive's reserved one, or the type itself.
 export function idOf(t: usize | string): usize {
@@ -2690,6 +2695,29 @@ export class Typing {
         const sends = r.sends;
         if (sends !== undefined) r.sends = this.lower(sends);
         this.arena.set(id, r);
+      }
+    }
+    // A type holding itself keeps its records, since `lower` gives it back as it is: its objects'
+    // fields and its union's members are lowered in place, so what goes into it fits. Optional
+    // markers stay, for printing to leave an empty one out.
+    let group = new TypeSet<Exclude<Type, string>>();
+    for (const [m] of this.members) group.add(m);
+    for (const [u] of this.ties) group.add(u);
+    for (const id of [...this.arena.keys()]) {
+      const r = this.arena.get(id)!;
+      if (r.kind !== "recursive" || typeof r.of === "string") continue;
+      group.add(r.of);
+      const of = this.rec(r.of);
+      if (of.kind === "union") for (const m of of.members) if (typeof m !== "string") group.add(m);
+    }
+    for (const t of group) {
+      let r = this.rec(t);
+      if (r.kind === "object" && r.tuple !== true && r.match !== true) {
+        r.fields = r.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
+        this.setRec(t, r);
+      } else if (r.kind === "union" && r.unknown !== true) {
+        r.members = r.members.map((m) => { const b = this.recOf(m); return b?.kind === "brand" ? b.base : m; });
+        this.setRec(t, r);
       }
     }
   }

@@ -3793,15 +3793,14 @@ function __arrayFromHex(s: string): u8[] throws TypeError {
 // The typed arrays' helpers, in a program that names a typed array or DataView. Every typed array
 // owns its elements, so one made over an ArrayBuffer takes it and copies out the range it views,
 // reading the bytes in the host's order, little-endian on every target Fish builds for.
-const TYPED = String.raw`
-declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, count: i64): void;
-function __arrayTypedZeros<T>(length: i64, zero: T): T[] {
-  assert(length >= 0, "RangeError: Invalid typed array length: " + String(length));
-  return new Array(length).fill(zero);
-}
-${["U8", "I8", "U16", "I16", "U32", "I32", "F32", "F64"].map((name) => {
-  const t = name.toLowerCase();
-  return `function __arrayFromBuffer${name}(buffer: ArrayBuffer, byteOffset: i64, length: i64, size: i64, name: string): ${t}[] {
+function typedFunctions(): string {
+  const names = ["U8", "I8", "U16", "I16", "U32", "I32", "F32", "F64"];
+  let out = "";
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i]!;
+    const t = name.toLowerCase();
+    if (i > 0) out += "\n";
+    out += `function __arrayFromBuffer${name}(buffer: ArrayBuffer, byteOffset: i64, length: i64, size: i64, name: string): ${t}[] {
   const total = buffer.length as i64;
   assert(byteOffset % size === 0, "RangeError: start offset of " + name + " should be a multiple of " + String(size));
   assert(byteOffset >= 0 && byteOffset <= total, "RangeError: Start offset " + String(byteOffset) + " is outside the bounds of the buffer");
@@ -3826,7 +3825,16 @@ function __arrayTypedSet${name}(source: Ref<${t}[]>, target: Mut<${t}[]>, offset
   assert(offset >= 0 && offset + n <= (target.length as i64), "RangeError: offset is out of bounds");
   if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(target[offset as usize]) as MutPtr<u8>, ptrOf(source[0]) as Ptr<u8>, n * size) };
 }`;
-}).join("\n")}
+  }
+  return out;
+}
+const TYPED = String.raw`
+declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, count: i64): void;
+function __arrayTypedZeros<T>(length: i64, zero: T): T[] {
+  assert(length >= 0, "RangeError: Invalid typed array length: " + String(length));
+  return new Array(length).fill(zero);
+}
+${typedFunctions()}
 `;
 
 // DataView over an ArrayBuffer it owns, reading and writing numbers of each width in either byte

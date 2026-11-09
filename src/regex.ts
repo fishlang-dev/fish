@@ -38,7 +38,13 @@ const fail = (message: string): never => {
   throw new RegexSyntaxError(`invalid regular expression: ${message}`);
 };
 
-const SYNTAX = new Set([..."^$\\.*+?()[]{}|"].map((c) => c.charCodeAt(0) as u32));
+function syntaxCodes(): Set<u32> {
+  let codes = new Set<u32>();
+  const chars = "^$\\.*+?()[]{}|";
+  for (let i = 0; i < chars.length; i++) codes.add(chars.charCodeAt(i) as u32);
+  return codes;
+}
+const SYNTAX = syntaxCodes();
 const at = (c: string): u32 => c.charCodeAt(0) as u32;
 
 export const DIGITS: Ranges = [[0x30, 0x39]];
