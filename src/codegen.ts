@@ -100,10 +100,31 @@ function brief(shown: string): string {
   return short.length <= 2 * LONGEST_ARGUMENTS ? short : `${short.slice(0, 2 * LONGEST_ARGUMENTS)}...`;
 }
 
+// Each instance's name in the IR by compilation: two instances whose types read alike, as two
+// classes made from arguments shown the same way, are told apart by a count after the first.
+const names = new WeakMap<Ref<Arenas>, Map<InstanceId, string>>();
+export function uniqueName(arenas: Ref<Arenas>, i: Instance): string {
+  let known = names.get(arenas);
+  if (known === undefined || !known.has(i.id)) {
+    known = new Map();
+    const seen = new Map<string, number>();
+    for (let id = 1; ; id++) {
+      const x = arenas.instanceOf(id as InstanceId);
+      if (x === undefined) break;
+      const name = shortened(x.symbol);
+      const n = (seen.get(name) ?? 0) + 1;
+      seen.set(name, n);
+      known.set(x.id, n === 1 ? name : `${name}~${n}`);
+    }
+    names.set(arenas, known);
+  }
+  return known.get(i.id) ?? shortened(i.symbol);
+}
+
 // An instance's name in the IR.
 export const symbol = (arenas: Ref<Arenas>, i: Instance) => {
   const b = bodyOf(arenas, i);
-  return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(shortened(i.symbol))}"`;
+  return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(uniqueName(arenas, i))}"`;
 };
 
 // Function definitions and declarations, each with the lines after it, in order of the symbols

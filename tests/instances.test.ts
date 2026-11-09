@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Arenas, type InstanceId } from "../src/arenas.ts";
 import { compile } from "../src/main.ts";
+import { symbol } from "../src/codegen.ts";
 import { cachedSession } from "../src/stdcache.ts";
 import { unreached, type Body, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
@@ -42,6 +43,15 @@ function main() {
   console.log(keep(() => a), keep(() => b));
 }`, file);
   expect(kept.match(/^define .*@"fsh\.keep#[0-9a-z.]+"/gm)?.length).toBe(2);
+});
+
+// Two instances whose symbols read alike, as classes made from arguments shown the same way, get
+// names of their own in the IR; one alone keeps its symbol.
+test("instances that read alike get symbols of their own", () => {
+  const arenas = new Arenas();
+  const made = (symbol: string) => arenas.addInstance({ body: arenas.addBody({ name: "m" } as Body).bodyId, symbol, bindings: new Map() } as unknown as Omit<Instance, "id">);
+  const [a, b, c] = [made("Box<T>.get"), made("Box<T>.get"), made("Box<U>.get")];
+  expect([symbol(arenas, a), symbol(arenas, b), symbol(arenas, c)]).toEqual(['@"fsh.Box<T>.get"', '@"fsh.Box<T>.get~2"', '@"fsh.Box<U>.get"']);
 });
 
 // An abstract member's signature and a template are checked but never compiled, so no compiled
