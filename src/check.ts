@@ -2796,9 +2796,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           const outerSight = this.resolver().enterSight(undefined);
           const scope = this.instancing().scopeOf(id);
           const outerScope = this.resolver().enterScope(scope);
+          this.tables.rewrites.startCheck();
           try {
             this.checkInstance(id, undefined, undefined, undefined);
           } finally {
+            this.tables.rewrites.endCheck();
             this.resolverState.scope = outerScope;
             this.resolverState.sight = outerSight;
           }
@@ -3750,9 +3752,9 @@ class BodyChecker implements Context, GuardHost {
     if (edited !== undefined) body.body = edited;
     let written = body.params.splice(0);
     while (written.length > 0) body.params.push(rebuiltParam(written.shift()!, this.cx.tables.rewrites));
-    this.cx.tables.rewrites.rebuilding = bodyId;
+    this.cx.tables.rewrites.startRebuild(bodyId);
     rebuiltStmts(body.body, this.cx.tables.rewrites);
-    this.cx.tables.rewrites.rebuilding = undefined;
+    this.cx.tables.rewrites.endRebuild();
     // A method this body calls on an object holding references is checked first, so the move
     // check knows whether it keeps what it is lent.
     const caller = this.instance().id;

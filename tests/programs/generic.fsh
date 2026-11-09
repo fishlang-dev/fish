@@ -1332,3 +1332,27 @@ function walk2<T>(n: i64, visit: () => T): i64 {
   return 1 + walk2<T>(n - 1, visit);
 }
 function main() { console.log(walk2(2, () => 5)); }
+
+// case: generic_class_instances_sharing_a_body_spread_a_map
+// expect: true
+// expect: true
+// expect: true
+type Named = { name: string };
+class Inst<H> {
+  host: H;
+  constructor(host: H) { this.host = host; }
+  all(f: Ref<Named>, given: Map<string, i64>): boolean {
+    return f.name.length > 0 && [...given].every(([name, t]) => name.length > 0 && t > 0);
+  }
+}
+function again<T>(h: T, given: Map<string, i64>): boolean {
+  return new Inst<T>(h).all({ name: "g" }, given);
+}
+function main() {
+  let m = new Map<string, i64>();
+  m.set("a", 2);
+  const i = new Inst<string>("h");
+  console.log(i.all({ name: "x" }, m.clone()));
+  console.log(again(1, m.clone()));
+  console.log(i.all({ name: "y", extra: 3 }, m));
+}

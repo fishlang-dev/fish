@@ -651,13 +651,46 @@ export class Rewrites implements Replacements {
   // type has no `id` field of its own, as a union of nodes has none.
   replaceAt(this: Mut<this>, id: usize, by: Expr): Expr {
     this.hasChanges = true;
+    this.made++;
+    this.madeAt.set(id, this.made);
     this.exprs.set(id, withIdExpr(by, id, 0));
     return this.exprs.get(id)!;
   }
 
+  // Instances may share a body, each checking and rebuilding it. Its replacements are in place
+  // after the first rebuild and keep their nodes' ids, so a later one puts back only those its own
+  // check made: another copy's, made since under the same ids, would replace them.
+  private made: usize = 0;
+  private madeAt = new Map<usize, usize>();
+  private rebuilt = new Set<usize>();
+  // How many replacements were made before the check of each body being checked began.
+  private checks: usize[] = [];
+  private from: usize = 0;
+
+  startCheck(this: Mut<this>): void {
+    this.checks.push(this.made);
+  }
+
+  endCheck(this: Mut<this>): void {
+    this.checks.pop();
+  }
+
+  startRebuild(this: Mut<this>, body: usize): void {
+    this.rebuilding = body;
+    this.from = this.rebuilt.has(body) && this.checks.length > 0 ? this.checks[this.checks.length - 1]! + 1 : 0;
+    this.rebuilt.add(body);
+  }
+
+  endRebuild(this: Mut<this>): void {
+    this.rebuilding = undefined;
+    this.from = 0;
+  }
+
   current(node: Expr): Expr {
     if (this.exprs.size === 0) return node;
-    return this.exprs.get(idOfExpr(node)) ?? node;
+    const id = idOfExpr(node);
+    if (this.from > 0 && (this.madeAt.get(id) ?? 0) < this.from) return node;
+    return this.exprs.get(id) ?? node;
   }
 
   // The node replacing `node`, if one does; for a caller holding `node` by reference, which keeps
