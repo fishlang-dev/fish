@@ -1697,7 +1697,27 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       return from === want || (this.isUnion(cx, from) && cx.tables.typing.rec(from).members.includes(want));
     }
     if (this.key(cx, e) === undefined || this.throughUnion(cx, e) || (narrowedLocal && this.isUnion(cx, type))) return false;
-    return cx.tables.typing.lower(type) === cx.tables.typing.lower(target) || cx.tables.typing.partOfItself(type, target);
+    if (cx.tables.typing.partOfItself(type, target)) return true;
+    const typeAs = cx.tables.typing.lower(type);
+    const targetAs = cx.tables.typing.lower(target);
+    return this.sameOpened(cx, typeAs, targetAs);
+  }
+
+  // Whether two types are one, with a member that holds itself opened up in one and not the
+  // other, as a union holding itself is read: checked without making the opened types.
+  sameOpened(cx: Ref<MoveCx<T, B, I>>, a: Type, b: Type): boolean {
+    const typing: Ref<Typing> = cx.tables.typing;
+    const x = typing.unfold(a);
+    const y = typing.unfold(b);
+    if (x === y) return true;
+    const rx = this.record(cx, x);
+    const ry = this.record(cx, y);
+    if (rx?.kind !== "union" || ry?.kind !== "union" || rx.members.length !== ry.members.length) return false;
+    for (const m of rx.members) {
+      const opened = typing.unfold(m);
+      if (!ry.members.some((n) => typing.unfold(n) === opened)) return false;
+    }
+    return true;
   }
 
   // Whether a field path passes through a union, or ends where a type parameter's concrete type
@@ -1707,8 +1727,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (this.unionOnPath(cx, e)) return true;
     const stored = this.storedType(cx, e);
     if (stored === undefined) return false;
-    const unfolded = cx.tables.typing.unfolded(stored);
-    return cx.tables.typing.lower(unfolded) !== cx.tables.typing.lower(cx.instance.types.get(e)!);
+    const storedAs = cx.tables.typing.lower(stored);
+    const readAs = cx.tables.typing.lower(cx.instance.types.get(e)!);
+    return !this.sameOpened(cx, storedAs, readAs);
   }
 
   // Whether an object a field path reads through is a union.

@@ -641,3 +641,19 @@ function main() {
 }
 // expect: -(-(7)) -(7) 7
 // expect: +
+
+// case: lifetime_return_field_of_self_holding_union
+// A field typed as a union that holds the field's own object type is returned where it lives,
+// with the object type declared before the union.
+type Wrap = { kind: "wrap"; value: Item };
+type Item = { kind: "num"; n: i64 } | Wrap;
+function inner(w: Ref<Wrap>): Ref<Item> { return w.value; }
+function main() {
+  const w: Wrap = { kind: "wrap", value: { kind: "wrap", value: { kind: "num", n: 3 } } };
+  const once = inner(w);
+  if (once.kind === "wrap") {
+    const twice = inner(once);
+    if (twice.kind === "num") console.log(twice.n);
+  }
+}
+// expect: 3

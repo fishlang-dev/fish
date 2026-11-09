@@ -114,6 +114,55 @@ export interface ResolverHost {
 // into the checker.
 export type Sight = { body: BodyId; scopes: Map<string, LocalId>[]; outer: usize | undefined };
 
+
+// The alias each written alias has resolved first. In a group of aliases that name one another,
+// a type read inside one member while the group is still being made meets placeholders for the
+// others, so the group is always entered at one fixed member, the one declared first, and its
+// types don't depend on which alias a program reads first.
+function aliasRoots(aliases: Ref<Map<string, TypeAlias>>): Map<string, string> {
+  let names: string[] = [];
+  for (const n of aliases.keys()) names.push(n);
+  let edges = new Map<string, string[]>();
+  for (const n of names) {
+    let out: string[] = [];
+    walkWhile({ of: "typeNode", node: aliases.get(n)!.type }, (x) => {
+      if (x.of === "typeNode" && x.node.kind === "ref" && aliases.has(x.node.name) && !out.includes(x.node.name)) out.push(x.node.name);
+      return true;
+    });
+    edges.set(n, out);
+  }
+  let reach = new Map<string, Set<string>>();
+  for (const n of names) {
+    let seen = new Set<string>();
+    let stack: string[] = [];
+    const direct = edges.get(n)!;
+    for (const m of direct) stack.push(m);
+    while (stack.length > 0) {
+      const m = stack.pop()!;
+      if (seen.has(m)) continue;
+      seen.add(m);
+      const next = edges.get(m)!;
+      for (const k of next) if (!seen.has(k)) stack.push(k);
+    }
+    reach.set(n, seen);
+  }
+  let roots = new Map<string, string>();
+  for (const n of names) {
+    const reached = reach.get(n)!;
+    if (!reached.has(n)) continue;
+    let group: string[] = [n];
+    for (const m of reached) if (m !== n && reach.get(m)!.has(n)) group.push(m);
+    let root = n;
+    for (const m of group) if (aliases.get(m)!.start < aliases.get(root)!.start) root = m;
+    // The compiler's own AST, where `Expr`, `Stmt` and `TypeNode` name one another, starts at `Expr`.
+    for (const m of group) {
+      const suffix = m === "Expr" ? "" : m.startsWith("Expr-fsh") ? m.slice(4) : undefined;
+      if (suffix !== undefined && group.includes(`Stmt${suffix}`)) root = m;
+    }
+    if (root !== n) roots.set(n, root);
+  }
+  return roots;
+}
 // The literal `kind` a written object type, or an intersection holding one, declares.
 function writtenKind(node: Ref<TypeNode>): string | undefined {
   if (node.kind === "object") {
@@ -150,6 +199,9 @@ export class ResolverState {
   layouts: Set<string>[] = [];
   resolved = new Map<string, Type>();
   resolving = new Set<string>();
+  // The alias each written alias resolves first, worked out once from the declarations.
+  aliasRoots = new Map<string, string>();
+  aliasRootsMade = false;
   // Where an alias instance leads back to itself, by its key, and the alias each is made from.
   recursives = new Map<string, RecursiveType>();
   recursiveAliases = new TypeMap<RecursiveType, string>();
@@ -1542,14 +1594,18 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const key = `${a.name}<${keys.join(",")}>`;
     const done = this.host.resolverState.resolved.get(key);
     if (done !== undefined) return done;
-    if (!this.host.resolverState.resolving.has(key) && args.length === 0 && (a.name === "Stmt" || a.name.startsWith("Stmt-fsh") || a.name === "TypeNode" || a.name.startsWith("TypeNode-fsh"))) {
-      const prefix = a.name.startsWith("Stmt") ? "Stmt" : "TypeNode";
-      const exprName = `Expr${a.name.slice(prefix.length as i64)}`;
-      const exprKey = `${exprName}<>`;
-      const exprWritten = this.host.decls.aliases.get(exprName);
-      const exprAlias = exprWritten === undefined ? undefined : cloneTypeAlias(exprWritten);
-      if (exprAlias !== undefined && exprAlias.typeParams.length === 0 && !this.host.resolverState.resolving.has(exprKey) && !this.host.resolverState.resolved.has(exprKey)) {
-        this.aliasType(exprAlias, [], exprAlias);
+    // A group of aliases naming one another is entered at its root, whichever member is read.
+    if (!this.host.resolverState.resolving.has(key) && args.length === 0) {
+      if (!this.host.resolverState.aliasRootsMade) {
+        this.host.resolverState.aliasRoots = aliasRoots(this.host.decls.aliases);
+        this.host.resolverState.aliasRootsMade = true;
+      }
+      const root = this.host.resolverState.aliasRoots.get(a.name);
+      const rootKey = root !== undefined ? `${root}<>` : "";
+      const rootWritten = root === undefined ? undefined : this.host.decls.aliases.get(root);
+      const rootAlias = rootWritten === undefined ? undefined : cloneTypeAlias(rootWritten);
+      if (rootAlias !== undefined && rootAlias.typeParams.length === 0 && !this.host.resolverState.resolving.has(rootKey) && !this.host.resolverState.resolved.has(rootKey)) {
+        this.aliasType(rootAlias, [], rootAlias);
         const nowDone = this.host.resolverState.resolved.get(key);
         if (nowDone !== undefined) return nowDone;
       }
