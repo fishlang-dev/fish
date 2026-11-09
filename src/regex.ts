@@ -24,7 +24,7 @@ export type RegexNode =
 
 export type Capture = { name: string | undefined; optional: boolean };
 
-export type Pattern = { tree: RegexNode; captures: Capture[]; flags: string; unicode: boolean; backtracks: boolean };
+export type RegexPattern = { tree: RegexNode; captures: Capture[]; flags: string; unicode: boolean; backtracks: boolean };
 
 export class RegexSyntaxError {
   message: string;
@@ -724,7 +724,7 @@ class Parser {
 }
 
 /** @throws {RegexSyntaxError} */
-export function parsePattern(source: string, flags: string, tables: Mut<RegexTables>): Pattern {
+export function parsePattern(source: string, flags: string, tables: Mut<RegexTables>): RegexPattern {
   const flagChars = [...flags];
   for (const [i, f] of flagChars.entries()) {
     if (!"dgimsuvy".includes(f) || flags.indexOf(f) !== (i as i64)) fail(`invalid flags supplied to RegExp constructor '${flags}'`);
@@ -967,7 +967,7 @@ class Compiler {
 }
 
 /** @throws {RegexSyntaxError} */
-export function compile(p: Ref<Pattern>, tables: Mut<RegexTables>): u32[] {
+export function compile(p: Ref<RegexPattern>, tables: Mut<RegexTables>): u32[] {
   let c = new Compiler(p.unicode);
   c.emit([(p.captures.length + 1) as u32, 0, flagsOf(p), 0]);
   c.emit([OP.save, 0]);
@@ -1027,7 +1027,7 @@ export function compile(p: Ref<Pattern>, tables: Mut<RegexTables>): u32[] {
   return c.code;
 }
 
-function flagsOf(p: Ref<Pattern>): u32 {
+function flagsOf(p: Ref<RegexPattern>): u32 {
   return ((p.unicode ? 1 : 0) | (p.flags.includes("y") ? 2 : 0) | (p.backtracks ? 4 : 0) | (p.flags.includes("g") ? 32 : 0)) as u32;
 }
 

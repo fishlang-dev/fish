@@ -2865,6 +2865,10 @@ class ClassMembers implements Members {
     return this.cx.tables.typing;
   }
 
+  typingView(): Ref<Typing> {
+    return this.cx.tables.typing;
+  }
+
   arenas(): Ref<Arenas> {
     return this.cx.tables.arenas;
   }
@@ -3094,6 +3098,9 @@ class BodyChecker implements Context, GuardHost {
   }
   held(): Ref<Instance> {
     return this.cx.tables.arenas.instanceOf(this.state.instanceId);
+  }
+  view(): Ref<Tables> {
+    return this.cx.tables;
   }
   types(this: Mut<this>): Mut<Instance["types"]> {
     return this.instance().types;

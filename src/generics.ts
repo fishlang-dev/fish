@@ -435,12 +435,12 @@ function substituted(ids: Mut<Ids>, node: Ref<TypeNode>, given: Ref<Map<string, 
 // by fitting it.
 /** @throws {CompileError} */
 export function checkBound(type: Type, bound: Type, members: Mut<Members>, at: Ref<Span>) {
-  const trait = typeof bound === "string" ? undefined : members.typing().rec(bound);
+  const trait = typeof bound === "string" ? undefined : members.typingView().rec(bound);
   const interfaced = trait !== undefined && trait.kind === "interface";
   const reason = interfaced ? unsatisfied(type, bound as InterfaceType, members, { start: at.start, end: at.end })
     : members.typing().fits(type, bound) ? undefined : "";
   if (reason === undefined) return;
-  throw new CompileError("E0107", `type '${members.typing().show(type)}' does not satisfy the constraint '${members.typing().show(bound)}'${reason !== "" ? `: ${reason}` : ""}`, at.start, at.end);
+  throw new CompileError("E0107", `type '${members.typingView().show(type)}' does not satisfy the constraint '${members.typingView().show(bound)}'${reason !== "" ? `: ${reason}` : ""}`, at.start, at.end);
 }
 
 // Whether a type has no type parameter in it, so its instance can be compiled. A class's
@@ -1244,11 +1244,23 @@ function readOnlyKept<H extends InstancingHost>(host: Mut<H>, written: Ref<Param
 function rebound<H extends InstancingHost>(host: Mut<H>, bound: Bound, decided: Ref<TypeMap<Type, Type>>): Bound {
   if (decided.size === 0) return bound;
   const [element, asyncElement, promised] = [host.tables.typing.generatorElement(bound), host.tables.typing.generatorElement(bound, true), host.tables.typing.promiseElement(bound)];
-  if (element !== undefined) return host.tables.typing.generatorInterface(host.replaced(element, decided));
+  if (element !== undefined) {
+    const yields = host.replaced(element, decided);
+    return host.tables.typing.generatorInterface(yields);
+  }
   const iterable = host.tables.typing.iterableElement(bound);
-  if (iterable !== undefined) return host.tables.typing.iterableInterface(host.replaced(iterable, decided));
-  if (asyncElement !== undefined) return host.tables.typing.asyncGeneratorInterface(host.replaced(asyncElement, decided));
-  if (promised !== undefined) return host.tables.typing.promiseInterface(host.replaced(promised, decided));
+  if (iterable !== undefined) {
+    const items = host.replaced(iterable, decided);
+    return host.tables.typing.iterableInterface(items);
+  }
+  if (asyncElement !== undefined) {
+    const yields = host.replaced(asyncElement, decided);
+    return host.tables.typing.asyncGeneratorInterface(yields);
+  }
+  if (promised !== undefined) {
+    const gives = host.replaced(promised, decided);
+    return host.tables.typing.promiseInterface(gives);
+  }
   const b = host.tables.typing.rec(bound);
   return b.kind === "function" || (b.kind === "interface" && b.generic !== undefined) ? host.replaced(bound, decided) as Bound : bound;
 }

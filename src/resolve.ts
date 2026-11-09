@@ -114,6 +114,35 @@ export interface ResolverHost {
 // into the checker.
 export type Sight = { body: BodyId; scopes: Map<string, LocalId>[]; outer: usize | undefined };
 
+// The literal `kind` a written object type, or an intersection holding one, declares.
+function writtenKind(node: Ref<TypeNode>): string | undefined {
+  if (node.kind === "object") {
+    for (const m of node.members) {
+      if (m.kind === "property" && m.name === "kind" && m.type !== undefined && m.type.kind === "literal" && m.type.value.kind === "string") return m.type.value.value;
+    }
+    return undefined;
+  }
+  if (node.kind === "intersection") {
+    for (const t of node.types) {
+      const k = writtenKind(t);
+      if (k !== undefined) return k;
+    }
+  }
+  return undefined;
+}
+
+// The literal string an object type's `kind` field holds, as in `{ kind: "block" }`.
+function literalKind(typing: Ref<Typing>, t: Type): string | undefined {
+  if (typeof t === "string") return undefined;
+  const r = typing.rec(t);
+  if (r.kind !== "object") return undefined;
+  const field = r.fields.find((f) => f.name === "kind");
+  if (field === undefined || typeof field.type === "string") return undefined;
+  const k = typing.rec(field.type);
+  return k.kind === "literal" && typeof k.value === "string" ? k.value : undefined;
+}
+
+
 // What resolving has made and where it is, kept by the host between uses.
 export class ResolverState {
   // What was being resolved as each class layout under way began: an alias met again inside one
@@ -181,7 +210,21 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   }
   /** @throws {CompileError} */
   conforms(this: Mut<this>, from: Type, to: Type, at: Ref<Span>): boolean {
+    // An alias met again while it is still being made has no shape yet, as when `Extract<Stmt, ...>`
+    // is read inside a member `Stmt` holds; a member of a discriminated union says its kind where
+    // it is declared, which decides it.
+    const pending = this.pendingKind(from);
+    const wanted = pending !== undefined ? literalKind(this.host.tables.typing, to) : undefined;
+    if (pending !== undefined && wanted !== undefined) return pending === wanted;
     return this.host.conforms(from, to, { start: at.start, end: at.end });
+  }
+  // The literal `kind` an alias still being made declares, read from where it is written.
+  private pendingKind(this: Mut<this>, t: Type): string | undefined {
+    if (typeof t === "string") return undefined;
+    const r = this.host.tables.typing.rec(t);
+    if (r.kind !== "recursive" || r.of !== "never") return undefined;
+    const alias = this.host.decls.aliases.get(r.name);
+    return alias !== undefined ? writtenKind(alias.type) : undefined;
   }
   typingOf(this: Mut<this>): Mut<Typing> {
     return this.host.tables.typing;

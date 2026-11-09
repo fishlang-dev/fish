@@ -617,7 +617,7 @@ type Building = { types: Categories; asExpressions: Set<usize>; fixed: boolean; 
 // gives the bindings of the quotes spliced in, and gets this quote's, with theirs; `free` gets
 // the names it leaves free.
 /** @throws {CompileError} */
-export function built<V>(tables: Mut<Tables>, q: Ref<Quote>, types: Ref<Categories>, at: Span | undefined, b: Builder<V>, scope: Mut<Map<string, string>>, free: Mut<Free>): V {
+export function built<V, K extends Builder<V>>(tables: Mut<Tables>, q: Ref<Quote>, types: Ref<Categories>, at: Span | undefined, b: Mut<K>, scope: Mut<Map<string, string>>, free: Mut<Free>): V {
   const tree = quoteTree(treeNode(q.tree));
   let asExpressions = new Set<usize>();
   for (const i of q.asExpressions) asExpressions.add(i);
@@ -626,20 +626,20 @@ export function built<V>(tables: Mut<Tables>, q: Ref<Quote>, types: Ref<Categori
   const last = tables.hygienes.length;
   if (at === undefined || last === 0) {
     b.prepare(scope, free);
-    return make<V>(tables.typing, c, b, tree, type, c.start, c.end);
+    return make<V, K>(tables.typing, c, b, tree, type, c.start, c.end);
   }
   const span = FILE_SPAN as usize;
   const file = (at.start - (at.start % span)) / span;
   const m: Making = { file, names: tables.hygienes[last - 1]!.namesIn.get(file)! };
   const clean = hygienic(tables.ids, tree, m, tables.hygienes[last - 1]!, scope, free);
   b.prepare(scope, free);
-  return make<V>(tables.typing, c, b, clean, type, c.start, c.end);
+  return make<V, K>(tables.typing, c, b, clean, type, c.start, c.end);
 }
 
 // The value of `v`, of the Ast type `type`. `start` and `end` are the span of the node a part is
 // in, where an error about the part is reported.
 /** @throws {CompileError} */
-function make<V>(typing: Mut<Typing>, c: Ref<Building>, b: Ref<Builder<V>>, v: Ref<QuoteValue>, type: Type, start: usize, end: usize): V {
+function make<V, K extends Builder<V>>(typing: Mut<Typing>, c: Ref<Building>, b: Ref<K>, v: Ref<QuoteValue>, type: Type, start: usize, end: usize): V {
   const t = typing.unfolded(type);
   const members = unionMembers(typing, t);
   if (members !== undefined) {
@@ -648,7 +648,7 @@ function make<V>(typing: Mut<Typing>, c: Ref<Building>, b: Ref<Builder<V>>, v: R
     if (splice !== undefined) return b.splice(typing, splice.i, type);
     const member = memberFor(typing, v, members);
     if (member === undefined) throw new CompileError("E1103", "internal error: a quoted node fits no member of its Ast type", start, end);
-    return b.member(make<V>(typing, c, b, v, member, start, end), t, member);
+    return b.member(make<V, K>(typing, c, b, v, member, start, end), t, member);
   }
   if (v.kind === "none" || t === "null") return b.none();
   if (t === "string") {
@@ -667,22 +667,22 @@ function make<V>(typing: Mut<Typing>, c: Ref<Building>, b: Ref<Builder<V>>, v: R
   const element = arrayElement(typing, t);
   if (element !== undefined) {
     let out: V[] = [];
-    if (v.kind === "list") for (const x of v.items) out.push(make<V>(typing, c, b, x, element, start, end));
+    if (v.kind === "list") for (const x of v.items) out.push(make<V, K>(typing, c, b, x, element, start, end));
     return b.array(out);
   }
   if (r.kind !== "object") throw new CompileError("E1103", `internal error: an Ast field of type '${r.kind}'`, start, end);
   const fields = objectFields(typing, t);
   let out = new Map<string, V>();
-  if (v.kind === "node") makeFields<V>(typing, c, b, v.fields, fields, start, end, out);
-  else if (v.kind === "record") makeFields<V>(typing, c, b, v.fields, fields, start, end, out);
-  else makeFields<V>(typing, c, b, [], fields, start, end, out);
+  if (v.kind === "node") makeFields<V, K>(typing, c, b, v.fields, fields, start, end, out);
+  else if (v.kind === "record") makeFields<V, K>(typing, c, b, v.fields, fields, start, end, out);
+  else makeFields<V, K>(typing, c, b, [], fields, start, end, out);
   return b.record(t as ObjectType, out);
 }
 
 // Each field of an object type's value, in the type's order, a field it doesn't have nothing.
 // Without a fixed span, a node keeps its own.
 /** @throws {CompileError} */
-function makeFields<V>(typing: Mut<Typing>, c: Ref<Building>, b: Ref<Builder<V>>, values: Ref<QuoteField[]>, fields: Ref<{ name: string; type: Type }[]>, start: usize, end: usize, out: Mut<Map<string, V>>): void {
+function makeFields<V, K extends Builder<V>>(typing: Mut<Typing>, c: Ref<Building>, b: Ref<K>, values: Ref<QuoteField[]>, fields: Ref<{ name: string; type: Type }[]>, start: usize, end: usize, out: Mut<Map<string, V>>): void {
   const ownStart = intIn(values, "start");
   const ownEnd = intIn(values, "end");
   let hereStart = start;
@@ -702,11 +702,11 @@ function makeFields<V>(typing: Mut<Typing>, c: Ref<Building>, b: Ref<Builder<V>>
     let found = false;
     for (const g of values) {
       if (g.name !== f.name) continue;
-      out.set(f.name, make<V>(typing, c, b, g.value, f.type, hereStart, hereEnd));
+      out.set(f.name, make<V, K>(typing, c, b, g.value, f.type, hereStart, hereEnd));
       found = true;
       break;
     }
-    if (!found) out.set(f.name, make<V>(typing, c, b, none, f.type, hereStart, hereEnd));
+    if (!found) out.set(f.name, make<V, K>(typing, c, b, none, f.type, hereStart, hereEnd));
   }
 }
 

@@ -160,7 +160,8 @@ function computed<H extends EnumHost>(host: Mut<H>, node: Ref<EnumNode>, m: Ref<
   host.tables.enumInits.push([init.start, init.end, m.name]);
   let value: unknown = undefined;
   try {
-    value = host.enumMemberValue(node.name, m.name, qualified(host.tables.ids, init, node.name, names));
+    const written = qualified(host.tables.ids, init, node.name, names);
+    value = host.enumMemberValue(node.name, m.name, written);
   } finally {
     host.tables.enumInits.pop();
   }

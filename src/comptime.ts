@@ -943,7 +943,7 @@ class Interpreter<H extends ComptimeHost> {
         }
         let made: Value;
         try {
-          made = built<Value>(this.host.tables, q, types, span(e), new AstValues(values, holeTypes, frees, within, e), scope, free);
+          made = built<Value, AstValues>(this.host.tables, q, types, span(e), new AstValues(values, holeTypes, frees, within, e), scope, free);
         } catch (err) {
           if (err instanceof CompileError && err.code === "E1101") throw new Stop(err.message, span(e), false);
           throw err;

@@ -189,7 +189,7 @@ export function lowerKeys(program: Mut<Stmt[]>) {
     if (n.of === "classMember") {
       const m = n.node;
       if (m.kind === "constructor" || m.kind === "staticBlock" || m.kind === "index") return;
-      if (m.name === ITERATOR) {
+      if (typeof m.name === "string" && m.name === ITERATOR) {
         failure = new CompileError("E0120", `'${ITERATOR}' as a quoted name would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`, m.start, m.end);
         return;
       }
@@ -219,7 +219,7 @@ export function lowerKeys(program: Mut<Stmt[]>) {
     if (n.of === "typeMember") {
       const m = n.node;
       if (m.kind === "property" || m.kind === "method" || m.kind === "get" || m.kind === "set") {
-        if (m.name === ITERATOR) {
+        if (typeof m.name === "string" && m.name === ITERATOR) {
           failure = new CompileError("E0120", `'${ITERATOR}' as a quoted name would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`, m.start, m.end);
           return;
         }
