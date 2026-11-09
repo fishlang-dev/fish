@@ -1713,11 +1713,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // every body is checked, each reads the one its callee compiles to, and so does each caller of
   // a function returning it, which takes a pass per call between them.
   /** @throws {CompileError} */
-  private settleGenerators(this: Mut<this>, ids: Ref<InstanceId[]>): void {
+  private settleGenerators(this: Mut<this>, ids: Mut<InstanceId[]>): void {
     // ponytail: passes bounded by the instance count, enough for any chain of returns.
     for (let pass: usize = 0; pass <= ids.length; pass++) {
       let changed = false;
-      for (const id of ids) {
+      for (let at: usize = 0; at < ids.length; at++) {
+        const id = ids[at]!;
         let swap = new TypeMap<Type, Type>();
         const instance = this.tables.arenas.instanceOf(id);
         for (const [e, target] of instance.calls) {
@@ -1730,8 +1731,36 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         if (swap.size === 0) continue;
         changed = true;
         this.swapTypes(id, swap);
+        this.remakeCallees(id, swap, ids);
       }
       if (!changed) return;
+    }
+  }
+
+  // A callee made for a generator the swap replaces, as `collect` is for what `toArray` reads, is
+  // made again for the one replacing it, checked, and compiled in its place.
+  /** @throws {CompileError} */
+  private remakeCallees(this: Mut<this>, id: InstanceId, swap: Ref<TypeMap<Type, Type>>, ids: Mut<InstanceId[]>): void {
+    let calls: [Expr, InstanceId][] = [];
+    for (const [e, target] of this.tables.arenas.instanceOf(id).calls) calls.push([cloneExpr(e), target]);
+    for (const [e, target] of calls) {
+      const callee = this.tables.arenas.instanceOf(target);
+      if (callee.concrete) continue;
+      let stale = false;
+      for (const t of callee.bindings.values()) if (swap.has(t)) stale = true;
+      if (!stale) continue;
+      let bindings = new Map<string, Type>();
+      for (const [name, t] of callee.bindings) bindings.set(name, swap.has(t) ? swap.get(t)! : t);
+      let definition: BodyId | undefined = undefined;
+      for (const [body, made] of this.instancingState.instances) for (const i of made.values()) if (i === target) definition = body;
+      if (definition === undefined) continue;
+      const f = cloneSignature(this.tables.arenas.bodyOf(definition));
+      const remade = this.instancing().instanceOf(f, bindings).id;
+      if (!this.tables.arenas.instanceOf(remade).concrete) continue;
+      this.checkBody(remade);
+      if (!ids.includes(remade)) ids.push(remade);
+      let instance = this.tables.arenas.instanceMut(id);
+      instance.calls.set(cloneExpr(e), remade);
     }
   }
 

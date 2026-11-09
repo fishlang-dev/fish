@@ -354,6 +354,7 @@ function main() {
 // case: iterable_generic_class_handing_on_a_generator
 // expect: a 1
 // expect: b 2
+// expect: 2
 class Pairs<K, V> {
   keys: K[] = [];
   vals: V[] = [];
@@ -371,4 +372,5 @@ function main() {
   p.keys.push("b");
   p.vals.push(2);
   for (const [k, v] of p) console.log(k, v);
+  console.log(p[Symbol.iterator]().toArray().length);
 }
