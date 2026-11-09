@@ -65,10 +65,39 @@ const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_
 // A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
 // test by its name, which may hold quotes, so those are escaped as LLVM spells them.
 const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`);
+// A symbol with each type argument list longer than this written as a hash of it: a generic
+// class made from a structural type spells its fields in its name, which every method's symbol
+// and frame name repeats.
+const LONGEST_ARGUMENTS = 160;
+export function shortened(name: string): string {
+  if (name.length <= LONGEST_ARGUMENTS) return name;
+  let out = "";
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < name.length; i++) {
+    const c = name[i]!;
+    if (c === "<") {
+      if (depth === 0) {
+        out += name.slice(from, i + 1);
+        from = i + 1;
+      }
+      depth++;
+    } else if (c === ">" && depth > 0) {
+      depth--;
+      if (depth === 0) {
+        const inner = name.slice(from, i);
+        out += inner.length > LONGEST_ARGUMENTS ? `#${digest(inner)}` : inner;
+        from = i;
+      }
+    }
+  }
+  return out + name.slice(from);
+}
+
 // An instance's name in the IR.
 export const symbol = (arenas: Ref<Arenas>, i: Instance) => {
   const b = bodyOf(arenas, i);
-  return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(i.symbol)}"`;
+  return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(shortened(i.symbol))}"`;
 };
 
 // Function definitions and declarations, each with the lines after it, in order of the symbols
@@ -510,7 +539,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if (closure) return closure.self ?? `<arrow ${where(bodyOf(noted.arenas, i)).split(":").slice(-2).join(":")}>`;
     // A generic instance ends in `#<id>`, which no frame shows; a private name is `#name` after a
     // dot or space, renamed `#name@Class` when a base declares one too.
-    return i.symbol.replace(/(?<![.\s])#\w+$/, "").replace(/(#\w+)@[^.#\s]+/g, "$1");
+    return shortened(i.symbol).replace(/(?<![.\s])#\w+$/, "").replace(/(#\w+)@[^.#\s]+/g, "$1");
   }
 
   // The part of a generated symbol telling `owner` apart in its family: a hash of its description
