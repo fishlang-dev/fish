@@ -1701,11 +1701,68 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const b = cloneSignature(bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id)));
       if (this.requiredBody(b, signed)) required.add(b.bodyId);
     }
+    this.settleGenerators(compiledIds);
     this.tables.typing.closeUnknown();
     this.unknownJson();
     this.tables.typing.layOutForCodegen();
     const found = warnings(this.tables, compiledIds, (b) => required.has(b.bodyId));
     return { instances: compiledIds, warnings: found };
+  }
+
+  // A call checked before its callee was gets the generator the callee's definition gives. Once
+  // every body is checked, each reads the one its callee compiles to, and so does each caller of
+  // a function returning it, which takes a pass per call between them.
+  /** @throws {CompileError} */
+  private settleGenerators(this: Mut<this>, ids: Ref<InstanceId[]>): void {
+    // ponytail: passes bounded by the instance count, enough for any chain of returns.
+    for (let pass: usize = 0; pass <= ids.length; pass++) {
+      let changed = false;
+      for (const id of ids) {
+        let swap = new TypeMap<Type, Type>();
+        const instance = this.tables.arenas.instanceOf(id);
+        for (const [e, target] of instance.calls) {
+          const had = instance.types.get(e);
+          const callee = this.tables.arenas.instanceOf(target);
+          const gives: Type = callee.generator !== undefined ? callee.generator : callee.returns;
+          if (had === undefined || had === gives || swap.has(had)) continue;
+          if (this.recOf(had)?.kind === "generator" && this.recOf(gives)?.kind === "generator") swap.set(had, gives);
+        }
+        if (swap.size === 0) continue;
+        changed = true;
+        this.swapTypes(id, swap);
+      }
+      if (!changed) return;
+    }
+  }
+
+  /** @throws {CompileError} */
+  private swapTypes(this: Mut<this>, id: InstanceId, swap: Ref<TypeMap<Type, Type>>): void {
+    let types: [Expr, Type][] = [];
+    for (const [e, t] of this.tables.arenas.instanceOf(id).types) types.push([cloneExpr(e), t]);
+    for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.replaced(types[i]![1], swap);
+    let coercions: [Expr, Type][] = [];
+    for (const [e, t] of this.tables.arenas.instanceOf(id).coercions) coercions.push([cloneExpr(e), t]);
+    for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.replaced(coercions[i]![1], swap);
+    let locals: LocalId[] = [];
+    for (const l of this.tables.arenas.instanceOf(id).locals.values()) locals.push(l);
+    for (const l of locals) {
+      const had = this.tables.arenas.localOf(l).type;
+      const type = this.replaced(had, swap);
+      let local = this.tables.arenas.localMut(l);
+      local.type = type;
+    }
+    const returned = this.tables.arenas.instanceOf(id).returns;
+    const returns = this.replaced(returned, swap);
+    let instance = this.tables.arenas.instanceMut(id);
+    while (types.length > 0) {
+      const [e, t] = types.shift()!;
+      instance.types.set(e, t);
+    }
+    while (coercions.length > 0) {
+      const [e, t] = coercions.shift()!;
+      instance.coercions.set(e, t);
+    }
+    instance.returns = returns;
   }
 
   // A value given to `JSON.stringify` holding an `unknown` needs each type stored in one to have a
@@ -2276,7 +2333,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const settersOf = this.tables.arenas.instanceOf(id).setters;
     for (const [e, target] of settersOf) setters.push([cloneExpr(e), target]);
     for (let i: usize = 0; i < setters.length; i++) setters[i]![1] = this.counterpart(setters[i]![1]);
-    const returns = this.tables.typing.lower(this.tables.arenas.instanceOf(id).returns);
+    const unlowered = this.tables.arenas.instanceOf(id).returns;
+    const returns = this.lowerMade(unlowered, made);
     let instance = this.tables.arenas.instanceMut(id);
     while (calls.length > 0) {
       const [e, target] = calls.shift()!;

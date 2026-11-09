@@ -435,7 +435,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
       return lend(block, r.of, to);
     }
     // An unknown narrowed to a number may hold another kind of number, converted on its way out.
-    if (r?.kind === "union" && r.members.includes(to) && !(r.unknown && r.members.some((m) => m !== to && typing.unknownGives(m, to)))) {
+    if (r?.kind === "union" && r.members.some((m) => m === to || sameFields(m, to)) && !(r.unknown && r.members.some((m) => m !== to && typing.unknownGives(m, to)))) {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(from)}, ptr ${v}, i32 0, i32 1`);
       return at;
@@ -447,9 +447,43 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
     return slot;
   }
 
+  // Whether two objects are laid out alike as one with their fields lowered: a member of a union
+  // holding itself keeps its brands and optional fields where a type narrowed to it has neither.
+  function sameFields(a: Type, b: Type): boolean {
+    const x = typing.recOf(a);
+    const y = typing.recOf(b);
+    if (x?.kind !== "object" || y?.kind !== "object" || x.fields.length !== y.fields.length) return false;
+    return x.fields.every((f, i) => f.name === y.fields[i]!.name && typing.lower(f.type) === typing.lower(y.fields[i]!.type));
+  }
+
+  // The object member of a union holding itself that a value lowered further than it goes into: a
+  // recursive alias keeps the brands in its body where the value's lowered type erased them, so
+  // the two match field by field once each field is lowered, an optional one left out, and are
+  // laid out alike.
+  function sameShape(from: Type, to: UnionType): Type | undefined {
+    const shape = (t: Type) => {
+      const r = typing.recOf(t);
+      const o = r?.kind === "recursive" ? typing.recOf(r.of) : r;
+      return o?.kind === "object" ? o.fields : undefined;
+    };
+    const fields = shape(from);
+    if (fields === undefined) return undefined;
+    return typing.rec(to).members.find((m) => {
+      const own = shape(m);
+      if (own === undefined || !fields.every((f) => own.some((o) => o.name === f.name))) return false;
+      return own.every((o) => {
+        const f = fields.find((x) => x.name === o.name);
+        if (f === undefined) return o.optional !== undefined;
+        const held = typing.recOf(o.type);
+        const opened = held?.kind === "recursive" ? held.of : o.type;
+        return typing.lower(f.type) === typing.lower(o.type) || typing.fits(f.type, o.type) || typing.fits(f.type, opened);
+      });
+    });
+  }
+
   // Sets the tag of the member `from` goes into, and stores its value as the payload.
   function inject(v: string, from: Type, to: UnionType): string {
-    const member = typing.membersFor(from, to)[0];
+    const member = typing.membersFor(from, to)[0] ?? sameShape(from, to);
     if (member === undefined) throw new Error(`internal error: '${typing.show(from)}' has no member in '${typing.show(to)}' to go into`);
     const slot = alloca(llvm(to));
     emit(`store i32 ${typing.rec(to).members.indexOf(member)}, ptr ${slot}`);

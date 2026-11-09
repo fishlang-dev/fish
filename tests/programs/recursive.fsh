@@ -633,3 +633,55 @@ function rd(e: Ref<Expr>): i64 { if (e.kind === "add") { if (e.l.kind === "add")
 function ow(e: Expr): i64 { if (e.kind === "add") { if (e.l.kind === "add") return e.l.v + e.l.l.v; return e.l.v; } return e.v; }
 function main2() { const e: Expr = { kind: "add", l: { kind: "add", l: { kind: "lit", v: 1 }, v: 2 }, v: 3 }; console.log(rd(e), ow(e)); }
 function main() { main1(); main2(); }
+
+// case: recursive_holding_a_brand
+// expect: 3
+// expect: 0
+type Id = Brand<usize, "id">;
+type Kin = Brand<usize, "kin">;
+type Leaf = { kind: "leaf"; id: Id | Kin; tag?: usize };
+type Node = { kind: "node"; kids: Tree[]; tag?: usize };
+type Tree = string | null | Leaf | Node;
+function copy(t: Tree): Tree {
+  if (t === null || typeof t !== "object") return t;
+  switch (t.kind) {
+    case "leaf":
+      return { kind: "leaf", id: t.id, tag: t.tag };
+    case "node":
+      return { kind: "node", kids: [] };
+  }
+  return null;
+}
+function main() {
+  const leaf = copy({ kind: "leaf", id: 4 as Id, tag: 3 as usize });
+  if (leaf !== null && typeof leaf !== "string" && leaf.kind === "leaf") console.log(leaf.tag ?? 0);
+  const node = copy({ kind: "node", kids: ["a"] });
+  if (node !== null && typeof node !== "string" && node.kind === "node") console.log(node.kids.length);
+}
+
+// case: recursive_through_its_array_holding_a_brand
+// expect: 2 7
+// expect: 1
+type Val = string | null | Spot | List;
+type Mark = Brand<usize, "mark">;
+type Spot = { kind: "spot"; mark: Mark; note?: usize };
+type List = { kind: "list"; items: Val[]; note?: usize };
+function dup(v: Val): Val {
+  if (v === null || typeof v !== "object") return v;
+  switch (v.kind) {
+    case "spot":
+      return { kind: "spot", mark: v.mark, note: v.note };
+    case "list": {
+      let items: Val[] = [];
+      for (const x of v.items) items.push(dup(x.clone()));
+      return { kind: "list", items, note: v.note };
+    }
+  }
+  return null;
+}
+function main() {
+  const c = dup({ kind: "spot", mark: 7 as Mark, note: 2 as usize });
+  if (c !== null && typeof c !== "string" && c.kind === "spot") console.log(c.note ?? 0, c.mark);
+  const l = dup({ kind: "list", items: ["a"] });
+  if (l !== null && typeof l !== "string" && l.kind === "list") console.log(l.items.length);
+}

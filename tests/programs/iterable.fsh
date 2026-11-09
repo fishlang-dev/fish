@@ -350,3 +350,25 @@ function main() {
   show(b);
 }
 // error: 5:8: error[E0206]: an 'Iterable' parameter is looped over, which advances a generator
+
+// case: iterable_generic_class_handing_on_a_generator
+// expect: a 1
+// expect: b 2
+class Pairs<K, V> {
+  keys: K[] = [];
+  vals: V[] = [];
+  *entries(): IterableIterator<[K, V]> {
+    for (let i = 0; i < this.keys.length; i++) yield [this.keys[i]!.clone(), this.vals[i]!.clone()];
+  }
+  [Symbol.iterator](): IterableIterator<[K, V]> {
+    return this.entries();
+  }
+}
+function main() {
+  let p = new Pairs<string, i64>();
+  p.keys.push("a");
+  p.vals.push(1);
+  p.keys.push("b");
+  p.vals.push(2);
+  for (const [k, v] of p) console.log(k, v);
+}
