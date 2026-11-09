@@ -24,6 +24,26 @@ test("one function per instance", () => {
   expect(ir).not.toContain("@\"fsh.identity\"(");
 });
 
+// A function given a different closure by each caller, which it only calls or hands on to
+// itself, is compiled once for all of them; one that uses it any other way is not.
+test("one instance for every closure a callback parameter is given", () => {
+  const file = join(import.meta.dir, "programs", "callback_shared.fsh");
+  const src = readFileSync(file, "utf8").split(/^\/\/ case: .*$/m)[1]!;
+  const ir = compile(session, src, file);
+  const defined = ir.match(/^define .*@"fsh\.walk#[0-9a-z.]+"/gm) ?? [];
+  expect(defined.length).toBe(1);
+  const named = new Set([...ir.matchAll(/@("fsh\.walk[^"]*")/g)].map((m) => m[1]));
+  expect(named.size).toBe(1);
+  const kept = compile(session, `
+function keep(f: () => i64): i64 { const g = f; return g(); }
+function main() {
+  const a = 1;
+  const b = 2;
+  console.log(keep(() => a), keep(() => b));
+}`, file);
+  expect(kept.match(/^define .*@"fsh\.keep#[0-9a-z.]+"/gm)?.length).toBe(2);
+});
+
 // An abstract member's signature and a template are checked but never compiled, so no compiled
 // code may call one: every Fish symbol a program's IR names is one it defines.
 test("abstract classes compile no call to what isn't compiled", () => {
