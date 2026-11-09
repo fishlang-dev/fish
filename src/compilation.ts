@@ -52,12 +52,15 @@ export type Counts = { enums: usize; lifts: usize; destructures: usize; expansio
 // `std`: std's statements when `cached`, each read a fresh copy, without which each compilation
 // parses std's source; and how many times std was parsed rather than loaded.
 // `timings`: each build stage's time, kept only when `--timings` asks.
+// `failed`: when present, codegen goes on past a function it fails on, declaring it in place of
+// its code and adding `symbol: message` here, so one build lists every failure.
 
 export type Session = {
   locking: Locking;
   engineHook: boolean;
   std: { tree: Stmt[]; cached: boolean; parses: usize };
   timings?: Timings;
+  failed?: string[];
 };
 
 export function newSession(): Session {

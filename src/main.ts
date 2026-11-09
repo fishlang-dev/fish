@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { bodyOf } from "./arenas.ts";
 import { C_KEYWORDS, check } from "./check.ts";
-import { compiledOf, codegen, symbol } from "./codegen.ts";
+import { compiledOf, codegen, symbolIn, symbolNames } from "./codegen.ts";
 import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newTimings, objectsNote, timed, type Compilation, type Session, type Tables } from "./compilation.ts";
 import { cachedSession } from "./stdcache.ts";
 import { CompileError, formatError, named, type Source } from "./diag.ts";
@@ -94,7 +94,7 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
     const checked = checkedProgram(compilation, expanded(compilation, loaded, library), library);
     for (const w of checked.warnings) w.sources = loaded.sources;
     const ir = timed(timings, "codegen", () => {
-      const ir = bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks, debug }), loaded);
+      const ir = bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks, debug, failed: compilation.session.failed }), loaded);
       return debug ? withDebugInfo(ir, src, file, loaded.sources, release) : ir;
     });
     return { ir, checked, shim: () => rustShim(loaded.rust, checked), warnings: checked.warnings };
@@ -257,7 +257,8 @@ function parts(ir: string, checked: Checked, release: boolean, target: Target = 
   if (release) return { std: [], program: ir };
   const arenas = checked.tables.arenas;
   const bodies = compiledOf(checked).filter((i) => !bodyOf(arenas, i).foreign && !bodyOf(arenas, i).rust);
-  const named = (std: boolean) => bodies.filter((i) => bodyOf(arenas, i).start >= STD_BASE === std).map((i) => symbol(arenas, i));
+  const names = symbolNames(arenas);
+  const named = (std: boolean) => bodies.filter((i) => bodyOf(arenas, i).start >= STD_BASE === std).map((i) => symbolIn(names, arenas, i));
   const { std, program } = split(ir, named(true), named(false));
   return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"], stdin: std, inputs: [] }], program };
 }

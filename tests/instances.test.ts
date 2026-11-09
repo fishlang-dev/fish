@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Arenas, type InstanceId } from "../src/arenas.ts";
 import { compile } from "../src/main.ts";
-import { symbol } from "../src/codegen.ts";
+import { shortened, symbolIn, symbolNames } from "../src/codegen.ts";
 import { cachedSession } from "../src/stdcache.ts";
 import { unreached, type Body, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
@@ -51,7 +51,8 @@ test("instances that read alike get symbols of their own", () => {
   const arenas = new Arenas();
   const made = (symbol: string) => arenas.addInstance({ body: arenas.addBody({ name: "m" } as Body).bodyId, symbol, bindings: new Map() } as unknown as Omit<Instance, "id">);
   const [a, b, c] = [made("Box<T>.get"), made("Box<T>.get"), made("Box<U>.get")];
-  expect([symbol(arenas, a), symbol(arenas, b), symbol(arenas, c)]).toEqual(['@"fsh.Box<T>.get"', '@"fsh.Box<T>.get~2"', '@"fsh.Box<U>.get"']);
+  const names = symbolNames(arenas);
+  expect([symbolIn(names, arenas, a), symbolIn(names, arenas, b), symbolIn(names, arenas, c)]).toEqual(['@"fsh.Box<T>.get"', '@"fsh.Box<T>.get~2"', '@"fsh.Box<U>.get"']);
 });
 
 // An abstract member's signature and a template are checked but never compiled, so no compiled
@@ -103,4 +104,9 @@ test("instance symbols are stable and tell type arguments apart", () => {
   expect(symbols(other.stdout.toString())).toEqual(here);
   expect(new Set(here).size).toBe(4);
   expect(here.filter((s) => /#\w+\.\d+$/.test(s))).toEqual([]);
+});
+
+test("a long type argument list is hashed whole, past the angle brackets its text holds", () => {
+  const name = `C<{ op: ">=" | "<"; f: () => ${"x".repeat(200)} }>.m`;
+  expect(shortened(name)).toMatch(/^C<#\w+>\.m$/);
 });

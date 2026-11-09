@@ -74,15 +74,20 @@ export function shortened(name: string): string {
   let out = "";
   let depth = 0;
   let from = 0;
+  let inText = false;
   for (let i = 0; i < name.length; i++) {
     const c = name[i]!;
+    // A literal type's text may hold `<` or `>`, as a function type's arrow holds `>`.
+    if (c === "\"") inText = !inText;
+    else if (inText && c === "\\") i++;
+    if (inText || c === "\"") continue;
     if (c === "<") {
       if (depth === 0) {
         out += name.slice(from, i + 1);
         from = i + 1;
       }
       depth++;
-    } else if (c === ">" && depth > 0) {
+    } else if (c === ">" && depth > 0 && name[i - 1] !== "=") {
       depth--;
       if (depth === 0) {
         const inner = name.slice(from, i);
@@ -100,31 +105,26 @@ function brief(shown: string): string {
   return short.length <= 2 * LONGEST_ARGUMENTS ? short : `${short.slice(0, 2 * LONGEST_ARGUMENTS)}...`;
 }
 
-// Each instance's name in the IR by compilation: two instances whose types read alike, as two
-// classes made from arguments shown the same way, are told apart by a count after the first.
-const names = new WeakMap<Ref<Arenas>, Map<InstanceId, string>>();
-export function uniqueName(arenas: Ref<Arenas>, i: Instance): string {
-  let known = names.get(arenas);
-  if (known === undefined || !known.has(i.id)) {
-    known = new Map();
-    const seen = new Map<string, number>();
-    for (let id = 1; ; id++) {
-      const x = arenas.instanceOf(id as InstanceId);
-      if (x === undefined) break;
-      const name = shortened(x.symbol);
-      const n = (seen.get(name) ?? 0) + 1;
-      seen.set(name, n);
-      known.set(x.id, n === 1 ? name : `${name}~${n}`);
-    }
-    names.set(arenas, known);
+// Each instance's name in the IR: two instances whose types read alike, as two classes made from
+// arguments shown the same way, are told apart by a count after the first.
+export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
+  let known = new Map<InstanceId, string>();
+  const seen = new Map<string, number>();
+  for (let id = 1; ; id++) {
+    const x = arenas.instanceOf(id as InstanceId);
+    if (x === undefined) break;
+    const name = shortened(x.symbol);
+    const n = (seen.get(name) ?? 0) + 1;
+    seen.set(name, n);
+    known.set(x.id, n === 1 ? name : `${name}~${n}`);
   }
-  return known.get(i.id) ?? shortened(i.symbol);
+  return known;
 }
 
-// An instance's name in the IR.
-export const symbol = (arenas: Ref<Arenas>, i: Instance) => {
+// An instance's name in the IR, from the names `symbolNames` gave the compilation's instances.
+export const symbolIn = (names: Ref<Map<InstanceId, string>>, arenas: Ref<Arenas>, i: Instance) => {
   const b = bodyOf(arenas, i);
-  return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(uniqueName(arenas, i))}"`;
+  return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(names.get(i.id) ?? shortened(i.symbol))}"`;
 };
 
 // Function definitions and declarations, each with the lines after it, in order of the symbols
@@ -189,12 +189,12 @@ const rustGiven = (typing: Typing, arenas: Ref<Arenas>, i: Instance): Crossing |
 // address and code, and the closure body each of this instance's calls of them runs.
 type Share = { template: Instance; at: Set<usize>; code: Map<usize, Instance | undefined> };
 const PAIR = "{ ptr, ptr }";
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean };
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean; failed?: string[] };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen(checked: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false, debug = false }: Options): string {
+export function codegen(checked: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false, debug = false, failed }: Options): string {
   const { tables: noted } = checked;
   const instances = compiledOf(checked);
   const {
@@ -207,6 +207,12 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   } = noted;
   const localOf = (id: LocalId): Local => arenas.localOf(id);
   const llvm = layoutOf(typing);
+  let names = symbolNames(arenas);
+  // Instances made while compiling, as comptime makes, are named once they are met.
+  const symbol = (a: Ref<Arenas>, i: Instance): string => {
+    if (!names.has(i.id)) names = symbolNames(a);
+    return symbolIn(names, a, i);
+  };
   const recOf = <T extends Type>(t: T | undefined) => (t === undefined || typeof t === "string" ? undefined : typing.rec(t as Exclude<T, string>));
   const isRef = (t: Type) => recOf(t)?.kind === "ref";
   const isArray = (t: Type): t is ArrayType => recOf(t)?.kind === "array";
@@ -364,155 +370,161 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   let pairs = new Map<LocalId, string>();
   for (const instance of instances) {
     if (bodyOf(noted.arenas, instance).comptime) continue;
-    // A copy compiled as another instance of its function has no code of its own.
-    if (shares.has(instance.id) && shares.get(instance.id)!.template !== instance) continue;
-    // A C function is declared under its own name, unless the runtime already declares it.
-    if (bodyOf(noted.arenas, instance).foreign) {
-      foreign.add(bodyOf(noted.arenas, instance).name);
-      if (bodyOf(noted.arenas, instance).rust) {
-        // A Rust function's shim takes its handle first when it is a method, then its parameters
-        // as they cross, the slot for the rest of what it gives, and where it puts a panic's message.
-        const rust = symbol(noted.arenas, instance);
-        if (declaredRust.has(rust)) continue;
-        declaredRust.add(rust);
-        const self = bodyOf(noted.arenas, instance).self && !bodyOf(noted.arenas, instance).self!.constructor ? ["ptr"] : [];
-        const gives = shimGives(llvm, rustGiven(noted.typing, noted.arenas, instance));
-        const params = [...self, ...instance.signature!.flatMap((t) => shimParams(llvm, rustCrossing(typing, t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
-        out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
+    try {
+      // A copy compiled as another instance of its function has no code of its own.
+      if (shares.has(instance.id) && shares.get(instance.id)!.template !== instance) continue;
+      // A C function is declared under its own name, unless the runtime already declares it.
+      if (bodyOf(noted.arenas, instance).foreign) {
+        foreign.add(bodyOf(noted.arenas, instance).name);
+        if (bodyOf(noted.arenas, instance).rust) {
+          // A Rust function's shim takes its handle first when it is a method, then its parameters
+          // as they cross, the slot for the rest of what it gives, and where it puts a panic's message.
+          const rust = symbol(noted.arenas, instance);
+          if (declaredRust.has(rust)) continue;
+          declaredRust.add(rust);
+          const self = bodyOf(noted.arenas, instance).self && !bodyOf(noted.arenas, instance).self!.constructor ? ["ptr"] : [];
+          const gives = shimGives(llvm, rustGiven(noted.typing, noted.arenas, instance));
+          const params = [...self, ...instance.signature!.flatMap((t) => shimParams(llvm, rustCrossing(typing, t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
+          out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
+          continue;
+        }
+        if (!DECLARED.has(bodyOf(noted.arenas, instance).name)) out.push(`declare ${crossed(llvm, instance.returns)} ${symbol(noted.arenas, instance)}(${instance.signature!.map((t) => crossing(llvm, t)).join(", ")})`, "");
         continue;
       }
-      if (!DECLARED.has(bodyOf(noted.arenas, instance).name)) out.push(`declare ${crossed(llvm, instance.returns)} ${symbol(noted.arenas, instance)}(${instance.signature!.map((t) => crossing(llvm, t)).join(", ")})`, "");
-      continue;
-    }
-    current = instance;
-    ({ types, locals, calls, setters, coercions, jumps } = instance);
-    const f = bodyOf(noted.arenas, instance);
-    self = f.self?.type;
-    allocas = [];
-    body = [];
-    temps = 0;
-    labels = 0;
-    numbered = new Map();
-    block = "entry";
-    pending = [];
-    floor = 0;
-    reserved.clear();
-    scopes = [[]];
-    const type = instance.returns;
-    framed = new Set();
-    // std's functions, its built-in modules' included, keep no frame, as Rust's short backtrace
-    // hides std's internals; nor do the arrows the checker wraps around a callback.
-    const from = sourceOf(src, file, f.start, sources).file;
-    const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(harness && from === file) && !f.closure?.made;
-    framing = (!release || leaks) && !library && ours ? body : undefined;
-    site = undefined;
-    debugging = debug && f.start < STD_BASE && !BUILT_IN.test(from) ? body : undefined;
-    marked = undefined;
-    if (debugging) allocas.push(`  ;fsh.fn ${f.start}`);
-    const machine = instance.generator ?? instance.future;
-    resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };
-    // A generator's variables, and its loops' state, are fields of the frame each `next()` is
-    // given, which already holds its parameters.
-    if (resuming) {
-      const field = (at: string, i: usize) => {
-        allocas.push(`  ${at} = getelementptr ${resuming!.frame}, ptr %frame, i32 0, i32 ${i}`);
-        framed.add(at);
-      };
-      field("%state", 0);
-      // An async arrow's captures are its frame's copy of the closure; an async method's object is
-      // borrowed through its frame, or held in it under `Own<this>`.
-      if (f.closure) {
-        field("%env", 1);
-        // Its copy of the captures is the future's own, dropped once the body is done.
-        own("%env", instance.closure!);
-      }
-      if (f.self && !f.self.constructor) {
-        if (f.self.owned) field("%this", 1);
-        else allocas.push(`  %this.at = getelementptr ${resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
-      }
-      for (const [local, i] of instance.frame!.locals) field(slot(localOf(local)), i);
-      // A `for await` loop's third field is the future it awaits.
-      for (const [s, i] of instance.frame!.loops) [i, i + 1, ...((s as { await?: boolean }).await ? [i + 2] : [])].forEach((j) => field(`%loop${j}`, j));
-      for (const i of instance.frame!.awaits.values()) field(`%await${i}`, i);
-      startBlock(resuming.start);
-      // The first `next`'s value has no `yield` to go to.
-      dropSent();
-    }
-    // Parameters are copied into slots like any other binding. One taken as a closure's address
-    // and code is the caller's to drop.
-    pairs = new Map();
-    const shared = shares.get(instance.id);
-    const params = f.params.flatMap((p, k) => {
-      const local = resolved(p);
-      if (shared?.at.has(k)) {
-        const at = `%${local.name}.pair.${local.id}`;
-        allocas.push(`  ${at} = alloca ${PAIR}`);
-        emit(`store ${PAIR} %"${local.name}.arg", ptr ${at}`);
-        pairs.set(local.localId, at);
-        return [`${PAIR} %"${local.name}.arg"`];
-      }
-      reserve(local);
-      own(slot(local), local.type);
-      if (resuming) return [""];
-      // A comptime parameter isn't passed: its instance knows its value.
-      if (p.comptime) return void emit(`store ${llvm(local.type)} ${bake(comptimeParameter(noted, instance, p), local.type)}, ptr ${slot(local)}`), [];
-      emit(`store ${llvm(local.type)} %"${local.name}.arg", ptr ${slot(local)}`);
-      return [`${llvm(local.type)} %"${local.name}.arg"`];
-    });
-    // A constructor or method works on its instance through a pointer, and a closure on what
-    // it captured.
-    if (f.self) params.unshift("ptr %this");
-    if (f.closure) params.unshift("ptr %env");
-    // A method owning its object drops it, unless the object moves out first.
-    if (f.self?.owned) own("%this", f.self.type, false);
-    captured = new Map();
-    // A capture the closure holds lives in its environment; a borrowed one, where it points.
-    [...(instance.captures ?? [])].forEach(([alias, from], i) => {
-      const at = temp();
-      // In a future the entry block is the only one every poll passes through.
-      const line = `${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`;
-      if (resuming) allocas.push(`  ${line}`);
-      else emit(line);
-      if (!isRef(typing.rec(instance.closure!).fields[i]!.type)) return captured.set(alias, at);
-      const pointer = from === "this" ? "%this" : temp();
-      const load = `${pointer} = load ptr, ptr ${at}`;
-      if (resuming) allocas.push(`  ${load}`);
-      else emit(load);
-      captured.set(alias, pointer);
-    });
-    if (f.closure) self = selfOf(arenas, f)?.type;
-    f.body.forEach(statement);
-    // Falling off the end drops what the body holds there, at its closing brace.
-    site = { start: f.end - 1, end: f.end };
-    // The last block is unreachable when every path returned; the checker guarantees it for values.
-    if (type === "void" || resuming) leave(undefined);
-    else emit("unreachable");
-    if (resuming) {
-      // Each `next()` or poll goes on from where the last stopped: the start, a `yield` or an
-      // `await`, or the end. A finished future is never polled again.
-      // Advancing a generator already finished drops what was sent; one finishing in this very
-      // call has dropped or taken it already, and comes to `done` directly.
-      const sent = recOf(resuming.type);
-      const finished = sent?.kind === "generator" && sent.sends && needsDrop(sent.sends) ? label() : resuming.done;
-      if (finished !== resuming.done) {
-        startBlock(finished);
+      current = instance;
+      ({ types, locals, calls, setters, coercions, jumps } = instance);
+      const f = bodyOf(noted.arenas, instance);
+      self = f.self?.type;
+      allocas = [];
+      body = [];
+      temps = 0;
+      labels = 0;
+      numbered = new Map();
+      block = "entry";
+      pending = [];
+      floor = 0;
+      reserved.clear();
+      scopes = [[]];
+      const type = instance.returns;
+      framed = new Set();
+      // std's functions, its built-in modules' included, keep no frame, as Rust's short backtrace
+      // hides std's internals; nor do the arrows the checker wraps around a callback.
+      const from = sourceOf(src, file, f.start, sources).file;
+      const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(harness && from === file) && !f.closure?.made;
+      framing = (!release || leaks) && !library && ours ? body : undefined;
+      site = undefined;
+      debugging = debug && f.start < STD_BASE && !BUILT_IN.test(from) ? body : undefined;
+      marked = undefined;
+      if (debugging) allocas.push(`  ;fsh.fn ${f.start}`);
+      const machine = instance.generator ?? instance.future;
+      resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };
+      // A generator's variables, and its loops' state, are fields of the frame each `next()` is
+      // given, which already holds its parameters.
+      if (resuming) {
+        const field = (at: string, i: usize) => {
+          allocas.push(`  ${at} = getelementptr ${resuming!.frame}, ptr %frame, i32 0, i32 ${i}`);
+          framed.add(at);
+        };
+        field("%state", 0);
+        // An async arrow's captures are its frame's copy of the closure; an async method's object is
+        // borrowed through its frame, or held in it under `Own<this>`.
+        if (f.closure) {
+          field("%env", 1);
+          // Its copy of the captures is the future's own, dropped once the body is done.
+          own("%env", instance.closure!);
+        }
+        if (f.self && !f.self.constructor) {
+          if (f.self.owned) field("%this", 1);
+          else allocas.push(`  %this.at = getelementptr ${resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
+        }
+        for (const [local, i] of instance.frame!.locals) field(slot(localOf(local)), i);
+        // A `for await` loop's third field is the future it awaits.
+        for (const [s, i] of instance.frame!.loops) [i, i + 1, ...((s as { await?: boolean }).await ? [i + 2] : [])].forEach((j) => field(`%loop${j}`, j));
+        for (const i of instance.frame!.awaits.values()) field(`%await${i}`, i);
+        startBlock(resuming.start);
+        // The first `next`'s value has no `yield` to go to.
         dropSent();
-        emit(`br label %${resuming.done}`);
       }
-      startBlock(resuming.done);
-      const resumed = typing.rec(resuming.type);
-      if (resumed.kind === "generator") emit(`ret ${resultType(instance)} ${yieldedAs(answer(undefined, resumed.yields))}`);
+      // Parameters are copied into slots like any other binding. One taken as a closure's address
+      // and code is the caller's to drop.
+      pairs = new Map();
+      const shared = shares.get(instance.id);
+      const params = f.params.flatMap((p, k) => {
+        const local = resolved(p);
+        if (shared?.at.has(k)) {
+          const at = `%${local.name}.pair.${local.id}`;
+          allocas.push(`  ${at} = alloca ${PAIR}`);
+          emit(`store ${PAIR} %"${local.name}.arg", ptr ${at}`);
+          pairs.set(local.localId, at);
+          return [`${PAIR} %"${local.name}.arg"`];
+        }
+        reserve(local);
+        own(slot(local), local.type);
+        if (resuming) return [""];
+        // A comptime parameter isn't passed: its instance knows its value.
+        if (p.comptime) return void emit(`store ${llvm(local.type)} ${bake(comptimeParameter(noted, instance, p), local.type)}, ptr ${slot(local)}`), [];
+        emit(`store ${llvm(local.type)} %"${local.name}.arg", ptr ${slot(local)}`);
+        return [`${llvm(local.type)} %"${local.name}.arg"`];
+      });
+      // A constructor or method works on its instance through a pointer, and a closure on what
+      // it captured.
+      if (f.self) params.unshift("ptr %this");
+      if (f.closure) params.unshift("ptr %env");
+      // A method owning its object drops it, unless the object moves out first.
+      if (f.self?.owned) own("%this", f.self.type, false);
+      captured = new Map();
+      // A capture the closure holds lives in its environment; a borrowed one, where it points.
+      [...(instance.captures ?? [])].forEach(([alias, from], i) => {
+        const at = temp();
+        // In a future the entry block is the only one every poll passes through.
+        const line = `${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`;
+        if (resuming) allocas.push(`  ${line}`);
+        else emit(line);
+        if (!isRef(typing.rec(instance.closure!).fields[i]!.type)) return captured.set(alias, at);
+        const pointer = from === "this" ? "%this" : temp();
+        const load = `${pointer} = load ptr, ptr ${at}`;
+        if (resuming) allocas.push(`  ${load}`);
+        else emit(load);
+        captured.set(alias, pointer);
+      });
+      if (f.closure) self = selfOf(arenas, f)?.type;
+      f.body.forEach(statement);
+      // Falling off the end drops what the body holds there, at its closing brace.
+      site = { start: f.end - 1, end: f.end };
+      // The last block is unreachable when every path returned; the checker guarantees it for values.
+      if (type === "void" || resuming) leave(undefined);
       else emit("unreachable");
-      const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
-      allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${finished} [ ${resumes} ]`);
-      // A generator taking values through `next(x)` is given one, and whether it was.
-      const sends = resumed.kind === "generator" ? resumed.sends : undefined;
-      const takes = resumed.kind === "future" || resumed.async ? "ptr %frame, ptr %cx" : sends ? `ptr %frame, ${llvm(sends)} %sent, i1 %sent.has` : "ptr %frame";
-      out.push(`define internal ${resultType(instance)} ${symbol(noted.arenas, instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...popFrame(body), "}", "");
-      continue;
+      if (resuming) {
+        // Each `next()` or poll goes on from where the last stopped: the start, a `yield` or an
+        // `await`, or the end. A finished future is never polled again.
+        // Advancing a generator already finished drops what was sent; one finishing in this very
+        // call has dropped or taken it already, and comes to `done` directly.
+        const sent = recOf(resuming.type);
+        const finished = sent?.kind === "generator" && sent.sends && needsDrop(sent.sends) ? label() : resuming.done;
+        if (finished !== resuming.done) {
+          startBlock(finished);
+          dropSent();
+          emit(`br label %${resuming.done}`);
+        }
+        startBlock(resuming.done);
+        const resumed = typing.rec(resuming.type);
+        if (resumed.kind === "generator") emit(`ret ${resultType(instance)} ${yieldedAs(answer(undefined, resumed.yields))}`);
+        else emit("unreachable");
+        const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
+        allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${finished} [ ${resumes} ]`);
+        // A generator taking values through `next(x)` is given one, and whether it was.
+        const sends = resumed.kind === "generator" ? resumed.sends : undefined;
+        const takes = resumed.kind === "future" || resumed.async ? "ptr %frame, ptr %cx" : sends ? `ptr %frame, ${llvm(sends)} %sent, i1 %sent.has` : "ptr %frame";
+        out.push(`define internal ${resultType(instance)} ${symbol(noted.arenas, instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...popFrame(body), "}", "");
+        continue;
+      }
+      // Fish's own functions stay inside this module, so two libraries never clash over them.
+      out.push(`define internal ${resultType(instance)} ${symbol(noted.arenas, instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...pushFrame(instance), ...popFrame(body), "}", "");
+    } catch (e) {
+      if (failed === undefined) throw e;
+      failed.push(`${instance.symbol}: ${e instanceof Error ? e.message : String(e)}`);
+      out.push(`declare void ${symbol(noted.arenas, instance)}()`, "");
     }
-    // Fish's own functions stay inside this module, so two libraries never clash over them.
-    out.push(`define internal ${resultType(instance)} ${symbol(noted.arenas, instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...pushFrame(instance), ...popFrame(body), "}", "");
   }
   framing = undefined;
   debugging = undefined;
