@@ -94,6 +94,12 @@ export function shortened(name: string): string {
   return out + name.slice(from);
 }
 
+// A type as a panic message names it: shortened, then cut off past a line's worth.
+function brief(shown: string): string {
+  const short = shortened(shown);
+  return short.length <= 2 * LONGEST_ARGUMENTS ? short : `${short.slice(0, 2 * LONGEST_ARGUMENTS)}...`;
+}
+
 // An instance's name in the IR.
 export const symbol = (arenas: Ref<Arenas>, i: Instance) => {
   const b = bodyOf(arenas, i);
@@ -7813,7 +7819,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     startBlock(fail);
     const [said, saidNot] = [label(), label()];
     emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
-    const name = bodyOf(noted.arenas, callOf(e)!).name;
+    // A name spelling a long type argument list is shortened as symbols are.
+    const name = shortened(bodyOf(noted.arenas, callOf(e)!).name);
     const shown = (x: Expr): string => (x.kind === "member" ? `${shown(x.object)}.${x.name}` : x.kind === "ident" ? x.name : "this");
     for (const [at, is] of [[said, "is"], [saidNot, "is not"]] as const) {
       startBlock(at);
@@ -7823,7 +7830,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       emit(`switch i32 ${tag}, label %${cases[0]} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
       union.members.forEach((m, i) => {
         startBlock(cases[i]!);
-        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nthe type predicate '${name}' said '${shown(arg)}' ${is} '${typing.show(type)}', but it holds a '${typing.show(m)}'\n`)})`);
+        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nthe type predicate '${name}' said '${shown(arg)}' ${is} '${brief(typing.show(type))}', but it holds a '${brief(typing.show(m))}'\n`)})`);
         emit("unreachable");
       });
     }

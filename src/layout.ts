@@ -394,8 +394,13 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
     if (fr?.kind === "union") {
       // A member of another kind than the narrowed type, an empty one or a scalar where an
       // aggregate is wanted, is one narrowing has left out, so it isn't there.
-      const absent = (member: Type) => typeof member === "string" && member !== to
-        && (member === "null" || member === "never" || typeof to !== "string" || (member === "string") !== (to === "string") || (member === "boolean") !== (to === "boolean"));
+      // So is a string or boolean literal where the narrowed type is of another kind.
+      const absent = (member: Type) => {
+        const lit = typing.recOf(member);
+        if (lit?.kind === "literal") return (typeof lit.value === "string" && to !== "string") || (typeof lit.value === "boolean" && to !== "boolean");
+        return typeof member === "string" && member !== to
+          && (member === "null" || member === "never" || typeof to !== "string" || (member === "string") !== (to === "string") || (member === "boolean") !== (to === "boolean"));
+      };
       return fr.members.includes(to) ? payload(v, from as UnionType, to) : eachMember(v, from as UnionType, to, (part, member) => (absent(member) ? "undef" : convert(part, member, to)));
     }
     if (typeof from === "string" || typeof to === "string") return v;

@@ -87,6 +87,17 @@ function main(): void {
   if (!isText(x)) console.log(x + 1);
 }
 // panic: the type predicate 'isText' said 'x' is not 'string', but it holds a 'string'
+// case: predicates_lying_about_a_long_type
+type Wide = { alpha: i64; bravo: i64; charlie: i64; delta: i64; echo: i64; foxtrot: i64; golf: i64; hotel: i64; india: i64; juliet: i64; kilo: i64; lima: i64; mike: i64; november: i64; oscar: i64; papa: i64; quebec: i64; romeo: i64; sierra: i64; tango: i64; uniform: i64; victor: i64; whiskey: i64; xray: i64; yankee: i64; zulu: i64 };
+function isText(_x: Ref<string | Wide>): _x is string {
+  return true;
+}
+function main(): void {
+  const x: string | Wide = { alpha: 1, bravo: 2, charlie: 3, delta: 4, echo: 5, foxtrot: 6, golf: 7, hotel: 8, india: 9, juliet: 10, kilo: 11, lima: 12, mike: 13, november: 14, oscar: 15, papa: 16, quebec: 17, romeo: 18, sierra: 19, tango: 20, uniform: 21, victor: 22, whiskey: 23, xray: 24, yankee: 25, zulu: 26 };
+  if (isText(x)) console.log(x.length);
+}
+// panic: but it holds a '{ alpha: i64; bravo: i64; charlie: i64;
+// panic: xray: i64; yankee: i64; zulu: i64...'
 // case: predicates_lying_null_release
 // mode: release
 class Item {
@@ -154,3 +165,17 @@ function main(): void {
 // expect: field
 // expect: literal
 // expect: true
+
+// case: predicates_field_of_literals_and_a_brand
+// expect: 0 1
+type Id = Brand<usize, "Id">;
+type T = "bigint" | "boolean" | Id;
+function isId(t: T): t is Id { return typeof t !== "string"; }
+function rec(t: Id): usize { return t + 1; }
+function f(t: T): usize {
+  const l = { type: t, name: "x" };
+  return isId(l.type) && rec(l.type) > 1 ? 1 : 0;
+}
+function main() {
+  console.log(f("bigint"), f(4 as Id));
+}
