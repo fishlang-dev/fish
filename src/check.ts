@@ -1219,7 +1219,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   /** @throws {CompileError} */
   keepsKnown(this: Mut<this>, target: InstanceId, caller: InstanceId) {
     const callee = this.tables.arenas.instanceOf(target);
-    if (callee.keeps !== undefined || this.done.has(target)) return;
+    // Reading an assumption still open is recorded too, since it may yet turn out wrong.
+    const open = this.inProgress.has(target) && callee.keeps !== true;
+    if (!open && (callee.keeps !== undefined || this.done.has(target))) return;
     const f = bodyOf(this.tables.arenas, callee);
     const bodyId = f.bodyId;
     if (f.self === undefined || !f.self.mutable || f.self.constructor === true || !this.tables.typing.holdsRef(f.self.type)) return;
@@ -2841,6 +2843,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           }
         } catch (e) {
           this.inProgress.delete(id);
+          // An assumption made by a check that failed is no result, for whoever reads it next.
+          let stopped = this.tables.arenas.instanceMut(id);
+          if (stopped.keeps === false) stopped.keeps = undefined;
           const body = this.tables.arenas.instanceOf(id).body;
           if (!(e instanceof CompileError)) throw e;
           if (this.demanded === 0) {

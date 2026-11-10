@@ -452,7 +452,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const params = f.params.flatMap((p, k) => {
         const local = resolved(p);
         if (shared?.at.has(k)) {
-          const at = `%${local.name}.pair.${local.id}`;
+          const at = `%"${local.name}.pair.${local.id}"`;
           allocas.push(`  ${at} = alloca ${PAIR}`);
           emit(`store ${PAIR} %"${local.name}.arg", ptr ${at}`);
           pairs.set(local.localId, at);

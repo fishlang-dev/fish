@@ -1463,6 +1463,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (this.state === null) return;
     let holders = new Set<LocalId>();
     if (holder !== undefined) holders.add(holder);
+    // A call's receiver and the variable given its result hold one loan between them.
+    const had = this.state.loans.get(key);
+    if (had !== undefined && had.place === place) for (const h of had.holders) holders.add(h);
     this.state.loans.set(key, { place, mutable, start: use.start, end: use.end, holders, call, callAt });
   }
 
@@ -2187,6 +2190,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   /** @throws {CompileError} */
   made(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): void {
     const parts = this.captured(cx, e);
+    // A closure has its own checker, so what it stores through `this` is counted here.
+    const closure = e.kind === "arrow" ? cx.instance.calls.get(e) : undefined;
+    if (closure !== undefined && cx.tables.arenas.instanceOf(closure).keeps === true) this.keepsInThis = true;
     // A copy the closure holds of a variable that a nested function it calls changes wouldn't
     // see the change, as JavaScript's closure would.
     for (const c of parts) {
