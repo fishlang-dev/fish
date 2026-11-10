@@ -1,5 +1,5 @@
 // Compiles the checker natively as far as codegen goes: mirrors src as .fsh, builds a driver that
-// parses and checks one program, and goes on past each function codegen fails on. Prints every
+// parses and checks the file it is given, and goes on past each function codegen fails on. Prints every
 // failure and where the IR's size goes, and writes the IR for scripts/irsplit.ts. A directory may
 // be named; otherwise it is `fish-native` in the system's temporary directory.
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
@@ -9,13 +9,14 @@ import { compile } from "../src/main.ts";
 import { cachedSession } from "../src/stdcache.ts";
 import { mirrored } from "./selfhost.ts";
 
-const DRIVER = `import { parse } from "./parser.fsh";
+const DRIVER = `import { readFileSync } from "node:fs";
+import { parse } from "./parser.fsh";
 import { check } from "./check.fsh";
 import { newCompilation, newSession } from "./compilation.fsh";
 function main() {
   let compilation = newCompilation(newSession());
   try {
-    const stmts = parse("function main() { const x: i64 = 1 + 2; console.log(x); }", compilation.ids);
+    const stmts = parse(readFileSync(process.argv[2]!, "utf8"), compilation.ids);
     check(compilation, stmts);
     console.log("accepted");
   } catch (e) {

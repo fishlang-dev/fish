@@ -9650,7 +9650,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // A pointer to a value lent to a reference: where a place holding exactly that type lives,
   // or else a slot holding a copy converted to it.
   function borrowed(e: Expr, to: Type): string {
-    if (lendable(e) && (stored(e) === to || typing.unfold(stored(e)) === to || typing.sameLowered(stored(e), to))) return blockOf(address(e), stored(e));
+    if (lendable(e) && (stored(e) === to || typing.unfold(stored(e)) === to || typing.lower(stored(e)) === typing.lower(to))) return blockOf(address(e), stored(e));
     const slot = alloca(llvm(to));
     const made = evaluate(e);
     if (fresh(e)) pending.push({ v: made, type: types.get(e)! });
