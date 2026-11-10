@@ -179,3 +179,19 @@ function f(t: T): usize {
 function main() {
   console.log(f("bigint"), f(4 as Id));
 }
+
+// case: predicates_no_about_a_brand_sharing_its_base
+// expect: a other other
+type A = Brand<usize, "A">;
+type B = Brand<usize, "B">;
+type T = "none" | A | B;
+function isA(t: T): t is A {
+  return t !== "none" && (t as usize) < 10;
+}
+function f(t: T): string {
+  if (isA(t)) return "a";
+  return "other";
+}
+function main() {
+  console.log(f(5 as A), f(50 as B), f("none"));
+}

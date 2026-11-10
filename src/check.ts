@@ -2320,7 +2320,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       if (instance.predicates !== undefined) {
         for (const k of instance.predicates.ids()) {
           const pr = instance.predicates.getById(k)!;
-          predicates.push([k, { ...pr, type: this.tables.typing.lower(pr.type) }]);
+          // Brands of one base are one value at run time, so a "no" about a brand can't be tested.
+          const no = pr.no && !this.tables.typing.holdsBrand(pr.type);
+          predicates.push([k, { ...pr, no, type: this.tables.typing.lower(pr.type) }]);
         }
       }
       while (predicates.length > 0) {
