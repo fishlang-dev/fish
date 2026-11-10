@@ -443,11 +443,6 @@ function borrowed(instance: Ref<Instance>, e: Ref<Expr>): boolean {
   return false;
 }
 
-// `await e`, which the parser reads as a unary operator.
-export function isAwait(e: Ref<Expr>): e is Extract<Expr, { kind: "unary" }> {
-  return e.kind === "unary" && e.op === "await";
-}
-
 // A generator's frame, everything it keeps between `next()` calls: its state, its parameters
 // in order, every other variable, then each `for...of` loop's array or generator and its
 // position. A closure's loops are its own.
@@ -509,7 +504,7 @@ function frameOf(tables: Mut<Tables>, id: InstanceId, generator: GeneratorType |
       loopsMet.push({ ...n.node });
       isLoop.push(true);
     }
-    if (n.of === "expr" && isAwait(n.node)) {
+    if (n.of === "expr" && n.node.kind === "unary" && n.node.op === "await") {
       awaitsMet.push({ ...n.node });
       isLoop.push(false);
     }
@@ -3101,7 +3096,6 @@ class BodyState {
   built: boolean;
   // A closure sees the `this` of the body it is written in, which it only reads.
   enclosing: Body["self"];
-  captures: Map<LocalId, LocalId | "this"> | undefined;
   // What the function may throw: any value's type. An arrow with none written takes it from the
   // function type it is given as, as it does its parameters' types, or else from what its body
   // can throw; a nested function declares its own.
@@ -3152,7 +3146,6 @@ class BodyState {
     this.exempt = undefined;
     this.built = false;
     this.enclosing = undefined;
-    this.captures = undefined;
     this.contextual = undefined;
     this.inferring = undefined;
     this.errorType = undefined;
@@ -3367,7 +3360,6 @@ class BodyChecker implements Context, GuardHost {
     const own = this.f().self === undefined ? undefined : { ...this.f().self! };
     if (this.f().closure !== undefined) this.st.self = enclosing !== undefined ? { ...enclosing, constructor: false, mutable: false, owned: false } : undefined;
     else this.st.self = own !== undefined ? { ...own, type: viewed ?? own.type } : undefined;
-    this.state.captures = this.instance().captures;
     this.st.owning = this.f().closure !== undefined && (this.f().async === true || this.f().closure!.move === true);
     this.st.owner = this.f().closure !== undefined ? this.closureOwner(this.f()) : this.f().declared ?? (this.f().owner !== undefined && this.f().owner === this.f().self?.type ? this.st.self!.type : this.f().owner);
     this.st.syncMain = this.cx.tables.timerMains.hasId(this.f().id);
@@ -3579,11 +3571,11 @@ class BodyChecker implements Context, GuardHost {
     return this.capturesHas(lId);
   }
   private capturesHas(l: LocalId): boolean {
-    return this.state.captures !== undefined && this.state.captures.has(l);
+    return this.held().captures?.has(l) === true;
   }
   // The binding outside a closure that one of its locals captures.
   private outsideOf(l: LocalId): LocalId | "this" | undefined {
-    return this.state.captures !== undefined ? this.state.captures.get(l) : undefined;
+    return this.held().captures?.get(l);
   }
 
   enterComptime(this: Mut<this>): void {
@@ -5136,7 +5128,7 @@ class BodyChecker implements Context, GuardHost {
           this.yielding(s.expr);
           return undefined;
         }
-        if (isAwait(s.expr)) this.awaiting(s.expr);
+        if (s.expr.kind === "unary" && s.expr.op === "await") this.awaiting(s.expr);
         if (s.expr.kind === "assign" && s.expr.value.kind === "yield") {
           // The target is found after the generator resumes, so it must be one that can be.
           let root: Ref<Expr> = s.expr.target;
@@ -5146,7 +5138,7 @@ class BodyChecker implements Context, GuardHost {
           }
           this.st.yieldable.add(cloneExpr(s.expr.value));
         }
-        if (s.expr.kind === "assign" && isAwait(s.expr.value)) {
+        if (s.expr.kind === "assign" && s.expr.value.kind === "unary" && s.expr.value.op === "await") {
           // The target is found after the await resumes, so it must be one that can be.
           let root: Ref<Expr> = s.expr.target;
           while (root.kind === "member") root = objectOf(root);
@@ -5194,7 +5186,7 @@ class BodyChecker implements Context, GuardHost {
         if (d.target.kind !== "ident") throw unsupported("destructuring patterns", d.target);
         if ((d.init === undefined) && s.keyword === "const") throw new CompileError("E0406", "a 'const' needs its value where it is declared, as TypeScript requires; use 'let' to assign it later", d.start, d.end);
         if ((d.init === undefined)) return this.unassigned(s, d, d.target.name);
-        if (isAwait(d.init)) this.awaiting(d.init);
+        if (d.init.kind === "unary" && d.init.op === "await") this.awaiting(d.init);
         if (d.init.kind === "yield") this.st.yieldable.add(cloneExpr(d.init));
         // A function type there makes the variable a stored callable.
         const declared = this.declaredType(s, d);
@@ -5608,7 +5600,7 @@ class BodyChecker implements Context, GuardHost {
           if (s.value !== undefined) throw new CompileError("E0801", "a generator can't return a value yet; 'return;' ends it", s.value.start, s.value.end);
           return undefined;
         }
-        if (s.value !== undefined && isAwait(s.value)) this.awaiting(s.value);
+        if (s.value !== undefined && s.value.kind === "unary" && s.value.op === "await") this.awaiting(s.value);
         if (this.f().self?.constructor === true && s.value !== undefined) throw new CompileError("E0605", "a constructor can't return a value", s.start, s.end);
         if (this.state.unset.size > 0) throw new CompileError("E0605", "a constructor can't return before every field is assigned", s.start, s.end);
         const declared = this.state.declared;
@@ -6080,10 +6072,10 @@ class BodyChecker implements Context, GuardHost {
   }
 
   noteThis(this: Mut<this>, e: Ref<Expr>): void {
-    if (this.state.captures === undefined || [...this.state.captures.values()].includes("this")) return;
+    if (this.held().captures === undefined || [...this.held().captures!.values()].includes("this")) return;
     const alias = this.cx.tables.arenas.addLocal({ name: "this", type: this.st.self!.type, mutable: false, param: false, id: this.cx.nextLocal++ }).localId;
-    this.state.captures.set(alias, "this");
     let inst = this.instance();
+    inst.captures!.set(alias, "this");
     if (inst.captureUses !== undefined) inst.captureUses.set(alias, cloneExpr(e));
     if (this.state.outer !== undefined) this.outerChecker().noteThis(e);
   }
@@ -6121,7 +6113,8 @@ class BodyChecker implements Context, GuardHost {
       const type = this.cx.localOf(fromId).type;
       const made = this.cx.tables.arenas.addLocal({ name, type, mutable: false, param: false, id: this.cx.nextLocal++ }).localId;
       this.state.depths.set(made, 0);
-      if (this.state.captures !== undefined) this.state.captures.set(made, fromId);
+      let inst = this.instance();
+      if (inst.captures !== undefined) inst.captures.set(made, fromId);
       if (this.cx.tables.nestedBindings.has(fromId)) this.cx.tables.nestedBindings.add(made);
       alias = made;
     }
@@ -6130,8 +6123,8 @@ class BodyChecker implements Context, GuardHost {
   }
   // The binding a closure reads `from` through, when it has made one.
   private captureOf(from: LocalId | "this"): LocalId | undefined {
-    if (this.state.captures === undefined) return undefined;
-    for (const [alias, l] of this.state.captures) if (l === from) return alias;
+    if (this.held().captures === undefined) return undefined;
+    for (const [alias, l] of this.held().captures!) if (l === from) return alias;
     return undefined;
   }
   // Where a closure first uses what one of its bindings captures.

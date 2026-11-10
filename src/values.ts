@@ -6656,11 +6656,11 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // Whether an expression is an index into an array, a place inside it.
-  private element(this: Mut<this>, given: Ref<Expr>): given is Extract<Expr, { kind: "index" }> {
+  private element(this: Mut<this>, given: Ref<Expr>): boolean {
     const now = this.ctx.tables().rewrites.rewritten(given);
     return now !== undefined ? this.elementNow(now) : this.elementNow(given);
   }
-  private elementNow(this: Mut<this>, e: Ref<Expr>): e is Extract<Expr, { kind: "index" }> {
+  private elementNow(this: Mut<this>, e: Ref<Expr>): boolean {
     if (e.kind !== "index") return false;
     const object = this.ctx.held().types.get(e.object);
     if (object === undefined) return false;
