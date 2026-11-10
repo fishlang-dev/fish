@@ -608,9 +608,10 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       b.params.forEach((p, k) => {
         const local = localOf(i.locals.get(p)!);
         if (!at.has(k)) return void parts.push(typing.keyOf(local.type));
-        // What calling it gives and takes, which every instance sharing the code must agree on.
+        // What calling it gives and takes, which every instance sharing the code must agree on: as
+        // types, since one IR shape can hold values that are dropped or dispatched differently.
         const target = calledThrough(i, p.pattern.kind === "ident" ? p.pattern.name : "");
-        parts.push(target === undefined ? "*" : `*${resultType(target)}(${bodyOf(arenas, target).params.map((q) => llvm(localOf(target.locals.get(q)!).type)).join(",")})`);
+        parts.push(target === undefined ? "*" : `*${typing.keyOf(target.returns)}(${bodyOf(arenas, target).params.map((q) => typing.keyOf(localOf(target.locals.get(q)!).type)).join(",")})`);
       });
       for (const [name, t] of [...i.bindings].sort(([a], [b]) => (a < b ? -1 : 1))) {
         const k = name.startsWith("#") ? Number(name.slice(1)) : -1;
@@ -669,10 +670,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
             });
           }
         }
+        if (n.of === "objectProp" && n.node.kind === "shorthand" && n.node.name === name) uses++;
         forEachChild(n, (c) => visit(c, inner));
       };
       for (const st of b.body) visit({ of: "stmt", node: st }, false);
-      if (uses > 0 && uses === calls && runs.size <= 1) at.add(k);
+      // Calling an async or generator closure makes a frame, which a call through the pair can't.
+      const framed = [...runs].some((r) => bodyOf(arenas, arenas.instanceOf(r)).async || bodyOf(arenas, arenas.instanceOf(r)).generator);
+      if (uses > 0 && uses === calls && runs.size <= 1 && !framed) at.add(k);
     });
     return at;
   }
@@ -6873,6 +6877,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // conversion that leaves part of a value behind copies the part it keeps.
   function owned(e: Expr): string {
     if (handedOn(e) !== e) return owned(handedOn(e));
+    // A shared callback has no slot to empty: its closure stays the caller's to drop.
+    if (pairOf(e) !== undefined) return value(e);
     const to = coercions.get(e);
     // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
     // else a copy of it. One boxed into a union's Dyn then goes into the union.
@@ -9479,7 +9485,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // writes the result into the task's output and says pending (0), ready (1), failed (2) or
   // panicked (3); a drop of the frame where it stopped; and a drop of the output it gave.
   function taskGlue(future: FutureType): [string, string, string] {
-    const name = (kind: string) => `@"task.${kind}.${quoted(futureOf.get(future)!.symbol)}"`;
+    const name = (kind: string) => symbol(noted.arenas, futureOf.get(future)!).replace(/^@"fsh\./, `@"task.${kind}.`);
     if (!glued.has(future)) {
       glued.add(future);
       const [frame, type] = [llvm(future), pollType(future)];

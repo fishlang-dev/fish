@@ -47,3 +47,43 @@ function main() {
     console.log("no");
   }
 }
+// case: callback_shared_mutating_closures_handed_on
+// expect: 2 2 20
+function walk(n: i64, each: (x: i64) => void): void {
+  if (n > 0) {
+    each(n);
+    walk(n - 1, each);
+  }
+}
+function main() {
+  let a: i64[] = [];
+  let b: i64[] = [];
+  walk(2, (x) => { a.push(x); });
+  walk(2, (x) => { b.push(x * 10); });
+  console.log(a.length, b.length, b[0]);
+}
+// case: callback_shared_handed_on_at_another_place
+// expect: 2
+// expect: 3
+function two(n: i64, a: () => i64, b: () => i64): i64 {
+  if (n === 0) return a();
+  return two(n - 1, b, a);
+}
+function main() {
+  console.log(two(1, () => 1, () => 2));
+  console.log(two(2, () => 3, () => 4));
+}
+// case: callback_shared_generic_function_value_at_two_types
+// expect: 1s
+// expect: 2t
+function both(f: <T>(x: T) => T, n: i64, s: string): string {
+  const a = f(n);
+  const b = f(s);
+  return `${a}${b}`;
+}
+function id<T>(x: T): T { return x; }
+function same<T>(x: T): T { return x; }
+function main() {
+  console.log(both(id, 1, "s"));
+  console.log(both(same, 2, "t"));
+}

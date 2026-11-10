@@ -43,6 +43,22 @@ function main() {
   console.log(keep(() => a), keep(() => b));
 }`, file);
   expect(kept.match(/^define .*@"fsh\.keep#[0-9a-z.]+"/gm)?.length).toBe(2);
+  const storedInObject = compile(session, `
+function keep(f: () => i64): i64 { const r = f(); const _o = { f }; return r; }
+function main() {
+  const a = 1;
+  const b = 2;
+  console.log(keep(() => a), keep(() => b));
+}`, file);
+  expect(storedInObject.match(/^define .*@"fsh\.keep#[0-9a-z.]+"/gm)?.length).toBe(2);
+  // One IR shape, two drops: a string and an Rc are both a pointer.
+  const results = compile(session, `
+function run(f: () => void): void { f(); }
+function main() {
+  run(() => "a".repeat(2));
+  run(() => new Rc<i64>(1));
+}`, file);
+  expect(results.match(/^define .*@"fsh\.run#[0-9a-z.]+"/gm)?.length).toBe(2);
 });
 
 // Two instances whose symbols read alike, as classes made from arguments shown the same way, get
