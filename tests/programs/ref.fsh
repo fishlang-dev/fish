@@ -913,3 +913,103 @@ function main() {
   console.log(v.src.x)
 }
 // expect: 5
+// case: ref_method_keeps_through_a_closure
+// A store through a closure counts as the method keeping what it was lent.
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    const f = () => {
+      this.src = other
+    }
+    f()
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  let v = new View(p)
+  {
+    const arr = [new P("gone")]
+    v.point(arr[0]!)
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough
+// case: ref_method_keeps_through_a_nested_closure
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    const f = () => {
+      const g = () => {
+        this.src = other
+      }
+      g()
+    }
+    f()
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  let v = new View(p)
+  {
+    const arr = [new P("gone")]
+    v.point(arr[0]!)
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough
+// case: ref_method_keeps_through_a_closure_calling_a_method
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  inner(this: Mut<this>, o: Ref<P>) {
+    this.src = o
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    const f = () => {
+      this.inner(other)
+    }
+    f()
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  let v = new View(p)
+  {
+    const arr = [new P("gone")]
+    v.point(arr[0]!)
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough

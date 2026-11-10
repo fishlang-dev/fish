@@ -256,7 +256,7 @@ class Hoister {
     // Which outer type parameters a local uses is read with the renames made so far, since a
     // local naming an outer local class uses the parameters it was given.
     let viewed: Stmt[] = [];
-    for (const s of stmts) viewed.push(rebuiltStmt(cloneStmt(s), this.rewrites));
+    if (localIndices.length > 0) for (const s of stmts) viewed.push(rebuiltStmt(cloneStmt(s), this.rewrites));
     const uses = generics(viewed, localIndices, ctx.typeParams);
     let renames: Rename[] = [];
     for (let idx: usize = 0; idx < localIndices.length; idx++) {

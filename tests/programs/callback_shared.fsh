@@ -139,3 +139,14 @@ function main() {
   console.log(one(id, 1));
   console.log(one(same, 2));
 }
+// case: callback_shared_parameter_named_outside_ascii
+function apply(λ: () => i64): i64 {
+  return λ()
+}
+
+function main() {
+  const a = 1
+  const b = 2
+  console.log(apply(() => a), apply(() => b + 1))
+}
+// expect: 1 3
