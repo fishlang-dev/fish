@@ -674,9 +674,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         forEachChild(n, (c) => visit(c, inner));
       };
       for (const st of b.body) visit({ of: "stmt", node: st }, false);
-      // Calling an async or generator closure makes a frame, which a call through the pair can't.
-      const framed = [...runs].some((r) => bodyOf(arenas, arenas.instanceOf(r)).async || bodyOf(arenas, arenas.instanceOf(r)).generator);
-      if (uses > 0 && uses === calls && runs.size <= 1 && !framed) at.add(k);
+      // A call through the pair passes an environment and builds no frame, so it can only run a
+      // plain closure: a generic function value's instance takes no environment.
+      const plain = [...runs].every((r) => {
+        const called = bodyOf(arenas, arenas.instanceOf(r));
+        return called.closure && !called.async && !called.generator;
+      });
+      if (uses > 0 && uses === calls && runs.size <= 1 && plain) at.add(k);
     });
     return at;
   }

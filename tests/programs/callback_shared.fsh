@@ -129,3 +129,13 @@ function main() {
   fire(async () => { console.log("b"); });
   console.log("end");
 }
+// case: callback_shared_generic_function_value_at_one_type
+// expect: 1
+// expect: 2
+function one(f: <T>(x: T) => T, n: i64): i64 { return f(n); }
+function id<T>(x: T): T { return x; }
+function same<T>(x: T): T { return x; }
+function main() {
+  console.log(one(id, 1));
+  console.log(one(same, 2));
+}
