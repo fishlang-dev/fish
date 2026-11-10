@@ -7579,10 +7579,16 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (!types.has(e)) pending.push({ v: made, type: "bigint" });
         return made;
       }
-      if (e.callee.kind === "member" && e.callee.name === "toString" && valueType(e.callee.object) === "bigint") {
+      if (e.callee.kind === "member" && e.callee.name === "toString" && referent(valueType(e.callee.object)) === "bigint") {
         const radix = e.args[0] ? value(e.args[0]) : "10";
         const made = temp();
-        unwinding(`call ptr @fsh_rt_big_to_string(ptr ${value(e.callee.object)}, i64 ${radix}, ptr ${panicAt(e)})`, made);
+        let big = value(e.callee.object);
+        if (isRef(valueType(e.callee.object))) {
+          const at = big;
+          big = temp();
+          emit(`${big} = load ptr, ptr ${at}`);
+        }
+        unwinding(`call ptr @fsh_rt_big_to_string(ptr ${big}, i64 ${radix}, ptr ${panicAt(e)})`, made);
         if (!types.has(e)) pending.push({ v: made, type: "string" });
         return made;
       }
