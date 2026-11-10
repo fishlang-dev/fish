@@ -743,7 +743,8 @@ function lowered(tables: Mut<Tables>, given: Stmt[], library: boolean): Stmt[] {
   if (misplaced.length > 0) throw new CompileError("E1103", misplaced[0]!.message, misplaced[0]!.start, misplaced[0]!.end);
   written = lowerOverloads(tables.ids, written);
   localKeys(written);
-  written = [...written, ...hoistLocals(tables, written)];
+  const hoisted = hoistLocals(tables, written);
+  written = [...written, ...hoisted];
   lowerKeys(written);
   tables.topKeys = topKeys(written);
   holdsNode({ of: "stmts", node: written }, (n) => {

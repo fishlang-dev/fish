@@ -2627,7 +2627,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const localKey = local.localId;
       this.ctx.locals().set(cloneExpr(callee), localKey);
     } else if (callee.kind === "member" && this.pure(callee) && receiver !== undefined && (this.recOf(receiver)?.kind === "class" || this.recOf(receiver)?.kind === "object")) {
-      if (this.ctx.typing().rec(receiver as ClassType).kind === "class" && (this.inheritedOf(receiver as ClassType as ClassType, "methods", callee.name) !== undefined)) return undefined;
+      if (this.recOf(receiver)?.kind === "class" && (this.inheritedOf(receiver as ClassType as ClassType, "methods", callee.name) !== undefined)) return undefined;
       held = this.ctx.typing().field(receiver as ObjectType | ClassType as ClassType | ObjectType, callee.name)?.type;
       // A getter on the way runs code the direct call would skip.
       const t = this.heldBy(held);
