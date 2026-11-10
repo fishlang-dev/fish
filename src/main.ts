@@ -258,7 +258,7 @@ function parts(ir: string, checked: Checked, release: boolean, target: Target = 
   const arenas = checked.tables.arenas;
   const bodies = compiledOf(checked).filter((i) => !bodyOf(arenas, i).foreign && !bodyOf(arenas, i).rust);
   const names = symbolNames(arenas);
-  const named = (std: boolean) => bodies.filter((i) => bodyOf(arenas, i).start >= STD_BASE === std).map((i) => symbolIn(names, arenas, i));
+  const named = (std: boolean) => bodies.filter((i) => bodyOf(arenas, i).start >= STD_BASE === std).map((i) => symbolIn(arenas, i, names));
   const { std, program } = split(ir, named(true), named(false));
   return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"], stdin: std, inputs: [] }], program };
 }

@@ -68,7 +68,7 @@ test("instances that read alike get symbols of their own", () => {
   const made = (symbol: string) => arenas.addInstance({ body: arenas.addBody({ name: "m" } as Body).bodyId, symbol, bindings: new Map() } as unknown as Omit<Instance, "id">);
   const [a, b, c] = [made("Box<T>.get"), made("Box<T>.get"), made("Box<U>.get")];
   const names = symbolNames(arenas);
-  expect([symbolIn(names, arenas, a), symbolIn(names, arenas, b), symbolIn(names, arenas, c)]).toEqual(['@"fsh.Box<T>.get"', '@"fsh.Box<T>.get~2"', '@"fsh.Box<U>.get"']);
+  expect([symbolIn(arenas, a, names), symbolIn(arenas, b, names), symbolIn(arenas, c, names)]).toEqual(['@"fsh.Box<T>.get"', '@"fsh.Box<T>.get~2"', '@"fsh.Box<U>.get"']);
 });
 
 // An abstract member's signature and a template are checked but never compiled, so no compiled

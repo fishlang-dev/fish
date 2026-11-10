@@ -46,7 +46,12 @@ const sameSpan = (a: object, b: object) => {
 // Every object a replacement replaced or made, by node id: a table may hold a copy of any of them.
 // Ids start again with each compilation, so each program clears it.
 const versions = new Map<number, object[]>();
-const isVersion = (id: number, node: object) => versions.get(id)?.some((v) => v === node || Bun.deepEquals(v, node)) ?? false;
+const isVersion = (id: number, node: object) => versions.get(id)?.some((v) => v === node || Bun.deepEquals(v, node) || ((v as { kind?: unknown }).kind === (node as { kind?: unknown }).kind && sameSpan(v, node))) ?? false;
+// The check each replacement was made in and each node was replaced in. Instances sharing a body
+// each keep the replacement their own check made, so one replaced by another check isn't stale.
+let checkNumber = 0;
+const madeIn = new WeakMap<object, number>();
+const replacedIn = new WeakMap<object, number>();
 // Replacements made through a bare `{ id }`, which the test can't tell the replaced node from:
 // lowering passes one where Fish can't lend a node of a wider union as an `Id`.
 const madeForStub = new WeakSet<object>();
@@ -73,7 +78,11 @@ function noteReplaced(was: object, out: object): void {
     if (typeof n.id === "number" && oldById.has(n.id)) {
       const prev = oldById.get(n.id)!;
       oldById.delete(n.id);
-      if (prev !== v) replacedBy.set(prev, v);
+      if (prev !== v) {
+        replacedBy.set(prev, v);
+        replacedIn.set(prev, checkNumber);
+        madeIn.set(v, checkNumber);
+      }
       versions.set(n.id, [...(versions.get(n.id) ?? []), prev, v]);
     }
     Object.values(n).forEach(linkNew);
@@ -88,6 +97,13 @@ for (const [rep, cur] of REPLACERS) {
     const out = orig.call(this, node, by);
     noteReplaced(was, out);
     return out;
+  };
+}
+for (const m of ["startCheck", "endCheck"] as const) {
+  const orig = Rewrites.prototype[m] as (this: Rewrites) => void;
+  (Rewrites.prototype as unknown as Record<string, unknown>)[m] = function (this: Rewrites) {
+    checkNumber++;
+    orig.call(this);
   };
 }
 // What `node` is now: the last of its replacements, or itself.
@@ -192,7 +208,8 @@ function stale(roots: unknown, where: string): string[] {
     const n = v as Record<string, unknown>;
     // A copy made as the node was, which Fish's ownership needs where a node held by reference goes
     // into a new one, is no replacement: rewrites reach both by id.
-    if (typeof n.id === "number" && latest(n as Id) !== n && !Bun.deepEquals(latest(n as Id), n)) problems.push(`${where}: a ${String(n.kind ?? "node")} at ${n.start} was replaced but is still in the tree`);
+    const anotherCopys = madeIn.has(n) && madeIn.get(n) !== replacedIn.get(n);
+    if (typeof n.id === "number" && latest(n as Id) !== n && !anotherCopys && !Bun.deepEquals(latest(n as Id), n)) problems.push(`${where}: a ${String(n.kind ?? "node")} at ${n.start} was replaced but is still in the tree`);
     Object.values(n).forEach(visit);
   };
   visit(roots);
@@ -470,8 +487,8 @@ const CHILDREN = [...new Set([...readFileSync(join(src, "rebuild.ts"), "utf8").m
 const IN_PLACE = [
   // the spans of nodes just made, before any tree holds them;
   "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
-  // a Body's overloads, given as ids, an enum's record and a Body's template mark, which are no nodes;
-  "check.ts: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true",
+  // a Body's overloads, given as ids, an enum's record, a Body's template mark and a Local's type, which are no nodes;
+  "check.ts: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true", "check.ts: local.type = type;",
   // lists of statements the checker walks, which it edits as a copy recorded by the list's owner
   // in the rewrite table for the rebuild: a statement that becomes several, nested functions
   // hoisted, statements added after the one being checked, and the same edits given to a later

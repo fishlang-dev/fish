@@ -109,7 +109,7 @@ function brief(shown: string): string {
 // arguments shown the same way, are told apart by a count after the first.
 export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
   let known = new Map<InstanceId, string>();
-  const seen = new Map<string, number>();
+  const seen = new Map<string, usize>();
   for (let id = 1; ; id++) {
     const x = arenas.instanceOf(id as InstanceId);
     if (x === undefined) break;
@@ -122,7 +122,7 @@ export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
 }
 
 // An instance's name in the IR, from the names `symbolNames` gave the compilation's instances.
-export const symbolIn = (names: Ref<Map<InstanceId, string>>, arenas: Ref<Arenas>, i: Instance) => {
+export const symbolIn = (arenas: Ref<Arenas>, i: Instance, names: Ref<Map<InstanceId, string>>) => {
   const b = bodyOf(arenas, i);
   return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(names.get(i.id) ?? shortened(i.symbol))}"`;
 };
@@ -187,7 +187,7 @@ const rustGiven = (typing: Typing, arenas: Ref<Arenas>, i: Instance): Crossing |
 // `debug`: a `-g` build, whose own functions carry the marks `withDebugInfo` turns into line tables.
 // A group of instances compiled as one: `template`'s code, the parameters it takes as a closure's
 // address and code, and the closure body each of this instance's calls of them runs.
-type Share = { template: Instance; at: Set<usize>; code: Map<usize, Instance | undefined> };
+type Share = { template: Instance; at: Set<usize>; code: Map<usize, InstanceId | undefined> };
 const PAIR = "{ ptr, ptr }";
 export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean; failed?: string[] };
 
@@ -211,7 +211,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // Instances made while compiling, as comptime makes, are named once they are met.
   const symbol = (a: Ref<Arenas>, i: Instance): string => {
     if (!names.has(i.id)) names = symbolNames(a);
-    return symbolIn(names, a, i);
+    return symbolIn(a, i, names);
   };
   const recOf = <T extends Type>(t: T | undefined) => (t === undefined || typeof t === "string" ? undefined : typing.rec(t as Exclude<T, string>));
   const isRef = (t: Type) => recOf(t)?.kind === "ref";
@@ -597,7 +597,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // the closure's address and its body's code, and the caller drops the closure once the call
   // returns. A walker given a different closure by every caller is otherwise copied for each.
   function sharing(): Map<InstanceId, Share> {
-    const groups = new Map<string, Instance[]>();
+    const groups = new Map<string, InstanceId[]>();
     const found = new Map<InstanceId, Set<usize>>();
     for (const i of instances) {
       const at = callbacksOnlyCalled(i);
@@ -621,16 +621,17 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const key = parts.join("|");
       let group = groups.get(key);
       if (group === undefined) groups.set(key, (group = []));
-      group.push(i);
+      group.push(i.id);
     }
     const out = new Map<InstanceId, Share>();
     for (const group of groups.values()) {
       if (group.length < 2) continue;
-      const template = group.toSorted((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0))[0]!;
-      for (const i of group) {
+      const template = group.map((id) => arenas.instanceOf(id)).toSorted((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0))[0]!;
+      for (const id of group) {
+        const i = arenas.instanceOf(id);
         const b = bodyOf(arenas, i);
-        const code = new Map<usize, Instance | undefined>();
-        for (const k of found.get(i.id)!) code.set(k, calledThrough(i, (b.params[k]!.pattern as { name: string }).name));
+        const code = new Map<usize, InstanceId | undefined>();
+        for (const k of found.get(i.id)!) code.set(k, calledThrough(i, (b.params[k]!.pattern as { name: string }).name)?.id);
         out.set(i.id, { template, at: found.get(i.id)!, code });
       }
     }
@@ -7690,7 +7691,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const code = share!.code.get(k);
       const [half, both] = [temp(), temp()];
       emit(`${half} = insertvalue ${PAIR} undef, ptr ${slot}, 0`);
-      emit(`${both} = insertvalue ${PAIR} ${half}, ptr ${code === undefined ? "null" : symbol(noted.arenas, code)}, 1`);
+      emit(`${both} = insertvalue ${PAIR} ${half}, ptr ${code === undefined ? "null" : symbol(noted.arenas, noted.arenas.instanceOf(code))}, 1`);
       values[k] = `${PAIR} ${both}`;
       lent.push({ slot, type });
     }
