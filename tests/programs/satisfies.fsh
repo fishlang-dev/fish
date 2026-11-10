@@ -34,10 +34,32 @@ function main(): void {
 // expect: [ 'a', 'b' ]
 // case: as_refuses_downcast
 function main(): void {
-  const v: string | i64 = "x";
-  const s = v as string;
+  const v: { name: string } = { name: "x" };
+  const s = v as { name: string; age: i64 };
 }
-// error: 'as' can't narrow 'i64 | string' to 'string', since nothing would check it while the program runs
+// error: 'as' can't narrow '{ name: string }' to '{ age: i64; name: string }', since nothing would check it while the program runs
+// case: as_refuses_union_member_downcast
+function main(): void {
+  const v: string | i64 = "hello";
+  const s = v as "hello";
+}
+// error: 'as' can't narrow 'i64 | string' to '"hello"', since nothing would check it while the program runs
+// case: as_narrows_union
+const c = (42 as i64 | string) as i64;
+function main(): void {
+  const v: string | i64 | boolean = "hello";
+  const s = v as string;
+  const sub = v as string | i64;
+  console.log(s, sub, c);
+}
+// expect: hello hello 42
+// case: as_narrows_union_panics
+function main(): void {
+  const v: string | i64 = 7;
+  const s = v as string;
+  console.log(s);
+}
+// panic: 'as string' failed: union held another member
 // case: as_refuses_unrelated
 function main(): void {
   const s = "x" as boolean;

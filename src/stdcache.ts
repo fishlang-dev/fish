@@ -2,9 +2,8 @@ import { deserialize, serialize } from "bun:jsc";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { newSession, type Session } from "./compilation.ts";
-import { cacheDir, partial } from "./mathlib.ts";
-import { renumber } from "./nodes.ts";
+import { newSession } from "./compilation.ts";
+import { buildSession, cacheDir, partial, type BuildSession } from "./mathlib.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_SOURCE } from "./std.ts";
 
@@ -27,8 +26,8 @@ export function stdKey(source: string, dir: string): string | null {
 // A session that loads std's parsed tree, serialized: kept in memory, else read from the cache,
 // else parsed and written there, the session counting the parse. A cache that can't be read or
 // written only costs the parse, and without a key the cache isn't touched at all.
-export function cachedSession(): Session {
-  const session = newSession();
+export function cachedSession(): BuildSession {
+  const session = buildSession(newSession());
   let key: string | null | undefined;
   let tree: { path: string | null; bytes: Uint8Array } | undefined;
   const bytes = (): Uint8Array => {
@@ -48,8 +47,9 @@ export function cachedSession(): Session {
     }
     if (bytes === undefined) {
       session.std.parses++;
-      // Ids are each compilation's own, so the cached tree holds zeros.
-      bytes = new Uint8Array(serialize(renumber("stmt", parse(STD_SOURCE, { last: 0 }), () => 0)));
+      // Each compilation renumbers its copy; until then the parse's own ids, one per node, tell a
+      // node reached twice apart from two nodes.
+      bytes = new Uint8Array(serialize(parse(STD_SOURCE, { last: 0 })));
       if (path !== null) {
         try {
           const temp = partial(path);
@@ -61,6 +61,9 @@ export function cachedSession(): Session {
     tree = { path, bytes };
     return bytes;
   };
-  session.std.load = (): Stmt[] => deserialize(bytes());
+  // Read through a getter, so each compilation takes a fresh copy of the tree, read from the cache
+  // as it is then.
+  Object.defineProperty(session.std, "tree", { get: (): Stmt[] => deserialize(bytes()) });
+  session.std.cached = true;
   return session;
 }

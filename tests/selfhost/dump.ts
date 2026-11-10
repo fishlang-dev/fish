@@ -378,30 +378,30 @@ export function dumpClassNode(indent: string, label: string, n: Ref<ClassNode>):
   }
   console.log(indent + "  " + "abstract" + " " + `${n.abstract}`);
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x91 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x91);
+  for (const x92 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x92);
   }
   console.log(indent + "  " + "typeParams" + ` [${n.typeParams.length}]`);
-  for (const x92 of n.typeParams) {
-    dumpTypeParam(indent + "  " + "  ", "-", x92);
+  for (const x93 of n.typeParams) {
+    dumpTypeParam(indent + "  " + "  ", "-", x93);
   }
   if (n.extends === undefined) console.log(indent + "  " + "extends" + " undefined");
   else {
     dumpExpr(indent + "  ", "extends", n.extends!);
   }
   console.log(indent + "  " + "implements" + ` [${n.implements.length}]`);
-  for (const x93 of n.implements) {
-    dumpTypeNode(indent + "  " + "  ", "-", x93);
+  for (const x94 of n.implements) {
+    dumpTypeNode(indent + "  " + "  ", "-", x94);
   }
   console.log(indent + "  " + "members" + ` [${n.members.length}]`);
-  for (const x94 of n.members) {
-    dumpClassMember(indent + "  " + "  ", "-", x94);
+  for (const x95 of n.members) {
+    dumpClassMember(indent + "  " + "  ", "-", x95);
   }
   if (n.derives === undefined) console.log(indent + "  " + "derives" + " undefined");
   else {
     console.log(indent + "  " + "derives" + ` [${n.derives!.length}]`);
-    for (const x95 of n.derives!) {
-      console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x95));
+    for (const x96 of n.derives!) {
+      console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x96));
     }
   }
 }
@@ -449,12 +449,12 @@ export function dumpParam(indent: string, label: string, n: Ref<Param>): void {
     dumpExpr(indent + "  ", "default", n.default!);
   }
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x121 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x121));
+  for (const x123 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x123));
   }
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x122 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x122);
+  for (const x124 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x124);
   }
   console.log(indent + "  " + "comptime" + " " + `${n.comptime}`);
 }
@@ -539,8 +539,8 @@ export function dumpEnumMember(indent: string, label: string, n: Ref<EnumMember>
   if (n.payload === undefined) console.log(indent + "  " + "payload" + " undefined");
   else {
     console.log(indent + "  " + "payload" + ` [${n.payload!.length}]`);
-    for (const x127 of n.payload!) {
-      dumpTypeNode(indent + "  " + "  ", "-", x127);
+    for (const x129 of n.payload!) {
+      dumpTypeNode(indent + "  " + "  ", "-", x129);
     }
   }
 }
@@ -555,8 +555,8 @@ export function dumpSwitchCase(indent: string, label: string, n: Ref<SwitchCase>
     dumpExpr(indent + "  ", "test", n.test!);
   }
   console.log(indent + "  " + "body" + ` [${n.body.length}]`);
-  for (const x128 of n.body) {
-    dumpStmt(indent + "  " + "  ", "-", x128);
+  for (const x130 of n.body) {
+    dumpStmt(indent + "  " + "  ", "-", x130);
   }
 }
 
@@ -591,8 +591,8 @@ export function dumpTypeParam(indent: string, label: string, n: Ref<TypeParam>):
     dumpTypeNode(indent + "  ", "default", n.default!);
   }
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x129 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x129));
+  for (const x131 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x131));
   }
 }
 
@@ -624,8 +624,8 @@ export function dumpJsName(indent: string, label: string, n: Ref<JsName>): void 
   if (n.overloads === undefined) console.log(indent + "  " + "overloads" + " undefined");
   else {
     console.log(indent + "  " + "overloads" + ` [${n.overloads!.length}]`);
-    for (const x130 of n.overloads!) {
-      dumpFunc(indent + "  " + "  ", "-", x130);
+    for (const x132 of n.overloads!) {
+      dumpFunc(indent + "  " + "  ", "-", x132);
     }
   }
 }
@@ -641,8 +641,8 @@ export function dumpFunc(indent: string, label: string, n: Ref<Func>): void {
 export function dumpUnion0(indent: string, label: string, n: Ref<Expr | Stmt[]>): void {
   if (Array.isArray(n)) {
     console.log(indent + label + ` [${n.length}]`);
-    for (const x131 of n) {
-      dumpStmt(indent + "  ", "-", x131);
+    for (const x133 of n) {
+      dumpStmt(indent + "  ", "-", x133);
     }
     return;
   }
@@ -1376,6 +1376,14 @@ export function dumpExpr_call(indent: string, label: string, n: Ref<Extract<Expr
     dumpExpr(indent + "  " + "  ", "-", x23);
   }
   console.log(indent + "  " + "optional" + " " + `${n.optional}`);
+  if (n.implementation === undefined) console.log(indent + "  " + "implementation" + " undefined");
+  else {
+    console.log(indent + "  " + "implementation" + " " + `${n.implementation!}`);
+  }
+  if (n.shown === undefined) console.log(indent + "  " + "shown" + " undefined");
+  else {
+    console.log(indent + "  " + "shown" + " " + JSON.stringify(n.shown!));
+  }
 }
 
 export function dumpExpr_new(indent: string, label: string, n: Ref<Extract<Expr, { kind: "new" }>>): void {
@@ -1437,6 +1445,14 @@ export function dumpExpr_nonNull(indent: string, label: string, n: Ref<Extract<E
   if (n.narrows === undefined) console.log(indent + "  " + "narrows" + " undefined");
   else {
     dumpTypeNode(indent + "  ", "narrows", n.narrows!);
+  }
+  if (n.reason === undefined) console.log(indent + "  " + "reason" + " undefined");
+  else {
+    console.log(indent + "  " + "reason" + " " + JSON.stringify(n.reason!));
+  }
+  if (n.redundant === undefined) console.log(indent + "  " + "redundant" + " undefined");
+  else {
+    console.log(indent + "  " + "redundant" + " " + `${n.redundant!}`);
   }
 }
 
@@ -2095,6 +2111,10 @@ export function dumpTypeAlias_typeAlias(indent: string, label: string, n: Ref<Ex
   else {
     dumpJsName(indent + "  ", "js", n.js!);
   }
+  if (n.shown === undefined) console.log(indent + "  " + "shown" + " undefined");
+  else {
+    console.log(indent + "  " + "shown" + " " + JSON.stringify(n.shown!));
+  }
 }
 
 export function dumpInterface_interface(indent: string, label: string, n: Ref<Extract<Interface, { kind: "interface" }>>): void {
@@ -2190,6 +2210,17 @@ export function dumpFunc_function(indent: string, label: string, n: Ref<Extract<
   else {
     dumpJsName(indent + "  ", "js", n.js!);
   }
+  if (n.overloadNames === undefined) console.log(indent + "  " + "overloadNames" + " undefined");
+  else {
+    console.log(indent + "  " + "overloadNames" + ` [${n.overloadNames!.length}]`);
+    for (const x70 of n.overloadNames!) {
+      console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x70));
+    }
+  }
+  if (n.signature === undefined) console.log(indent + "  " + "signature" + " undefined");
+  else {
+    console.log(indent + "  " + "signature" + " " + `${n.signature!}`);
+  }
 }
 
 export function dumpStmt_class(indent: string, label: string, n: Ref<Extract<Stmt, { kind: "class" }>>): void {
@@ -2203,30 +2234,30 @@ export function dumpStmt_class(indent: string, label: string, n: Ref<Extract<Stm
   }
   console.log(indent + "  " + "abstract" + " " + `${n.abstract}`);
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x70 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x70);
+  for (const x71 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x71);
   }
   console.log(indent + "  " + "typeParams" + ` [${n.typeParams.length}]`);
-  for (const x71 of n.typeParams) {
-    dumpTypeParam(indent + "  " + "  ", "-", x71);
+  for (const x72 of n.typeParams) {
+    dumpTypeParam(indent + "  " + "  ", "-", x72);
   }
   if (n.extends === undefined) console.log(indent + "  " + "extends" + " undefined");
   else {
     dumpExpr(indent + "  ", "extends", n.extends!);
   }
   console.log(indent + "  " + "implements" + ` [${n.implements.length}]`);
-  for (const x72 of n.implements) {
-    dumpTypeNode(indent + "  " + "  ", "-", x72);
+  for (const x73 of n.implements) {
+    dumpTypeNode(indent + "  " + "  ", "-", x73);
   }
   console.log(indent + "  " + "members" + ` [${n.members.length}]`);
-  for (const x73 of n.members) {
-    dumpClassMember(indent + "  " + "  ", "-", x73);
+  for (const x74 of n.members) {
+    dumpClassMember(indent + "  " + "  ", "-", x74);
   }
   if (n.derives === undefined) console.log(indent + "  " + "derives" + " undefined");
   else {
     console.log(indent + "  " + "derives" + ` [${n.derives!.length}]`);
-    for (const x74 of n.derives!) {
-      console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x74));
+    for (const x75 of n.derives!) {
+      console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x75));
     }
   }
 }
@@ -2253,16 +2284,20 @@ export function dumpTypeMember_method(indent: string, label: string, n: Ref<Extr
   dumpUnion2(indent + "  ", "name", n.name);
   console.log(indent + "  " + "optional" + " " + `${n.optional}`);
   console.log(indent + "  " + "typeParams" + ` [${n.typeParams.length}]`);
-  for (const x75 of n.typeParams) {
-    dumpTypeParam(indent + "  " + "  ", "-", x75);
+  for (const x76 of n.typeParams) {
+    dumpTypeParam(indent + "  " + "  ", "-", x76);
   }
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x76 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x76);
+  for (const x77 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x77);
   }
   if (n.returns === undefined) console.log(indent + "  " + "returns" + " undefined");
   else {
     dumpTypeNode(indent + "  ", "returns", n.returns!);
+  }
+  if (n.throws === undefined) console.log(indent + "  " + "throws" + " undefined");
+  else {
+    dumpTypeNode(indent + "  ", "throws", n.throws!);
   }
 }
 
@@ -2272,12 +2307,12 @@ export function dumpTypeMember_call(indent: string, label: string, n: Ref<Extrac
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "typeParams" + ` [${n.typeParams.length}]`);
-  for (const x77 of n.typeParams) {
-    dumpTypeParam(indent + "  " + "  ", "-", x77);
+  for (const x78 of n.typeParams) {
+    dumpTypeParam(indent + "  " + "  ", "-", x78);
   }
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x78 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x78);
+  for (const x79 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x79);
   }
   if (n.returns === undefined) console.log(indent + "  " + "returns" + " undefined");
   else {
@@ -2291,12 +2326,12 @@ export function dumpTypeMember_construct(indent: string, label: string, n: Ref<E
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "typeParams" + ` [${n.typeParams.length}]`);
-  for (const x79 of n.typeParams) {
-    dumpTypeParam(indent + "  " + "  ", "-", x79);
+  for (const x80 of n.typeParams) {
+    dumpTypeParam(indent + "  " + "  ", "-", x80);
   }
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x80 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x80);
+  for (const x81 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x81);
   }
   if (n.returns === undefined) console.log(indent + "  " + "returns" + " undefined");
   else {
@@ -2311,8 +2346,8 @@ export function dumpTypeMember_index(indent: string, label: string, n: Ref<Extra
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "readonly" + " " + `${n.readonly}`);
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x81 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x81);
+  for (const x82 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x82);
   }
   dumpTypeNode(indent + "  ", "type", n.type);
 }
@@ -2324,8 +2359,8 @@ export function dumpTypeMember_get(indent: string, label: string, n: Ref<Extract
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   dumpUnion2(indent + "  ", "name", n.name);
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x82 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x82);
+  for (const x83 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x83);
   }
   if (n.returns === undefined) console.log(indent + "  " + "returns" + " undefined");
   else {
@@ -2340,8 +2375,8 @@ export function dumpTypeMember_set(indent: string, label: string, n: Ref<Extract
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   dumpUnion2(indent + "  ", "name", n.name);
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x83 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x83);
+  for (const x84 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x84);
   }
   if (n.returns === undefined) console.log(indent + "  " + "returns" + " undefined");
   else {
@@ -2387,20 +2422,20 @@ export function dumpObjectProp_method(indent: string, label: string, n: Ref<Extr
   console.log(indent + "  " + "async" + " " + `${n.async}`);
   console.log(indent + "  " + "generator" + " " + `${n.generator}`);
   console.log(indent + "  " + "typeParams" + ` [${n.typeParams.length}]`);
-  for (const x84 of n.typeParams) {
-    dumpTypeParam(indent + "  " + "  ", "-", x84);
+  for (const x85 of n.typeParams) {
+    dumpTypeParam(indent + "  " + "  ", "-", x85);
   }
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x85 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x85);
+  for (const x86 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x86);
   }
   if (n.returnType === undefined) console.log(indent + "  " + "returnType" + " undefined");
   else {
     dumpTypeNode(indent + "  ", "returnType", n.returnType!);
   }
   console.log(indent + "  " + "body" + ` [${n.body.length}]`);
-  for (const x86 of n.body) {
-    dumpStmt(indent + "  " + "  ", "-", x86);
+  for (const x87 of n.body) {
+    dumpStmt(indent + "  " + "  ", "-", x87);
   }
 }
 
@@ -2411,16 +2446,16 @@ export function dumpObjectProp_get(indent: string, label: string, n: Ref<Extract
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   dumpUnion2(indent + "  ", "key", n.key);
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x87 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x87);
+  for (const x88 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x88);
   }
   if (n.returnType === undefined) console.log(indent + "  " + "returnType" + " undefined");
   else {
     dumpTypeNode(indent + "  ", "returnType", n.returnType!);
   }
   console.log(indent + "  " + "body" + ` [${n.body.length}]`);
-  for (const x88 of n.body) {
-    dumpStmt(indent + "  " + "  ", "-", x88);
+  for (const x89 of n.body) {
+    dumpStmt(indent + "  " + "  ", "-", x89);
   }
 }
 
@@ -2431,16 +2466,16 @@ export function dumpObjectProp_set(indent: string, label: string, n: Ref<Extract
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   dumpUnion2(indent + "  ", "key", n.key);
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x89 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x89);
+  for (const x90 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x90);
   }
   if (n.returnType === undefined) console.log(indent + "  " + "returnType" + " undefined");
   else {
     dumpTypeNode(indent + "  ", "returnType", n.returnType!);
   }
   console.log(indent + "  " + "body" + ` [${n.body.length}]`);
-  for (const x90 of n.body) {
-    dumpStmt(indent + "  " + "  ", "-", x90);
+  for (const x91 of n.body) {
+    dumpStmt(indent + "  " + "  ", "-", x91);
   }
 }
 
@@ -2450,12 +2485,12 @@ export function dumpClassMember_field(indent: string, label: string, n: Ref<Extr
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x96 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x96));
+  for (const x97 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x97));
   }
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x97 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x97);
+  for (const x98 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x98);
   }
   dumpUnion2(indent + "  ", "name", n.name);
   console.log(indent + "  " + "optional" + " " + `${n.optional}`);
@@ -2476,23 +2511,23 @@ export function dumpClassMember_method(indent: string, label: string, n: Ref<Ext
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x98 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x98));
+  for (const x99 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x99));
   }
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x99 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x99);
+  for (const x100 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x100);
   }
   dumpUnion2(indent + "  ", "name", n.name);
   console.log(indent + "  " + "optional" + " " + `${n.optional}`);
   console.log(indent + "  " + "generator" + " " + `${n.generator}`);
   console.log(indent + "  " + "typeParams" + ` [${n.typeParams.length}]`);
-  for (const x100 of n.typeParams) {
-    dumpTypeParam(indent + "  " + "  ", "-", x100);
+  for (const x101 of n.typeParams) {
+    dumpTypeParam(indent + "  " + "  ", "-", x101);
   }
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x101 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x101);
+  for (const x102 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x102);
   }
   if (n.returnType === undefined) console.log(indent + "  " + "returnType" + " undefined");
   else {
@@ -2505,9 +2540,20 @@ export function dumpClassMember_method(indent: string, label: string, n: Ref<Ext
   if (n.body === undefined) console.log(indent + "  " + "body" + " undefined");
   else {
     console.log(indent + "  " + "body" + ` [${n.body!.length}]`);
-    for (const x102 of n.body!) {
-      dumpStmt(indent + "  " + "  ", "-", x102);
+    for (const x103 of n.body!) {
+      dumpStmt(indent + "  " + "  ", "-", x103);
     }
+  }
+  if (n.overloadNames === undefined) console.log(indent + "  " + "overloadNames" + " undefined");
+  else {
+    console.log(indent + "  " + "overloadNames" + ` [${n.overloadNames!.length}]`);
+    for (const x104 of n.overloadNames!) {
+      console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x104));
+    }
+  }
+  if (n.signature === undefined) console.log(indent + "  " + "signature" + " undefined");
+  else {
+    console.log(indent + "  " + "signature" + " " + `${n.signature!}`);
   }
 }
 
@@ -2517,16 +2563,16 @@ export function dumpClassMember_constructor(indent: string, label: string, n: Re
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x103 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x103));
+  for (const x105 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x105));
   }
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x104 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x104);
+  for (const x106 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x106);
   }
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x105 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x105);
+  for (const x107 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x107);
   }
   if (n.throws === undefined) console.log(indent + "  " + "throws" + " undefined");
   else {
@@ -2535,8 +2581,8 @@ export function dumpClassMember_constructor(indent: string, label: string, n: Re
   if (n.body === undefined) console.log(indent + "  " + "body" + " undefined");
   else {
     console.log(indent + "  " + "body" + ` [${n.body!.length}]`);
-    for (const x106 of n.body!) {
-      dumpStmt(indent + "  " + "  ", "-", x106);
+    for (const x108 of n.body!) {
+      dumpStmt(indent + "  " + "  ", "-", x108);
     }
   }
 }
@@ -2547,17 +2593,17 @@ export function dumpClassMember_get(indent: string, label: string, n: Ref<Extrac
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x107 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x107));
+  for (const x109 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x109));
   }
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x108 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x108);
+  for (const x110 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x110);
   }
   dumpUnion2(indent + "  ", "name", n.name);
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x109 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x109);
+  for (const x111 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x111);
   }
   if (n.returnType === undefined) console.log(indent + "  " + "returnType" + " undefined");
   else {
@@ -2570,8 +2616,8 @@ export function dumpClassMember_get(indent: string, label: string, n: Ref<Extrac
   if (n.body === undefined) console.log(indent + "  " + "body" + " undefined");
   else {
     console.log(indent + "  " + "body" + ` [${n.body!.length}]`);
-    for (const x110 of n.body!) {
-      dumpStmt(indent + "  " + "  ", "-", x110);
+    for (const x112 of n.body!) {
+      dumpStmt(indent + "  " + "  ", "-", x112);
     }
   }
 }
@@ -2582,17 +2628,17 @@ export function dumpClassMember_set(indent: string, label: string, n: Ref<Extrac
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x111 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x111));
+  for (const x113 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x113));
   }
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x112 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x112);
+  for (const x114 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x114);
   }
   dumpUnion2(indent + "  ", "name", n.name);
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x113 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x113);
+  for (const x115 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x115);
   }
   if (n.returnType === undefined) console.log(indent + "  " + "returnType" + " undefined");
   else {
@@ -2605,8 +2651,8 @@ export function dumpClassMember_set(indent: string, label: string, n: Ref<Extrac
   if (n.body === undefined) console.log(indent + "  " + "body" + " undefined");
   else {
     console.log(indent + "  " + "body" + ` [${n.body!.length}]`);
-    for (const x114 of n.body!) {
-      dumpStmt(indent + "  " + "  ", "-", x114);
+    for (const x116 of n.body!) {
+      dumpStmt(indent + "  " + "  ", "-", x116);
     }
   }
 }
@@ -2617,16 +2663,16 @@ export function dumpClassMember_index(indent: string, label: string, n: Ref<Extr
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x115 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x115));
+  for (const x117 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x117));
   }
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x116 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x116);
+  for (const x118 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x118);
   }
   console.log(indent + "  " + "params" + ` [${n.params.length}]`);
-  for (const x117 of n.params) {
-    dumpParam(indent + "  " + "  ", "-", x117);
+  for (const x119 of n.params) {
+    dumpParam(indent + "  " + "  ", "-", x119);
   }
   dumpTypeNode(indent + "  ", "type", n.type);
 }
@@ -2637,16 +2683,16 @@ export function dumpClassMember_staticBlock(indent: string, label: string, n: Re
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "modifiers" + ` [${n.modifiers.length}]`);
-  for (const x118 of n.modifiers) {
-    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x118));
+  for (const x120 of n.modifiers) {
+    console.log(indent + "  " + "  " + "-" + " " + JSON.stringify(x120));
   }
   console.log(indent + "  " + "decorators" + ` [${n.decorators.length}]`);
-  for (const x119 of n.decorators) {
-    dumpExpr(indent + "  " + "  ", "-", x119);
+  for (const x121 of n.decorators) {
+    dumpExpr(indent + "  " + "  ", "-", x121);
   }
   console.log(indent + "  " + "body" + ` [${n.body.length}]`);
-  for (const x120 of n.body) {
-    dumpStmt(indent + "  " + "  ", "-", x120);
+  for (const x122 of n.body) {
+    dumpStmt(indent + "  " + "  ", "-", x122);
   }
 }
 
@@ -2664,8 +2710,8 @@ export function dumpPattern_object(indent: string, label: string, n: Ref<Extract
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "props" + ` [${n.props.length}]`);
-  for (const x123 of n.props) {
-    dumpPatternProp(indent + "  " + "  ", "-", x123);
+  for (const x125 of n.props) {
+    dumpPatternProp(indent + "  " + "  ", "-", x125);
   }
   if (n.rest === undefined) console.log(indent + "  " + "rest" + " undefined");
   else {
@@ -2679,10 +2725,10 @@ export function dumpPattern_array(indent: string, label: string, n: Ref<Extract<
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "elements" + ` [${n.elements.length}]`);
-  for (const x124 of n.elements) {
-    if (x124 === undefined) console.log(indent + "  " + "  " + "-" + " undefined");
+  for (const x126 of n.elements) {
+    if (x126 === undefined) console.log(indent + "  " + "  " + "-" + " undefined");
     else {
-      dumpPattern(indent + "  " + "  ", "-", x124!);
+      dumpPattern(indent + "  " + "  ", "-", x126!);
     }
   }
   if (n.rest === undefined) console.log(indent + "  " + "rest" + " undefined");
@@ -2732,8 +2778,8 @@ export function dumpPattern_variant(indent: string, label: string, n: Ref<Extrac
   if (n.args === undefined) console.log(indent + "  " + "args" + " undefined");
   else {
     console.log(indent + "  " + "args" + ` [${n.args!.length}]`);
-    for (const x125 of n.args!) {
-      dumpPattern(indent + "  " + "  ", "-", x125);
+    for (const x127 of n.args!) {
+      dumpPattern(indent + "  " + "  ", "-", x127);
     }
   }
 }
@@ -2744,7 +2790,7 @@ export function dumpPattern_or(indent: string, label: string, n: Ref<Extract<Pat
   console.log(indent + "  " + "end" + " " + `${n.end}`);
   console.log(indent + "  " + "id" + " " + `${n.id}`);
   console.log(indent + "  " + "patterns" + ` [${n.patterns.length}]`);
-  for (const x126 of n.patterns) {
-    dumpPattern(indent + "  " + "  ", "-", x126);
+  for (const x128 of n.patterns) {
+    dumpPattern(indent + "  " + "  ", "-", x128);
   }
 }

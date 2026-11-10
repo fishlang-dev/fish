@@ -3,14 +3,13 @@ import { writeFileSync } from "node:fs";
 import { JS_NATIVE } from "../src/js_native.ts";
 import { compile, ENGINE, ENGINE_SOURCES } from "../src/main.ts";
 import { NATIVE } from "../src/native.ts";
-import { mathObjects } from "../src/mathlib.ts";
-import type { Session } from "../src/compilation.ts";
+import { mathObjects, type BuildSession } from "../src/mathlib.ts";
 
 // Builds the program at `file` with the runtime, the engine and the program all under
 // AddressSanitizer, and runs it reporting leaks. ASan instruments only IR functions marked for
 // it, and crashes on the empty struct accesses the IR makes, nested ones too, which touch nothing.
 // It is built within `session`.
-export function sanitized(session: Session, file: string, src: string) {
+export function sanitized(session: BuildSession, file: string, src: string) {
   writeFileSync(file, src);
   const ir = compile(session, src, file)
     .replaceAll(" uwtable ", " uwtable sanitize_address ")

@@ -759,3 +759,411 @@ function main() {
   print(c.tokens.length, c.tokens[0]!.start, c.lex.scanned)
 }
 // expect: 1 2 1
+// case: ref_method_keeps_nothing
+// A method of a class holding a reference that stores nothing in `this` can be lent a local.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  seen: i64 = 0
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  count(this: Mut<this>, other: Ref<P>): i64 {
+    this.seen += other.x + this.src.x
+    return this.seen
+  }
+  run(this: Mut<this>): i64 {
+    const local = new P()
+    return this.count(local)
+  }
+}
+
+function main() {
+  const p = new P()
+  let v = new View(p)
+  console.log(v.run())
+}
+// expect: 2
+// case: ref_method_keeps_nothing_declared_later
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  seen: i64 = 0
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  run(this: Mut<this>): i64 {
+    const local = new P()
+    return this.count(local)
+  }
+  count(this: Mut<this>, other: Ref<P>): i64 {
+    this.seen += other.x + this.src.x
+    return this.seen
+  }
+}
+
+function main() {
+  const p = new P()
+  let v = new View(p)
+  console.log(v.run())
+}
+// expect: 2
+// case: ref_method_keeps_what_it_stores
+// One that stores what it is lent keeps it, so it can't be lent a local.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    this.src = other
+  }
+  run(this: Mut<this>) {
+    const local = new P()
+    this.point(local)
+  }
+}
+
+function main() {}
+// error: can't store in 'this' a reference to 'local', which belongs to this function
+// case: ref_method_keeps_nothing_recursive
+// A method calling itself is taken to keep nothing while it is checked, which its own body
+// bears out.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  seen: i64 = 0
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  count(this: Mut<this>, other: Ref<P>, n: i64): i64 {
+    this.seen += other.x
+    if (n > 0) {
+      const local = new P()
+      return this.count(local, n - 1)
+    }
+    return this.seen
+  }
+}
+
+function main() {
+  const p = new P()
+  let v = new View(p)
+  console.log(v.count(p, 2))
+}
+// expect: 3
+// case: ref_method_keeps_recursive
+// One whose body does keep what it is lent is checked again as keeping, so its own call can't
+// lend it a local.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  point(this: Mut<this>, other: Ref<P>, n: i64): void {
+    if (n > 0) {
+      const local = new P()
+      this.point(local, n - 1)
+    } else this.src = other
+  }
+}
+
+function main() {}
+// error: can't store in 'this' a reference to 'local', which belongs to this function
+// case: ref_method_keeps_recursive_param
+// A recursive method that keeps what it is lent may pass on what it was lent itself.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  point(this: Mut<this>, other: Ref<P>, n: i64): void {
+    if (n > 0) this.point(other, n - 1)
+    else this.src = other
+  }
+}
+
+function main() {
+  const a = new P()
+  let b = new P()
+  b.x = 5
+  let v = new View(a)
+  v.point(b, 3)
+  console.log(v.src.x)
+}
+// expect: 5
+// case: ref_method_keeps_through_a_closure
+// A store through a closure counts as the method keeping what it was lent.
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    const f = () => {
+      this.src = other
+    }
+    f()
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  let v = new View(p)
+  {
+    const arr = [new P("gone")]
+    v.point(arr[0]!)
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough
+// case: ref_method_keeps_through_a_nested_closure
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    const f = () => {
+      const g = () => {
+        this.src = other
+      }
+      g()
+    }
+    f()
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  let v = new View(p)
+  {
+    const arr = [new P("gone")]
+    v.point(arr[0]!)
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough
+// case: ref_method_keeps_through_a_closure_calling_a_method
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  inner(this: Mut<this>, o: Ref<P>) {
+    this.src = o
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    const f = () => {
+      this.inner(other)
+    }
+    f()
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  let v = new View(p)
+  {
+    const arr = [new P("gone")]
+    v.point(arr[0]!)
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough
+// case: ref_method_read_while_assumed_by_a_second_caller
+// A method settled on another's assumption can't keep calling it once the assumption fails.
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  touch(this: Mut<this>, o: Ref<P>) {
+    this.a(o, 0)
+  }
+  a(this: Mut<this>, o: Ref<P>, n: i64): void {
+    if (n > 0) {
+      this.a(o, n - 1)
+      this.b(o, n - 1)
+    }
+    this.src = o
+  }
+  b(this: Mut<this>, o: Ref<P>, n: i64): void {
+    this.a(o, n)
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  const q = new P("q")
+  let v = new View(p)
+  v.touch(q)
+  {
+    const arr = [new P("gone")]
+    v.b(arr[0]!, 1)
+  }
+  console.log(v.src.name)
+}
+// error: keeps what it is lent in 'this'
+// case: ref_generator_held_keeps_its_receiver_holding
+// Giving a call's generator to a variable leaves the receiver holding what it was lent.
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  touch(this: Mut<this>, o: Ref<P>) {
+    this.src = o
+  }
+  *point(this: Mut<this>, other: Ref<P>): Generator<i64> {
+    this.src = other
+    yield 1
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  const q = new P("q")
+  let v = new View(p)
+  v.touch(q)
+  {
+    const arr = [new P("gone")]
+    const g = v.point(arr[0]!)
+    for (const _ of g) {
+    }
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough
+// case: ref_future_held_keeps_its_receiver_holding
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  touch(this: Mut<this>, o: Ref<P>) {
+    this.src = o
+  }
+  async point(this: Mut<this>, other: Ref<P>): Promise<void> {
+    this.src = other
+  }
+}
+
+async function main() {
+  const p = new P("keep")
+  const q = new P("q")
+  let v = new View(p)
+  v.touch(q)
+  {
+    const arr = [new P("gone")]
+    const fut = v.point(arr[0]!)
+    await fut
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough
+// case: ref_method_assumption_from_a_check_that_failed
+// A method checked out of turn whose check fails leaves no answer for its next caller to trust.
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  x(this: Mut<this>, o: Ref<P>, n: i64) {
+    if (n > 0) this.b(o, 1)
+  }
+  b(this: Mut<this>, o: Ref<P>, n: i64): void {
+    if (n > 0) this.b(o, n - 1)
+    if (n > 5) {
+      const loc = new P("l")
+      this.t(loc)
+    }
+    this.src = o
+  }
+  t(this: Mut<this>, l: Ref<P>): void {
+    this.x(l, 0)
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  let v = new View(p)
+  {
+    const arr = [new P("gone")]
+    v.x(arr[0]!, 1)
+  }
+  console.log(v.src.name)
+}
+// errors: 2
+// error: E0209
+// error: E0204

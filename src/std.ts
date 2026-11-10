@@ -1,9 +1,10 @@
 import type { Compilation } from "./compilation.ts";
-import type { Source } from "./diag.ts";
+import type { CompileError, Source } from "./diag.ts";
 import { AST } from "./ast.ts";
-import { nextId, renumber, shiftSpans, someNode, walk } from "./nodes.ts";
+import { nextId, renumberStmts, Rewrites, someNode, walk, type AnyNode } from "./nodes.ts";
+import { rebuiltStmts } from "./rebuild.ts";
 import { parse, type Pattern, type Stmt } from "./parser.ts";
-import { TYPED_ARRAYS } from "./typing.ts";
+import { TYPED_ARRAY_NAMES } from "./typing.ts";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
@@ -3630,7 +3631,7 @@ export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
 const HTTP_NAMES = ["fetch", "serve", "Router", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
-export const STD_BASE = 2 ** 40;
+export const STD_BASE: usize = 2 ** 40;
 // What a macro builds syntax with besides quotes: `ident("x")`, a name the macro's user sees.
 const AST_HELPERS = String.raw`
 function ident(name: string): AstExpr {
@@ -3792,15 +3793,14 @@ function __arrayFromHex(s: string): u8[] throws TypeError {
 // The typed arrays' helpers, in a program that names a typed array or DataView. Every typed array
 // owns its elements, so one made over an ArrayBuffer takes it and copies out the range it views,
 // reading the bytes in the host's order, little-endian on every target Fish builds for.
-const TYPED = String.raw`
-declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, count: i64): void;
-function __arrayTypedZeros<T>(length: i64, zero: T): T[] {
-  assert(length >= 0, "RangeError: Invalid typed array length: " + String(length));
-  return new Array(length).fill(zero);
-}
-${["U8", "I8", "U16", "I16", "U32", "I32", "F32", "F64"].map((name) => {
-  const t = name.toLowerCase();
-  return `function __arrayFromBuffer${name}(buffer: ArrayBuffer, byteOffset: i64, length: i64, size: i64, name: string): ${t}[] {
+function typedFunctions(): string {
+  const names = ["U8", "I8", "U16", "I16", "U32", "I32", "F32", "F64"];
+  let out = "";
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i]!;
+    const t = name.toLowerCase();
+    if (i > 0) out += "\n";
+    out += `function __arrayFromBuffer${name}(buffer: ArrayBuffer, byteOffset: i64, length: i64, size: i64, name: string): ${t}[] {
   const total = buffer.length as i64;
   assert(byteOffset % size === 0, "RangeError: start offset of " + name + " should be a multiple of " + String(size));
   assert(byteOffset >= 0 && byteOffset <= total, "RangeError: Start offset " + String(byteOffset) + " is outside the bounds of the buffer");
@@ -3825,7 +3825,16 @@ function __arrayTypedSet${name}(source: Ref<${t}[]>, target: Mut<${t}[]>, offset
   assert(offset >= 0 && offset + n <= (target.length as i64), "RangeError: offset is out of bounds");
   if (n > 0) unsafe { fsh_rt_bytes_copy(mutPtrOf(target[offset as usize]) as MutPtr<u8>, ptrOf(source[0]) as Ptr<u8>, n * size) };
 }`;
-}).join("\n")}
+  }
+  return out;
+}
+const TYPED = String.raw`
+declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, count: i64): void;
+function __arrayTypedZeros<T>(length: i64, zero: T): T[] {
+  assert(length >= 0, "RangeError: Invalid typed array length: " + String(length));
+  return new Array(length).fill(zero);
+}
+${typedFunctions()}
 `;
 
 // DataView over an ArrayBuffer it owns, reading and writing numbers of each width in either byte
@@ -6390,10 +6399,10 @@ export function evaluate(module: string): JsValue {
 
 // The std module a specifier names, if any: `node:os` and `os` both name `os`.
 export function stdModule(specifier: string): string | undefined {
-  const bare = specifier.startsWith("node:") ? specifier.slice("node:".length) : specifier;
+  const bare = specifier.startsWith("node:") ? specifier.slice("node:".length as i64) : specifier;
   // "path/posix" is "path", which is POSIX's here.
   const name = bare === "path/posix" ? "path" : bare === "bun" ? "Bun" : bare;
-  return Object.hasOwn(STD_MODULES, name) ? name : undefined;
+  return STD_MODULES[name] !== undefined ? name : undefined;
 }
 
 // What awaiting a JS promise that rejects throws: the JS error's message, and what JS threw. It
@@ -6415,154 +6424,264 @@ export const STD_FILE = "<fish std>";
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
 
 // The std statements a program is checked with, their spans moved past its own.
-export function stdFor({ session, ids }: Compilation, written: Stmt[]): Stmt[] {
+/** @throws {CompileError} */
+export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stmt[] {
   // Each call takes its own copy, since the passes below change the tree, numbered as it is taken.
-  const { std } = session;
-  const all: Stmt[] = renumber("stmt", std.load ? std.load() : (std.parses++, parse(STD_SOURCE, { last: 0 })), () => nextId(ids));
-  shiftSpans("stmt", all, STD_BASE);
-  // The array iterators' generators and the promise cells take names no program can write, so
-  // none hides them.
-  hideHelpers(all);
-  const at = (s: Stmt) => s.start - STD_BASE;
-  let from = 0;
-  // The statements of std's next section, in the order STD_SOURCE joins them.
-  const next = (text: string) => {
+  let all: Stmt[] = [];
+  if (compilation.session.std.cached) all = [...compilation.session.std.tree];
+  else {
+    compilation.session.std.parses++;
+    all = parse(STD_SOURCE, { last: 0 });
+  }
+  // The statements of each of std's sections, in the order STD_SOURCE joins them.
+  let sections: Stmt[][] = [];
+  let from: usize = 0;
+  for (const text of [PRELUDE, HTTP, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BTOA, ATOB, DATE, STDIN, TLS]) {
     const start = from;
     from += text.length;
-    return all.filter((s) => at(s) >= start && at(s) < from);
-  };
-  const prelude = next(PRELUDE);
-  const http = next(HTTP);
-  const fetching = next(FETCH);
-  const served = next(SERVED);
-  const core = next(URL_CORE);
-  const url = next(URL_LIB);
-  const json = next(JSON_VALUE);
-  const jsonName = next(JSON_NAME);
-  const ast = next(AST + AST_HELPERS);
-  const js = next(JS_ERROR);
-  const bytes = next(BYTES);
-  const typed = next(TYPED);
-  const dataView = next(DATA_VIEW);
-  const btoa = next(BTOA);
-  const atob = next(ATOB);
-  const dates = next(DATE);
-  const reading = next(STDIN);
-  const tls = next(TLS);
-  renameValue([...json, ...jsonName]);
-  const astNames = ast.flatMap(declaredNames);
-  const parts = [[json, ["Json", "JSON"]], [jsonName, ["Json"]], [ast, [...astNames, "quote", "quoteType"]], [js, ["JsError"]], [dataView, ["DataView"]], [btoa, ["btoa"]], [atob, ["atob"]], [reading, ["readLine"]]] as const;
-  const packages = written.some(fromPackage);
+    sections.push(all.filter((s) => s.start >= start && s.start < from));
+  }
+  let prelude = sections.shift()!;
+  let http = sections.shift()!;
+  let fetching = sections.shift()!;
+  let served = sections.shift()!;
+  let core = sections.shift()!;
+  let url = sections.shift()!;
+  let json = sections.shift()!;
+  let jsonName = sections.shift()!;
+  let ast = sections.shift()!;
+  let js = sections.shift()!;
+  let bytes = sections.shift()!;
+  let typed = sections.shift()!;
+  let dataView = sections.shift()!;
+  let btoa = sections.shift()!;
+  let atob = sections.shift()!;
+  let dates = sections.shift()!;
+  let reading = sections.shift()!;
+  let tls = sections.shift()!;
+  renamed(json, { kind: "json" });
+  renamed(jsonName, { kind: "json" });
+  let astNames: string[] = [];
+  for (const s of ast) for (const n of declaredNames(s)) astNames.push(n);
+  const packages = written.some((s) => fromPackage(s));
   // A program's own URL, URLSearchParams or TypeError keeps its name, and std's takes one no
   // program can write.
-  const declared = new Set(written.flatMap(declaredNames));
+  let declared = new Set<string>();
+  for (const s of written) for (const n of declaredNames(s)) declared.add(n);
   const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
-  if (own.size > 0) hideNames([...prelude, ...http, ...fetching, ...core, ...url, ...bytes, ...btoa, ...atob, ...dates], own);
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   const httpUsed = uses(written, http, HTTP_NAMES);
   const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
-  const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentions(written, (n) => n.kind === "ident" && n.name === "Request"));
-  const urls = [...(httpUsed && !urlWanted ? served : []), ...(httpUsed || urlWanted ? core : []), ...(urlWanted ? url : [])];
-  const linked = parts.flatMap(([part, names]) => (uses(written, part, [...names]) || (part === js && packages) ? part : []));
+  const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));
+  // The libraries a program gets by naming them; JsError also comes with any package.
+  const jsonUsed = uses(written, json, ["Json", "JSON"]);
+  const jsonNameUsed = uses(written, jsonName, ["Json"]);
+  const astUsed = uses(written, ast, [...astNames, "quote", "quoteType"]);
+  const jsUsed = uses(written, js, ["JsError"]) || packages;
+  const dataViewUsed = uses(written, dataView, ["DataView"]);
+  const btoaUsed = uses(written, btoa, ["btoa"]);
+  const atobUsed = uses(written, atob, ["atob"]);
+  const readingUsed = uses(written, reading, ["readLine"]);
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa and atob call them too.
-  const encoding = httpUsed || linked.some((s) => btoa.includes(s) || atob.includes(s)) || mentions(written, encodes);
+  const encoding = httpUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
   const dated = httpUsed || uses(written, dates, ["Date"]);
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
-  const typing = linked.some((s) => dataView.includes(s)) || mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && Object.hasOwn(TYPED_ARRAYS, n.name));
-  return [...prelude, ...(dated ? dates : []), ...(httpUsed ? http : []), ...(fetchUsed ? fetching : []), ...urls, ...linked, ...(encoding ? bytes : []), ...(typing ? typed : []), ...(secure ? tls : [])];
+  const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
+  let chosen: Stmt[] = prelude;
+  if (dated) chosen = chosen.concat(dates);
+  if (httpUsed) chosen = chosen.concat(http);
+  if (fetchUsed) chosen = chosen.concat(fetching);
+  if (httpUsed && !urlWanted) chosen = chosen.concat(served);
+  if (httpUsed || urlWanted) chosen = chosen.concat(core);
+  if (urlWanted) chosen = chosen.concat(url);
+  if (jsonUsed) chosen = chosen.concat(json);
+  if (jsonNameUsed) chosen = chosen.concat(jsonName);
+  if (astUsed) chosen = chosen.concat(ast);
+  if (jsUsed) chosen = chosen.concat(js);
+  if (dataViewUsed) chosen = chosen.concat(dataView);
+  if (btoaUsed) chosen = chosen.concat(btoa);
+  if (atobUsed) chosen = chosen.concat(atob);
+  if (readingUsed) chosen = chosen.concat(reading);
+  if (encoding) chosen = chosen.concat(bytes);
+  if (typing) chosen = chosen.concat(typed);
+  if (secure) chosen = chosen.concat(tls);
+  if (own.size > 0) renamed(chosen, { kind: "own", names: own });
+  // The array iterators' generators and the promise cells take names no program can write, so
+  // none hides them.
+  renamed(chosen, { kind: "helpers" });
+  return renumberStmts(chosen, () => nextId(compilation.ids), STD_BASE);
+}
+
+// The names std gives a program a library under where they would clash: the prelude's helpers,
+// declared and called as `__arrayFilled`, become `array filled`; std's classes a program declares
+// its own of become `std URL`; and the JSON value alias takes its unwritable name, shown as `Json`.
+type Renaming = { kind: "helpers" } | { kind: "own"; names: Set<string> } | { kind: "json" };
+
+// The name `renaming` gives a node of kind `kind` named `name`, if it renames it.
+function renameOf(renaming: Ref<Renaming>, kind: string, name: string): string | undefined {
+  if (renaming.kind === "json") return (kind === "ref" || kind === "typeAlias") && name === "JsonValue" ? JSON_VALUE_NAME : undefined;
+  if (renaming.kind === "own") return (kind === "class" || kind === "ident" || kind === "ref") && renaming.names.has(name) ? `std ${name}` : undefined;
+  const helper = kind === "function" || kind === "ident" || kind === "typeAlias" || kind === "ref" || kind === "field" || kind === "member";
+  if (!helper || !/^__(array|iter|promise|timer|timeout|router|url|date)/.test(name)) return undefined;
+  let out = "";
+  for (const c of name.slice(2)) out += c >= "A" && c <= "Z" ? ` ${c.toLowerCase()}` : c;
+  return out;
+}
+
+function renamed(statements: Mut<Stmt[]>, renaming: Ref<Renaming>): void {
+  let rewrites = new Rewrites();
+  walk({ of: "stmts", node: statements }, (n) => {
+    if (n.of === "stmt") {
+      const s = n.node;
+      if (s.kind === "function") {
+        const name = renameOf(renaming, s.kind, s.name);
+        if (name !== undefined) rewrites.replaceStmt(s, { ...s, name });
+      } else if (s.kind === "class" && s.name !== undefined) {
+        const name = renameOf(renaming, s.kind, s.name);
+        if (name !== undefined) rewrites.replaceStmt(s, { ...s, name });
+      } else if (s.kind === "typeAlias") {
+        const name = renameOf(renaming, s.kind, s.name);
+        if (name !== undefined && renaming.kind === "json") rewrites.replaceStmt(s, { ...s, name, shown: "Json" });
+        else if (name !== undefined) rewrites.replaceStmt(s, { ...s, name });
+      }
+    } else if (n.of === "expr") {
+      const e = n.node;
+      if (e.kind === "ident") {
+        const name = renameOf(renaming, e.kind, e.name);
+        if (name !== undefined) rewrites.replace(e, { ...e, name });
+      } else if (e.kind === "member") {
+        const name = renameOf(renaming, e.kind, e.name);
+        if (name !== undefined) rewrites.replace(e, { ...e, name });
+      }
+    } else if (n.of === "func") {
+      const f = n.node;
+      const name = renameOf(renaming, f.kind, f.name);
+      if (name !== undefined) rewrites.replaceFunc(f, { ...f, name });
+    } else if (n.of === "pattern") {
+      const p = n.node;
+      if (p.kind === "ident") {
+        const name = renameOf(renaming, p.kind, p.name);
+        if (name !== undefined) rewrites.replacePattern(p, { ...p, name });
+      }
+    } else if (n.of === "typeNode") {
+      const t = n.node;
+      if (t.kind === "ref") {
+        const name = renameOf(renaming, t.kind, t.name);
+        if (name !== undefined) rewrites.replaceTypeNode(t, { ...t, name });
+      }
+    } else if (n.of === "classMember") {
+      const m = n.node;
+      if (m.kind === "field" && typeof m.name === "string") {
+        const name = renameOf(renaming, m.kind, m.name);
+        if (name !== undefined) rewrites.replaceClassMember(m, { ...m, name });
+      }
+    }
+  });
+  rebuiltStmts(statements, rewrites);
 }
 
 // A call of a byte encoder or decoder: 'x.toBase64', 'x.toHex', 'u8.fromBase64' or 'u8.fromHex'.
-function encodes(n: Record<string, unknown>): boolean {
-  if (n.kind !== "member" || typeof n.name !== "string") return false;
-  const object = n.object as { kind?: string; name?: string };
-  return BYTE_METHODS.includes(n.name) || (BYTE_STATICS.includes(n.name) && object.kind === "ident" && object.name === "u8");
-}
-
-// The prelude's helpers, declared and called as `__arrayFilled`, become `array filled`, which
-// no program can write.
-function hideHelpers(statements: Stmt[]) {
-  walk("stmt", statements, ({ node: n }) => {
-    const node = n as Record<string, unknown>;
-    const hidden = node.kind === "function" || node.kind === "ident" || node.kind === "typeAlias" || node.kind === "ref" || node.kind === "field" || node.kind === "member";
-    if (hidden && typeof node.name === "string" && /^__(array|iter|promise|timer|timeout|router|url|date)/.test(node.name)) {
-      node.name = node.name.slice(2).replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`);
-    }
+function mentionsEncoder(statements: Ref<Stmt[]>): boolean {
+  return someNode({ of: "stmts", node: statements }, (n) => {
+    if (n.of !== "expr" || n.node.kind !== "member") return false;
+    const m = n.node;
+    return BYTE_METHODS.includes(m.name) || (BYTE_STATICS.includes(m.name) && m.object.kind === "ident" && m.object.name === "u8");
   });
 }
 
-// Renames std's classes a program declares its own of to names no program can write.
-function hideNames(statements: Stmt[], names: Set<string>) {
-  walk("stmt", statements, ({ node: n }) => {
-    const node = n as Record<string, unknown>;
-    if ((node.kind === "class" || node.kind === "ident" || node.kind === "ref") && typeof node.name === "string" && names.has(node.name)) node.name = `std ${node.name}`;
+// Whether a name or a type names this.
+function mentionsName(statements: Ref<Stmt[]>, name: string): boolean {
+  return someNode({ of: "stmts", node: statements }, (n) => nameOf(n) === name);
+}
+
+function mentionsTypedArray(statements: Ref<Stmt[]>): boolean {
+  return someNode({ of: "stmts", node: statements }, (n) => {
+    const name = nameOf(n);
+    return name !== undefined && TYPED_ARRAY_NAMES.has(name);
   });
 }
 
-// Gives the std's JSON value alias its unwritable name, shown as `Json` in messages.
-function renameValue(statements: Stmt[]) {
-  walk("stmt", statements, ({ node: n }) => {
-    const node = n as Record<string, unknown>;
-    if ((node.kind === "ref" || node.kind === "typeAlias") && node.name === "JsonValue") {
-      node.name = JSON_VALUE_NAME;
-      if (node.kind === "typeAlias") node.shown = "Json";
-    }
-  });
+// The name an identifier or a type reference writes, a binding's included.
+function nameOf(n: Ref<AnyNode>): string | undefined {
+  if (n.of === "expr" && n.node.kind === "ident") return n.node.name;
+  if (n.of === "pattern" && n.node.kind === "ident") return n.node.name;
+  if (n.of === "typeNode" && n.node.kind === "ref") return n.node.name;
+  return undefined;
 }
 
 // A program that refers to a library by one of its names gets it, unless it declares one of the
 // library's top-level names itself.
 // A declaration a package made, as its imports are linked into the program.
-function fromPackage(s: Stmt): boolean {
+function fromPackage(s: Ref<Stmt>): boolean {
   return s.kind === "export" || s.kind === "declare" ? fromPackage(s.body) : "js" in s && s.js !== undefined;
 }
 
-function uses(written: Stmt[], library: Stmt[], wanted: string[]): boolean {
-  const declared = new Set(written.flatMap(declaredNames));
-  if (library.some((s) => declaredNames(s).some((n) => declared.has(n)))) return false;
+function uses(written: Ref<Stmt[]>, library: Ref<Stmt[]>, wanted: Ref<string[]>): boolean {
+  let declared = new Set<string>();
+  for (const s of written) for (const n of declaredNames(s)) declared.add(n);
+  for (const s of library) for (const n of declaredNames(s)) if (declared.has(n)) return false;
   // A name the program declares is its own, not the library's.
-  return mentions(written, (n) => (n.kind === "ident" || n.kind === "ref") && typeof n.name === "string" && wanted.includes(n.name) && !declared.has(n.name));
+  return someNode({ of: "stmts", node: written }, (n) => {
+    const name = nameOf(n);
+    return name !== undefined && wanted.includes(name) && !declared.has(name);
+  });
 }
 
 // The top-level names a statement binds: a declaration's, each name its `let` or `const`
 // patterns bind, and an import's, through `export` and `declare`.
-function declaredNames(s: Stmt): string[] {
+function declaredNames(s: Ref<Stmt>): string[] {
   switch (s.kind) {
     case "export":
     case "declare":
       return declaredNames(s.body);
     case "exportDefault":
       return s.declaration === undefined ? [] : declaredNames(s.declaration);
-    case "let":
-      return s.declarations.flatMap((d) => boundNames(d.target));
-    case "import":
-      return [...(s.default === undefined ? [] : [s.default]), ...(s.namespace === undefined ? [] : [s.namespace]), ...(s.named ?? []).map((n) => n.alias ?? n.name)];
-    default:
-      return "name" in s && typeof s.name === "string" ? [s.name] : [];
-  }
-}
-
-// The names a binding pattern binds; a default's value binds none.
-function boundNames(p: Pattern | undefined): string[] {
-  if (p === undefined) return [];
-  switch (p.kind) {
-    case "ident":
-      return [p.name];
-    case "object":
-      return [...p.props.flatMap((prop) => boundNames(prop.value)), ...boundNames(p.rest)];
-    case "array":
-      return [...p.elements.flatMap(boundNames), ...boundNames(p.rest)];
-    case "default":
-      return boundNames(p.target);
+    case "let": {
+      let out: string[] = [];
+      for (const d of s.declarations) boundNames(d.target, out);
+      return out;
+    }
+    case "import": {
+      let out: string[] = [];
+      if (s.default !== undefined) out.push(s.default);
+      if (s.namespace !== undefined) out.push(s.namespace);
+      if (s.named !== undefined) for (const n of s.named) out.push(n.alias !== undefined ? n.alias : n.name);
+      return out;
+    }
+    case "class":
+      return s.name !== undefined ? [s.name] : [];
+    case "function":
+    case "enum":
+    case "typeAlias":
+    case "interface":
+    case "namespace":
+      return [s.name];
     default:
       return [];
   }
 }
 
-// Whether a node in a tree is one the test picks.
-function mentions(statements: Stmt[], test: (node: Record<string, unknown>) => boolean): boolean {
-  return someNode("stmt", statements, ({ node }) => test(node as Record<string, unknown>));
+// The names a binding pattern binds, added to `out`; a default's value binds none.
+function boundNames(p: Ref<Pattern>, out: Mut<string[]>): void {
+  switch (p.kind) {
+    case "ident":
+      out.push(p.name);
+      return;
+    case "object":
+      for (const prop of p.props) boundNames(prop.value, out);
+      if (p.rest !== undefined) boundNames(p.rest, out);
+      return;
+    case "array":
+      for (const e of p.elements) if (e !== undefined) boundNames(e, out);
+      if (p.rest !== undefined) boundNames(p.rest, out);
+      return;
+    case "default":
+      boundNames(p.target, out);
+      return;
+    default:
+      return;
+  }
 }

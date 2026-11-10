@@ -75,9 +75,9 @@ test("two programs compiled alternately in one process each compile the same eve
 // A stage timed inside another counts only toward itself, and the outer stage keeps the rest,
 // however deeply nested, repeated, or ended by a throw.
 test("timed gives each stage its own time, nested stages taken out of their parents", () => {
-  let clock = 0;
-  const t = newTimings(() => clock);
-  const spend = (ms: number) => (clock += ms);
+  const t = newTimings();
+  t.manual = 0;
+  const spend = (ms: number) => (t.manual! += ms);
   timed(t, "check", () => {
     spend(10);
     timed(t, "moves", () => spend(3));

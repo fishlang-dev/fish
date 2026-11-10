@@ -353,3 +353,42 @@ function main() {
 }
 // expect: 7 1 13 3 1
 // expect: 100 0 40
+
+// case: mut_field_of_a_type_with_an_optional_field_is_lent_not_copied
+// expect: 11
+class Arena {
+  xs: i64[] = [];
+  add(this: Mut<this>, v: i64): usize {
+    this.xs.push(v);
+    return this.xs.length;
+  }
+}
+type Tables = { arena: Arena; n?: i64 };
+function add(t: Mut<Tables>): usize {
+  return t.arena.add(1);
+}
+type HasT = { tables: Tables };
+class View<H extends HasT> {
+  host: Mut<H>;
+  constructor(h: Mut<H>) {
+    this.host = h;
+  }
+  go(this: Mut<this>): usize {
+    const n = add(this.host.tables);
+    return n + this.host.tables.arena.xs.length * 10;
+  }
+}
+class Checker {
+  tables: Tables;
+  constructor(t: Tables) {
+    this.tables = t;
+  }
+  view(this: Mut<this>): View<Checker> {
+    return new View<Checker>(this);
+  }
+}
+function main() {
+  let c = new Checker({ arena: new Arena() });
+  let v = c.view();
+  console.log(v.go());
+}

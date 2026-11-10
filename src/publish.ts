@@ -10,7 +10,7 @@ import { MAX_ENTRIES, tar, untar } from "./tar.ts";
 import { CompileError, locate } from "./diag.ts";
 import { resolveSpecifier, specifierOf } from "./modules.ts";
 import { parse, type Stmt } from "./parser.ts";
-import { walk } from "./nodes.ts";
+import { walkWhile } from "./nodes.ts";
 import { cacheDir } from "./mathlib.ts";
 import { openIndex, registryUrl, resolveVersions, versions, type IndexEntry } from "./registry_index.ts";
 
@@ -127,13 +127,14 @@ export function unsafeUses(files: { path: string; text: string }[]): UnsafeUse[]
       const { line, col } = locate(text, node.start);
       uses.push({ file: path, line, col, what });
     };
-    walk("stmt", program, ({ of, node: n }) => {
+    walkWhile({ of: "stmts", node: program }, ({ of, node: n }) => {
       if (of === "stmt" && n.kind === "unsafe") note(n, "unsafe block");
       if (of === "expr" && n.kind === "unsafe") note(n, "unsafe expression");
       if (of === "stmt" && n.kind === "declare") {
         note(n, n.body.kind === "function" ? `C declaration of '${n.body.name}'` : "C declaration");
         return false;
       }
+      return true;
     });
   }
   return uses.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line || a.col - b.col));

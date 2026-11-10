@@ -2,7 +2,7 @@
 // a document (src/doc.ts) and laid out at 80 columns.
 
 import { CompileError } from "./diag.ts";
-import { nextId, WeakNodeMap, type Ids } from "./nodes.ts";
+import { nextId, NodeMap, type Ids } from "./nodes.ts";
 import {
   align, breakParent, conditionalGroup, fill, group, hardline, ifBreak, indent, indentIfBreak, join, label, line,
   lineSuffix, lineSuffixBoundary, literalline, print, softline, type Doc,
@@ -830,9 +830,9 @@ function printer(attached: Attachment, ids: Ids) {
   const visited = new Set<object>();
   // Each expression's document, printed once per place as Prettier caches it: hugging prints an
   // argument a second time, and without the cache nested callbacks would cost 2^depth.
-  const printedCache = new WeakNodeMap<Expr, { parent: unknown; key: string; doc: Doc }>();
+  const printedCache = new NodeMap<Expr, { parent: unknown; key: string; doc: Doc }>();
   // The pipe each binary view stands for, which its comments attach to.
-  const viewed = new WeakNodeMap<Expr, Expr>();
+  const viewed = new NodeMap<Expr, Expr>();
   let groups = 0;
 
   // A name for a group, so an `ifBreak` elsewhere can ask how it was printed.
@@ -1464,11 +1464,11 @@ function printer(attached: Attachment, ids: Ids) {
   }
 
   // A signature's parameters and return type; a method's return type is grouped on its own.
-  function memberSignature(m: { params: Param[]; returns: TypeNode | undefined; typeParams?: TypeParam[] }, parent: At<"type">, src: string, method = false): Doc[] {
-    const f: Fn = { params: m.params, typeParams: m.typeParams ?? [], returnType: m.returns };
+  function memberSignature(m: { params: Param[]; returns: TypeNode | undefined; typeParams?: TypeParam[]; throws?: TypeNode }, parent: At<"type">, src: string, method = false): Doc[] {
+    const f: Fn = { params: m.params, typeParams: m.typeParams ?? [], returnType: m.returns, throws: m.throws };
     const params = parameters(f, parent, src, false, typeParameters(f.typeParams, parent, src), m);
-    const returned = m.returns ? [": ", type(m.returns, "returnType", parent, src)] : "";
-    return [shouldGroupParameters(f, returned) ? group(params) : params, method && m.returns ? group(returned) : returned];
+    const returned: Doc = [m.returns ? [": ", type(m.returns, "returnType", parent, src)] : "", m.throws ? [" throws ", type(m.throws, "throws", parent, src)] : ""];
+    return [shouldGroupParameters(f, returned) ? group(params) : params, method && (m.returns || m.throws) ? group(returned) : returned];
   }
 
   // `{ readonly [K in T as N]?: V }`; one written with a line break after its `{` stays expanded.

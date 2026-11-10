@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Arenas, type InstanceId } from "../src/arenas.ts";
 import { compile } from "../src/main.ts";
+import { shortened, symbolIn, symbolNames } from "../src/codegen.ts";
 import { cachedSession } from "../src/stdcache.ts";
 import { unreached, type Body, type Instance } from "../src/check.ts";
 import type { Expr } from "../src/parser.ts";
@@ -22,6 +23,52 @@ test("one function per instance", () => {
   expect(defined("first")).toBe(2);
   expect(defined("getX")).toBe(3);
   expect(ir).not.toContain("@\"fsh.identity\"(");
+});
+
+// A function given a different closure by each caller, which it only calls or hands on to
+// itself, is compiled once for all of them; one that uses it any other way is not.
+test("one instance for every closure a callback parameter is given", () => {
+  const file = join(import.meta.dir, "programs", "callback_shared.fsh");
+  const src = readFileSync(file, "utf8").split(/^\/\/ case: .*$/m)[1]!;
+  const ir = compile(session, src, file);
+  const defined = ir.match(/^define .*@"fsh\.walk#[0-9a-z.]+"/gm) ?? [];
+  expect(defined.length).toBe(1);
+  const named = new Set([...ir.matchAll(/@("fsh\.walk[^"]*")/g)].map((m) => m[1]));
+  expect(named.size).toBe(1);
+  const kept = compile(session, `
+function keep(f: () => i64): i64 { const g = f; return g(); }
+function main() {
+  const a = 1;
+  const b = 2;
+  console.log(keep(() => a), keep(() => b));
+}`, file);
+  expect(kept.match(/^define .*@"fsh\.keep#[0-9a-z.]+"/gm)?.length).toBe(2);
+  const storedInObject = compile(session, `
+function keep(f: () => i64): i64 { const r = f(); const _o = { f }; return r; }
+function main() {
+  const a = 1;
+  const b = 2;
+  console.log(keep(() => a), keep(() => b));
+}`, file);
+  expect(storedInObject.match(/^define .*@"fsh\.keep#[0-9a-z.]+"/gm)?.length).toBe(2);
+  // One IR shape, two drops: a string and an Rc are both a pointer.
+  const results = compile(session, `
+function run(f: () => void): void { f(); }
+function main() {
+  run(() => "a".repeat(2));
+  run(() => new Rc<i64>(1));
+}`, file);
+  expect(results.match(/^define .*@"fsh\.run#[0-9a-z.]+"/gm)?.length).toBe(2);
+});
+
+// Two instances whose symbols read alike, as classes made from arguments shown the same way, get
+// names of their own in the IR; one alone keeps its symbol.
+test("instances that read alike get symbols of their own", () => {
+  const arenas = new Arenas();
+  const made = (symbol: string) => arenas.addInstance({ body: arenas.addBody({ name: "m" } as Body).bodyId, symbol, bindings: new Map() } as unknown as Omit<Instance, "id">);
+  const [a, b, c] = [made("Box<T>.get"), made("Box<T>.get"), made("Box<U>.get")];
+  const names = symbolNames(arenas);
+  expect([symbolIn(arenas, a, names), symbolIn(arenas, b, names), symbolIn(arenas, c, names)]).toEqual(['@"fsh.Box<T>.get"', '@"fsh.Box<T>.get~2"', '@"fsh.Box<U>.get"']);
 });
 
 // An abstract member's signature and a template are checked but never compiled, so no compiled
@@ -73,4 +120,9 @@ test("instance symbols are stable and tell type arguments apart", () => {
   expect(symbols(other.stdout.toString())).toEqual(here);
   expect(new Set(here).size).toBe(4);
   expect(here.filter((s) => /#\w+\.\d+$/.test(s))).toEqual([]);
+});
+
+test("a long type argument list is hashed whole, past the angle brackets its text holds", () => {
+  const name = `C<{ op: ">=" | "<"; f: () => ${"x".repeat(200)} }>.m`;
+  expect(shortened(name)).toMatch(/^C<#\w+>\.m$/);
 });

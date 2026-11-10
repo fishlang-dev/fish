@@ -155,3 +155,24 @@ function main(): void {
   console.log(3n ** n);
 }
 // panic: Maximum BigInt size exceeded
+
+// case: bigint_to_string_through_a_reference
+// expect: [12]
+// expect: [12]
+// expect: [34] [34]
+// expect: [12]
+// expect: 34 34
+type V = bigint | string;
+function show1(v: V): string { if (typeof v === "bigint") return v.toString(); return v; }
+function show2(v: Ref<V>): string { if (typeof v === "bigint") return v.toString(); return "s"; }
+function show3(v: Ref<bigint>): string { return v.toString(); }
+function show4(v: Ref<V>): string { if (typeof v === "bigint") { const n: bigint = v.clone(); return String(n); } return "s"; }
+function main() {
+  const a: V = 12n;
+  console.log("[" + show1(12n) + "]");
+  console.log("[" + show2(a) + "]");
+  const b: bigint = 34n;
+  console.log("[" + show3(b) + "]", "[" + b.toString() + "]");
+  console.log("[" + show4(a) + "]");
+  console.log(`${b}`, String(b));
+}

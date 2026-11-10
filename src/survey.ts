@@ -4,7 +4,7 @@ import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
 import { isNode, named, surveyHits, type Node } from "./migrate.ts";
-import { nextId, renumber } from "./nodes.ts";
+import { nextId, renumberStmts } from "./nodes.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
 import { findTypings } from "./typings.ts";
@@ -276,7 +276,7 @@ function captures(program: Stmt[]): usize[] {
   const found: usize[] = [];
   try {
     const ids = { last: 0 };
-    hoistLocals({ names: { local: new Set(), madeUp: new Map() }, ids }, renumber("stmt", structuredClone(program), () => nextId(ids)), (local) => found.push(local.start));
+    hoistLocals({ names: { local: new Set(), madeUp: new Map() }, ids }, renumberStmts(structuredClone(program), () => nextId(ids)), (local) => found.push(local.start));
   } catch {
     return [];
   }

@@ -851,6 +851,9 @@ const JSDOC_THROWS: [string, string][] = [
   ["/** @throws {A */ function f() {}", "none"],
   ["/**\n * @throws {A |\n *   B} when\n */\nfunction f() {}", "none"],
   ["/**\n * @throws {@link E}\n * @throws {F}\n */\nfunction f() {}", "F at 'F'"],
+  ["interface I { /** @throws {E} */ m(x: i64): i64 }", "E at 'E'"],
+  ["type T = { /** @throws {E} */ m(): void }", "E at 'E'"],
+  ["interface I { /** @throws {E} */ x: i64 }", "none"],
 ];
 
 for (const [src, shape] of JSDOC_THROWS) {
@@ -862,6 +865,7 @@ test("a JSDoc @throws tag parses as the written clause does", () => {
   expect(bare("/** @throws {A | B<i64>} */ function f(): void {}")).toBe(bare("function f(): void throws A | B<i64> {}"));
   expect(bare("class C { /** @throws {E} */ m(): void {} }")).toBe(bare("class C { m(): void throws E {} }"));
   expect(bare("/** @throws {E} */ type Parse<T> = (c: Mut<Cursor>) => T;")).toBe(bare("type Parse<T> = (c: Mut<Cursor>) => T throws E;"));
+  expect(bare("interface I { /** @throws {E} */ m(): void }")).toBe(bare("interface I { m(): void throws E }"));
 });
 
 test("JSDoc @throws errors point into the comment", () => {

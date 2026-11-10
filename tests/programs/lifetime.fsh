@@ -464,3 +464,196 @@ function first<A extends Lifetime>(x: Ref<P, A>, y: Ref<P>): Ref<P, A> {
 
 function main() {}
 // error: the returned reference points into 'y', but its lifetime ties it to 'x'
+// case: lifetime_through_returned_ref
+type Item = { n: i64 }
+type Shelf = { items: Item[] }
+
+class Store {
+  shelf: Shelf = { items: [] }
+  shelfOf(this: Mut<this>): Mut<Shelf> {
+    return this.shelf
+  }
+  items(this: Mut<this>): Mut<Item[]> {
+    return this.shelfOf().items
+  }
+  first(this: Mut<this>): Ref<Item> {
+    return this.shelfOf().items[0]!
+  }
+}
+
+function main() {
+  let s = new Store()
+  s.shelf.items.push({ n: 4 })
+  s.shelf.items.push({ n: 6 })
+  console.log(s.items().length, s.first().n)
+}
+// expect: 2 4
+// case: lifetime_field_of_owned_result
+type Pair = { left: { x: i64 }; right: i64 }
+
+function made(): Pair {
+  return { left: { x: 1 }, right: 2 }
+}
+
+function bad(p: Ref<Pair>): Ref<{ x: i64 }> {
+  return made().left
+}
+
+function main() {}
+// error: can't return a reference to a temporary or a copy
+// case: lifetime_method_through_returned_ref
+type Mark = { n: i64 }
+
+class Marks {
+  all: Mark[] = []
+  at(i: usize): Ref<Mark> {
+    return this.all[i]!
+  }
+}
+
+class Board {
+  marks: Marks = new Marks()
+  marksOf(this: Mut<this>): Mut<Marks> {
+    return this.marks
+  }
+  mark(this: Mut<this>, i: usize): Ref<Mark> {
+    return this.marksOf().at(i)
+  }
+}
+
+function main() {
+  let b = new Board()
+  b.marks.all.push({ n: 8 })
+  console.log(b.mark(0).n)
+}
+// expect: 8
+// case: lifetime_held_through_returned_ref
+type Square = { n: i64 }
+
+class Grid {
+  cells: Square[] = []
+  at(i: usize): Ref<Square> {
+    return this.cells[i]!
+  }
+}
+
+class Sheet {
+  grid: Grid = new Grid()
+  gridOf(this: Mut<this>): Mut<Grid> {
+    return this.grid
+  }
+  sum(this: Mut<this>, i: usize): i64 {
+    const a = this.gridOf().at(i)
+    const total = a.n
+    const b: Ref<Square> = this.gridOf().cells[i]!
+    return total + b.n
+  }
+}
+
+function main() {
+  let s = new Sheet()
+  s.grid.cells.push({ n: 5 })
+  console.log(s.sum(0))
+}
+// expect: 10
+// case: lifetime_held_through_returned_ref_conflict
+type Slot = { n: i64 }
+
+class Slots {
+  all: Slot[] = []
+  at(i: usize): Ref<Slot> {
+    return this.all[i]!
+  }
+}
+
+class Rack {
+  slots: Slots = new Slots()
+  slotsOf(this: Mut<this>): Mut<Slots> {
+    return this.slots
+  }
+  both(this: Mut<this>): i64 {
+    const a = this.slotsOf().at(0)
+    const b = this.slotsOf().at(1)
+    return a.n + b.n
+  }
+}
+
+function main() {}
+// error: cannot use 'this' while 'a' borrows 'this' mutably
+// case: lifetime_change_through_returned_ref
+type Bin = { items: i64[]; total: i64 }
+
+class Depot {
+  bin: Bin = { items: [], total: 0 }
+  binOf(this: Mut<this>): Mut<Bin> {
+    return this.bin
+  }
+  add(this: Mut<this>, n: i64): void {
+    this.binOf().items.push(n)
+    this.binOf().total += n
+  }
+}
+
+function main() {
+  let d = new Depot()
+  d.add(3)
+  d.add(4)
+  d.binOf().total = d.bin.total * 2
+  console.log(d.bin.items.length, d.bin.total)
+}
+// expect: 2 14
+// case: lifetime_change_through_returned_shared_ref
+type Crate = { items: i64[] }
+
+class Yard {
+  crate: Crate = { items: [] }
+  crateOf(): Ref<Crate> {
+    return this.crate
+  }
+  add(this: Mut<this>, n: i64): void {
+    this.crateOf().items.push(n)
+  }
+}
+
+function main() {}
+// error: is a shared reference ('Ref'), which only reads
+
+// case: lifetime_return_narrowed_union_parts
+// A field of a narrowed recursive union, and the narrowed reference itself, are returned
+// where they live.
+type Tree = { kind: "leaf"; n: i64 } | { kind: "neg"; inner: Tree } | { kind: "pos"; inner: Tree };
+function innerOf(t: Ref<Tree>): Ref<Tree> {
+  if (t.kind === "neg") return t.inner;
+  return t;
+}
+function show(t: Ref<Tree>): string {
+  if (t.kind === "leaf") return `${t.n}`;
+  if (t.kind === "neg") return `-(${show(innerOf(t))})`;
+  return "+";
+}
+function main() {
+  const t: Tree = { kind: "neg", inner: { kind: "neg", inner: { kind: "leaf", n: 7 } } };
+  const once = innerOf(t);
+  const twice = innerOf(once);
+  console.log(show(t), show(once), show(twice));
+  const p: Tree = { kind: "pos", inner: { kind: "leaf", n: 1 } };
+  console.log(show(innerOf(p)));
+}
+// expect: -(-(7)) -(7) 7
+// expect: +
+
+// case: lifetime_return_field_of_self_holding_union
+// A field typed as a union that holds the field's own object type is returned where it lives,
+// with the object type declared before the union.
+type Wrap = { kind: "wrap"; value: Item };
+type Item = { kind: "num"; n: i64 } | Wrap;
+function inner(w: Ref<Wrap>): Ref<Item> { return w.value; }
+function main() {
+  const w: Wrap = { kind: "wrap", value: { kind: "wrap", value: { kind: "num", n: 3 } } };
+  const once = inner(w);
+  if (once.kind === "wrap") {
+    const twice = inner(once);
+    if (twice.kind === "num") console.log(twice.n);
+  }
+}
+// expect: 3

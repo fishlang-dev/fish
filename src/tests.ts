@@ -3,7 +3,7 @@ import { relative } from "node:path";
 import type { Compilation } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
-import { nextId, walk, type Ids } from "./nodes.ts";
+import { nextId, respanFunc, walk, type Ids } from "./nodes.ts";
 import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
 
 // Top-level `test("name", () => { ... })` blocks: left out of a build, lifted into functions of
@@ -55,14 +55,9 @@ export function liftTests({ names, ids }: Compilation, modules: Module[]): Test[
 
 function lifted(ids: Ids, name: string, body: Body, at: Span): Func {
   const [made] = parse(`${body.async ? "async " : ""}function f(): ${body.async ? "Promise<void>" : "void"} throws Error {}`, ids) as [Func];
-  placed(made, at);
+  const placed = respanFunc(made, at);
   const statements: Stmt[] = Array.isArray(body.body) ? body.body : [{ id: nextId(ids), kind: "expr", expr: body.body, start: body.body.start, end: body.body.end }];
-  return { ...made, id: nextId(ids), name, body: statements };
-}
-
-// Gives every node of a made tree the span `at`, where its parts are written.
-function placed(made: Func, at: Span) {
-  walk("func", made, ({ node }) => void Object.assign(node, { start: at.start, end: at.end }));
+  return { ...placed, id: nextId(ids), name, body: statements };
 }
 
 // The harness's text before its tests are known: an import of each of the package's files, so
@@ -89,7 +84,7 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 `;
   const made = parse(text, ids);
   const named = new Map(tests.map((t) => [call(t), `test ${JSON.stringify(t.name)}-fsh${modules.indexOf(t.module)}`]));
-  walk("stmt", made, ({ of, node }) => {
+  walk({ of: "stmts", node: made }, ({ of, node }) => {
     if ((of === "expr" || of === "pattern") && node.kind === "ident" && named.has(node.name)) node.name = named.get(node.name)!;
   });
   return made;

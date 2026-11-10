@@ -7,11 +7,11 @@
 // write, a name the compiler made up, never.
 export function suggestion(name: string, candidates: Iterable<string>): string | undefined {
   if (name.length < 2) return undefined;
-  const lengthSlack = Math.max(2, Math.floor(name.length * 0.34));
-  let best = Math.floor(name.length * 0.4) + 1;
-  let found: string | undefined;
+  const lengthSlack = Math.max(2, Math.floor((name.length as f64) * 0.34));
+  let best = Math.floor((name.length as f64) * 0.4) + 1;
+  let found: string | undefined = undefined;
   for (const candidate of candidates) {
-    if (candidate === name || !WRITABLE.test(candidate) || Math.abs(candidate.length - name.length) > lengthSlack) continue;
+    if (candidate === name || !WRITABLE.test(candidate) || Math.abs((candidate.length as f64) - (name.length as f64)) > lengthSlack) continue;
     if (candidate.length < 3 && candidate.toLowerCase() !== name.toLowerCase()) continue;
     const distance = distanceWithin(name, candidate, best - 0.1);
     if (distance === undefined) continue;
@@ -32,15 +32,16 @@ export function didYouMean(name: string, candidates: Iterable<string>): string {
 // Levenshtein distance with substitutions costing 2, or 0.1 for a change of case, given up
 // once it must exceed `max`.
 function distanceWithin(a: string, b: string, max: f64): f64 | undefined {
-  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j as f64);
   let current = new Array<f64>(b.length + 1).fill(0);
   const big = max + 0.01;
   for (let i = 1; i <= a.length; i++) {
     const lowA = a[i - 1]!.toLowerCase();
-    const minJ = Math.ceil(i > max ? i - max : 1);
-    const maxJ = Math.floor(b.length > max + i ? max + i : b.length);
-    current[0] = i;
-    let rowMin = i;
+    const row = i as f64;
+    const minJ = Math.ceil(row > max ? row - max : 1) as usize;
+    const maxJ = Math.floor((b.length as f64) > max + row ? max + row : (b.length as f64)) as usize;
+    current[0] = row;
+    let rowMin = row;
     for (let j = 1; j < minJ; j++) current[j] = big;
     for (let j = minJ; j <= maxJ; j++) {
       const substitute = previous[j - 1]! + (lowA === b[j - 1]!.toLowerCase() ? 0.1 : 2);

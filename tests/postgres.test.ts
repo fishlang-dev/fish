@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Socket } from "bun";
 import { newSession } from "../src/compilation.ts";
+import { buildSession } from "../src/mathlib.ts";
 import { buildAsync } from "../src/main.ts";
 
 // The postgres module against a scripted server speaking Postgres's wire protocol, written here,
@@ -19,7 +20,7 @@ afterAll(() => {
   real?.stop();
   rmSync(tmp, { recursive: true, force: true });
 });
-const session = newSession();
+const session = buildSession(newSession());
 
 async function build(name: string, src: string): Promise<string> {
   const file = join(tmp, `${name}.fsh`);

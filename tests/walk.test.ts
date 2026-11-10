@@ -2,9 +2,15 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { rebuildSource, REBUILD, walkerSource, WALK } from "../scripts/walkgen.ts";
-import { childrenOf, Rewrites, walk } from "../src/nodes.ts";
+import { forEachChild, Rewrites, walk, walkWhile, type AnyNode } from "../src/nodes.ts";
 import { parse, parseExpression, type Expr } from "../src/parser.ts";
 import { rebuiltExpr } from "../src/rebuild.ts";
+
+function childrenOf(n: AnyNode): AnyNode[] {
+  const found: AnyNode[] = [];
+  forEachChild(n, (c) => found.push(c));
+  return found;
+}
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -41,7 +47,7 @@ test("a walk reaches every node of every test program and compiler source file",
     }
     parsed++;
     const reached = new Set<object>();
-    walk("stmt", program, ({ node }) => void reached.add(node));
+    walk({ of: "stmts", node: program }, ({ node }) => void reached.add(node));
     const missed = [...everyNode(program)].filter((n) => !reached.has(n)).map((n) => `${file}: a ${(n as { kind?: string }).kind ?? "node"} at ${(n as { start: number }).start}`);
     expect(missed.slice(0, 5)).toEqual([]);
   }
@@ -55,7 +61,7 @@ test("children come in the order their type lists the fields, each list of state
   expect(childrenOf({ of: "expr", node: arrow }).map((c) => c.of)).toEqual(["stmts"]);
   // A walk goes through a list without handing it over, and skips what is under a node it refuses.
   const kinds: string[] = [];
-  walk("expr", e, ({ node }) => {
+  walkWhile({ of: "expr", node: e }, ({ node }) => {
     kinds.push((node as { kind: string }).kind);
     return (node as { kind: string }).kind !== "arrow";
   });

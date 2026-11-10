@@ -199,6 +199,14 @@ function main() { console.log(comptime deep(0)); }
 // Division by zero while compiling is a compile error.
 function div(a: i64, b: i64): i64 { return a / b; }
 function main() { console.log(comptime div(1, 0)); }
+// case: comptime_empty_option
+// error: this comptime code panicked: called `Option::unwrap()` on a `None` value
+// '!' on an empty Option while compiling panics with Rust's wording, as at run time.
+function f(): i64 {
+  const o: i64 | null = null;
+  return o!;
+}
+function main() { console.log(comptime f()); }
 // case: comptime_empty_loop
 // error: this comptime code took more than 10,000,000 steps
 // An empty endless loop is stopped by the step limit too.
