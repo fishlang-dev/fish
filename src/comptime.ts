@@ -252,7 +252,7 @@ export class AstValues implements Builder<Value> {
           free.set(name, spelling);
           continue;
         }
-        const held = copyValue(this.holes[i]!);
+        const held = copyValue(this.holes[i]);
         this.holes[i] = renamed(this.spans[i]!, held, spelling, to);
       }
     }
@@ -271,13 +271,13 @@ export class AstValues implements Builder<Value> {
   }
 
   splice(typing: Mut<Typing>, i: usize, into: Type): Value {
-    return retag(typing, copyValue(this.holes[i]!), this.types[i], into);
+    return retag(typing, copyValue(this.holes[i]), this.types[i], into);
   }
 
   // A splice where a name goes: the name of the identifier it is.
   /** @throws {CompileError} */
   name(i: usize): Value {
-    const named = identName(this.holes[i]!);
+    const named = identName(this.holes[i]);
     if (named !== undefined) return named;
     throw new CompileError("E1101", "a splice where a name goes takes an identifier, as 'ident(\"name\")' makes", this.at.start, this.at.end);
   }
@@ -646,7 +646,7 @@ class Interpreter<H extends ComptimeHost> {
     const b = this.unwrap(y);
     if (a !== null && b !== null && typeof a === "object" && typeof b === "object" && a.kind === "variant" && b.kind === "variant") {
       if (a.type !== b.type || a.args.length !== b.args.length) return false;
-      for (let i: usize = 0; i < a.args.length; i++) if (!this.same(copyValue(a.args[i]!), copyValue(b.args[i]!), at)) return false;
+      for (let i: usize = 0; i < a.args.length; i++) if (!this.same(copyValue(a.args[i]), copyValue(b.args[i]), at)) return false;
       return true;
     }
     // Objects and arrays compare part by part.
@@ -662,7 +662,7 @@ class Interpreter<H extends ComptimeHost> {
     }
     if (a !== null && b !== null && typeof a === "object" && typeof b === "object" && a.kind === "array" && b.kind === "array") {
       if (a.items.length !== b.items.length) return false;
-      for (let i: usize = 0; i < a.items.length; i++) if (!this.same(copyValue(a.items[i]!), copyValue(b.items[i]!), at)) return false;
+      for (let i: usize = 0; i < a.items.length; i++) if (!this.same(copyValue(a.items[i]), copyValue(b.items[i]), at)) return false;
       return true;
     }
     return samePrimitive(a, b);
@@ -1101,7 +1101,7 @@ class Interpreter<H extends ComptimeHost> {
         if (from !== null && from !== undefined) {
           const items = this.iterated(from, e.args[0]!);
           for (let i: usize = 0; i < items.length; i++) {
-            const item = copyValue(items[i]!);
+            const item = copyValue(items[i]);
             if (isSet) this.put(made, item, undefined);
             else {
               const [k, v] = this.pair(item);
@@ -1165,7 +1165,7 @@ class Interpreter<H extends ComptimeHost> {
     const type = t.type as ObjectType;
     const count = this.host.tables.typing.elementsOf(type).length;
     let length = this.host.tables.typing.rec(type).required ?? count;
-    for (let i = length; i < count; i++) if (this.unwrap(t.fields.get(String(i))!) !== null) length = i + 1;
+    for (let i = length; i < count; i++) if (this.unwrap(t.fields.get(String(i))) !== null) length = i + 1;
     const rest = t.fields.get("...");
     return BigInt(length + (isItems(rest) ? rest.items.length : 0));
   }
@@ -1244,7 +1244,7 @@ class Interpreter<H extends ComptimeHost> {
           return undefined;
         }
         if (callee.name === "pop") {
-          const last = held.items.length > 0 ? held.items.pop()! : null;
+          const last = held.items.length > 0 ? held.items.pop() : null;
           this.write(self, held, true);
           return last;
         }
@@ -1275,13 +1275,13 @@ class Interpreter<H extends ComptimeHost> {
         return self;
       }
       case "get": {
-        const found = held.entries.get(this.keyName(args.length > 0 ? args[0]! : null));
+        const found = held.entries.get(this.keyName(args.length > 0 ? args[0] : null));
         return found !== undefined ? cloned(this.host.tables, found[1]) : null;
       }
       case "has":
-        return held.entries.has(this.keyName(args.length > 0 ? args[0]! : null));
+        return held.entries.has(this.keyName(args.length > 0 ? args[0] : null));
       case "delete": {
-        const had = held.entries.delete(this.keyName(args.length > 0 ? args[0]! : null));
+        const had = held.entries.delete(this.keyName(args.length > 0 ? args[0] : null));
         this.write(self, held, true);
         return had;
       }
@@ -1343,7 +1343,7 @@ class Interpreter<H extends ComptimeHost> {
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private pair(this: Mut<this>, item: Value): [Value, Value] {
     const v = this.unwrap(item);
-    if (isItems(v)) return [copyValue(v.items[0]!), copyValue(v.items[1]!)];
+    if (isItems(v)) return [copyValue(v.items[0]), copyValue(v.items[1])];
     if (isRecord(v)) return [copyValue(v.fields.get("0")), copyValue(v.fields.get("1"))];
     assert(false, "internal error: a Map's entry that isn't a pair");
     return [null, null];
@@ -1746,7 +1746,7 @@ class Interpreter<H extends ComptimeHost> {
         const variant = info.variant;
         const args = this.subPatterns(f, p);
         if (!isVariant(v) || (union && v.type !== variant)) return false;
-        for (let i: usize = 0; i < args.length; i++) if (!this.tests(f, args[i]!, i < v.args.length ? copyValue(v.args[i]!) : undefined)) return false;
+        for (let i: usize = 0; i < args.length; i++) if (!this.tests(f, args[i]!, i < v.args.length ? copyValue(v.args[i]) : undefined)) return false;
         return true;
       }
       case "object": {
@@ -1762,7 +1762,7 @@ class Interpreter<H extends ComptimeHost> {
       case "array": {
         const items = this.subPatterns(f, p);
         if (!isItems(v) || v.items.length !== items.length) return false;
-        for (let i: usize = 0; i < items.length; i++) if (!this.tests(f, items[i]!, copyValue(v.items[i]!))) return false;
+        for (let i: usize = 0; i < items.length; i++) if (!this.tests(f, items[i]!, copyValue(v.items[i]))) return false;
         return true;
       }
     }
@@ -1800,9 +1800,9 @@ class Interpreter<H extends ComptimeHost> {
       this.bind(f, subs[0]!, v);
       return;
     }
-    if (kind === "variant" && isVariant(v)) for (let i: usize = 0; i < subs.length; i++) this.bind(f, subs[i]!, i < v.args.length ? copyValue(v.args[i]!) : undefined);
+    if (kind === "variant" && isVariant(v)) for (let i: usize = 0; i < subs.length; i++) this.bind(f, subs[i]!, i < v.args.length ? copyValue(v.args[i]) : undefined);
     if (kind === "object" && isRecord(v)) for (let i: usize = 0; i < subs.length; i++) this.bind(f, subs[i]!, copyValue(v.fields.get(keys[i]!)));
-    if (kind === "array" && isItems(v)) for (let i: usize = 0; i < subs.length; i++) this.bind(f, subs[i]!, i < v.items.length ? copyValue(v.items[i]!) : undefined);
+    if (kind === "array" && isItems(v)) for (let i: usize = 0; i < subs.length; i++) this.bind(f, subs[i]!, i < v.items.length ? copyValue(v.items[i]) : undefined);
   }
 
   // An arithmetic or bitwise operator on numbers of `type`, panicking where the program would.
@@ -2149,7 +2149,7 @@ function follow(v: Value, path: Ref<Step[]>, i: usize): Followed {
   const step = copyStep(path[i]!);
   if (step.kind === "field") return follow(isRecord(v) ? v.fields.get(step.name) : undefined, path, i + 1);
   const at = toIndex(step.index);
-  return follow(isItems(v) && at < v.items.length ? copyValue(v.items[at]!) : undefined, path, i + 1);
+  return follow(isItems(v) && at < v.items.length ? copyValue(v.items[at]) : undefined, path, i + 1);
 }
 
 // `held` with `v` put at the end of `path`. A union's tag is kept on the way, and at the end
@@ -2167,7 +2167,7 @@ function placed(held: Value, path: Ref<Step[]>, i: usize, v: Value, inner: boole
   if (step.kind === "element" && isItems(held)) {
     const at = toIndex(step.index);
     if (last) held.items[at] = v;
-    else held.items[at] = placed(copyValue(held.items[at]!), path, i + 1, v, inner);
+    else held.items[at] = placed(copyValue(held.items[at]), path, i + 1, v, inner);
     return held;
   }
   return held;
@@ -2179,7 +2179,7 @@ function copyStep(s: Ref<Step>): Step {
 
 // An argument a string method is given: an integer, as an index or count, or a string.
 function bigArg(args: Ref<Value[]>, i: usize): bigint {
-  return i < args.length ? bigOfValue(args[i]!) : 0n;
+  return i < args.length ? bigOfValue(args[i]) : 0n;
 }
 
 function intArg(args: Ref<Value[]>, i: usize): i64 {
@@ -2188,7 +2188,7 @@ function intArg(args: Ref<Value[]>, i: usize): i64 {
 
 function textArg(args: Ref<Value[]>, i: usize): string {
   if (i >= args.length) return "undefined";
-  const v = copyValue(args[i]!);
+  const v = copyValue(args[i]);
   return typeof v === "string" ? v : "undefined";
 }
 

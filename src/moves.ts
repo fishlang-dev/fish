@@ -532,7 +532,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       case "labeled": {
         this.exits.set(s.id, null);
         this.statement(cx, s.body);
-        this.state = join(this.state, this.exits.get(s.id)!);
+        this.state = join(this.state, (this.exits.get(s.id) ?? null));
         const gone3 = this.scoped(cx, s.body);
         this.dropped(cx, gone3, s.end);
         return;
@@ -548,7 +548,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
           this.statements(cx, c.body);
           falling = join(this.state, null);
         }
-        this.state = join(join(falling, this.exits.get(s.id)!), s.cases.some((c) => c.test === undefined) ? null : entry);
+        this.state = join(join(falling, (this.exits.get(s.id) ?? null)), s.cases.some((c) => c.test === undefined) ? null : entry);
         const gone4 = this.scoped(cx, s);
         this.dropped(cx, gone4, s.end);
         return;
@@ -607,7 +607,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       if (!bodyFirst) leaving = this.loopTest(cx, s);
       if (revived !== undefined) this.revive(cx, revived);
       if (s.kind === "while" || s.kind === "doWhile" || s.kind === "for" || s.kind === "forOf") this.statements(cx, s.body);
-      this.state = join(this.state, this.nexts.get(s.id)!);
+      this.state = join(this.state, (this.nexts.get(s.id) ?? null));
       // However a pass ended, `continue` included, its body's variables are gone, and a holder
       // used anywhere in the loop is used again on the next pass.
       const gone5 = s.kind === "for" ? this.scopedList(cx, s.body) : this.scoped(cx, s);
@@ -617,7 +617,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       for (const local of s.kind === "for" ? this.insideList(cx, s.body) : this.inside(cx, s)) this.release(cx, local);
       if (bodyFirst) leaving = this.loopTest(cx, s);
       else if (s.kind === "for" && s.update !== undefined) this.expr(cx, s.update, undefined, true);
-      leaving = join(leaving, this.exits.get(s.id)!);
+      leaving = join(leaving, (this.exits.get(s.id) ?? null));
       const after = join(this.state, null);
       this.state = leaving;
       // However the loop ended, `break` included, its variables are gone.
@@ -831,7 +831,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
             this.arms.set(arm.body.id, [consume, discarded]);
             this.exits.set(arm.body.id, null);
             this.statement(cx, arm.body);
-            this.state = join(this.state, this.exits.get(arm.body.id)!);
+            this.state = join(this.state, (this.exits.get(arm.body.id) ?? null));
             const gone9 = [...this.scoped(cx, arm.body), ...bound];
             this.dropped(cx, gone9, arm.body.end);
           } else {
