@@ -20,7 +20,7 @@ function main() {
     check(compilation, stmts);
     console.log("accepted");
   } catch (e) {
-    console.log(\`rejected \${e.code}\`);
+    console.log(\`rejected \${e.code} \${e.start} \${e.message}\`);
   }
 }
 `;
