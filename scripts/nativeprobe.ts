@@ -13,6 +13,7 @@ const DRIVER = `import { readFileSync } from "node:fs";
 import { parse } from "./parser.fsh";
 import { check } from "./check.fsh";
 import { newCompilation, newSession } from "./compilation.fsh";
+import { CompileError } from "./diag.fsh";
 function main() {
   let compilation = newCompilation(newSession());
   try {
@@ -20,7 +21,8 @@ function main() {
     check(compilation, stmts);
     console.log("accepted");
   } catch (e) {
-    console.log(\`rejected \${e.code} \${e.start} \${e.message}\`);
+    if (e instanceof CompileError) console.log(\`rejected \${e.code} \${e.start} \${e.message}\`);
+    else console.log(\`unreadable \${e.message}\`);
   }
 }
 `;
