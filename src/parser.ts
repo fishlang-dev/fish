@@ -62,7 +62,7 @@ export type Expr = Span & Id & (
   // `optional` marks the link written `?.`; later links in the same chain short-circuit with it.
   | { kind: "member"; object: Expr; name: string; optional: boolean }
   | { kind: "index"; object: Expr; index: Expr; optional: boolean }
-  | { kind: "call"; callee: Expr; typeArgs: TypeNode[]; args: Expr[]; optional: boolean }
+  | { kind: "call"; callee: Expr; typeArgs: TypeNode[]; args: Expr[]; optional: boolean; implementation?: true; shown?: string }
   // `args` is undefined for `new C` without parentheses.
   | { kind: "new"; callee: Expr; typeArgs: TypeNode[]; args: Expr[] | undefined }
   // `f<T>` without a call.
@@ -72,7 +72,7 @@ export type Expr = Span & Id & (
   | { kind: "import"; args: Expr[] }
   // `narrows`, in an overload signature's body, is the signature's return type, which the
   // implementation's value is narrowed to.
-  | { kind: "nonNull"; expr: Expr; narrows?: TypeNode }
+  | { kind: "nonNull"; expr: Expr; narrows?: TypeNode; reason?: string; redundant?: boolean }
   // `throw` as an expression, which never gives a value.
   | { kind: "throw"; value: Expr }
   | (ClassNode & { kind: "class" })
@@ -154,7 +154,7 @@ export type PropertyName = string | Expr;
 
 export type TypeMember = Span & Id & (
   | { kind: "property"; name: PropertyName; optional: boolean; readonly: boolean; type: TypeNode | undefined }
-  | { kind: "method"; name: PropertyName; optional: boolean; typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined }
+  | { kind: "method"; name: PropertyName; optional: boolean; typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined; throws?: TypeNode }
   | { kind: "call" | "construct"; typeParams: TypeParam[]; params: Param[]; returns: TypeNode | undefined }
   | { kind: "index"; readonly: boolean; params: Param[]; type: TypeNode }
   | { kind: "get" | "set"; name: PropertyName; params: Param[]; returns: TypeNode | undefined }
@@ -203,7 +203,7 @@ export type ClassNode = Span & Id & {
 export type ClassMember = Span & Id & { modifiers: Modifier[]; decorators: Expr[] } & (
   | { kind: "field"; name: PropertyName; optional: boolean; definite: boolean; type: TypeNode | undefined; init: Expr | undefined }
   | { kind: "method"; name: PropertyName; optional: boolean; generator: boolean; typeParams: TypeParam[];
-      params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined }
+      params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined; overloadNames?: string[]; signature?: true }
   | { kind: "constructor"; params: Param[]; throws?: TypeNode; body: Stmt[] | undefined }
   | { kind: "get" | "set"; name: PropertyName; params: Param[]; returnType: TypeNode | undefined; throws?: TypeNode; body: Stmt[] | undefined }
   | { kind: "index"; params: Param[]; type: TypeNode }
@@ -258,7 +258,7 @@ export type TypeParam = Span & Id & { name: string; constraint: TypeNode | undef
 
 // `decorators`, on these and on functions, are the macros applied to them.
 // A package's type, declared in its `.d.ts`, sets `js`: an object type alias is then a JS handle.
-export type TypeAlias = Span & Id & { kind: "typeAlias"; name: string; typeParams: TypeParam[]; type: TypeNode; decorators?: Expr[]; js?: JsName };
+export type TypeAlias = Span & Id & { kind: "typeAlias"; name: string; typeParams: TypeParam[]; type: TypeNode; decorators?: Expr[]; js?: JsName; shown?: string };
 
 // A package's interface or class, from its `.d.ts`, sets `js`, its values JS handles; a class
 // also has `jsClass`, its constructors' parameters and its statics.
@@ -282,6 +282,8 @@ export type Func = Span & Id & {
   decorators?: Expr[];
   // A package's function, or a const read as one, declared in its `.d.ts`.
   js?: JsName;
+  overloadNames?: string[];
+  signature?: true;
 };
 
 export type BinaryOp =
@@ -704,7 +706,7 @@ function memberShape(src: string, m: Ref<TypeMember>): string {
   switch (m.kind) {
     case "property": return `property ${nameShape(src, m.name)} ${m.optional} ${m.readonly} ${optionalShape(src, m.type)}`;
     case "method":
-      return `method ${nameShape(src, m.name)} ${m.optional} <${typeParamShapes(src, m.typeParams)}>(${paramShapes(src, m.params)}) ${optionalShape(src, m.returns)}`;
+      return `method ${nameShape(src, m.name)} ${m.optional} <${typeParamShapes(src, m.typeParams)}>(${paramShapes(src, m.params)}) ${optionalShape(src, m.returns)} throws ${optionalShape(src, m.throws)}`;
     case "call":
     case "construct":
       return `${m.kind} <${typeParamShapes(src, m.typeParams)}>(${paramShapes(src, m.params)}) ${optionalShape(src, m.returns)}`;

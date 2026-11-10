@@ -392,3 +392,17 @@ function main() {
 // stderr:    6: Box<i64>.#get at private_methods.fsh:14:30
 // stderr:    7: Box<i64>.open at private_methods.fsh:15:30
 // stderr:    8: main at private_methods.fsh:19:15
+
+// case: backtrace_generic_class_with_a_long_argument
+// panic: attempt to divide by zero
+// panic: 0: Holder<#yxzuaz>.fail at
+type Wide = { alpha: i64; bravo: i64; charlie: i64; delta: i64; echo: i64; foxtrot: i64; golf: i64; hotel: i64; india: i64; juliet: i64; kilo: i64; lima: i64; mike: i64; november: i64 };
+class Holder<T> {
+  value: T;
+  constructor(value: T) { this.value = value; }
+  fail(n: i64): i64 { return 10 / n; }
+}
+function main() {
+  const h = new Holder<Wide>({ alpha: 1, bravo: 2, charlie: 3, delta: 4, echo: 5, foxtrot: 6, golf: 7, hotel: 8, india: 9, juliet: 10, kilo: 11, lima: 12, mike: 13, november: 14 });
+  console.log(h.fail(0));
+}

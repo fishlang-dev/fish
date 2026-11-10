@@ -68,6 +68,20 @@ export class CompileError extends Error {
     this.end = end;
     this.note = note;
   }
+
+  clone(): CompileError {
+    let out = new CompileError(
+      this.code,
+      this.message,
+      this.start,
+      this.end,
+      this.note === undefined ? undefined : { start: this.note!.start, end: this.note!.end, message: this.note!.message },
+    );
+    out.sources = this.sources.map((s) => ({ base: s.base, src: s.src, file: s.file }));
+    out.names = { local: new Set([...this.names.local]), madeUp: new Map([...this.names.madeUp]) };
+    out.errors = this.errors.map((e) => e.clone());
+    return out;
+  }
 }
 
 // Several errors from one build, in source order. It reads as its first wherever only one error
@@ -79,6 +93,12 @@ export class CompileErrors extends CompileError {
   }
 }
 
+export function compileErrors(errors: CompileError[]): CompileError {
+  let out = new CompileError(errors[0]!.code, errors[0]!.message, errors[0]!.start, errors[0]!.end, errors[0]!.note === undefined ? undefined : { ...errors[0]!.note! });
+  out.errors = errors;
+  return out;
+}
+
 // Gives `e` the names its compilation made up, with the hoisted ones in its messages as written.
 export function named(e: CompileError, names: Names): CompileError {
   let out = e;
@@ -86,6 +106,14 @@ export function named(e: CompileError, names: Names): CompileError {
   for (let i = 0; i < out.errors.length; i++) rename(out.errors[i]!, names);
   out.names = names;
   return out;
+}
+
+export function copyNames(names: Ref<Names>): Names {
+  let local = new Set<string>();
+  for (const n of names.local) local.add(n);
+  let madeUp = new Map<string, string>();
+  for (const [k, v] of names.madeUp) madeUp.set(k, v);
+  return { local, madeUp };
 }
 
 // `e`'s messages with the hoisted names in them as written.

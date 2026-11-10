@@ -18,3 +18,4 @@ type f64 = number;
 type Lifetime = unknown;
 type Ref<T, L extends Lifetime = Lifetime> = T;
 type Mut<T, L extends Lifetime = Lifetime> = T;
+type Brand<T, Tag> = T & { readonly __brand?: Tag };

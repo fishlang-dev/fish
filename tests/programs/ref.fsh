@@ -759,3 +759,157 @@ function main() {
   print(c.tokens.length, c.tokens[0]!.start, c.lex.scanned)
 }
 // expect: 1 2 1
+// case: ref_method_keeps_nothing
+// A method of a class holding a reference that stores nothing in `this` can be lent a local.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  seen: i64 = 0
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  count(this: Mut<this>, other: Ref<P>): i64 {
+    this.seen += other.x + this.src.x
+    return this.seen
+  }
+  run(this: Mut<this>): i64 {
+    const local = new P()
+    return this.count(local)
+  }
+}
+
+function main() {
+  const p = new P()
+  let v = new View(p)
+  console.log(v.run())
+}
+// expect: 2
+// case: ref_method_keeps_nothing_declared_later
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  seen: i64 = 0
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  run(this: Mut<this>): i64 {
+    const local = new P()
+    return this.count(local)
+  }
+  count(this: Mut<this>, other: Ref<P>): i64 {
+    this.seen += other.x + this.src.x
+    return this.seen
+  }
+}
+
+function main() {
+  const p = new P()
+  let v = new View(p)
+  console.log(v.run())
+}
+// expect: 2
+// case: ref_method_keeps_what_it_stores
+// One that stores what it is lent keeps it, so it can't be lent a local.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  point(this: Mut<this>, other: Ref<P>) {
+    this.src = other
+  }
+  run(this: Mut<this>) {
+    const local = new P()
+    this.point(local)
+  }
+}
+
+function main() {}
+// error: can't store in 'this' a reference to 'local', which belongs to this function
+// case: ref_method_keeps_nothing_recursive
+// A method calling itself is taken to keep nothing while it is checked, which its own body
+// bears out.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  seen: i64 = 0
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  count(this: Mut<this>, other: Ref<P>, n: i64): i64 {
+    this.seen += other.x
+    if (n > 0) {
+      const local = new P()
+      return this.count(local, n - 1)
+    }
+    return this.seen
+  }
+}
+
+function main() {
+  const p = new P()
+  let v = new View(p)
+  console.log(v.count(p, 2))
+}
+// expect: 3
+// case: ref_method_keeps_recursive
+// One whose body does keep what it is lent is checked again as keeping, so its own call can't
+// lend it a local.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  point(this: Mut<this>, other: Ref<P>, n: i64): void {
+    if (n > 0) {
+      const local = new P()
+      this.point(local, n - 1)
+    } else this.src = other
+  }
+}
+
+function main() {}
+// error: can't store in 'this' a reference to 'local', which belongs to this function
+// case: ref_method_keeps_recursive_param
+// A recursive method that keeps what it is lent may pass on what it was lent itself.
+class P {
+  x = 1
+}
+
+class View {
+  src: Ref<P>
+  constructor(src: Ref<P>) {
+    this.src = src
+  }
+  point(this: Mut<this>, other: Ref<P>, n: i64): void {
+    if (n > 0) this.point(other, n - 1)
+    else this.src = other
+  }
+}
+
+function main() {
+  const a = new P()
+  let b = new P()
+  b.x = 5
+  let v = new View(a)
+  v.point(b, 3)
+  console.log(v.src.x)
+}
+// expect: 5

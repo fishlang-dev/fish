@@ -515,3 +515,24 @@ function main() {
   r.x = 2
 }
 // error: cannot assign to 'r.x' because 'r' is a shared reference ('Ref'), which only reads
+
+// case: refs_conditional_of_temporaries_lent_to_a_call
+// expect: i64,id 9 id 9,id 9 id 9
+type A = Brand<usize, "A">;
+type B = Brand<usize, "B">;
+type T = "i64" | "string" | A | B;
+function show(t: T): string { return typeof t === "string" ? t : `id ${t as usize}`; }
+function pick(n: i64): T { return n === 0 ? "i64" : (9 as B); }
+function st(types: Ref<T[]>): string {
+  let out: string[] = [];
+  for (const t of types) out.push(show(t));
+  return out.join(",");
+}
+function go(flag: boolean, n: i64): string {
+  const h = flag ? pick(n) : undefined;
+  const k = pick(1);
+  return st(h !== undefined ? [h, k] : [k]);
+}
+function main() {
+  console.log(go(true, 0), go(true, 1), go(false, 0));
+}

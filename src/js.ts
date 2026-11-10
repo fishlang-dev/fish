@@ -1,7 +1,7 @@
 import { CompileError } from "./diag.ts";
 import type { ClassNode, Func, Interface, JsName, Param, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import type { Declared } from "./typings.ts";
-import { nextId, renumber, walk, type Ids } from "./nodes.ts";
+import { nextId, renumberStmt, walk, type Ids } from "./nodes.ts";
 
 export type { JsName };
 
@@ -16,7 +16,7 @@ const KINDS: Partial<Record<Stmt["kind"], string>> = { enum: "an enum", namespac
 // read as a value, an interface or an object type alias a JS handle's shape, and a class the
 // shape of its instances with its constructors and statics. Its spans stay those of its file.
 export function jsDeclaration(ids: Ids, declared: Declared, name: string, specifier: string, pkg: usize, at: Span, exported: string = name): Stmt {
-  const d = unwrap(renumber("stmt", structuredClone(declared.at), () => nextId(ids)));
+  const d = unwrap(renumberStmt(structuredClone(declared.at), () => nextId(ids)));
   const js: JsName = { module: specifier, package: pkg, name: exported };
   lowerTypes(d);
   switch (d.kind) {
@@ -32,7 +32,7 @@ export function jsDeclaration(ids: Ids, declared: Declared, name: string, specif
       // merges them.
       const merged = declared.scope.flatMap((x) => {
         const u = unwrap(x);
-        return u !== unwrap(declared.at) && u.kind === "interface" && u.name === d.name ? unwrap(renumber("stmt", structuredClone(x), () => nextId(ids))) : [];
+        return u !== unwrap(declared.at) && u.kind === "interface" && u.name === d.name ? unwrap(renumberStmt(structuredClone(x), () => nextId(ids))) : [];
       }) as Interface[];
       merged.forEach(lowerTypes);
       return { ...d, name, js, jsSource: declared.at, members: shapeMembers(ids, [...d.members, ...merged.flatMap((m) => m.members)]) } as Stmt;
@@ -53,7 +53,7 @@ export function jsOverloads(ids: Ids, declared: Declared, made: Stmt, name: stri
   if (first.kind !== "function" || made.kind !== "function") return [];
   const others = declared.scope.filter((s) => s !== declared.at && unwrap(s).kind === "function" && (unwrap(s) as { name: string }).name === first.name);
   const signatures = others.map((s, i) => {
-    const d = unwrap(renumber("stmt", structuredClone(s), () => nextId(ids))) as Extract<Stmt, { kind: "function" }>;
+    const d = unwrap(renumberStmt(structuredClone(s), () => nextId(ids))) as Extract<Stmt, { kind: "function" }>;
     lowerTypes(d);
     return { ...d, name: `${name} signature ${i + 2}`, body: undefined, js: { module: specifier, package: pkg, name } };
   });
@@ -112,7 +112,7 @@ function unwrap(s: Stmt): Stmt {
 // Renames the types a declaration names that Fish calls something else. Only type nodes are
 // `ref`s, so every one in the declaration is a type it names.
 function lowerTypes(declaration: Stmt) {
-  walk("stmt", declaration, ({ of, node: n }) => {
+  walk({ of: "stmt", node: declaration }, ({ of, node: n }) => {
     if (of === "typeNode" && n.kind === "ref" && Object.hasOwn(LOWERED, n.name)) n.name = LOWERED[n.name]!;
   });
 }
@@ -120,7 +120,7 @@ function lowerTypes(declaration: Stmt) {
 // The type names a declaration refers to, which the program needs declared beside it.
 export function referenced(declarations: Stmt[]): Set<string> {
   const found = new Set<string>();
-  walk("stmt", declarations, ({ of, node: n }) => {
+  walk({ of: "stmts", node: declarations }, ({ of, node: n }) => {
     if (of === "typeNode" && n.kind === "ref") found.add(n.name.split(".")[0]!);
   });
   return found;

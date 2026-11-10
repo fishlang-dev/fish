@@ -1,15 +1,16 @@
 import { bodyOf } from "./arenas.ts";
-import { compiledOf, type Checked } from "./check.ts";
-import { astValues, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
+import type { Checked } from "./check.ts";
+import { compiledOf } from "./codegen.ts";
+import { AstValues, CheckedHost, comptimeBody, comptimeCall, type Value } from "./comptime.ts";
 import type { Compilation, Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Param, type Stmt } from "./parser.ts";
-import { built, declaredBy, quoted, withHygiene, type Category, type Hygiene } from "./quote.ts";
+import { built, declaredBy, freshName, quoted, withHygiene, type Categories, type Hygiene } from "./quote.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
 import type { Id } from "./ids.ts";
-import { nextId, NodeMap, NodeSet, renumber, Rewrites, walk, type Ids } from "./nodes.ts";
+import { nextId, NodeMap, NodeSet, renumberStmts, Rewrites, walk, type Ids } from "./nodes.ts";
 import { rebuiltStmts } from "./rebuild.ts";
 import { markGenerated } from "./warnings.ts";
 
@@ -144,7 +145,7 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
     const made = parse(`class X { equals(other: Ref<this>): boolean { return ${test}; } }`, ids)[0] as Extract<Stmt, { kind: "class" }>;
     const method = made.members[0]!;
     respan(method, at);
-    markGenerated(generated, method);
+    markGenerated(generated, { of: "classMember", node: method });
     upcasts.add(`${at.start}:${at.end}`);
     decl = { ...decl, members: [...decl.members, method] };
   }
@@ -153,7 +154,7 @@ function derived({ upcasts, ids, generated }: Compilation, d: Decl, exported: bo
 
 // Gives every node of a tree one span, as code a decorator made.
 function respan(member: ClassMember, at: { start: usize; end: usize }) {
-  walk("classMember", member, ({ node }) => {
+  walk({ of: "classMember", node: member }, ({ node }) => {
     const n = node as Partial<{ start: usize; end: usize }>;
     if (typeof n.start === "number") n.start = at.start;
     if (typeof n.end === "number") n.end = at.end;
@@ -175,7 +176,7 @@ function copied(ids: Ids, loaded: Loaded): { loaded: Loaded; of: NodeMap<Stmt, S
   const copies = new Map<Module, Module>();
   const of = new NodeMap<Stmt, Stmt>();
   for (const m of loaded.modules) {
-    const statements = renumber("stmt", structuredClone(m.statements), () => nextId(ids));
+    const statements = renumberStmts(structuredClone(m.statements), () => nextId(ids));
     m.statements.forEach((s, i) => of.set(s, statements[i]!));
     copies.set(m, { ...m, statements, targets: new NodeMap() });
   }
@@ -332,7 +333,7 @@ function freeNames(s: Stmt): Set<string> {
     binding(n.rest);
   };
   const top = s.kind === "export" ? s.body : s;
-  walk("stmt", top, ({ node }) => {
+  walk({ of: "stmt", node: top }, ({ node }) => {
     const n = node as Record<string, unknown> & { kind?: string };
     const inner = node !== top;
     if ((n.kind === "ident" || n.kind === "ref" || n.kind === "variant") && typeof n.name === "string") used.add(n.name.split(".")[0]!);
@@ -378,7 +379,7 @@ function macroProgram(program: Stmt[], macros: Map<string, Func>, sites: NodeSet
 // The top-level declarations a program's quotes make.
 function quoteDeclarations(tables: Tables, s: Stmt): string[] {
   const found: string[] = [];
-  walk("stmt", s, ({ of, node: n }) => {
+  walk({ of: "stmt", node: s }, ({ of, node: n }) => {
     if (of !== "expr" || n.kind !== "tagged" || n.tag.kind !== "ident" || (n.tag.name !== "quote" && n.tag.name !== "quoteType")) return;
     try {
       found.push(...declaredBy(quoted(tables, n, n.tag.name === "quoteType")));
@@ -399,28 +400,24 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
   const nearest = ready.linked;
   const macro = macroOf(nearest, macros);
   const before = pending.where === "own" ? 1 : 2;
-  const instance = compiledOf(checked).find((i) => bodyOf(i).name === macro.name && bodyOf(i).start === macro.start);
+  const instance = compiledOf(checked).find((i) => bodyOf(checked.tables.arenas, i).name === macro.name && bodyOf(checked.tables.arenas, i).start === macro.start);
   // A parameter of an object or interface type makes a function generic, with no instance until
   // it is called.
   if (!instance) throw new CompileError("E1103", "a macro's parameters can't be object types or interfaces yet, which make it generic; use a class", macro.start, macro.end);
   const param = macro.params[0]!;
   const returns = instance.returns;
-  if (typeof returns === "string" || instance.tables.typing.rec(returns).kind === "literal") throw new CompileError("E1103", `a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${instance.tables.typing.show(returns)}'`, macro.start, macro.end);
-  const input = instance.tables.arenas.localOf(instance.locals.get(param)!).type;
+  if (typeof returns === "string" || checked.tables.typing.rec(returns).kind === "literal") throw new CompileError("E1103", `a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${checked.tables.typing.show(returns)}'`, macro.start, macro.end);
+  const input = checked.tables.arenas.localOf(instance.locals.get(param)!).type;
   const { bare, restore } = stripped(ids, decl, pending);
-  const types = { AstExpr: input, AstStmt: input, AstType: input } as Record<Category, Type>;
+  const types: Categories = { AstExpr: input, AstStmt: input, AstType: input };
   let value: Value;
   try {
-    value = built<Value>(checked.tables, { tree: bare, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, astValues(() => null));
+    value = built<Value, AstValues>(checked.tables, { tree: { of: "stmt", node: bare }, category: "AstStmt", holes: [], asExpressions: new Set(), names: new Set() }, types, undefined, new AstValues([], [], [], [], { start: 0, end: 0 }), new Map(), new Map());
   } catch (e) {
-    if (e instanceof CompileError) throw e;
+    if (e instanceof CompileError && e.code !== "E1103") throw e;
     throw new CompileError("E1103", "a macro's parameter takes the declaration it is applied to, so its type is 'Ast' or 'AstStmt'", param.start, param.end);
   }
   const suffix = `@m${compilation.counts.expansions++}`;
-  const fresh = (name: string) => {
-    compilation.names.local.add(`${name}${suffix}`);
-    return `${name}${suffix}`;
-  };
   // The declarations this macro's quotes make are known from the start, so a quote naming one
   // made by a quote it builds later means it.
   const declared = reached(code, macro).flatMap((s) => quoteDeclarations(ctx.checked.tables, s));
@@ -428,21 +425,28 @@ function run(decl: Decl, exported: boolean, module: Module, pending: Pending, re
     const d = s.kind === "export" ? s.body : s;
     return d?.kind === "enum" ? d.members.map((x) => x.name) : [];
   })));
-  const hygiene: Hygiene = { declared: new Map(declared.map((n) => [n, fresh(n)])), namesIn: (file) => namesIn(loaded.modules[file]!), pins, members, fresh };
+  const hygiene: Hygiene = { declared: new Map(), namesIn: new Map(loaded.modules.map((m, i) => [i, namesIn(m)])), pins, members, suffix, made: new Set() };
+  for (const n of declared) hygiene.declared.set(n, freshName(hygiene, n));
   // An argument taken as syntax is the argument as written; one taken as a value is its constant's.
   const original = pending.decorator.kind === "call" ? pending.decorator.args : [];
   // Computed in the macro's hygiene, so a quote in an argument or a default means its file's names.
   const values = () => ready.args.map((a, i) => {
-    const t = instance.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
+    const t = checked.tables.arenas.localOf(instance.locals.get(macro.params[i + before]!)!).type;
     if (a.none) return null;
-    if (!a.syntax) return comptimeBody(compiledOf(checked).find((c) => bodyOf(c).name === `const ${a.name}`)!);
-    return built<Value>(checked.tables, { tree: original[i] ?? a.expr, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, astValues(() => null));
+    if (!a.syntax) return comptimeBody(new CheckedHost(checked.tables), compiledOf(checked).find((c) => bodyOf(checked.tables.arenas, c).name === `const ${a.name}`)!.id);
+    return built<Value, AstValues>(checked.tables, { tree: { of: "expr", node: original[i] ?? a.expr }, category: "AstExpr", holes: [], asExpressions: new Set(), names: new Set() }, { AstExpr: t, AstStmt: t, AstType: t }, undefined, new AstValues([], [], [], [], { start: 0, end: 0 }), new Map(), new Map());
   });
   const index = before === 2 ? [BigInt(pending.index)] : [];
-  const result = withHygiene(checked.tables, hygiene, () => comptimeCall(instance, [value, ...index, ...values()], nearest));
+  let result: Value;
+  try {
+    result = withHygiene(checked.tables, hygiene, () => comptimeCall(new CheckedHost(checked.tables), instance.id, [value, ...index, ...values()], nearest));
+  } finally {
+    // An error the expansion throws names them as written too.
+    for (const n of hygiene.made) compilation.names.local.add(n);
+  }
   const node = nodeOf(ids, result);
   const given = (Array.isArray(node) ? node : [node]) as Decl[];
-  markGenerated(compilation.generated, given);
+  for (const d of given) markGenerated(compilation.generated, { of: "stmt", node: d });
   // A name past the linker's suffix is one only a pin may write, as `ident` can't.
   const forged = findName(given, (n) => /-fsh\d+$/.test(n) && !hygiene.pins.has(n));
   if (forged) throw new CompileError("E1103", `the macro '${written(macro.name)}' gave the name '${forged}', which no program can write; 'ident' makes a name as written in the program`, nearest.start, nearest.end);
@@ -492,10 +496,10 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
       throw new CompileError("E1104", `a macro gave no '${name}' back, so the decorators still to apply to its ${decl.kind === "class" ? "members" : "parameters"} have nowhere to go`, at.start, at.end);
     }
     if (!same) return;
-    if (own.length > 0) rewrites.replace(same, { ...same, decorators: [...own, ...(same.decorators ?? [])] } as Stmt);
+    if (own.length > 0) rewrites.replaceStmt(same, { ...same, decorators: [...own, ...(same.decorators ?? [])] } as Stmt);
     // Each goes back to the member of the same kind and name, or the same kind when it has none,
     // or else the same place, a member taking one member's decorators.
-    const back = <T extends Id & { decorators: Expr[] }>(list: T[], before: T[], saved: Expr[][], key: (x: T) => string) => {
+    const back = <T extends Id & { decorators: Expr[] }>(list: T[], before: T[], saved: Expr[][], key: (x: T) => string, put: (at: T, by: T) => void) => {
       const taken = new Set<T>();
       saved.forEach((decorators, i) => {
         if (decorators.length === 0) return;
@@ -504,13 +508,13 @@ function stripped(ids: Ids, decl: Decl, pending: Pending): { bare: Stmt; restore
         const at = list.find((x) => !taken.has(x) && key(x) === want) ?? (place && !taken.has(place) && kindOf(place) === kindOf(before[i]!) ? place : undefined);
         if (!at) throw new CompileError("E1104", "a macro took away what these decorators were waiting to apply to", decorators[0]!.start, decorators[0]!.end);
         taken.add(at);
-        rewrites.replace(at, { ...at, decorators: [...decorators, ...at.decorators] } as unknown as Param);
+        put(at, { ...at, decorators: [...decorators, ...at.decorators] });
       });
     };
     const kindOf = (x: unknown) => (x as { kind?: string }).kind ?? "param";
     const memberKey = (m: ClassMember) => `${m.kind} ${m.modifiers.includes("static") ? "static " : ""}${typeof (m as { name?: unknown }).name === "string" ? (m as { name: string }).name : ""}`;
-    if (same.kind === "class" && decl.kind === "class") back(same.members, decl.members, members, memberKey);
-    if (same.kind === "function" && decl.kind === "function") back(same.params, decl.params, params, (p) => (p.pattern.kind === "ident" ? p.pattern.name : `#${decl.params.indexOf(p)}`));
+    if (same.kind === "class" && decl.kind === "class") back(same.members, decl.members, members, memberKey, (at, by) => void rewrites.replaceClassMember(at, by));
+    if (same.kind === "function" && decl.kind === "function") back(same.params, decl.params, params, (p) => (p.pattern.kind === "ident" ? p.pattern.name : `#${decl.params.indexOf(p)}`), (at, by) => void rewrites.replaceParam(at, by));
   };
   return { bare: bare as Stmt, restore };
 }

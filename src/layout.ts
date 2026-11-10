@@ -2,6 +2,7 @@ import type { Builder } from "./arithmetic.ts";
 import { category, ofKind, typeofTest, type Verdict } from "./narrow.ts";
 import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
+import { byteSize, words } from "./sizes.ts";
 import type { Tables } from "./compilation.ts";
 import { isLock, isNumeric, type LiteralType, INTEGERS, isInteger, type ClassType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
@@ -34,46 +35,10 @@ export function layoutOf(typing: Typing): (t: Type) => string {
   };
 }
 
-function words(typing: Typing, t: UnionType): usize {
-  return Math.ceil(Math.max(...typing.rec(t).members.map((m) => size(typing, m)[0])) / 8);
-}
-
-// A type's size and alignment in bytes, as LLVM lays out its IR type on the 64-bit targets
-// Fish supports.
 // An array is its elements' buffer, its length and its capacity, in elements.
 export const ARRAY = "{ ptr, i64, i64 }";
 // A Dyn is a pointer to its value's block, then to its vtable.
 export const DYN = "{ ptr, ptr }";
-
-// A type's size in bytes as it is laid out.
-export const byteSize = (typing: Typing, t: Type): usize => size(typing, t)[0];
-
-function size(typing: Typing, t: Type): [usize, usize] {
-  const r = typeof t === "string" ? undefined : typing.rec(t);
-  if (r?.kind === "brand") return size(typing, r.base);
-  if (r?.kind === "array") return [24, 8];
-  if (r?.kind === "fixed") {
-    const [bytes, align] = size(typing, r.element);
-    return [Math.ceil(bytes / align) * align * r.size, align];
-  }
-  if (r?.kind === "dyn") return [16, 8];
-  if (isInteger(t)) return [INTEGERS[t].bits / 8, INTEGERS[t].bits / 8];
-  if (t === "f32") return [4, 4];
-  if (t === "f64") return [8, 8];
-  if (t === "boolean") return [1, 1];
-  if (t === "null" || t === "never") return [0, 1];
-  if (t === "string" || t === "bigint") return [8, 8];
-  if (r === undefined) return [0, 1];
-  if (r.kind === "ref" || r.kind === "pointer" || r.kind === "handle" || r.kind === "shared" || r.kind === "block" || r.kind === "map" || r.kind === "regex" || r.kind === "recursive") return [8, 8];
-  // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
-  if (r.kind === "union") return [8 + 8 * words(typing, t as UnionType), 8];
-  if (r.kind === "interior" && !isLock(r)) return size(typing, r.of);
-  const parts = r.kind === "interior" ? [[4, 4] as [usize, usize], size(typing, r.of)] : [...(r.kind === "class" && r.base ? [r.base] : []), ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.kind === "param" ? (r.bound ? typing.rec(r.bound).fields : []) : r.fields).map((f) => f.type)].map((p) => size(typing, p));
-  const align = Math.max(1, ...parts.map(([, a]) => a));
-  let bytes = 0;
-  for (const [n, a] of parts) bytes = Math.ceil(bytes / a) * a + n;
-  return [Math.ceil(bytes / align) * align, align];
-}
 
 // What converting needs besides emitting: a slot in the function's entry block.
 // `text` gives a pointer to a literal's string block, which lives for the whole program.
@@ -429,8 +394,13 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
     if (fr?.kind === "union") {
       // A member of another kind than the narrowed type, an empty one or a scalar where an
       // aggregate is wanted, is one narrowing has left out, so it isn't there.
-      const absent = (member: Type) => typeof member === "string" && member !== to
-        && (member === "null" || member === "never" || typeof to !== "string" || (member === "string") !== (to === "string") || (member === "boolean") !== (to === "boolean"));
+      // So is a string or boolean literal where the narrowed type is of another kind.
+      const absent = (member: Type) => {
+        const lit = typing.recOf(member);
+        if (lit?.kind === "literal") return (typeof lit.value === "string" && to !== "string") || (typeof lit.value === "boolean" && to !== "boolean");
+        return typeof member === "string" && member !== to
+          && (member === "null" || member === "never" || typeof to !== "string" || (member === "string") !== (to === "string") || (member === "boolean") !== (to === "boolean"));
+      };
       return fr.members.includes(to) ? payload(v, from as UnionType, to) : eachMember(v, from as UnionType, to, (part, member) => (absent(member) ? "undef" : convert(part, member, to)));
     }
     if (typeof from === "string" || typeof to === "string") return v;
@@ -470,7 +440,7 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
       return lend(block, r.of, to);
     }
     // An unknown narrowed to a number may hold another kind of number, converted on its way out.
-    if (r?.kind === "union" && r.members.includes(to) && !(r.unknown && r.members.some((m) => m !== to && typing.unknownGives(m, to)))) {
+    if (r?.kind === "union" && r.members.some((m) => m === to || (typing.recOf(m)?.kind === "object" && alike(m, to))) && !(r.unknown && r.members.some((m) => m !== to && typing.unknownGives(m, to)))) {
       const at = temp();
       emit(`${at} = getelementptr ${llvm(from)}, ptr ${v}, i32 0, i32 1`);
       return at;
@@ -480,6 +450,27 @@ export function conversions(b: Slots, kindTests: Tables["kindTests"], keyTests: 
     const slot = alloca(llvm(to));
     emit(`store ${llvm(to)} ${convert(loaded, from, to)}, ptr ${slot}`);
     return slot;
+  }
+
+  // Whether two types are laid out alike: a union holding itself keeps its own records for
+  // codegen, while a type narrowed to one of its members was lowered to fresh ones of the same
+  // shape. A pair met again inside itself is taken as alike, and each pair is decided once.
+  function alike(a: Type, b: Type, seen: Map<string, boolean> = new Map<string, boolean>()): boolean {
+    if (a === b) return true;
+    const x = typing.recOf(a);
+    const y = typing.recOf(b);
+    if (x === undefined || y === undefined || x.kind !== y.kind) return false;
+    const pair = `${String(a)},${String(b)}`;
+    const known = seen.get(pair);
+    if (known !== undefined) return known;
+    seen.set(pair, true);
+    let same = false;
+    if (x.kind === "recursive" && y.kind === "recursive") same = alike(x.of, y.of, seen);
+    else if (x.kind === "array" && y.kind === "array") same = alike(x.element, y.element, seen);
+    else if (x.kind === "union" && y.kind === "union") same = x.members.length === y.members.length && x.members.every((m, i) => alike(m, y.members[i]!, seen));
+    else if (x.kind === "object" && y.kind === "object" && x.tuple === y.tuple) same = x.fields.length === y.fields.length && x.fields.every((f, i) => f.name === y.fields[i]!.name && alike(f.type, y.fields[i]!.type, seen));
+    seen.set(pair, same);
+    return same;
   }
 
   // Sets the tag of the member `from` goes into, and stores its value as the payload.

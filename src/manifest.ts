@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFi
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { CompileError } from "./diag.ts";
 import { parseRange } from "./semver.ts";
+import { validCrate } from "./rust.ts";
 
 // A package another depends on, from a local path, a git repository pinned to a commit, or the
 // registry by a version range, and where its entry is in the depending package's `fish.toml`.
@@ -244,9 +245,6 @@ export function readManifest(src: string, dir: string): Manifest {
   if (registry && (typeof registry.value !== "string" || registry.value.startsWith("-"))) throw new CompileError("E0905", "the registry's url is a string naming its index, as in url = \"https://...\"", registry.start, registry.end);
   return { name: name.value, version: version.value, entry, lib, edition: (edition?.value ?? "native") as Edition, dependencies, ...(rustDependencies && { rustDependencies }), ...(registry && { registry: registry.value as string }), dir };
 }
-
-// A crate's name as Cargo takes it.
-export const validCrate = (name: string) => /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(name);
 
 // A `[rust-dependencies]` entry in one of Cargo's forms: `name = "1.2"`, or a table with `version`,
 // `features`, `default-features`, and `path`, or `git` with one of `rev`, `tag` and `branch`.

@@ -633,3 +633,159 @@ function rd(e: Ref<Expr>): i64 { if (e.kind === "add") { if (e.l.kind === "add")
 function ow(e: Expr): i64 { if (e.kind === "add") { if (e.l.kind === "add") return e.l.v + e.l.l.v; return e.l.v; } return e.v; }
 function main2() { const e: Expr = { kind: "add", l: { kind: "add", l: { kind: "lit", v: 1 }, v: 2 }, v: 3 }; console.log(rd(e), ow(e)); }
 function main() { main1(); main2(); }
+
+// case: recursive_holding_a_brand
+// expect: 3
+// expect: 0
+type Id = Brand<usize, "id">;
+type Kin = Brand<usize, "kin">;
+type Leaf = { kind: "leaf"; id: Id | Kin; tag?: usize };
+type Node = { kind: "node"; kids: Tree[]; tag?: usize };
+type Tree = string | null | Leaf | Node;
+function copy(t: Tree): Tree {
+  if (t === null || typeof t !== "object") return t;
+  switch (t.kind) {
+    case "leaf":
+      return { kind: "leaf", id: t.id, tag: t.tag };
+    case "node":
+      return { kind: "node", kids: [] };
+  }
+  return null;
+}
+function main() {
+  const leaf = copy({ kind: "leaf", id: 4 as Id, tag: 3 as usize });
+  if (leaf !== null && typeof leaf !== "string" && leaf.kind === "leaf") console.log(leaf.tag ?? 0);
+  const node = copy({ kind: "node", kids: ["a"] });
+  if (node !== null && typeof node !== "string" && node.kind === "node") console.log(node.kids.length);
+}
+
+// case: recursive_through_its_array_holding_a_brand
+// expect: 2 7
+// expect: 1
+type Val = string | null | Spot | List;
+type Mark = Brand<usize, "mark">;
+type Spot = { kind: "spot"; mark: Mark; note?: usize };
+type List = { kind: "list"; items: Val[]; note?: usize };
+function dup(v: Val): Val {
+  if (v === null || typeof v !== "object") return v;
+  switch (v.kind) {
+    case "spot":
+      return { kind: "spot", mark: v.mark, note: v.note };
+    case "list": {
+      let items: Val[] = [];
+      for (const x of v.items) items.push(dup(x.clone()));
+      return { kind: "list", items, note: v.note };
+    }
+  }
+  return null;
+}
+function main() {
+  const c = dup({ kind: "spot", mark: 7 as Mark, note: 2 as usize });
+  if (c !== null && typeof c !== "string" && c.kind === "spot") console.log(c.note ?? 0, c.mark);
+  const l = dup({ kind: "list", items: ["a"] });
+  if (l !== null && typeof l !== "string" && l.kind === "list") console.log(l.items.length);
+}
+
+// case: recursive_member_holding_a_narrowed_self
+// expect: option
+type TypeId = Brand<usize, "TypeId">;
+type Type = string | TypeId;
+type C =
+  | { kind: "plain"; type: Type }
+  | { kind: "string" }
+  | { kind: "option"; of: C; inner: Type }
+  | { kind: "array"; element: C; elementType: Type; lent: boolean };
+
+function f(t: Type, n: i64): C | string {
+  if (n > 0) {
+    const e = f(t, n - 1);
+    if (typeof e === "string") return e;
+    if (e.kind === "array") return { kind: "option", of: e, inner: t };
+    return { kind: "array", element: e, elementType: t, lent: false };
+  }
+  return { kind: "plain", type: t };
+}
+
+function main() {
+  const r = f("x", 2);
+  if (typeof r !== "string") console.log(r.kind);
+}
+
+// case: recursive_string_member_read_through_a_reference_is_retained
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: heapheapheap
+type Expr = { kind: "id"; name: string } | { kind: "list"; items: Expr[] } | { kind: "prop"; key: Name };
+type Name = string | Expr;
+function cloneExpr(n: Ref<Expr>): Expr {
+  if (n.kind === "id") return { kind: "id" as const, name: n.name };
+  if (n.kind === "list") return { kind: "list" as const, items: n.items.map((x) => cloneExpr(x)) };
+  return { kind: "prop" as const, key: cloneName(n.key) };
+}
+function cloneName(n: Ref<Name>): Name {
+  if (typeof n === "string") return n;
+  return cloneExpr(n) as Name;
+}
+type M = { name: Name };
+function main() {
+  const text = "heap".repeat(3);
+  const m: M = { name: text };
+  for (let i = 0; i < 4; i++) {
+    const c: M = { name: cloneName(m.name) };
+    console.log(typeof c.name === "string");
+  }
+  console.log(text);
+}
+
+// case: recursive_array_of_a_brand_as_a_member
+// expect: 2
+// expect: 1
+type Id = Brand<usize, "id">;
+type V = Id[] | { kind: "n"; v: V[] };
+function size(v: Ref<V>): usize { return Array.isArray(v) ? v.length : v.v.length; }
+function main() {
+  const a: V = [1 as Id, 2 as Id];
+  console.log(size(a));
+  const b: V = { kind: "n", v: [a] };
+  console.log(size(b));
+}
+
+// case: recursive_map_of_a_brand_as_a_member
+// expect: 1
+type Id = Brand<usize, "id">;
+type V = Map<string, Id> | { kind: "n"; v: V[] };
+function main() {
+  let m = new Map<string, Id>();
+  m.set("a", 1 as Id);
+  const a: V = m;
+  const b: V = { kind: "n", v: [a] };
+  console.log(typeof b === "object" && !(b instanceof Map) ? b.v.length : 0);
+}
+
+// case: recursive_two_brands_of_one_base
+// expect: n
+type Id = Brand<usize, "id">;
+type Kin = Brand<usize, "kin">;
+type V = Id | Kin | string | V[];
+function show(v: Ref<V>): string {
+  if (typeof v === "string") return "s";
+  if (Array.isArray(v)) return "a";
+  return "n";
+}
+function main() {
+  const x: V = 2 as Kin;
+  console.log(show(x));
+}
+
+// case: recursive_extract_by_a_field_not_named_kind
+// expect: 5
+type Blk = { tag: "blk"; n: i64 };
+type Oth = { tag: "oth"; b: Extract<S, { tag: "blk" }> | null; kids: S[] };
+type S = Blk | Oth;
+function f(s: Ref<S>): i64 { return s.tag === "oth" && s.b !== null ? s.b.n : 0; }
+function main() {
+  const a: S = { tag: "oth", b: { tag: "blk", n: 5 }, kids: [] };
+  console.log(f(a));
+}

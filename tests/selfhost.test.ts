@@ -1,10 +1,14 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, type Expr, type Param, type Stmt } from "../src/parser.ts";
 import { BASELINE, survey, type Baseline } from "../scripts/selfhost.ts";
+import { buildChecker, differences } from "../scripts/nativediff.ts";
 
-setDefaultTimeout(300_000);
+// Checking every source file takes over an hour now that the checker's files get far into their
+// bodies.
+setDefaultTimeout(7_200_000);
 
 const SRC = join(import.meta.dir, "..", "src");
 
@@ -91,4 +95,38 @@ test("the compiler keeps no module state", () => {
     found.push(...tableChanges(program, reached).map((c) => `${f}: ${c} changes a module's table`));
   }
   expect(found).toEqual([]);
+});
+
+// The harness has to tell a native run that went wrong from one that agreed.
+test("the native comparison reports a crash after a verdict and a checker that accepts everything", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fish-native-stub-"));
+  try {
+    for (const [name, exit, sample] of [["crashes", 139, 500], ["accepts", 0, 20]] as const) {
+      const stub = join(dir, name);
+      writeFileSync(stub, `#!/bin/sh\necho accepted\nexit ${exit}\n`, { mode: 0o755 });
+      const { compared, differing } = await differences(stub, sample);
+      expect(compared).toBeGreaterThan(0);
+      expect(differing.length).toBeGreaterThan(0);
+      if (exit !== 0) expect(differing.length).toBe(compared);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// How many programs parse and check alone can't reach, as measured: those with imports or
+// decorators, whose native loader and macro stage aren't compiled, and errors raised after checking.
+const UNREACHED = 319;
+
+// The checker compiled by Fish gives each single-file test program the verdict Bun's checker gives it.
+test("the native checker accepts and rejects the test programs exactly as Bun's does", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fish-native-checker-"));
+  try {
+    const { compared, unreached, differing } = await differences(buildChecker(dir));
+    expect(differing.map((r) => `${r.name}: ${r.bun} / ${r.native} ${r.detail}`)).toEqual([]);
+    expect(compared).toBeGreaterThan(3600);
+    expect(unreached.length).toBeLessThanOrEqual(UNREACHED);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -1,7 +1,7 @@
 import type { CompileError } from "./diag.ts";
 import { expression, primary, templateParts, unary } from "./expressions.ts";
 import { isToken, type Token } from "./lexer.ts";
-import { accessorOf, modifierOf, type Cursor, type Parse, type Modifier, type Param, type Pattern, type PropertyName, type TupleElement, type TypeMember, type TypeNode, type TypeParam } from "./parser.ts";
+import { accessorOf, documentedThrows, modifierOf, type Cursor, type Parse, type Modifier, type Param, type Pattern, type PropertyName, type TupleElement, type TypeMember, type TypeNode, type TypeParam } from "./parser.ts";
 import { decoratorList } from "./declarations.ts";
 import { bindingPattern } from "./patterns.ts";
 import { nextId } from "./ids.ts";
@@ -380,7 +380,15 @@ function typeMember(c: Mut<Cursor>): TypeMember {
   }
   const name = propertyName(c);
   const optional = c.eat("?");
-  if (c.at("(") || c.at("<")) return { id: nextId(c.ids), kind: "method", name, optional, ...signature(c), start, end: c.end() };
+  if (c.at("(") || c.at("<")) {
+    const sig = signature(c);
+    const written = throwsClause(c);
+    const doc = documentedThrows(c, start, written);
+    const throws = written ?? doc;
+    let method: Extract<TypeMember, { kind: "method" }> = { id: nextId(c.ids), kind: "method", name, optional, ...sig, start, end: c.end() };
+    if (throws !== undefined) method.throws = throws;
+    return method;
+  }
   const type = c.at(":") ? annotation(c) : undefined;
   return { id: nextId(c.ids), kind: "property", name, optional, readonly, type, start, end: c.end() };
 }

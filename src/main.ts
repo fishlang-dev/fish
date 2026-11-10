@@ -4,9 +4,9 @@ import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { bodyOf } from "./arenas.ts";
-import { C_KEYWORDS, check, compiledOf } from "./check.ts";
-import { codegen, symbol } from "./codegen.ts";
-import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newTimings, objectsNote, timed, type Compilation, type Session } from "./compilation.ts";
+import { C_KEYWORDS, check } from "./check.ts";
+import { compiledOf, codegen, symbolIn, symbolNames } from "./codegen.ts";
+import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newTimings, objectsNote, timed, type Compilation, type Session, type Tables } from "./compilation.ts";
 import { cachedSession } from "./stdcache.ts";
 import { CompileError, formatError, named, type Source } from "./diag.ts";
 import { flatten, load, type Loaded } from "./modules.ts";
@@ -20,7 +20,8 @@ import { parse, parseWithComments, type Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.ts";
-import { cachedObject, cachedObjectAsync, files, mathObjects, mathObjectsAsync, type Unit } from "./mathlib.ts";
+import { cachedObject, cachedObjectAsync, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, type BuildSession, type Unit } from "./mathlib.ts";
+import { RUNTIME } from "./runtime.ts";
 import { dockerfile, dockerfilePath, findOpenSsl, HOST_TARGET, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
@@ -31,7 +32,7 @@ import { compare, formatComparison, formatReport, readReport, sources, survey } 
 import { explain } from "./codes.ts";
 import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type, type Typing } from "./typing.ts";
-import { rustShim, type Shim } from "./rust.ts";
+import { rustShim, type Shim } from "./rustshim.ts";
 import { split } from "./split.ts";
 import { withDebugInfo } from "./debuginfo.ts";
 import { watchProgram } from "./watch.ts";
@@ -93,7 +94,7 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
     const checked = checkedProgram(compilation, expanded(compilation, loaded, library), library);
     for (const w of checked.warnings) w.sources = loaded.sources;
     const ir = timed(timings, "codegen", () => {
-      const ir = bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks, debug }), loaded);
+      const ir = bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks, debug, failed: compilation.session.failed }), loaded);
       return debug ? withDebugInfo(ir, src, file, loaded.sources, release) : ir;
     });
     return { ir, checked, shim: () => rustShim(loaded.rust, checked), warnings: checked.warnings };
@@ -123,7 +124,7 @@ function expanded(compilation: Compilation, loaded: Loaded, library: boolean): S
 
 // `check` of a whole program, timed as the check stage.
 function checkedProgram(compilation: Compilation, program: Stmt[], library: boolean): Checked {
-  return timed(compilation.session.timings, "check", () => check(compilation, program, library));
+  return timed(compilation.session.timings, "check", () => check(compilation, program, library && RUNTIME_NAMES));
 }
 
 // Runs `run`, giving a compile error it throws the program's other files to render against, and
@@ -137,13 +138,26 @@ function withSources<T>({ names }: Compilation, sources: Source[], run: () => T)
   }
 }
 
+// The C names a library's exports can't take besides C's keywords, since an export would replace
+// them: the runtime's own calls, read from its code without its comments and strings, then the
+// math and unwinding functions the IR, or LLVM lowering it, calls, which no text names, then the
+// runtime's `Math` functions and the C ones they call.
+const NATIVE_CODE = NATIVE.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, " ");
+const LOWERED = ["fma", "feclearexcept", "feraiseexcept", "pow", "powf", "fmod", "fmodf", "sqrt", "sqrtf", "floor", "floorf", "ceil", "ceilf", "trunc", "truncf", "round", "roundf", "fabs", "fabsf", "exp", "expf", "log", "logf", "sin", "sinf", "cos", "cosf", "memset", "memmove", "memcpy", "memcmp", "bzero", "abort", "exit", "fflush", "dprintf", "printf", "malloc", "calloc", "realloc", "free", "write", "qsort"];
+export const RUNTIME_NAMES = new Set([
+  ...[...NATIVE_CODE.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)].map((m) => m[1]!).filter((n) => !C_KEYWORDS.has(n)),
+  ...RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []),
+  ...LOWERED,
+  ...MATH_RUNTIME.map((f) => `fsh_math_${f}`),
+]);
+
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
-export function buildLibrary(session: Session, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, debug = false): CompileError[] {
+export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, debug = false): CompileError[] {
   const src = readFileSync(file, "utf8");
   const compilation = newCompilation(session);
   const loaded = load(compilation, file, src);
-  const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), true));
+  const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), RUNTIME_NAMES));
   const made = withSources(compilation, loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources, debug }), loaded));
   const ir = debug ? withDebugInfo(made, src, file, loaded.sources, release) : made;
   const shim = rustShim(loaded.rust, checked);
@@ -174,7 +188,7 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
       if (shim && process.platform === "darwin") run(["libtool", "-static", "-o", at(`lib${name}.a`), archive, shim.lib]);
       else if (shim) run(["ar", "-M"], `CREATE ${at(`lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
     }
-    writeFileSync(at(`${name}.h`), header(name, compiledOf(checked).filter((i) => bodyOf(i).exported)));
+    writeFileSync(at(`${name}.h`), header(name, checked.tables, compiledOf(checked).filter((i) => bodyOf(checked.tables.arenas, i).exported)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -184,16 +198,16 @@ export function buildLibrary(session: Session, file: string, out: string, kind: 
 
 // A C header declaring a library's exports, usable from C and C++. A parameter named like a C
 // keyword is left unnamed, as C allows.
-function header(name: string, exports: Instance[]): string {
+function header(name: string, tables: Tables, exports: Instance[]): string {
   const guard = `${/^[A-Za-z]/.test(name) ? "" : "FISH_"}${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
   const lines = exports.map((i) => {
-    const params = bodyOf(i).params.map((p) => {
-      const { type, name } = i.tables.arenas.localOf(i.locals.get(p)!);
-      const c = cType(i.tables.typing, type);
+    const params = bodyOf(tables.arenas, i).params.map((p) => {
+      const { type, name } = tables.arenas.localOf(i.locals.get(p)!);
+      const c = cType(tables.typing, type);
       const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
       return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;
     });
-    return `${cType(i.tables.typing, i.returns)} ${bodyOf(i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
+    return `${cType(tables.typing, i.returns)} ${bodyOf(tables.arenas, i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
   });
   return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "", ...lines, "", "#ifdef __cplusplus", "}", "#endif", "", `#endif`, ""].join("\n");
 }
@@ -221,7 +235,7 @@ function cType(typing: Typing, t: Type): string {
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
 // program reports at exit what it never freed, by where it was allocated. `loaded` is given the
 // files the program was read from, or looked for, even when it doesn't build. Gives the warnings.
-export function build(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
+export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
   const made = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
   const { checked, shim, warnings } = made;
   const ir = instrumented(made.ir, target);
@@ -241,14 +255,16 @@ function refuseForeignRust(target: Target) {
 // the cache keeps between builds.
 function parts(ir: string, checked: Checked, release: boolean, target: Target = HOST_TARGET): { std: Unit[]; program: string } {
   if (release) return { std: [], program: ir };
-  const bodies = compiledOf(checked).filter((i) => !bodyOf(i).foreign && !bodyOf(i).rust);
-  const named = (std: boolean) => bodies.filter((i) => bodyOf(i).start >= STD_BASE === std).map(symbol);
+  const arenas = checked.tables.arenas;
+  const bodies = compiledOf(checked).filter((i) => !bodyOf(arenas, i).foreign && !bodyOf(arenas, i).rust);
+  const names = symbolNames(arenas);
+  const named = (std: boolean) => bodies.filter((i) => bodyOf(arenas, i).start >= STD_BASE === std).map((i) => symbolIn(arenas, i, names));
   const { std, program } = split(ir, named(true), named(false));
   return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"], stdin: std, inputs: [] }], program };
 }
 
 // Builds the IR `ir`, of the checked program, into the executable `out`.
-function linked(session: Session, ir: string, checked: Checked, out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false, debug = false) {
+function linked(session: BuildSession, ir: string, checked: Checked, out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false, debug = false) {
   const { timings } = session;
   const { std, program } = parts(ir, checked, release, target);
   const objects = timed(timings, "runtime", () => [...[...runtimeUnits(ir, release, false, target, leaks), ...std].map((u) => cachedObject(session, u)), ...mathObjects(session, target.compile)]);
@@ -278,7 +294,7 @@ function linked(session: Session, ir: string, checked: Checked, out: string, rel
 }
 
 // `build`, with clang run without blocking, so several builds can go at once.
-export async function buildAsync(session: Session, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
+export async function buildAsync(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
   const { ir, checked, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false);
   const { std, program } = parts(ir, checked, release);
   const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map((u) => cachedObjectAsync(session, u)), mathObjectsAsync(session)])).flat();
@@ -291,7 +307,7 @@ export async function buildAsync(session: Session, file: string, out: string, re
 // Builds the tests of the package at `dir` into one program at `out`, unless it has none, and gives
 // them in declaration order. Every `.fsh` file of the package is loaded through a generated entry,
 // the harness, whose `main` runs one test by its index.
-export function buildTests(session: Session, dir: string, out: string): Test[] {
+export function buildTests(session: BuildSession, dir: string, out: string): Test[] {
   const files = fishFiles(dir, (message) => console.error(message.replace(/^fishc fmt/, "fishc test")));
   // The harness is read as the manifest's path, which every package has and no `.fsh` file is, so
   // the files' names are written from the package's directory.
@@ -312,7 +328,7 @@ export function buildTests(session: Session, dir: string, out: string): Test[] {
 
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
 // Gives the exit code.
-async function testPackage(session: Session, dir: string, filter: string | undefined): Promise<i64> {
+async function testPackage(session: BuildSession, dir: string, filter: string | undefined): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
   const running = new Set<i32>();
   // Interrupted, the tests running and what they started end, and the build is removed.

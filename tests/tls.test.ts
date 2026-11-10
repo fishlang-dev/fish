@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { newSession } from "../src/compilation.ts";
+import { buildSession } from "../src/mathlib.ts";
 import { buildAsync } from "../src/main.ts";
 import { NATIVE, tlsStub } from "../src/native.ts";
 import { STD_MODULES } from "../src/std.ts";
@@ -16,7 +17,7 @@ setDefaultTimeout(60_000);
 const fixtures = join(import.meta.dir, "fixtures", "tls");
 const tmp = mkdtempSync(join(tmpdir(), "fish-tls-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
-const session = newSession();
+const session = buildSession(newSession());
 
 async function build(name: string, src: string): Promise<string> {
   const file = join(tmp, `${name}.fsh`);

@@ -307,3 +307,93 @@ function main(): void {
   console.log(n);
 }
 // expect: 3
+// case: jsdoc_throws_interface
+// A tag on an interface or object-type method signature declares what that method throws.
+class ParseError {
+  constructor(public message: string) {}
+}
+interface Host {
+  /** @throws {ParseError} */
+  check(n: i64): i64;
+  /** @throws {ParseError} */
+  take(this: Own<this>, n: i64): i64;
+  plain(n: i64): i64;
+}
+class Checker<H extends Host> {
+  constructor(public host: H) {}
+  /** @throws {ParseError} */
+  run(n: i64): i64 {
+    return this.host.check(n) + this.host.plain(1);
+  }
+  caught(n: i64): i64 {
+    try {
+      return this.host.check(n);
+    } catch (e) {
+      return -99;
+    }
+  }
+}
+class RealHost {
+  label: string = "real";
+  /** @throws {ParseError} */
+  check(n: i64): i64 {
+    if (n < 0) throw new ParseError("bad " + n);
+    return n * 2;
+  }
+  /** @throws {ParseError} */
+  take(this: Own<this>, n: i64): i64 {
+    if (n < 0) throw new ParseError("owned " + this.label);
+    return n + (this.label.length as i64);
+  }
+  plain(n: i64): i64 {
+    return n;
+  }
+}
+class SafeHost {
+  check(n: i64): i64 {
+    return n + 10;
+  }
+  take(this: Own<this>, n: i64): i64 {
+    return n;
+  }
+  plain(n: i64): i64 {
+    return n;
+  }
+}
+/** @throws {ParseError} */
+function viaDyn(h: Ref<Dyn<Host>>, n: i64): i64 {
+  return h.check(n);
+}
+function main(): void {
+  const c = new Checker(new RealHost());
+  try {
+    console.log(c.run(4));
+    console.log(c.run(-3));
+  } catch (e) {
+    console.log(e.message);
+  }
+  const safe = new Checker(new SafeHost());
+  console.log(safe.caught(5));
+  const h: Dyn<Host> = new RealHost();
+  try {
+    console.log(viaDyn(h, 5));
+    console.log(viaDyn(h, -7));
+  } catch (e) {
+    console.log(e.message);
+  }
+  const d1: Dyn<Host> = new RealHost();
+  const d2: Dyn<Host> = new RealHost();
+  try {
+    console.log(d1.take(3));
+    console.log(d2.take(-1));
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+// expect: 9
+// expect: bad -3
+// expect: 15
+// expect: 10
+// expect: bad -7
+// expect: 7
+// expect: owned real

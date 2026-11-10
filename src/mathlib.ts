@@ -45,8 +45,22 @@ export function files(dir: string): string[] {
 // when the input is `-`, and `inputs` the other files its text depends on, such as headers.
 export type Unit = { name: string; args: string[]; stdin?: string; inputs: string[] };
 
+// A session that builds objects as well as compiling, with the caches only building reads.
+// `clang`: `clang --version`, which names the target as well as the compiler.
+// `digests`: each source a cached object depends on, hashed, by path, size and modification time.
+// `compiling`: the objects being compiled without blocking, so each is compiled once.
+// `mathUnits`: the Math runtime's objects to compile.
+export type BuildSession = Session & { clang?: string; digests: Map<string, string>; compiling: Map<string, Promise<string>>; mathUnits?: Unit[] };
+
+// `session` given the caches building needs, keeping any it already has.
+export function buildSession(session: Session & Partial<BuildSession>): BuildSession {
+  session.digests ??= new Map();
+  session.compiling ??= new Map();
+  return session as BuildSession;
+}
+
 // `clang --version`, which names the target as well as the compiler, run once a session.
-function clangVersion(session: Session): string {
+function clangVersion(session: BuildSession): string {
   if (session.clang !== undefined) return session.clang;
   const clang = Bun.spawnSync(["clang", "--version"]);
   if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
@@ -54,7 +68,7 @@ function clangVersion(session: Session): string {
 }
 
 // Remembered by size and modification time too, so an edit in a long-lived session is seen.
-function digestOf({ digests }: Session, path: string): string {
+function digestOf({ digests }: BuildSession, path: string): string {
   const { size, mtimeMs } = statSync(path);
   const key = `${path}:${size}:${mtimeMs}`;
   let digest = digests.get(key);
@@ -64,7 +78,7 @@ function digestOf({ digests }: Session, path: string): string {
 
 // Where a unit's object lives, named by a hash of clang, the target, the flags and every source
 // text, so a change to any of them is a new object rather than a stale one.
-function objectPath(session: Session, u: Unit): string {
+function objectPath(session: BuildSession, u: Unit): string {
   const hash = createHash("sha256").update(clangVersion(session)).update(u.args.join("\0")).update("\0").update(u.stdin ?? "").update("\0");
   for (const f of u.inputs) hash.update(f).update(digestOf(session, f));
   return join(cacheDir(), "objects", `${u.name}-${hash.digest("hex").slice(0, 16)}.o`);
@@ -93,7 +107,7 @@ const input = (u: Unit) => (u.stdin === undefined ? undefined : new TextEncoder(
 const emptyDir = () => mkdtempSync(join(tmpdir(), "fish-cc-"));
 
 // The unit's object, compiled first if the cache has none.
-export function cachedObject(session: Session, u: Unit): string {
+export function cachedObject(session: BuildSession, u: Unit): string {
   const out = objectPath(session, u);
   if (existsSync(out)) {
     if (session.timings) session.timings.objects.cached++;
@@ -113,7 +127,7 @@ export function cachedObject(session: Session, u: Unit): string {
 
 // `cachedObject`, without blocking, each object compiled only once however many of a session's
 // builds ask.
-export function cachedObjectAsync(session: Session, u: Unit): Promise<string> {
+export function cachedObjectAsync(session: BuildSession, u: Unit): Promise<string> {
   const { compiling } = session;
   const out = objectPath(session, u);
   if (existsSync(out)) return Promise.resolve(out);
@@ -136,7 +150,7 @@ export function cachedObjectAsync(session: Session, u: Unit): Promise<string> {
   return done;
 }
 
-function units(session: Session): Unit[] {
+function units(session: BuildSession): Unit[] {
   if (session.mathUnits) return session.mathUnits;
   const inputs = [...files(LLVM_LIBC), ...files(join(CORE_MATH, "src"))];
   // A quoted include is looked for beside its source first, so the source's whole directory is
@@ -147,11 +161,11 @@ function units(session: Session): Unit[] {
 
 // The objects to link, built first if this clang and target have none yet. `target` is the
 // clang flags of a target other than the host's.
-export function mathObjects(session: Session, target: string[] = []): string[] {
+export function mathObjects(session: BuildSession, target: string[] = []): string[] {
   return units(session).map((u) => cachedObject(session, target.length === 0 ? u : { ...u, args: [...target, ...u.args] }));
 }
 
 // `mathObjects`, without blocking.
-export function mathObjectsAsync(session: Session): Promise<string[]> {
+export function mathObjectsAsync(session: BuildSession): Promise<string[]> {
   return Promise.all(units(session).map((u) => cachedObjectAsync(session, u)));
 }

@@ -599,3 +599,33 @@ async function main(): Promise<void> throws Error {
   const o: OrderId = v
 }
 // error: 8:22: error[E0101]: type 'Brand<usize, "UserId">' is not assignable to type 'Brand<usize, "OrderId">'
+
+// case: brand_union_given_to_a_callback
+// expect: true 2
+type A = Brand<usize, "a">;
+type B = Brand<usize, "b">;
+type T = "x" | "y" | A | B;
+function big(t: Exclude<T, string>, n: usize): boolean { return t > n; }
+function main() {
+  let objects: Exclude<T, string>[] = [];
+  objects.push(3 as A);
+  objects.push(5 as B);
+  const n: usize = 4;
+  console.log(objects.some((m) => big(m, n)), objects.filter((m) => big(m, 1)).length);
+}
+
+// case: brand_optional_field_narrowed_holding_a_literal
+// expect: i64
+// expect: id 7
+type A = Brand<usize, "A">;
+type B = Brand<usize, "B">;
+type T = "i64" | "string" | A | B;
+type P = { kind: "p"; c?: T };
+function make(c: T): P { return { kind: "p", c }; }
+function show(t: T): string { return typeof t === "string" ? t : `id ${t as usize}`; }
+function main() {
+  const r = make("i64");
+  console.log(r.c !== undefined ? show(r.c) : "none");
+  const s = make(7 as B);
+  console.log(s.c !== undefined ? show(s.c) : "none");
+}

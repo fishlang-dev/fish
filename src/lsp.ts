@@ -2,7 +2,8 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { compiledOf, type Checked } from "./check.ts";
+import type { Checked } from "./check.ts";
+import { compiledOf } from "./codegen.ts";
 import { type Session } from "./compilation.ts";
 import { cachedSession } from "./stdcache.ts";
 import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
@@ -89,7 +90,7 @@ function diagnostic(e: CompileError, path: string, text: string) {
 
 const before = (a: Position, b: Position) => a.line < b.line || (a.line === b.line && a.character <= b.character);
 // A type as its program's names read to the user.
-function named({ compilation: { names, typing } }: Checked, t: Type): string {
+function named({ tables: { names, typing } }: Checked, t: Type): string {
   return shown(written(typing.show(t), names), names);
 }
 

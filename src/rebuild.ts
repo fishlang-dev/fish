@@ -1,15 +1,47 @@
 // Generated from the parser's AST types by `bun scripts/walkgen.ts`; a test fails when it is stale.
 // Each `rebuilt` function gives a node as the rewrite table has it, each node under it put in
 // place the same way, writing the slots that held replaced nodes.
-import type { Replacements } from "./ids.ts";
 import type { TypeNode, Expr, Stmt, TupleElement, PropertyName, TypeMember, ObjectProp, ClassNode, ClassMember, Param, Pattern, MatchArm, PatternProp, Specifier, EnumMember, SwitchCase, Declarator, TypeParam, TypeAlias, Interface, JsName, Func } from "./parser.ts";
 
+// What a rebuild reads each node's replacement through: the node itself when it has none.
+export interface Replacements {
+  isEmpty(): boolean;
+  currentTypeNode(node: TypeNode): TypeNode;
+  current(node: Expr): Expr;
+  currentStmt(node: Stmt): Stmt;
+  currentTupleElement(node: TupleElement): TupleElement;
+  currentTypeMember(node: TypeMember): TypeMember;
+  currentObjectProp(node: ObjectProp): ObjectProp;
+  currentClassNode(node: ClassNode): ClassNode;
+  currentClassMember(node: ClassMember): ClassMember;
+  currentParam(node: Param): Param;
+  currentPattern(node: Pattern): Pattern;
+  currentMatchArm(node: MatchArm): MatchArm;
+  currentPatternProp(node: PatternProp): PatternProp;
+  currentSpecifier(node: Specifier): Specifier;
+  currentEnumMember(node: EnumMember): EnumMember;
+  currentSwitchCase(node: SwitchCase): SwitchCase;
+  currentDeclarator(node: Declarator): Declarator;
+  currentTypeParam(node: TypeParam): TypeParam;
+  currentTypeAlias(node: TypeAlias): TypeAlias;
+  currentInterface(node: Interface): Interface;
+  currentFunc(node: Func): Func;
+  // A statement list checking edited, by its owner's id and the field holding it.
+  currentList(owner: usize, field: string): Stmt[] | undefined;
+}
+
 export function rebuiltTypeNode(n: TypeNode, r: Ref<Replacements>): TypeNode {
-  let m = r.current(n);
+  let m = r.currentTypeNode(n);
   switch (m.kind) {
     case "ref":
-      for (let i1 = 0; i1 < m.args.length; i1++) {
-        m.args[i1] = rebuiltTypeNode(m.args[i1]!, r);
+      if (m.args.length > 0) {
+        let i1 = m.args.splice(0);
+        i1.reverse();
+        while (i1.length > 0) {
+          let e1 = i1.pop()!;
+          e1 = rebuiltTypeNode(e1, r);
+          m.args.push(e1);
+        }
       }
       break;
     case "literal":
@@ -19,35 +51,73 @@ export function rebuiltTypeNode(n: TypeNode, r: Ref<Replacements>): TypeNode {
       m.element = rebuiltTypeNode(m.element, r);
       break;
     case "tuple":
-      for (let i1 = 0; i1 < m.elements.length; i1++) {
-        m.elements[i1] = rebuiltTupleElement(m.elements[i1]!, r);
+      if (m.elements.length > 0) {
+        let i2 = m.elements.splice(0);
+        i2.reverse();
+        while (i2.length > 0) {
+          let e2 = i2.pop()!;
+          e2 = rebuiltTupleElement(e2, r);
+          m.elements.push(e2);
+        }
       }
       break;
     case "object":
-      for (let i1 = 0; i1 < m.members.length; i1++) {
-        m.members[i1] = rebuiltTypeMember(m.members[i1]!, r);
+      if (m.members.length > 0) {
+        let i3 = m.members.splice(0);
+        i3.reverse();
+        while (i3.length > 0) {
+          let e3 = i3.pop()!;
+          e3 = rebuiltTypeMember(e3, r);
+          m.members.push(e3);
+        }
       }
       break;
     case "function":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i4 = m.typeParams.splice(0);
+        i4.reverse();
+        while (i4.length > 0) {
+          let e4 = i4.pop()!;
+          e4 = rebuiltTypeParam(e4, r);
+          m.typeParams.push(e4);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i5 = m.params.splice(0);
+        i5.reverse();
+        while (i5.length > 0) {
+          let e5 = i5.pop()!;
+          e5 = rebuiltParam(e5, r);
+          m.params.push(e5);
+        }
       }
       m.returns = rebuiltTypeNode(m.returns, r);
       if (m.throws !== undefined) {
-        m.throws = rebuiltTypeNode(m.throws!, r);
+        let v6 = m.throws!;
+        v6 = rebuiltTypeNode(v6, r);
+        m.throws = v6;
       }
       break;
     case "union":
-      for (let i1 = 0; i1 < m.types.length; i1++) {
-        m.types[i1] = rebuiltTypeNode(m.types[i1]!, r);
+      if (m.types.length > 0) {
+        let i7 = m.types.splice(0);
+        i7.reverse();
+        while (i7.length > 0) {
+          let e7 = i7.pop()!;
+          e7 = rebuiltTypeNode(e7, r);
+          m.types.push(e7);
+        }
       }
       break;
     case "intersection":
-      for (let i1 = 0; i1 < m.types.length; i1++) {
-        m.types[i1] = rebuiltTypeNode(m.types[i1]!, r);
+      if (m.types.length > 0) {
+        let i8 = m.types.splice(0);
+        i8.reverse();
+        while (i8.length > 0) {
+          let e8 = i8.pop()!;
+          e8 = rebuiltTypeNode(e8, r);
+          m.types.push(e8);
+        }
       }
       break;
     case "operator":
@@ -61,8 +131,14 @@ export function rebuiltTypeNode(n: TypeNode, r: Ref<Replacements>): TypeNode {
       m.target = rebuiltTypeNode(m.target, r);
       break;
     case "import":
-      for (let i1 = 0; i1 < m.args.length; i1++) {
-        m.args[i1] = rebuiltTypeNode(m.args[i1]!, r);
+      if (m.args.length > 0) {
+        let i10 = m.args.splice(0);
+        i10.reverse();
+        while (i10.length > 0) {
+          let e10 = i10.pop()!;
+          e10 = rebuiltTypeNode(e10, r);
+          m.args.push(e10);
+        }
       }
       break;
     case "conditional":
@@ -73,26 +149,40 @@ export function rebuiltTypeNode(n: TypeNode, r: Ref<Replacements>): TypeNode {
       break;
     case "infer":
       if (m.constraint !== undefined) {
-        m.constraint = rebuiltTypeNode(m.constraint!, r);
+        let o11 = m.constraint!;
+        o11 = rebuiltTypeNode(o11, r);
+        m.constraint = o11;
       }
       break;
     case "template":
-      for (let i1 = 0; i1 < m.types.length; i1++) {
-        m.types[i1] = rebuiltTypeNode(m.types[i1]!, r);
+      if (m.types.length > 0) {
+        let i13 = m.types.splice(0);
+        i13.reverse();
+        while (i13.length > 0) {
+          let e13 = i13.pop()!;
+          e13 = rebuiltTypeNode(e13, r);
+          m.types.push(e13);
+        }
       }
       break;
     case "mapped":
       m.constraint = rebuiltTypeNode(m.constraint, r);
       if (m.as !== undefined) {
-        m.as = rebuiltTypeNode(m.as!, r);
+        let o14 = m.as!;
+        o14 = rebuiltTypeNode(o14, r);
+        m.as = o14;
       }
       if (m.type !== undefined) {
-        m.type = rebuiltTypeNode(m.type!, r);
+        let o15 = m.type!;
+        o15 = rebuiltTypeNode(o15, r);
+        m.type = o15;
       }
       break;
     case "predicate":
       if (m.type !== undefined) {
-        m.type = rebuiltTypeNode(m.type!, r);
+        let o18 = m.type!;
+        o18 = rebuiltTypeNode(o18, r);
+        m.type = o18;
       }
       break;
   }
@@ -103,14 +193,26 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
   let m = r.current(n);
   switch (m.kind) {
     case "template":
-      for (let i1 = 0; i1 < m.exprs.length; i1++) {
-        m.exprs[i1] = rebuiltExpr(m.exprs[i1]!, r);
+      if (m.exprs.length > 0) {
+        let i3 = m.exprs.splice(0);
+        i3.reverse();
+        while (i3.length > 0) {
+          let e3 = i3.pop()!;
+          e3 = rebuiltExpr(e3, r);
+          m.exprs.push(e3);
+        }
       }
       break;
     case "tagged":
       m.tag = rebuiltExpr(m.tag, r);
-      for (let i1 = 0; i1 < m.typeArgs.length; i1++) {
-        m.typeArgs[i1] = rebuiltTypeNode(m.typeArgs[i1]!, r);
+      if (m.typeArgs.length > 0) {
+        let i4 = m.typeArgs.splice(0);
+        i4.reverse();
+        while (i4.length > 0) {
+          let e4 = i4.pop()!;
+          e4 = rebuiltTypeNode(e4, r);
+          m.typeArgs.push(e4);
+        }
       }
       m.template = rebuiltExpr(m.template, r);
       break;
@@ -118,41 +220,88 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
       m.value = rebuiltExpr(m.value, r);
       break;
     case "array":
-      for (let i1 = 0; i1 < m.elements.length; i1++) {
-        if (m.elements[i1] !== undefined) {
-          m.elements[i1] = rebuiltExpr(m.elements[i1]!, r);
+      if (m.elements.length > 0) {
+        let i5 = m.elements.splice(0);
+        i5.reverse();
+        while (i5.length > 0) {
+          const last = i5.pop();
+          if (last === undefined) {
+            m.elements.push(undefined);
+          } else {
+            let e5 = last!;
+            e5 = rebuiltExpr(e5, r);
+            m.elements.push(e5);
+          }
         }
       }
       break;
     case "object":
-      for (let i1 = 0; i1 < m.props.length; i1++) {
-        m.props[i1] = rebuiltObjectProp(m.props[i1]!, r);
+      if (m.props.length > 0) {
+        let i6 = m.props.splice(0);
+        i6.reverse();
+        while (i6.length > 0) {
+          let e6 = i6.pop()!;
+          e6 = rebuiltObjectProp(e6, r);
+          m.props.push(e6);
+        }
       }
       break;
     case "function":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i8 = m.typeParams.splice(0);
+        i8.reverse();
+        while (i8.length > 0) {
+          let e8 = i8.pop()!;
+          e8 = rebuiltTypeParam(e8, r);
+          m.typeParams.push(e8);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i9 = m.params.splice(0);
+        i9.reverse();
+        while (i9.length > 0) {
+          let e9 = i9.pop()!;
+          e9 = rebuiltParam(e9, r);
+          m.params.push(e9);
+        }
       }
       if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
+        let o10 = m.returnType!;
+        o10 = rebuiltTypeNode(o10, r);
+        m.returnType = o10;
       }
+      const l11 = r.currentList(m.id, "body");
+      if (l11 !== undefined) m.body = l11;
       rebuiltStmts(m.body, r);
       break;
     case "arrow":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i12 = m.typeParams.splice(0);
+        i12.reverse();
+        while (i12.length > 0) {
+          let e12 = i12.pop()!;
+          e12 = rebuiltTypeParam(e12, r);
+          m.typeParams.push(e12);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i13 = m.params.splice(0);
+        i13.reverse();
+        while (i13.length > 0) {
+          let e13 = i13.pop()!;
+          e13 = rebuiltParam(e13, r);
+          m.params.push(e13);
+        }
       }
       if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
+        let o14 = m.returnType!;
+        o14 = rebuiltTypeNode(o14, r);
+        m.returnType = o14;
       }
       if (m.throws !== undefined) {
-        m.throws = rebuiltTypeNode(m.throws!, r);
+        let v15 = m.throws!;
+        v15 = rebuiltTypeNode(v15, r);
+        m.throws = v15;
       }
       m.body = rebuiltOneOf0(m.body, r);
       break;
@@ -165,59 +314,125 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
       break;
     case "call":
       m.callee = rebuiltExpr(m.callee, r);
-      for (let i1 = 0; i1 < m.typeArgs.length; i1++) {
-        m.typeArgs[i1] = rebuiltTypeNode(m.typeArgs[i1]!, r);
+      if (m.typeArgs.length > 0) {
+        let i16 = m.typeArgs.splice(0);
+        i16.reverse();
+        while (i16.length > 0) {
+          let e16 = i16.pop()!;
+          e16 = rebuiltTypeNode(e16, r);
+          m.typeArgs.push(e16);
+        }
       }
-      for (let i1 = 0; i1 < m.args.length; i1++) {
-        m.args[i1] = rebuiltExpr(m.args[i1]!, r);
+      if (m.args.length > 0) {
+        let i17 = m.args.splice(0);
+        i17.reverse();
+        while (i17.length > 0) {
+          let e17 = i17.pop()!;
+          e17 = rebuiltExpr(e17, r);
+          m.args.push(e17);
+        }
       }
       break;
     case "new":
       m.callee = rebuiltExpr(m.callee, r);
-      for (let i1 = 0; i1 < m.typeArgs.length; i1++) {
-        m.typeArgs[i1] = rebuiltTypeNode(m.typeArgs[i1]!, r);
+      if (m.typeArgs.length > 0) {
+        let i20 = m.typeArgs.splice(0);
+        i20.reverse();
+        while (i20.length > 0) {
+          let e20 = i20.pop()!;
+          e20 = rebuiltTypeNode(e20, r);
+          m.typeArgs.push(e20);
+        }
       }
       if (m.args !== undefined) {
-        for (let i1 = 0; i1 < m.args!.length; i1++) {
-          m.args![i1] = rebuiltExpr(m.args![i1]!, r);
+        let o21 = m.args!;
+        if (o21.length > 0) {
+          let i22 = o21.splice(0);
+          i22.reverse();
+          while (i22.length > 0) {
+            let e22 = i22.pop()!;
+            e22 = rebuiltExpr(e22, r);
+            o21.push(e22);
+          }
         }
+        m.args = o21;
       }
       break;
     case "instantiation":
       m.expr = rebuiltExpr(m.expr, r);
-      for (let i1 = 0; i1 < m.typeArgs.length; i1++) {
-        m.typeArgs[i1] = rebuiltTypeNode(m.typeArgs[i1]!, r);
+      if (m.typeArgs.length > 0) {
+        let i23 = m.typeArgs.splice(0);
+        i23.reverse();
+        while (i23.length > 0) {
+          let e23 = i23.pop()!;
+          e23 = rebuiltTypeNode(e23, r);
+          m.typeArgs.push(e23);
+        }
       }
       break;
     case "import":
-      for (let i1 = 0; i1 < m.args.length; i1++) {
-        m.args[i1] = rebuiltExpr(m.args[i1]!, r);
+      if (m.args.length > 0) {
+        let i24 = m.args.splice(0);
+        i24.reverse();
+        while (i24.length > 0) {
+          let e24 = i24.pop()!;
+          e24 = rebuiltExpr(e24, r);
+          m.args.push(e24);
+        }
       }
       break;
     case "nonNull":
       m.expr = rebuiltExpr(m.expr, r);
       if (m.narrows !== undefined) {
-        m.narrows = rebuiltTypeNode(m.narrows!, r);
+        let v25 = m.narrows!;
+        v25 = rebuiltTypeNode(v25, r);
+        m.narrows = v25;
       }
       break;
     case "throw":
       m.value = rebuiltExpr(m.value, r);
       break;
     case "class":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i29 = m.decorators.splice(0);
+        i29.reverse();
+        while (i29.length > 0) {
+          let e29 = i29.pop()!;
+          e29 = rebuiltExpr(e29, r);
+          m.decorators.push(e29);
+        }
       }
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i30 = m.typeParams.splice(0);
+        i30.reverse();
+        while (i30.length > 0) {
+          let e30 = i30.pop()!;
+          e30 = rebuiltTypeParam(e30, r);
+          m.typeParams.push(e30);
+        }
       }
       if (m.extends !== undefined) {
-        m.extends = rebuiltExpr(m.extends!, r);
+        let o31 = m.extends!;
+        o31 = rebuiltExpr(o31, r);
+        m.extends = o31;
       }
-      for (let i1 = 0; i1 < m.implements.length; i1++) {
-        m.implements[i1] = rebuiltTypeNode(m.implements[i1]!, r);
+      if (m.implements.length > 0) {
+        let i32 = m.implements.splice(0);
+        i32.reverse();
+        while (i32.length > 0) {
+          let e32 = i32.pop()!;
+          e32 = rebuiltTypeNode(e32, r);
+          m.implements.push(e32);
+        }
       }
-      for (let i1 = 0; i1 < m.members.length; i1++) {
-        m.members[i1] = rebuiltClassMember(m.members[i1]!, r);
+      if (m.members.length > 0) {
+        let i33 = m.members.splice(0);
+        i33.reverse();
+        while (i33.length > 0) {
+          let e33 = i33.pop()!;
+          e33 = rebuiltClassMember(e33, r);
+          m.members.push(e33);
+        }
       }
       break;
     case "unary":
@@ -245,8 +460,14 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
       break;
     case "match":
       m.subject = rebuiltExpr(m.subject, r);
-      for (let i1 = 0; i1 < m.arms.length; i1++) {
-        m.arms[i1] = rebuiltMatchArm(m.arms[i1]!, r);
+      if (m.arms.length > 0) {
+        let i36 = m.arms.splice(0);
+        i36.reverse();
+        while (i36.length > 0) {
+          let e36 = i36.pop()!;
+          e36 = rebuiltMatchArm(e36, r);
+          m.arms.push(e36);
+        }
       }
       break;
     case "comptime":
@@ -260,13 +481,21 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
       m.value = rebuiltExpr(m.value, r);
       break;
     case "sequence":
-      for (let i1 = 0; i1 < m.exprs.length; i1++) {
-        m.exprs[i1] = rebuiltExpr(m.exprs[i1]!, r);
+      if (m.exprs.length > 0) {
+        let i37 = m.exprs.splice(0);
+        i37.reverse();
+        while (i37.length > 0) {
+          let e37 = i37.pop()!;
+          e37 = rebuiltExpr(e37, r);
+          m.exprs.push(e37);
+        }
       }
       break;
     case "yield":
       if (m.value !== undefined) {
-        m.value = rebuiltExpr(m.value!, r);
+        let o38 = m.value!;
+        o38 = rebuiltExpr(o38, r);
+        m.value = o38;
       }
       break;
     case "as":
@@ -286,40 +515,64 @@ export function rebuiltExpr(n: Expr, r: Ref<Replacements>): Expr {
 }
 
 export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
-  let m = r.current(n);
+  let m = r.currentStmt(n);
   switch (m.kind) {
     case "expr":
       m.expr = rebuiltExpr(m.expr, r);
       break;
     case "let":
-      for (let i1 = 0; i1 < m.declarations.length; i1++) {
-        m.declarations[i1] = rebuiltDeclarator(m.declarations[i1]!, r);
+      if (m.declarations.length > 0) {
+        let i1 = m.declarations.splice(0);
+        i1.reverse();
+        while (i1.length > 0) {
+          let e1 = i1.pop()!;
+          e1 = rebuiltDeclarator(e1, r);
+          m.declarations.push(e1);
+        }
       }
       break;
     case "return":
       if (m.value !== undefined) {
-        m.value = rebuiltExpr(m.value!, r);
+        let o2 = m.value!;
+        o2 = rebuiltExpr(o2, r);
+        m.value = o2;
       }
       break;
     case "if":
       m.cond = rebuiltExpr(m.cond, r);
+      const l3 = r.currentList(m.id, "then");
+      if (l3 !== undefined) m.then = l3;
       rebuiltStmts(m.then, r);
       if (m.else !== undefined) {
-        rebuiltStmts(m.else!, r);
+        let o4 = m.else!;
+        const l5 = r.currentList(m.id, "else");
+        if (l5 !== undefined) o4 = l5;
+        rebuiltStmts(o4, r);
+        m.else = o4;
       }
       break;
     case "while":
       m.cond = rebuiltExpr(m.cond, r);
+      const l6 = r.currentList(m.id, "body");
+      if (l6 !== undefined) m.body = l6;
       rebuiltStmts(m.body, r);
       break;
     case "doWhile":
+      const l7 = r.currentList(m.id, "body");
+      if (l7 !== undefined) m.body = l7;
       rebuiltStmts(m.body, r);
       m.cond = rebuiltExpr(m.cond, r);
       break;
     case "switch":
       m.discriminant = rebuiltExpr(m.discriminant, r);
-      for (let i1 = 0; i1 < m.cases.length; i1++) {
-        m.cases[i1] = rebuiltSwitchCase(m.cases[i1]!, r);
+      if (m.cases.length > 0) {
+        let i8 = m.cases.splice(0);
+        i8.reverse();
+        while (i8.length > 0) {
+          let e8 = i8.pop()!;
+          e8 = rebuiltSwitchCase(e8, r);
+          m.cases.push(e8);
+        }
       }
       break;
     case "labeled":
@@ -329,80 +582,146 @@ export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
       m.value = rebuiltExpr(m.value, r);
       break;
     case "try":
+      const l11 = r.currentList(m.id, "block");
+      if (l11 !== undefined) m.block = l11;
       rebuiltStmts(m.block, r);
       if (m.param !== undefined) {
-        m.param = rebuiltPattern(m.param!, r);
+        let o12 = m.param!;
+        o12 = rebuiltPattern(o12, r);
+        m.param = o12;
       }
       if (m.paramType !== undefined) {
-        m.paramType = rebuiltTypeNode(m.paramType!, r);
+        let o13 = m.paramType!;
+        o13 = rebuiltTypeNode(o13, r);
+        m.paramType = o13;
       }
       if (m.handler !== undefined) {
-        rebuiltStmts(m.handler!, r);
+        let o14 = m.handler!;
+        const l15 = r.currentList(m.id, "handler");
+        if (l15 !== undefined) o14 = l15;
+        rebuiltStmts(o14, r);
+        m.handler = o14;
       }
       if (m.finalizer !== undefined) {
-        rebuiltStmts(m.finalizer!, r);
+        let o16 = m.finalizer!;
+        const l17 = r.currentList(m.id, "finalizer");
+        if (l17 !== undefined) o16 = l17;
+        rebuiltStmts(o16, r);
+        m.finalizer = o16;
       }
       break;
     case "for":
       if (m.init !== undefined) {
-        m.init = rebuiltStmt(m.init!, r);
+        let o18 = m.init!;
+        o18 = rebuiltStmt(o18, r);
+        m.init = o18;
       }
       if (m.test !== undefined) {
-        m.test = rebuiltExpr(m.test!, r);
+        let o19 = m.test!;
+        o19 = rebuiltExpr(o19, r);
+        m.test = o19;
       }
       if (m.update !== undefined) {
-        m.update = rebuiltExpr(m.update!, r);
+        let o20 = m.update!;
+        o20 = rebuiltExpr(o20, r);
+        m.update = o20;
       }
+      const l21 = r.currentList(m.id, "body");
+      if (l21 !== undefined) m.body = l21;
       rebuiltStmts(m.body, r);
       break;
     case "forIn":
       m.left = rebuiltOneOf1(m.left, r);
       m.right = rebuiltExpr(m.right, r);
+      const l22 = r.currentList(m.id, "body");
+      if (l22 !== undefined) m.body = l22;
       rebuiltStmts(m.body, r);
       break;
     case "forOf":
       m.left = rebuiltOneOf1(m.left, r);
       m.right = rebuiltExpr(m.right, r);
+      const l23 = r.currentList(m.id, "body");
+      if (l23 !== undefined) m.body = l23;
       rebuiltStmts(m.body, r);
       break;
     case "block":
+      const l24 = r.currentList(m.id, "body");
+      if (l24 !== undefined) m.body = l24;
       rebuiltStmts(m.body, r);
       break;
     case "enum":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i25 = m.typeParams.splice(0);
+        i25.reverse();
+        while (i25.length > 0) {
+          let e25 = i25.pop()!;
+          e25 = rebuiltTypeParam(e25, r);
+          m.typeParams.push(e25);
+        }
       }
-      for (let i1 = 0; i1 < m.members.length; i1++) {
-        m.members[i1] = rebuiltEnumMember(m.members[i1]!, r);
+      if (m.members.length > 0) {
+        let i26 = m.members.splice(0);
+        i26.reverse();
+        while (i26.length > 0) {
+          let e26 = i26.pop()!;
+          e26 = rebuiltEnumMember(e26, r);
+          m.members.push(e26);
+        }
       }
       if (m.decorators !== undefined) {
-        for (let i1 = 0; i1 < m.decorators!.length; i1++) {
-          m.decorators![i1] = rebuiltExpr(m.decorators![i1]!, r);
+        let v27 = m.decorators!;
+        if (v27.length > 0) {
+          let i28 = v27.splice(0);
+          i28.reverse();
+          while (i28.length > 0) {
+            let e28 = i28.pop()!;
+            e28 = rebuiltExpr(e28, r);
+            v27.push(e28);
+          }
         }
+        m.decorators = v27;
       }
       break;
     case "namespace":
       if (m.body !== undefined) {
-        rebuiltStmts(m.body!, r);
+        let o31 = m.body!;
+        const l32 = r.currentList(m.id, "body");
+        if (l32 !== undefined) o31 = l32;
+        rebuiltStmts(o31, r);
+        m.body = o31;
       }
       break;
     case "declare":
       m.body = rebuiltStmt(m.body, r);
       break;
     case "comptime":
+      const l33 = r.currentList(m.id, "body");
+      if (l33 !== undefined) m.body = l33;
       rebuiltStmts(m.body, r);
       break;
     case "unsafe":
+      const l34 = r.currentList(m.id, "body");
+      if (l34 !== undefined) m.body = l34;
       rebuiltStmts(m.body, r);
       break;
     case "import":
       if (m.named !== undefined) {
-        for (let i1 = 0; i1 < m.named!.length; i1++) {
-          m.named![i1] = rebuiltSpecifier(m.named![i1]!, r);
+        let o37 = m.named!;
+        if (o37.length > 0) {
+          let i38 = o37.splice(0);
+          i38.reverse();
+          while (i38.length > 0) {
+            let e38 = i38.pop()!;
+            e38 = rebuiltSpecifier(e38, r);
+            o37.push(e38);
+          }
         }
+        m.named = o37;
       }
       if (m.attributes !== undefined) {
-        m.attributes = rebuiltExpr(m.attributes!, r);
+        let o39 = m.attributes!;
+        o39 = rebuiltExpr(o39, r);
+        m.attributes = o39;
       }
       break;
     case "export":
@@ -410,106 +729,238 @@ export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
       break;
     case "exportDefault":
       if (m.declaration !== undefined) {
-        m.declaration = rebuiltStmt(m.declaration!, r);
+        let o42 = m.declaration!;
+        o42 = rebuiltStmt(o42, r);
+        m.declaration = o42;
       }
       if (m.value !== undefined) {
-        m.value = rebuiltExpr(m.value!, r);
+        let o43 = m.value!;
+        o43 = rebuiltExpr(o43, r);
+        m.value = o43;
       }
       break;
     case "exportNamed":
-      for (let i1 = 0; i1 < m.specifiers.length; i1++) {
-        m.specifiers[i1] = rebuiltSpecifier(m.specifiers[i1]!, r);
+      if (m.specifiers.length > 0) {
+        let i44 = m.specifiers.splice(0);
+        i44.reverse();
+        while (i44.length > 0) {
+          let e44 = i44.pop()!;
+          e44 = rebuiltSpecifier(e44, r);
+          m.specifiers.push(e44);
+        }
       }
       break;
     case "exportAssign":
       m.value = rebuiltExpr(m.value, r);
       break;
     case "typeAlias":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i47 = m.typeParams.splice(0);
+        i47.reverse();
+        while (i47.length > 0) {
+          let e47 = i47.pop()!;
+          e47 = rebuiltTypeParam(e47, r);
+          m.typeParams.push(e47);
+        }
       }
       m.type = rebuiltTypeNode(m.type, r);
       if (m.decorators !== undefined) {
-        for (let i1 = 0; i1 < m.decorators!.length; i1++) {
-          m.decorators![i1] = rebuiltExpr(m.decorators![i1]!, r);
+        let v48 = m.decorators!;
+        if (v48.length > 0) {
+          let i49 = v48.splice(0);
+          i49.reverse();
+          while (i49.length > 0) {
+            let e49 = i49.pop()!;
+            e49 = rebuiltExpr(e49, r);
+            v48.push(e49);
+          }
         }
+        m.decorators = v48;
       }
       if (m.js !== undefined) {
-        m.js = rebuiltJsName(m.js!, r);
+        let v50 = m.js!;
+        v50 = rebuiltJsName(v50, r);
+        m.js = v50;
       }
       break;
     case "interface":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i52 = m.typeParams.splice(0);
+        i52.reverse();
+        while (i52.length > 0) {
+          let e52 = i52.pop()!;
+          e52 = rebuiltTypeParam(e52, r);
+          m.typeParams.push(e52);
+        }
       }
-      for (let i1 = 0; i1 < m.extends.length; i1++) {
-        m.extends[i1] = rebuiltTypeNode(m.extends[i1]!, r);
+      if (m.extends.length > 0) {
+        let i53 = m.extends.splice(0);
+        i53.reverse();
+        while (i53.length > 0) {
+          let e53 = i53.pop()!;
+          e53 = rebuiltTypeNode(e53, r);
+          m.extends.push(e53);
+        }
       }
-      for (let i1 = 0; i1 < m.members.length; i1++) {
-        m.members[i1] = rebuiltTypeMember(m.members[i1]!, r);
+      if (m.members.length > 0) {
+        let i54 = m.members.splice(0);
+        i54.reverse();
+        while (i54.length > 0) {
+          let e54 = i54.pop()!;
+          e54 = rebuiltTypeMember(e54, r);
+          m.members.push(e54);
+        }
       }
       if (m.decorators !== undefined) {
-        for (let i1 = 0; i1 < m.decorators!.length; i1++) {
-          m.decorators![i1] = rebuiltExpr(m.decorators![i1]!, r);
-        }
-      }
-      if (m.js !== undefined) {
-        m.js = rebuiltJsName(m.js!, r);
-      }
-      if (m.jsClass !== undefined) {
-        for (let i1 = 0; i1 < m.jsClass!.constructors.length; i1++) {
-          for (let i2 = 0; i2 < m.jsClass!.constructors[i1]!.length; i2++) {
-            m.jsClass!.constructors[i1]![i2] = rebuiltParam(m.jsClass!.constructors[i1]![i2]!, r);
+        let v55 = m.decorators!;
+        if (v55.length > 0) {
+          let i56 = v55.splice(0);
+          i56.reverse();
+          while (i56.length > 0) {
+            let e56 = i56.pop()!;
+            e56 = rebuiltExpr(e56, r);
+            v55.push(e56);
           }
         }
-        for (let i1 = 0; i1 < m.jsClass!.statics.length; i1++) {
-          m.jsClass!.statics[i1] = rebuiltTypeMember(m.jsClass!.statics[i1]!, r);
+        m.decorators = v55;
+      }
+      if (m.js !== undefined) {
+        let v57 = m.js!;
+        v57 = rebuiltJsName(v57, r);
+        m.js = v57;
+      }
+      if (m.jsClass !== undefined) {
+        let v58 = m.jsClass!;
+        if (v58.constructors.length > 0) {
+          let i59 = v58.constructors.splice(0);
+          i59.reverse();
+          while (i59.length > 0) {
+            let e59 = i59.pop()!;
+            if (e59.length > 0) {
+              let i60 = e59.splice(0);
+              i60.reverse();
+              while (i60.length > 0) {
+                let e60 = i60.pop()!;
+                e60 = rebuiltParam(e60, r);
+                e59.push(e60);
+              }
+            }
+            v58.constructors.push(e59);
+          }
         }
+        if (v58.statics.length > 0) {
+          let i61 = v58.statics.splice(0);
+          i61.reverse();
+          while (i61.length > 0) {
+            let e61 = i61.pop()!;
+            e61 = rebuiltTypeMember(e61, r);
+            v58.statics.push(e61);
+          }
+        }
+        m.jsClass = v58;
       }
       if (m.jsSource !== undefined) {
-        m.jsSource = rebuiltStmt(m.jsSource!, r);
+        let v62 = m.jsSource!;
+        v62 = rebuiltStmt(v62, r);
+        m.jsSource = v62;
       }
       break;
     case "function":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
-      }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
-      }
-      if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
-      }
-      if (m.throws !== undefined) {
-        m.throws = rebuiltTypeNode(m.throws!, r);
-      }
-      if (m.body !== undefined) {
-        rebuiltStmts(m.body!, r);
-      }
-      if (m.decorators !== undefined) {
-        for (let i1 = 0; i1 < m.decorators!.length; i1++) {
-          m.decorators![i1] = rebuiltExpr(m.decorators![i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i63 = m.typeParams.splice(0);
+        i63.reverse();
+        while (i63.length > 0) {
+          let e63 = i63.pop()!;
+          e63 = rebuiltTypeParam(e63, r);
+          m.typeParams.push(e63);
         }
       }
+      if (m.params.length > 0) {
+        let i64 = m.params.splice(0);
+        i64.reverse();
+        while (i64.length > 0) {
+          let e64 = i64.pop()!;
+          e64 = rebuiltParam(e64, r);
+          m.params.push(e64);
+        }
+      }
+      if (m.returnType !== undefined) {
+        let o65 = m.returnType!;
+        o65 = rebuiltTypeNode(o65, r);
+        m.returnType = o65;
+      }
+      if (m.throws !== undefined) {
+        let v66 = m.throws!;
+        v66 = rebuiltTypeNode(v66, r);
+        m.throws = v66;
+      }
+      if (m.body !== undefined) {
+        let o67 = m.body!;
+        const l68 = r.currentList(m.id, "body");
+        if (l68 !== undefined) o67 = l68;
+        rebuiltStmts(o67, r);
+        m.body = o67;
+      }
+      if (m.decorators !== undefined) {
+        let v69 = m.decorators!;
+        if (v69.length > 0) {
+          let i70 = v69.splice(0);
+          i70.reverse();
+          while (i70.length > 0) {
+            let e70 = i70.pop()!;
+            e70 = rebuiltExpr(e70, r);
+            v69.push(e70);
+          }
+        }
+        m.decorators = v69;
+      }
       if (m.js !== undefined) {
-        m.js = rebuiltJsName(m.js!, r);
+        let v71 = m.js!;
+        v71 = rebuiltJsName(v71, r);
+        m.js = v71;
       }
       break;
     case "class":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i76 = m.decorators.splice(0);
+        i76.reverse();
+        while (i76.length > 0) {
+          let e76 = i76.pop()!;
+          e76 = rebuiltExpr(e76, r);
+          m.decorators.push(e76);
+        }
       }
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i77 = m.typeParams.splice(0);
+        i77.reverse();
+        while (i77.length > 0) {
+          let e77 = i77.pop()!;
+          e77 = rebuiltTypeParam(e77, r);
+          m.typeParams.push(e77);
+        }
       }
       if (m.extends !== undefined) {
-        m.extends = rebuiltExpr(m.extends!, r);
+        let o78 = m.extends!;
+        o78 = rebuiltExpr(o78, r);
+        m.extends = o78;
       }
-      for (let i1 = 0; i1 < m.implements.length; i1++) {
-        m.implements[i1] = rebuiltTypeNode(m.implements[i1]!, r);
+      if (m.implements.length > 0) {
+        let i79 = m.implements.splice(0);
+        i79.reverse();
+        while (i79.length > 0) {
+          let e79 = i79.pop()!;
+          e79 = rebuiltTypeNode(e79, r);
+          m.implements.push(e79);
+        }
       }
-      for (let i1 = 0; i1 < m.members.length; i1++) {
-        m.members[i1] = rebuiltClassMember(m.members[i1]!, r);
+      if (m.members.length > 0) {
+        let i80 = m.members.splice(0);
+        i80.reverse();
+        while (i80.length > 0) {
+          let e80 = i80.pop()!;
+          e80 = rebuiltClassMember(e80, r);
+          m.members.push(e80);
+        }
       }
       break;
   }
@@ -517,76 +968,147 @@ export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
 }
 
 export function rebuiltTupleElement(n: TupleElement, r: Ref<Replacements>): TupleElement {
-  let m = r.current(n);
+  let m = r.currentTupleElement(n);
   m.type = rebuiltTypeNode(m.type, r);
   return m;
 }
 
 export function rebuiltTypeMember(n: TypeMember, r: Ref<Replacements>): TypeMember {
-  let m = r.current(n);
+  let m = r.currentTypeMember(n);
   switch (m.kind) {
     case "property":
       m.name = rebuiltOneOf2(m.name, r);
       if (m.type !== undefined) {
-        m.type = rebuiltTypeNode(m.type!, r);
+        let o1 = m.type!;
+        o1 = rebuiltTypeNode(o1, r);
+        m.type = o1;
       }
       break;
     case "method":
       m.name = rebuiltOneOf2(m.name, r);
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i2 = m.typeParams.splice(0);
+        i2.reverse();
+        while (i2.length > 0) {
+          let e2 = i2.pop()!;
+          e2 = rebuiltTypeParam(e2, r);
+          m.typeParams.push(e2);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i3 = m.params.splice(0);
+        i3.reverse();
+        while (i3.length > 0) {
+          let e3 = i3.pop()!;
+          e3 = rebuiltParam(e3, r);
+          m.params.push(e3);
+        }
       }
       if (m.returns !== undefined) {
-        m.returns = rebuiltTypeNode(m.returns!, r);
+        let o4 = m.returns!;
+        o4 = rebuiltTypeNode(o4, r);
+        m.returns = o4;
+      }
+      if (m.throws !== undefined) {
+        let v5 = m.throws!;
+        v5 = rebuiltTypeNode(v5, r);
+        m.throws = v5;
       }
       break;
     case "call":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i6 = m.typeParams.splice(0);
+        i6.reverse();
+        while (i6.length > 0) {
+          let e6 = i6.pop()!;
+          e6 = rebuiltTypeParam(e6, r);
+          m.typeParams.push(e6);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i7 = m.params.splice(0);
+        i7.reverse();
+        while (i7.length > 0) {
+          let e7 = i7.pop()!;
+          e7 = rebuiltParam(e7, r);
+          m.params.push(e7);
+        }
       }
       if (m.returns !== undefined) {
-        m.returns = rebuiltTypeNode(m.returns!, r);
+        let o8 = m.returns!;
+        o8 = rebuiltTypeNode(o8, r);
+        m.returns = o8;
       }
       break;
     case "construct":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i9 = m.typeParams.splice(0);
+        i9.reverse();
+        while (i9.length > 0) {
+          let e9 = i9.pop()!;
+          e9 = rebuiltTypeParam(e9, r);
+          m.typeParams.push(e9);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i10 = m.params.splice(0);
+        i10.reverse();
+        while (i10.length > 0) {
+          let e10 = i10.pop()!;
+          e10 = rebuiltParam(e10, r);
+          m.params.push(e10);
+        }
       }
       if (m.returns !== undefined) {
-        m.returns = rebuiltTypeNode(m.returns!, r);
+        let o11 = m.returns!;
+        o11 = rebuiltTypeNode(o11, r);
+        m.returns = o11;
       }
       break;
     case "index":
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i12 = m.params.splice(0);
+        i12.reverse();
+        while (i12.length > 0) {
+          let e12 = i12.pop()!;
+          e12 = rebuiltParam(e12, r);
+          m.params.push(e12);
+        }
       }
       m.type = rebuiltTypeNode(m.type, r);
       break;
     case "get":
       m.name = rebuiltOneOf2(m.name, r);
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i13 = m.params.splice(0);
+        i13.reverse();
+        while (i13.length > 0) {
+          let e13 = i13.pop()!;
+          e13 = rebuiltParam(e13, r);
+          m.params.push(e13);
+        }
       }
       if (m.returns !== undefined) {
-        m.returns = rebuiltTypeNode(m.returns!, r);
+        let o14 = m.returns!;
+        o14 = rebuiltTypeNode(o14, r);
+        m.returns = o14;
       }
       break;
     case "set":
       m.name = rebuiltOneOf2(m.name, r);
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i15 = m.params.splice(0);
+        i15.reverse();
+        while (i15.length > 0) {
+          let e15 = i15.pop()!;
+          e15 = rebuiltParam(e15, r);
+          m.params.push(e15);
+        }
       }
       if (m.returns !== undefined) {
-        m.returns = rebuiltTypeNode(m.returns!, r);
+        let o16 = m.returns!;
+        o16 = rebuiltTypeNode(o16, r);
+        m.returns = o16;
       }
       break;
   }
@@ -594,7 +1116,7 @@ export function rebuiltTypeMember(n: TypeMember, r: Ref<Replacements>): TypeMemb
 }
 
 export function rebuiltObjectProp(n: ObjectProp, r: Ref<Replacements>): ObjectProp {
-  let m = r.current(n);
+  let m = r.currentObjectProp(n);
   switch (m.kind) {
     case "property":
       m.key = rebuiltOneOf2(m.key, r);
@@ -602,7 +1124,9 @@ export function rebuiltObjectProp(n: ObjectProp, r: Ref<Replacements>): ObjectPr
       break;
     case "shorthand":
       if (m.default !== undefined) {
-        m.default = rebuiltExpr(m.default!, r);
+        let o1 = m.default!;
+        o1 = rebuiltExpr(o1, r);
+        m.default = o1;
       }
       break;
     case "spread":
@@ -610,35 +1134,71 @@ export function rebuiltObjectProp(n: ObjectProp, r: Ref<Replacements>): ObjectPr
       break;
     case "method":
       m.key = rebuiltOneOf2(m.key, r);
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i2 = m.typeParams.splice(0);
+        i2.reverse();
+        while (i2.length > 0) {
+          let e2 = i2.pop()!;
+          e2 = rebuiltTypeParam(e2, r);
+          m.typeParams.push(e2);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i3 = m.params.splice(0);
+        i3.reverse();
+        while (i3.length > 0) {
+          let e3 = i3.pop()!;
+          e3 = rebuiltParam(e3, r);
+          m.params.push(e3);
+        }
       }
       if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
+        let o4 = m.returnType!;
+        o4 = rebuiltTypeNode(o4, r);
+        m.returnType = o4;
       }
+      const l5 = r.currentList(m.id, "body");
+      if (l5 !== undefined) m.body = l5;
       rebuiltStmts(m.body, r);
       break;
     case "get":
       m.key = rebuiltOneOf2(m.key, r);
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i6 = m.params.splice(0);
+        i6.reverse();
+        while (i6.length > 0) {
+          let e6 = i6.pop()!;
+          e6 = rebuiltParam(e6, r);
+          m.params.push(e6);
+        }
       }
       if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
+        let o7 = m.returnType!;
+        o7 = rebuiltTypeNode(o7, r);
+        m.returnType = o7;
       }
+      const l8 = r.currentList(m.id, "body");
+      if (l8 !== undefined) m.body = l8;
       rebuiltStmts(m.body, r);
       break;
     case "set":
       m.key = rebuiltOneOf2(m.key, r);
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i9 = m.params.splice(0);
+        i9.reverse();
+        while (i9.length > 0) {
+          let e9 = i9.pop()!;
+          e9 = rebuiltParam(e9, r);
+          m.params.push(e9);
+        }
       }
       if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
+        let o10 = m.returnType!;
+        o10 = rebuiltTypeNode(o10, r);
+        m.returnType = o10;
       }
+      const l11 = r.currentList(m.id, "body");
+      if (l11 !== undefined) m.body = l11;
       rebuiltStmts(m.body, r);
       break;
   }
@@ -646,124 +1206,264 @@ export function rebuiltObjectProp(n: ObjectProp, r: Ref<Replacements>): ObjectPr
 }
 
 export function rebuiltClassNode(n: ClassNode, r: Ref<Replacements>): ClassNode {
-  let m = r.current(n);
-  for (let i1 = 0; i1 < m.decorators.length; i1++) {
-    m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+  let m = r.currentClassNode(n);
+  if (m.decorators.length > 0) {
+    let i2 = m.decorators.splice(0);
+    i2.reverse();
+    while (i2.length > 0) {
+      let e2 = i2.pop()!;
+      e2 = rebuiltExpr(e2, r);
+      m.decorators.push(e2);
+    }
   }
-  for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-    m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+  if (m.typeParams.length > 0) {
+    let i3 = m.typeParams.splice(0);
+    i3.reverse();
+    while (i3.length > 0) {
+      let e3 = i3.pop()!;
+      e3 = rebuiltTypeParam(e3, r);
+      m.typeParams.push(e3);
+    }
   }
   if (m.extends !== undefined) {
-    m.extends = rebuiltExpr(m.extends!, r);
+    let o4 = m.extends!;
+    o4 = rebuiltExpr(o4, r);
+    m.extends = o4;
   }
-  for (let i1 = 0; i1 < m.implements.length; i1++) {
-    m.implements[i1] = rebuiltTypeNode(m.implements[i1]!, r);
+  if (m.implements.length > 0) {
+    let i5 = m.implements.splice(0);
+    i5.reverse();
+    while (i5.length > 0) {
+      let e5 = i5.pop()!;
+      e5 = rebuiltTypeNode(e5, r);
+      m.implements.push(e5);
+    }
   }
-  for (let i1 = 0; i1 < m.members.length; i1++) {
-    m.members[i1] = rebuiltClassMember(m.members[i1]!, r);
+  if (m.members.length > 0) {
+    let i6 = m.members.splice(0);
+    i6.reverse();
+    while (i6.length > 0) {
+      let e6 = i6.pop()!;
+      e6 = rebuiltClassMember(e6, r);
+      m.members.push(e6);
+    }
   }
   return m;
 }
 
 export function rebuiltClassMember(n: ClassMember, r: Ref<Replacements>): ClassMember {
-  let m = r.current(n);
+  let m = r.currentClassMember(n);
   switch (m.kind) {
     case "field":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i2 = m.decorators.splice(0);
+        i2.reverse();
+        while (i2.length > 0) {
+          let e2 = i2.pop()!;
+          e2 = rebuiltExpr(e2, r);
+          m.decorators.push(e2);
+        }
       }
       m.name = rebuiltOneOf2(m.name, r);
       if (m.type !== undefined) {
-        m.type = rebuiltTypeNode(m.type!, r);
+        let o3 = m.type!;
+        o3 = rebuiltTypeNode(o3, r);
+        m.type = o3;
       }
       if (m.init !== undefined) {
-        m.init = rebuiltExpr(m.init!, r);
+        let o4 = m.init!;
+        o4 = rebuiltExpr(o4, r);
+        m.init = o4;
       }
       break;
     case "method":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i6 = m.decorators.splice(0);
+        i6.reverse();
+        while (i6.length > 0) {
+          let e6 = i6.pop()!;
+          e6 = rebuiltExpr(e6, r);
+          m.decorators.push(e6);
+        }
       }
       m.name = rebuiltOneOf2(m.name, r);
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i7 = m.typeParams.splice(0);
+        i7.reverse();
+        while (i7.length > 0) {
+          let e7 = i7.pop()!;
+          e7 = rebuiltTypeParam(e7, r);
+          m.typeParams.push(e7);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i8 = m.params.splice(0);
+        i8.reverse();
+        while (i8.length > 0) {
+          let e8 = i8.pop()!;
+          e8 = rebuiltParam(e8, r);
+          m.params.push(e8);
+        }
       }
       if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
+        let o9 = m.returnType!;
+        o9 = rebuiltTypeNode(o9, r);
+        m.returnType = o9;
       }
       if (m.throws !== undefined) {
-        m.throws = rebuiltTypeNode(m.throws!, r);
+        let v10 = m.throws!;
+        v10 = rebuiltTypeNode(v10, r);
+        m.throws = v10;
       }
       if (m.body !== undefined) {
-        rebuiltStmts(m.body!, r);
+        let o11 = m.body!;
+        const l12 = r.currentList(m.id, "body");
+        if (l12 !== undefined) o11 = l12;
+        rebuiltStmts(o11, r);
+        m.body = o11;
       }
       break;
     case "constructor":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i17 = m.decorators.splice(0);
+        i17.reverse();
+        while (i17.length > 0) {
+          let e17 = i17.pop()!;
+          e17 = rebuiltExpr(e17, r);
+          m.decorators.push(e17);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i18 = m.params.splice(0);
+        i18.reverse();
+        while (i18.length > 0) {
+          let e18 = i18.pop()!;
+          e18 = rebuiltParam(e18, r);
+          m.params.push(e18);
+        }
       }
       if (m.throws !== undefined) {
-        m.throws = rebuiltTypeNode(m.throws!, r);
+        let v19 = m.throws!;
+        v19 = rebuiltTypeNode(v19, r);
+        m.throws = v19;
       }
       if (m.body !== undefined) {
-        rebuiltStmts(m.body!, r);
+        let o20 = m.body!;
+        const l21 = r.currentList(m.id, "body");
+        if (l21 !== undefined) o20 = l21;
+        rebuiltStmts(o20, r);
+        m.body = o20;
       }
       break;
     case "get":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i23 = m.decorators.splice(0);
+        i23.reverse();
+        while (i23.length > 0) {
+          let e23 = i23.pop()!;
+          e23 = rebuiltExpr(e23, r);
+          m.decorators.push(e23);
+        }
       }
       m.name = rebuiltOneOf2(m.name, r);
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i24 = m.params.splice(0);
+        i24.reverse();
+        while (i24.length > 0) {
+          let e24 = i24.pop()!;
+          e24 = rebuiltParam(e24, r);
+          m.params.push(e24);
+        }
       }
       if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
+        let o25 = m.returnType!;
+        o25 = rebuiltTypeNode(o25, r);
+        m.returnType = o25;
       }
       if (m.throws !== undefined) {
-        m.throws = rebuiltTypeNode(m.throws!, r);
+        let v26 = m.throws!;
+        v26 = rebuiltTypeNode(v26, r);
+        m.throws = v26;
       }
       if (m.body !== undefined) {
-        rebuiltStmts(m.body!, r);
+        let o27 = m.body!;
+        const l28 = r.currentList(m.id, "body");
+        if (l28 !== undefined) o27 = l28;
+        rebuiltStmts(o27, r);
+        m.body = o27;
       }
       break;
     case "set":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i30 = m.decorators.splice(0);
+        i30.reverse();
+        while (i30.length > 0) {
+          let e30 = i30.pop()!;
+          e30 = rebuiltExpr(e30, r);
+          m.decorators.push(e30);
+        }
       }
       m.name = rebuiltOneOf2(m.name, r);
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i31 = m.params.splice(0);
+        i31.reverse();
+        while (i31.length > 0) {
+          let e31 = i31.pop()!;
+          e31 = rebuiltParam(e31, r);
+          m.params.push(e31);
+        }
       }
       if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
+        let o32 = m.returnType!;
+        o32 = rebuiltTypeNode(o32, r);
+        m.returnType = o32;
       }
       if (m.throws !== undefined) {
-        m.throws = rebuiltTypeNode(m.throws!, r);
+        let v33 = m.throws!;
+        v33 = rebuiltTypeNode(v33, r);
+        m.throws = v33;
       }
       if (m.body !== undefined) {
-        rebuiltStmts(m.body!, r);
+        let o34 = m.body!;
+        const l35 = r.currentList(m.id, "body");
+        if (l35 !== undefined) o34 = l35;
+        rebuiltStmts(o34, r);
+        m.body = o34;
       }
       break;
     case "index":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i37 = m.decorators.splice(0);
+        i37.reverse();
+        while (i37.length > 0) {
+          let e37 = i37.pop()!;
+          e37 = rebuiltExpr(e37, r);
+          m.decorators.push(e37);
+        }
       }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
+      if (m.params.length > 0) {
+        let i38 = m.params.splice(0);
+        i38.reverse();
+        while (i38.length > 0) {
+          let e38 = i38.pop()!;
+          e38 = rebuiltParam(e38, r);
+          m.params.push(e38);
+        }
       }
       m.type = rebuiltTypeNode(m.type, r);
       break;
     case "staticBlock":
-      for (let i1 = 0; i1 < m.decorators.length; i1++) {
-        m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+      if (m.decorators.length > 0) {
+        let i40 = m.decorators.splice(0);
+        i40.reverse();
+        while (i40.length > 0) {
+          let e40 = i40.pop()!;
+          e40 = rebuiltExpr(e40, r);
+          m.decorators.push(e40);
+        }
       }
+      const l41 = r.currentList(m.id, "body");
+      if (l41 !== undefined) m.body = l41;
       rebuiltStmts(m.body, r);
       break;
   }
@@ -771,39 +1471,68 @@ export function rebuiltClassMember(n: ClassMember, r: Ref<Replacements>): ClassM
 }
 
 export function rebuiltParam(n: Param, r: Ref<Replacements>): Param {
-  let m = r.current(n);
+  let m = r.currentParam(n);
   m.pattern = rebuiltPattern(m.pattern, r);
   if (m.type !== undefined) {
-    m.type = rebuiltTypeNode(m.type!, r);
+    let o1 = m.type!;
+    o1 = rebuiltTypeNode(o1, r);
+    m.type = o1;
   }
   if (m.default !== undefined) {
-    m.default = rebuiltExpr(m.default!, r);
+    let o2 = m.default!;
+    o2 = rebuiltExpr(o2, r);
+    m.default = o2;
   }
-  for (let i1 = 0; i1 < m.decorators.length; i1++) {
-    m.decorators[i1] = rebuiltExpr(m.decorators[i1]!, r);
+  if (m.decorators.length > 0) {
+    let i4 = m.decorators.splice(0);
+    i4.reverse();
+    while (i4.length > 0) {
+      let e4 = i4.pop()!;
+      e4 = rebuiltExpr(e4, r);
+      m.decorators.push(e4);
+    }
   }
   return m;
 }
 
 export function rebuiltPattern(n: Pattern, r: Ref<Replacements>): Pattern {
-  let m = r.current(n);
+  let m = r.currentPattern(n);
   switch (m.kind) {
     case "object":
-      for (let i1 = 0; i1 < m.props.length; i1++) {
-        m.props[i1] = rebuiltPatternProp(m.props[i1]!, r);
-      }
-      if (m.rest !== undefined) {
-        m.rest = rebuiltPattern(m.rest!, r);
-      }
-      break;
-    case "array":
-      for (let i1 = 0; i1 < m.elements.length; i1++) {
-        if (m.elements[i1] !== undefined) {
-          m.elements[i1] = rebuiltPattern(m.elements[i1]!, r);
+      if (m.props.length > 0) {
+        let i1 = m.props.splice(0);
+        i1.reverse();
+        while (i1.length > 0) {
+          let e1 = i1.pop()!;
+          e1 = rebuiltPatternProp(e1, r);
+          m.props.push(e1);
         }
       }
       if (m.rest !== undefined) {
-        m.rest = rebuiltPattern(m.rest!, r);
+        let o2 = m.rest!;
+        o2 = rebuiltPattern(o2, r);
+        m.rest = o2;
+      }
+      break;
+    case "array":
+      if (m.elements.length > 0) {
+        let i3 = m.elements.splice(0);
+        i3.reverse();
+        while (i3.length > 0) {
+          const last = i3.pop();
+          if (last === undefined) {
+            m.elements.push(undefined);
+          } else {
+            let e3 = last!;
+            e3 = rebuiltPattern(e3, r);
+            m.elements.push(e3);
+          }
+        }
+      }
+      if (m.rest !== undefined) {
+        let o4 = m.rest!;
+        o4 = rebuiltPattern(o4, r);
+        m.rest = o4;
       }
       break;
     case "default":
@@ -818,14 +1547,28 @@ export function rebuiltPattern(n: Pattern, r: Ref<Replacements>): Pattern {
       break;
     case "variant":
       if (m.args !== undefined) {
-        for (let i1 = 0; i1 < m.args!.length; i1++) {
-          m.args![i1] = rebuiltPattern(m.args![i1]!, r);
+        let o5 = m.args!;
+        if (o5.length > 0) {
+          let i6 = o5.splice(0);
+          i6.reverse();
+          while (i6.length > 0) {
+            let e6 = i6.pop()!;
+            e6 = rebuiltPattern(e6, r);
+            o5.push(e6);
+          }
         }
+        m.args = o5;
       }
       break;
     case "or":
-      for (let i1 = 0; i1 < m.patterns.length; i1++) {
-        m.patterns[i1] = rebuiltPattern(m.patterns[i1]!, r);
+      if (m.patterns.length > 0) {
+        let i7 = m.patterns.splice(0);
+        i7.reverse();
+        while (i7.length > 0) {
+          let e7 = i7.pop()!;
+          e7 = rebuiltPattern(e7, r);
+          m.patterns.push(e7);
+        }
       }
       break;
   }
@@ -833,87 +1576,127 @@ export function rebuiltPattern(n: Pattern, r: Ref<Replacements>): Pattern {
 }
 
 export function rebuiltMatchArm(n: MatchArm, r: Ref<Replacements>): MatchArm {
-  let m = r.current(n);
+  let m = r.currentMatchArm(n);
   m.pattern = rebuiltPattern(m.pattern, r);
   if (m.guard !== undefined) {
-    m.guard = rebuiltExpr(m.guard!, r);
+    let o1 = m.guard!;
+    o1 = rebuiltExpr(o1, r);
+    m.guard = o1;
   }
   m.body = rebuiltOneOf3(m.body, r);
   return m;
 }
 
 export function rebuiltPatternProp(n: PatternProp, r: Ref<Replacements>): PatternProp {
-  let m = r.current(n);
+  let m = r.currentPatternProp(n);
   m.key = rebuiltOneOf2(m.key, r);
   m.value = rebuiltPattern(m.value, r);
   return m;
 }
 
 export function rebuiltSpecifier(n: Specifier, r: Ref<Replacements>): Specifier {
-  let m = r.current(n);
+  let m = r.currentSpecifier(n);
   return m;
 }
 
 export function rebuiltEnumMember(n: EnumMember, r: Ref<Replacements>): EnumMember {
-  let m = r.current(n);
+  let m = r.currentEnumMember(n);
   if (m.init !== undefined) {
-    m.init = rebuiltExpr(m.init!, r);
+    let o1 = m.init!;
+    o1 = rebuiltExpr(o1, r);
+    m.init = o1;
   }
   if (m.payload !== undefined) {
-    for (let i1 = 0; i1 < m.payload!.length; i1++) {
-      m.payload![i1] = rebuiltTypeNode(m.payload![i1]!, r);
+    let o2 = m.payload!;
+    if (o2.length > 0) {
+      let i3 = o2.splice(0);
+      i3.reverse();
+      while (i3.length > 0) {
+        let e3 = i3.pop()!;
+        e3 = rebuiltTypeNode(e3, r);
+        o2.push(e3);
+      }
     }
+    m.payload = o2;
   }
   return m;
 }
 
 export function rebuiltSwitchCase(n: SwitchCase, r: Ref<Replacements>): SwitchCase {
-  let m = r.current(n);
+  let m = r.currentSwitchCase(n);
   if (m.test !== undefined) {
-    m.test = rebuiltExpr(m.test!, r);
+    let o1 = m.test!;
+    o1 = rebuiltExpr(o1, r);
+    m.test = o1;
   }
+  const l2 = r.currentList(m.id, "body");
+  if (l2 !== undefined) m.body = l2;
   rebuiltStmts(m.body, r);
   return m;
 }
 
 export function rebuiltDeclarator(n: Declarator, r: Ref<Replacements>): Declarator {
-  let m = r.current(n);
+  let m = r.currentDeclarator(n);
   m.target = rebuiltPattern(m.target, r);
   if (m.type !== undefined) {
-    m.type = rebuiltTypeNode(m.type!, r);
+    let o1 = m.type!;
+    o1 = rebuiltTypeNode(o1, r);
+    m.type = o1;
   }
   if (m.init !== undefined) {
-    m.init = rebuiltExpr(m.init!, r);
+    let o2 = m.init!;
+    o2 = rebuiltExpr(o2, r);
+    m.init = o2;
   }
   return m;
 }
 
 export function rebuiltTypeParam(n: TypeParam, r: Ref<Replacements>): TypeParam {
-  let m = r.current(n);
+  let m = r.currentTypeParam(n);
   if (m.constraint !== undefined) {
-    m.constraint = rebuiltTypeNode(m.constraint!, r);
+    let o1 = m.constraint!;
+    o1 = rebuiltTypeNode(o1, r);
+    m.constraint = o1;
   }
   if (m.default !== undefined) {
-    m.default = rebuiltTypeNode(m.default!, r);
+    let o2 = m.default!;
+    o2 = rebuiltTypeNode(o2, r);
+    m.default = o2;
   }
   return m;
 }
 
 export function rebuiltTypeAlias(n: TypeAlias, r: Ref<Replacements>): TypeAlias {
-  let m = r.current(n);
+  let m = r.currentTypeAlias(n);
   switch (m.kind) {
     case "typeAlias":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i1 = m.typeParams.splice(0);
+        i1.reverse();
+        while (i1.length > 0) {
+          let e1 = i1.pop()!;
+          e1 = rebuiltTypeParam(e1, r);
+          m.typeParams.push(e1);
+        }
       }
       m.type = rebuiltTypeNode(m.type, r);
       if (m.decorators !== undefined) {
-        for (let i1 = 0; i1 < m.decorators!.length; i1++) {
-          m.decorators![i1] = rebuiltExpr(m.decorators![i1]!, r);
+        let v2 = m.decorators!;
+        if (v2.length > 0) {
+          let i3 = v2.splice(0);
+          i3.reverse();
+          while (i3.length > 0) {
+            let e3 = i3.pop()!;
+            e3 = rebuiltExpr(e3, r);
+            v2.push(e3);
+          }
         }
+        m.decorators = v2;
       }
       if (m.js !== undefined) {
-        m.js = rebuiltJsName(m.js!, r);
+        let v4 = m.js!;
+        v4 = rebuiltJsName(v4, r);
+        m.js = v4;
       }
       break;
   }
@@ -921,38 +1704,88 @@ export function rebuiltTypeAlias(n: TypeAlias, r: Ref<Replacements>): TypeAlias 
 }
 
 export function rebuiltInterface(n: Interface, r: Ref<Replacements>): Interface {
-  let m = r.current(n);
+  let m = r.currentInterface(n);
   switch (m.kind) {
     case "interface":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i1 = m.typeParams.splice(0);
+        i1.reverse();
+        while (i1.length > 0) {
+          let e1 = i1.pop()!;
+          e1 = rebuiltTypeParam(e1, r);
+          m.typeParams.push(e1);
+        }
       }
-      for (let i1 = 0; i1 < m.extends.length; i1++) {
-        m.extends[i1] = rebuiltTypeNode(m.extends[i1]!, r);
+      if (m.extends.length > 0) {
+        let i2 = m.extends.splice(0);
+        i2.reverse();
+        while (i2.length > 0) {
+          let e2 = i2.pop()!;
+          e2 = rebuiltTypeNode(e2, r);
+          m.extends.push(e2);
+        }
       }
-      for (let i1 = 0; i1 < m.members.length; i1++) {
-        m.members[i1] = rebuiltTypeMember(m.members[i1]!, r);
+      if (m.members.length > 0) {
+        let i3 = m.members.splice(0);
+        i3.reverse();
+        while (i3.length > 0) {
+          let e3 = i3.pop()!;
+          e3 = rebuiltTypeMember(e3, r);
+          m.members.push(e3);
+        }
       }
       if (m.decorators !== undefined) {
-        for (let i1 = 0; i1 < m.decorators!.length; i1++) {
-          m.decorators![i1] = rebuiltExpr(m.decorators![i1]!, r);
-        }
-      }
-      if (m.js !== undefined) {
-        m.js = rebuiltJsName(m.js!, r);
-      }
-      if (m.jsClass !== undefined) {
-        for (let i1 = 0; i1 < m.jsClass!.constructors.length; i1++) {
-          for (let i2 = 0; i2 < m.jsClass!.constructors[i1]!.length; i2++) {
-            m.jsClass!.constructors[i1]![i2] = rebuiltParam(m.jsClass!.constructors[i1]![i2]!, r);
+        let v4 = m.decorators!;
+        if (v4.length > 0) {
+          let i5 = v4.splice(0);
+          i5.reverse();
+          while (i5.length > 0) {
+            let e5 = i5.pop()!;
+            e5 = rebuiltExpr(e5, r);
+            v4.push(e5);
           }
         }
-        for (let i1 = 0; i1 < m.jsClass!.statics.length; i1++) {
-          m.jsClass!.statics[i1] = rebuiltTypeMember(m.jsClass!.statics[i1]!, r);
+        m.decorators = v4;
+      }
+      if (m.js !== undefined) {
+        let v6 = m.js!;
+        v6 = rebuiltJsName(v6, r);
+        m.js = v6;
+      }
+      if (m.jsClass !== undefined) {
+        let v7 = m.jsClass!;
+        if (v7.constructors.length > 0) {
+          let i8 = v7.constructors.splice(0);
+          i8.reverse();
+          while (i8.length > 0) {
+            let e8 = i8.pop()!;
+            if (e8.length > 0) {
+              let i9 = e8.splice(0);
+              i9.reverse();
+              while (i9.length > 0) {
+                let e9 = i9.pop()!;
+                e9 = rebuiltParam(e9, r);
+                e8.push(e9);
+              }
+            }
+            v7.constructors.push(e8);
+          }
         }
+        if (v7.statics.length > 0) {
+          let i10 = v7.statics.splice(0);
+          i10.reverse();
+          while (i10.length > 0) {
+            let e10 = i10.pop()!;
+            e10 = rebuiltTypeMember(e10, r);
+            v7.statics.push(e10);
+          }
+        }
+        m.jsClass = v7;
       }
       if (m.jsSource !== undefined) {
-        m.jsSource = rebuiltStmt(m.jsSource!, r);
+        let v11 = m.jsSource!;
+        v11 = rebuiltStmt(v11, r);
+        m.jsSource = v11;
       }
       break;
   }
@@ -962,50 +1795,90 @@ export function rebuiltInterface(n: Interface, r: Ref<Replacements>): Interface 
 export function rebuiltJsName(n: JsName, r: Ref<Replacements>): JsName {
   let m = n;
   if (m.overloads !== undefined) {
-    for (let i1 = 0; i1 < m.overloads!.length; i1++) {
-      m.overloads![i1] = rebuiltFunc(m.overloads![i1]!, r);
+    let v2 = m.overloads!;
+    if (v2.length > 0) {
+      let i3 = v2.splice(0);
+      i3.reverse();
+      while (i3.length > 0) {
+        let e3 = i3.pop()!;
+        e3 = rebuiltFunc(e3, r);
+        v2.push(e3);
+      }
     }
+    m.overloads = v2;
   }
   return m;
 }
 
 export function rebuiltFunc(n: Func, r: Ref<Replacements>): Func {
-  let m = r.current(n);
+  let m = r.currentFunc(n);
   switch (m.kind) {
     case "function":
-      for (let i1 = 0; i1 < m.typeParams.length; i1++) {
-        m.typeParams[i1] = rebuiltTypeParam(m.typeParams[i1]!, r);
-      }
-      for (let i1 = 0; i1 < m.params.length; i1++) {
-        m.params[i1] = rebuiltParam(m.params[i1]!, r);
-      }
-      if (m.returnType !== undefined) {
-        m.returnType = rebuiltTypeNode(m.returnType!, r);
-      }
-      if (m.throws !== undefined) {
-        m.throws = rebuiltTypeNode(m.throws!, r);
-      }
-      if (m.body !== undefined) {
-        rebuiltStmts(m.body!, r);
-      }
-      if (m.decorators !== undefined) {
-        for (let i1 = 0; i1 < m.decorators!.length; i1++) {
-          m.decorators![i1] = rebuiltExpr(m.decorators![i1]!, r);
+      if (m.typeParams.length > 0) {
+        let i1 = m.typeParams.splice(0);
+        i1.reverse();
+        while (i1.length > 0) {
+          let e1 = i1.pop()!;
+          e1 = rebuiltTypeParam(e1, r);
+          m.typeParams.push(e1);
         }
       }
+      if (m.params.length > 0) {
+        let i2 = m.params.splice(0);
+        i2.reverse();
+        while (i2.length > 0) {
+          let e2 = i2.pop()!;
+          e2 = rebuiltParam(e2, r);
+          m.params.push(e2);
+        }
+      }
+      if (m.returnType !== undefined) {
+        let o3 = m.returnType!;
+        o3 = rebuiltTypeNode(o3, r);
+        m.returnType = o3;
+      }
+      if (m.throws !== undefined) {
+        let v4 = m.throws!;
+        v4 = rebuiltTypeNode(v4, r);
+        m.throws = v4;
+      }
+      if (m.body !== undefined) {
+        let o5 = m.body!;
+        const l6 = r.currentList(m.id, "body");
+        if (l6 !== undefined) o5 = l6;
+        rebuiltStmts(o5, r);
+        m.body = o5;
+      }
+      if (m.decorators !== undefined) {
+        let v7 = m.decorators!;
+        if (v7.length > 0) {
+          let i8 = v7.splice(0);
+          i8.reverse();
+          while (i8.length > 0) {
+            let e8 = i8.pop()!;
+            e8 = rebuiltExpr(e8, r);
+            v7.push(e8);
+          }
+        }
+        m.decorators = v7;
+      }
       if (m.js !== undefined) {
-        m.js = rebuiltJsName(m.js!, r);
+        let v9 = m.js!;
+        v9 = rebuiltJsName(v9, r);
+        m.js = v9;
       }
       break;
   }
   return m;
 }
 
-export function rebuiltStmts(n: Stmt[], r: Ref<Replacements>): Stmt[] {
-  for (let i = 0; i < n.length; i++) {
-    n[i] = rebuiltStmt(n[i]!, r);
+export function rebuiltStmts(n: Mut<Stmt[]>, r: Ref<Replacements>): void {
+  if (r.isEmpty() || n.length === 0) return;
+  let a = n.splice(0);
+  a.reverse();
+  while (a.length > 0) {
+    n.push(rebuiltStmt(a.pop()!, r));
   }
-  return n;
 }
 
 // Expr | Stmt[]
@@ -1208,7 +2081,2700 @@ export function rebuiltOneOf3(n: Expr | Extract<Stmt, { kind: "block" }>, r: Ref
     case "assertion":
       return rebuiltExpr(n, r) as Expr | Extract<Stmt, { kind: "block" }>;
     case "block":
-      return rebuiltStmt(n, r) as Expr | Extract<Stmt, { kind: "block" }>;
+      rebuiltStmts(n.body, r);
+    return n;
   }
   return n;
+}
+
+export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, usize]): TypeNode {
+  switch (n.kind) {
+    case "ref":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "literal":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "array":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "tuple":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "object":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "function":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "union":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "intersection":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "operator":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "indexed":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "query":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "import":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "conditional":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "infer":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "template":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "mapped":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "predicate":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    default:
+      return n;
+  }
+}
+
+export function idOfTypeNode(n: Ref<TypeNode>): usize {
+  switch (n.kind) {
+    case "ref":
+      return n.id;
+    case "literal":
+      return n.id;
+    case "array":
+      return n.id;
+    case "tuple":
+      return n.id;
+    case "object":
+      return n.id;
+    case "function":
+      return n.id;
+    case "union":
+      return n.id;
+    case "intersection":
+      return n.id;
+    case "operator":
+      return n.id;
+    case "indexed":
+      return n.id;
+    case "query":
+      return n.id;
+    case "import":
+      return n.id;
+    case "conditional":
+      return n.id;
+    case "infer":
+      return n.id;
+    case "template":
+      return n.id;
+    case "mapped":
+      return n.id;
+    default:
+      return n.id;
+  }
+}
+
+export function markTypeNode(n: Ref<TypeNode>): [usize, usize] {
+  switch (n.kind) {
+    case "ref":
+      return [n.id, n.start * 1048576 + n.end];
+    case "literal":
+      return [n.id, n.start * 1048576 + n.end];
+    case "array":
+      return [n.id, n.start * 1048576 + n.end];
+    case "tuple":
+      return [n.id, n.start * 1048576 + n.end];
+    case "object":
+      return [n.id, n.start * 1048576 + n.end];
+    case "function":
+      return [n.id, n.start * 1048576 + n.end];
+    case "union":
+      return [n.id, n.start * 1048576 + n.end];
+    case "intersection":
+      return [n.id, n.start * 1048576 + n.end];
+    case "operator":
+      return [n.id, n.start * 1048576 + n.end];
+    case "indexed":
+      return [n.id, n.start * 1048576 + n.end];
+    case "query":
+      return [n.id, n.start * 1048576 + n.end];
+    case "import":
+      return [n.id, n.start * 1048576 + n.end];
+    case "conditional":
+      return [n.id, n.start * 1048576 + n.end];
+    case "infer":
+      return [n.id, n.start * 1048576 + n.end];
+    case "template":
+      return [n.id, n.start * 1048576 + n.end];
+    case "mapped":
+      return [n.id, n.start * 1048576 + n.end];
+    default:
+      return [n.id, n.start * 1048576 + n.end];
+  }
+}
+
+export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): Expr {
+  switch (n.kind) {
+    case "int":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "float":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "bigint":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "null":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "this":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "super":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "regex":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "template":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "tagged":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "bool":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "string":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "ident":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "spread":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "array":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "object":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "function":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "arrow":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "member":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "index":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "call":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "new":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "instantiation":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "meta":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "import":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "nonNull":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "throw":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "class":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "privateName":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "unary":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "update":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "binary":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "conditional":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "assign":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "pipe":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "topic":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "match":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "comptime":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "unsafe":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "destructure":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "sequence":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "yield":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "as":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "satisfies":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "assertion":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    default:
+      return n;
+  }
+}
+
+export function idOfExpr(n: Ref<Expr>): usize {
+  switch (n.kind) {
+    case "int":
+      return n.id;
+    case "float":
+      return n.id;
+    case "bigint":
+      return n.id;
+    case "null":
+      return n.id;
+    case "this":
+      return n.id;
+    case "super":
+      return n.id;
+    case "regex":
+      return n.id;
+    case "template":
+      return n.id;
+    case "tagged":
+      return n.id;
+    case "bool":
+      return n.id;
+    case "string":
+      return n.id;
+    case "ident":
+      return n.id;
+    case "spread":
+      return n.id;
+    case "array":
+      return n.id;
+    case "object":
+      return n.id;
+    case "function":
+      return n.id;
+    case "arrow":
+      return n.id;
+    case "member":
+      return n.id;
+    case "index":
+      return n.id;
+    case "call":
+      return n.id;
+    case "new":
+      return n.id;
+    case "instantiation":
+      return n.id;
+    case "meta":
+      return n.id;
+    case "import":
+      return n.id;
+    case "nonNull":
+      return n.id;
+    case "throw":
+      return n.id;
+    case "class":
+      return n.id;
+    case "privateName":
+      return n.id;
+    case "unary":
+      return n.id;
+    case "update":
+      return n.id;
+    case "binary":
+      return n.id;
+    case "conditional":
+      return n.id;
+    case "assign":
+      return n.id;
+    case "pipe":
+      return n.id;
+    case "topic":
+      return n.id;
+    case "match":
+      return n.id;
+    case "comptime":
+      return n.id;
+    case "unsafe":
+      return n.id;
+    case "destructure":
+      return n.id;
+    case "sequence":
+      return n.id;
+    case "yield":
+      return n.id;
+    case "as":
+      return n.id;
+    case "satisfies":
+      return n.id;
+    default:
+      return n.id;
+  }
+}
+
+export function markExpr(n: Ref<Expr>): [usize, usize] {
+  switch (n.kind) {
+    case "int":
+      return [n.id, n.start * 1048576 + n.end];
+    case "float":
+      return [n.id, n.start * 1048576 + n.end];
+    case "bigint":
+      return [n.id, n.start * 1048576 + n.end];
+    case "null":
+      return [n.id, n.start * 1048576 + n.end];
+    case "this":
+      return [n.id, n.start * 1048576 + n.end];
+    case "super":
+      return [n.id, n.start * 1048576 + n.end];
+    case "regex":
+      return [n.id, n.start * 1048576 + n.end];
+    case "template":
+      return [n.id, n.start * 1048576 + n.end];
+    case "tagged":
+      return [n.id, n.start * 1048576 + n.end];
+    case "bool":
+      return [n.id, n.start * 1048576 + n.end];
+    case "string":
+      return [n.id, n.start * 1048576 + n.end];
+    case "ident":
+      return [n.id, n.start * 1048576 + n.end];
+    case "spread":
+      return [n.id, n.start * 1048576 + n.end];
+    case "array":
+      return [n.id, n.start * 1048576 + n.end];
+    case "object":
+      return [n.id, n.start * 1048576 + n.end];
+    case "function":
+      return [n.id, n.start * 1048576 + n.end];
+    case "arrow":
+      return [n.id, n.start * 1048576 + n.end];
+    case "member":
+      return [n.id, n.start * 1048576 + n.end];
+    case "index":
+      return [n.id, n.start * 1048576 + n.end];
+    case "call":
+      return [n.id, n.start * 1048576 + n.end];
+    case "new":
+      return [n.id, n.start * 1048576 + n.end];
+    case "instantiation":
+      return [n.id, n.start * 1048576 + n.end];
+    case "meta":
+      return [n.id, n.start * 1048576 + n.end];
+    case "import":
+      return [n.id, n.start * 1048576 + n.end];
+    case "nonNull":
+      return [n.id, n.start * 1048576 + n.end];
+    case "throw":
+      return [n.id, n.start * 1048576 + n.end];
+    case "class":
+      return [n.id, n.start * 1048576 + n.end];
+    case "privateName":
+      return [n.id, n.start * 1048576 + n.end];
+    case "unary":
+      return [n.id, n.start * 1048576 + n.end];
+    case "update":
+      return [n.id, n.start * 1048576 + n.end];
+    case "binary":
+      return [n.id, n.start * 1048576 + n.end];
+    case "conditional":
+      return [n.id, n.start * 1048576 + n.end];
+    case "assign":
+      return [n.id, n.start * 1048576 + n.end];
+    case "pipe":
+      return [n.id, n.start * 1048576 + n.end];
+    case "topic":
+      return [n.id, n.start * 1048576 + n.end];
+    case "match":
+      return [n.id, n.start * 1048576 + n.end];
+    case "comptime":
+      return [n.id, n.start * 1048576 + n.end];
+    case "unsafe":
+      return [n.id, n.start * 1048576 + n.end];
+    case "destructure":
+      return [n.id, n.start * 1048576 + n.end];
+    case "sequence":
+      return [n.id, n.start * 1048576 + n.end];
+    case "yield":
+      return [n.id, n.start * 1048576 + n.end];
+    case "as":
+      return [n.id, n.start * 1048576 + n.end];
+    case "satisfies":
+      return [n.id, n.start * 1048576 + n.end];
+    default:
+      return [n.id, n.start * 1048576 + n.end];
+  }
+}
+
+export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): Stmt {
+  switch (n.kind) {
+    case "expr":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "let":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "return":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "if":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "while":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "doWhile":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "switch":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "labeled":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "break":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "continue":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "throw":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "try":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "for":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "forIn":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "forOf":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "block":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "empty":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "debugger":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "enum":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "namespace":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "declare":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "comptime":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "unsafe":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "import":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "importEquals":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "export":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "exportDefault":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "exportNamed":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "exportAll":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "exportAssign":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "exportAsNamespace":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "typeAlias":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "interface":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "function":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "class":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    default:
+      return n;
+  }
+}
+
+export function idOfStmt(n: Ref<Stmt>): usize {
+  switch (n.kind) {
+    case "expr":
+      return n.id;
+    case "let":
+      return n.id;
+    case "return":
+      return n.id;
+    case "if":
+      return n.id;
+    case "while":
+      return n.id;
+    case "doWhile":
+      return n.id;
+    case "switch":
+      return n.id;
+    case "labeled":
+      return n.id;
+    case "break":
+      return n.id;
+    case "continue":
+      return n.id;
+    case "throw":
+      return n.id;
+    case "try":
+      return n.id;
+    case "for":
+      return n.id;
+    case "forIn":
+      return n.id;
+    case "forOf":
+      return n.id;
+    case "block":
+      return n.id;
+    case "empty":
+      return n.id;
+    case "debugger":
+      return n.id;
+    case "enum":
+      return n.id;
+    case "namespace":
+      return n.id;
+    case "declare":
+      return n.id;
+    case "comptime":
+      return n.id;
+    case "unsafe":
+      return n.id;
+    case "import":
+      return n.id;
+    case "importEquals":
+      return n.id;
+    case "export":
+      return n.id;
+    case "exportDefault":
+      return n.id;
+    case "exportNamed":
+      return n.id;
+    case "exportAll":
+      return n.id;
+    case "exportAssign":
+      return n.id;
+    case "exportAsNamespace":
+      return n.id;
+    case "typeAlias":
+      return n.id;
+    case "interface":
+      return n.id;
+    case "function":
+      return n.id;
+    default:
+      return n.id;
+  }
+}
+
+export function markStmt(n: Ref<Stmt>): [usize, usize] {
+  switch (n.kind) {
+    case "expr":
+      return [n.id, n.start * 1048576 + n.end];
+    case "let":
+      return [n.id, n.start * 1048576 + n.end];
+    case "return":
+      return [n.id, n.start * 1048576 + n.end];
+    case "if":
+      return [n.id, n.start * 1048576 + n.end];
+    case "while":
+      return [n.id, n.start * 1048576 + n.end];
+    case "doWhile":
+      return [n.id, n.start * 1048576 + n.end];
+    case "switch":
+      return [n.id, n.start * 1048576 + n.end];
+    case "labeled":
+      return [n.id, n.start * 1048576 + n.end];
+    case "break":
+      return [n.id, n.start * 1048576 + n.end];
+    case "continue":
+      return [n.id, n.start * 1048576 + n.end];
+    case "throw":
+      return [n.id, n.start * 1048576 + n.end];
+    case "try":
+      return [n.id, n.start * 1048576 + n.end];
+    case "for":
+      return [n.id, n.start * 1048576 + n.end];
+    case "forIn":
+      return [n.id, n.start * 1048576 + n.end];
+    case "forOf":
+      return [n.id, n.start * 1048576 + n.end];
+    case "block":
+      return [n.id, n.start * 1048576 + n.end];
+    case "empty":
+      return [n.id, n.start * 1048576 + n.end];
+    case "debugger":
+      return [n.id, n.start * 1048576 + n.end];
+    case "enum":
+      return [n.id, n.start * 1048576 + n.end];
+    case "namespace":
+      return [n.id, n.start * 1048576 + n.end];
+    case "declare":
+      return [n.id, n.start * 1048576 + n.end];
+    case "comptime":
+      return [n.id, n.start * 1048576 + n.end];
+    case "unsafe":
+      return [n.id, n.start * 1048576 + n.end];
+    case "import":
+      return [n.id, n.start * 1048576 + n.end];
+    case "importEquals":
+      return [n.id, n.start * 1048576 + n.end];
+    case "export":
+      return [n.id, n.start * 1048576 + n.end];
+    case "exportDefault":
+      return [n.id, n.start * 1048576 + n.end];
+    case "exportNamed":
+      return [n.id, n.start * 1048576 + n.end];
+    case "exportAll":
+      return [n.id, n.start * 1048576 + n.end];
+    case "exportAssign":
+      return [n.id, n.start * 1048576 + n.end];
+    case "exportAsNamespace":
+      return [n.id, n.start * 1048576 + n.end];
+    case "typeAlias":
+      return [n.id, n.start * 1048576 + n.end];
+    case "interface":
+      return [n.id, n.start * 1048576 + n.end];
+    case "function":
+      return [n.id, n.start * 1048576 + n.end];
+    default:
+      return [n.id, n.start * 1048576 + n.end];
+  }
+}
+
+export function withIdTupleElement(n: TupleElement, id: usize, by: usize, at?: [usize, usize]): TupleElement {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfTupleElement(n: Ref<TupleElement>): usize {
+  return n.id;
+}
+
+export function markTupleElement(n: Ref<TupleElement>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usize, usize]): TypeMember {
+  switch (n.kind) {
+    case "property":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "method":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "call":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "construct":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "index":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "get":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "set":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    default:
+      return n;
+  }
+}
+
+export function idOfTypeMember(n: Ref<TypeMember>): usize {
+  switch (n.kind) {
+    case "property":
+      return n.id;
+    case "method":
+      return n.id;
+    case "call":
+      return n.id;
+    case "construct":
+      return n.id;
+    case "index":
+      return n.id;
+    case "get":
+      return n.id;
+    default:
+      return n.id;
+  }
+}
+
+export function markTypeMember(n: Ref<TypeMember>): [usize, usize] {
+  switch (n.kind) {
+    case "property":
+      return [n.id, n.start * 1048576 + n.end];
+    case "method":
+      return [n.id, n.start * 1048576 + n.end];
+    case "call":
+      return [n.id, n.start * 1048576 + n.end];
+    case "construct":
+      return [n.id, n.start * 1048576 + n.end];
+    case "index":
+      return [n.id, n.start * 1048576 + n.end];
+    case "get":
+      return [n.id, n.start * 1048576 + n.end];
+    default:
+      return [n.id, n.start * 1048576 + n.end];
+  }
+}
+
+export function withIdObjectProp(n: ObjectProp, id: usize, by: usize, at?: [usize, usize]): ObjectProp {
+  switch (n.kind) {
+    case "property":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "shorthand":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "spread":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "method":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "get":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "set":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    default:
+      return n;
+  }
+}
+
+export function idOfObjectProp(n: Ref<ObjectProp>): usize {
+  switch (n.kind) {
+    case "property":
+      return n.id;
+    case "shorthand":
+      return n.id;
+    case "spread":
+      return n.id;
+    case "method":
+      return n.id;
+    case "get":
+      return n.id;
+    default:
+      return n.id;
+  }
+}
+
+export function markObjectProp(n: Ref<ObjectProp>): [usize, usize] {
+  switch (n.kind) {
+    case "property":
+      return [n.id, n.start * 1048576 + n.end];
+    case "shorthand":
+      return [n.id, n.start * 1048576 + n.end];
+    case "spread":
+      return [n.id, n.start * 1048576 + n.end];
+    case "method":
+      return [n.id, n.start * 1048576 + n.end];
+    case "get":
+      return [n.id, n.start * 1048576 + n.end];
+    default:
+      return [n.id, n.start * 1048576 + n.end];
+  }
+}
+
+export function withIdClassNode(n: ClassNode, id: usize, by: usize, at?: [usize, usize]): ClassNode {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfClassNode(n: Ref<ClassNode>): usize {
+  return n.id;
+}
+
+export function markClassNode(n: Ref<ClassNode>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [usize, usize]): ClassMember {
+  switch (n.kind) {
+    case "field":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "method":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "constructor":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "get":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "set":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "index":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "staticBlock":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    default:
+      return n;
+  }
+}
+
+export function idOfClassMember(n: Ref<ClassMember>): usize {
+  switch (n.kind) {
+    case "field":
+      return n.id;
+    case "method":
+      return n.id;
+    case "constructor":
+      return n.id;
+    case "get":
+      return n.id;
+    case "set":
+      return n.id;
+    case "index":
+      return n.id;
+    default:
+      return n.id;
+  }
+}
+
+export function markClassMember(n: Ref<ClassMember>): [usize, usize] {
+  switch (n.kind) {
+    case "field":
+      return [n.id, n.start * 1048576 + n.end];
+    case "method":
+      return [n.id, n.start * 1048576 + n.end];
+    case "constructor":
+      return [n.id, n.start * 1048576 + n.end];
+    case "get":
+      return [n.id, n.start * 1048576 + n.end];
+    case "set":
+      return [n.id, n.start * 1048576 + n.end];
+    case "index":
+      return [n.id, n.start * 1048576 + n.end];
+    default:
+      return [n.id, n.start * 1048576 + n.end];
+  }
+}
+
+export function withIdParam(n: Param, id: usize, by: usize, at?: [usize, usize]): Param {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfParam(n: Ref<Param>): usize {
+  return n.id;
+}
+
+export function markParam(n: Ref<Param>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usize]): Pattern {
+  switch (n.kind) {
+    case "ident":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "object":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "array":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "default":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "expr":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "wildcard":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "literal":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "variant":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    case "or":
+      n.id = id;
+      if (at !== undefined) {
+        n.start = at[0];
+        n.end = at[1];
+      } else if (by !== 0) {
+        n.start += by;
+        n.end += by;
+      }
+      return n;
+    default:
+      return n;
+  }
+}
+
+export function idOfPattern(n: Ref<Pattern>): usize {
+  switch (n.kind) {
+    case "ident":
+      return n.id;
+    case "object":
+      return n.id;
+    case "array":
+      return n.id;
+    case "default":
+      return n.id;
+    case "expr":
+      return n.id;
+    case "wildcard":
+      return n.id;
+    case "literal":
+      return n.id;
+    case "variant":
+      return n.id;
+    default:
+      return n.id;
+  }
+}
+
+export function markPattern(n: Ref<Pattern>): [usize, usize] {
+  switch (n.kind) {
+    case "ident":
+      return [n.id, n.start * 1048576 + n.end];
+    case "object":
+      return [n.id, n.start * 1048576 + n.end];
+    case "array":
+      return [n.id, n.start * 1048576 + n.end];
+    case "default":
+      return [n.id, n.start * 1048576 + n.end];
+    case "expr":
+      return [n.id, n.start * 1048576 + n.end];
+    case "wildcard":
+      return [n.id, n.start * 1048576 + n.end];
+    case "literal":
+      return [n.id, n.start * 1048576 + n.end];
+    case "variant":
+      return [n.id, n.start * 1048576 + n.end];
+    default:
+      return [n.id, n.start * 1048576 + n.end];
+  }
+}
+
+export function withIdMatchArm(n: MatchArm, id: usize, by: usize, at?: [usize, usize]): MatchArm {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfMatchArm(n: Ref<MatchArm>): usize {
+  return n.id;
+}
+
+export function markMatchArm(n: Ref<MatchArm>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdPatternProp(n: PatternProp, id: usize, by: usize, at?: [usize, usize]): PatternProp {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfPatternProp(n: Ref<PatternProp>): usize {
+  return n.id;
+}
+
+export function markPatternProp(n: Ref<PatternProp>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdSpecifier(n: Specifier, id: usize, by: usize, at?: [usize, usize]): Specifier {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfSpecifier(n: Ref<Specifier>): usize {
+  return n.id;
+}
+
+export function markSpecifier(n: Ref<Specifier>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdEnumMember(n: EnumMember, id: usize, by: usize, at?: [usize, usize]): EnumMember {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfEnumMember(n: Ref<EnumMember>): usize {
+  return n.id;
+}
+
+export function markEnumMember(n: Ref<EnumMember>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdSwitchCase(n: SwitchCase, id: usize, by: usize, at?: [usize, usize]): SwitchCase {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfSwitchCase(n: Ref<SwitchCase>): usize {
+  return n.id;
+}
+
+export function markSwitchCase(n: Ref<SwitchCase>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdDeclarator(n: Declarator, id: usize, by: usize, at?: [usize, usize]): Declarator {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfDeclarator(n: Ref<Declarator>): usize {
+  return n.id;
+}
+
+export function markDeclarator(n: Ref<Declarator>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdTypeParam(n: TypeParam, id: usize, by: usize, at?: [usize, usize]): TypeParam {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfTypeParam(n: Ref<TypeParam>): usize {
+  return n.id;
+}
+
+export function markTypeParam(n: Ref<TypeParam>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdTypeAlias(n: TypeAlias, id: usize, by: usize, at?: [usize, usize]): TypeAlias {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfTypeAlias(n: Ref<TypeAlias>): usize {
+  return n.id;
+}
+
+export function markTypeAlias(n: Ref<TypeAlias>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdInterface(n: Interface, id: usize, by: usize, at?: [usize, usize]): Interface {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfInterface(n: Ref<Interface>): usize {
+  return n.id;
+}
+
+export function markInterface(n: Ref<Interface>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function withIdFunc(n: Func, id: usize, by: usize, at?: [usize, usize]): Func {
+  n.id = id;
+  if (at !== undefined) {
+    n.start = at[0];
+    n.end = at[1];
+  } else if (by !== 0) {
+    n.start += by;
+    n.end += by;
+  }
+  return n;
+}
+
+export function idOfFunc(n: Ref<Func>): usize {
+  return n.id;
+}
+
+export function markFunc(n: Ref<Func>): [usize, usize] {
+  return [n.id, n.start * 1048576 + n.end];
+}
+
+export function cloneTypeNode(n: Ref<TypeNode>): TypeNode {
+  switch (n.kind) {
+    case "ref":
+      return { kind: "ref" as const, start: n.start, end: n.end, id: n.id, name: n.name, args: n.args.map((x1) => cloneTypeNode(x1)) };
+    case "literal":
+      return { kind: "literal" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "array":
+      return { kind: "array" as const, start: n.start, end: n.end, id: n.id, element: cloneTypeNode(n.element) };
+    case "tuple":
+      return { kind: "tuple" as const, start: n.start, end: n.end, id: n.id, elements: n.elements.map((x1) => cloneTupleElement(x1)) };
+    case "object":
+      return { kind: "object" as const, start: n.start, end: n.end, id: n.id, members: n.members.map((x1) => cloneTypeMember(x1)) };
+    case "function":
+      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returns: cloneTypeNode(n.returns), throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, construct: n.construct, abstract: n.abstract };
+    case "union":
+      return { kind: "union" as const, start: n.start, end: n.end, id: n.id, types: n.types.map((x1) => cloneTypeNode(x1)) };
+    case "intersection":
+      return { kind: "intersection" as const, start: n.start, end: n.end, id: n.id, types: n.types.map((x1) => cloneTypeNode(x1)) };
+    case "operator":
+      return { kind: "operator" as const, start: n.start, end: n.end, id: n.id, op: n.op, type: cloneTypeNode(n.type) };
+    case "indexed":
+      return { kind: "indexed" as const, start: n.start, end: n.end, id: n.id, object: cloneTypeNode(n.object), index: cloneTypeNode(n.index) };
+    case "query":
+      return { kind: "query" as const, start: n.start, end: n.end, id: n.id, target: cloneTypeNode(n.target) };
+    case "import":
+      return { kind: "import" as const, start: n.start, end: n.end, id: n.id, module: n.module, name: n.name, args: n.args.map((x1) => cloneTypeNode(x1)) };
+    case "conditional":
+      return { kind: "conditional" as const, start: n.start, end: n.end, id: n.id, check: cloneTypeNode(n.check), extends: cloneTypeNode(n.extends), then: cloneTypeNode(n.then), else: cloneTypeNode(n.else) };
+    case "infer":
+      return { kind: "infer" as const, start: n.start, end: n.end, id: n.id, name: n.name, constraint: n.constraint !== undefined ? cloneTypeNode(n.constraint!) : undefined };
+    case "template":
+      return { kind: "template" as const, start: n.start, end: n.end, id: n.id, quasis: [...n.quasis], types: n.types.map((x1) => cloneTypeNode(x1)) };
+    case "mapped":
+      return { kind: "mapped" as const, start: n.start, end: n.end, id: n.id, name: n.name, constraint: cloneTypeNode(n.constraint), as: n.as !== undefined ? cloneTypeNode(n.as!) : undefined, type: n.type !== undefined ? cloneTypeNode(n.type!) : undefined, readonly: n.readonly, optional: n.optional };
+    case "predicate":
+      return { kind: "predicate" as const, start: n.start, end: n.end, id: n.id, asserts: n.asserts, name: n.name, type: n.type !== undefined ? cloneTypeNode(n.type!) : undefined };
+    default:
+      return cloneTypeNode(n);
+  }
+}
+
+export function cloneExpr(n: Ref<Expr>): Expr {
+  switch (n.kind) {
+    case "int":
+      return { kind: "int" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "float":
+      return { kind: "float" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "bigint":
+      return { kind: "bigint" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "null":
+      return { kind: "null" as const, start: n.start, end: n.end, id: n.id };
+    case "this":
+      return { kind: "this" as const, start: n.start, end: n.end, id: n.id };
+    case "super":
+      return { kind: "super" as const, start: n.start, end: n.end, id: n.id };
+    case "regex":
+      return { kind: "regex" as const, start: n.start, end: n.end, id: n.id, pattern: n.pattern, flags: n.flags };
+    case "template":
+      return { kind: "template" as const, start: n.start, end: n.end, id: n.id, quasis: [...n.quasis], raw: [...n.raw], exprs: n.exprs.map((x1) => cloneExpr(x1)) };
+    case "tagged":
+      return { kind: "tagged" as const, start: n.start, end: n.end, id: n.id, tag: cloneExpr(n.tag), typeArgs: n.typeArgs.map((x1) => cloneTypeNode(x1)), template: cloneExpr(n.template) };
+    case "bool":
+      return { kind: "bool" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "string":
+      return { kind: "string" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "ident":
+      return { kind: "ident" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "spread":
+      return { kind: "spread" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "array":
+      return { kind: "array" as const, start: n.start, end: n.end, id: n.id, elements: n.elements.map((x1): Extract<Expr, { kind: "array" }>["elements"][usize] => (x1 !== undefined ? cloneExpr(x1!) : undefined)) };
+    case "object":
+      return { kind: "object" as const, start: n.start, end: n.end, id: n.id, props: n.props.map((x1) => cloneObjectProp(x1)) };
+    case "function":
+      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, body: cloneStmts(n.body) };
+    case "arrow":
+      return { kind: "arrow" as const, start: n.start, end: n.end, id: n.id, move: n.move, async: n.async, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: cloneOneOf0(n.body) };
+    case "member":
+      return { kind: "member" as const, start: n.start, end: n.end, id: n.id, object: cloneExpr(n.object), name: n.name, optional: n.optional };
+    case "index":
+      return { kind: "index" as const, start: n.start, end: n.end, id: n.id, object: cloneExpr(n.object), index: cloneExpr(n.index), optional: n.optional };
+    case "call":
+      return { kind: "call" as const, start: n.start, end: n.end, id: n.id, callee: cloneExpr(n.callee), typeArgs: n.typeArgs.map((x1) => cloneTypeNode(x1)), args: n.args.map((x1) => cloneExpr(x1)), optional: n.optional, implementation: n.implementation, shown: n.shown };
+    case "new":
+      return { kind: "new" as const, start: n.start, end: n.end, id: n.id, callee: cloneExpr(n.callee), typeArgs: n.typeArgs.map((x1) => cloneTypeNode(x1)), args: n.args !== undefined ? n.args!.map((x1) => cloneExpr(x1)) : undefined };
+    case "instantiation":
+      return { kind: "instantiation" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr), typeArgs: n.typeArgs.map((x1) => cloneTypeNode(x1)) };
+    case "meta":
+      return { kind: "meta" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "import":
+      return { kind: "import" as const, start: n.start, end: n.end, id: n.id, args: n.args.map((x1) => cloneExpr(x1)) };
+    case "nonNull":
+      return { kind: "nonNull" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr), narrows: n.narrows !== undefined ? cloneTypeNode(n.narrows!) : undefined, reason: n.reason, redundant: n.redundant };
+    case "throw":
+      return { kind: "throw" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "class":
+      return { kind: "class" as const, start: n.start, end: n.end, id: n.id, name: n.name, abstract: n.abstract, decorators: n.decorators.map((x1) => cloneExpr(x1)), typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends !== undefined ? cloneExpr(n.extends!) : undefined, implements: n.implements.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneClassMember(x1)), derives: n.derives !== undefined ? [...n.derives!] : undefined };
+    case "privateName":
+      return { kind: "privateName" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "unary":
+      return { kind: "unary" as const, start: n.start, end: n.end, id: n.id, op: n.op, operand: cloneExpr(n.operand) };
+    case "update":
+      return { kind: "update" as const, start: n.start, end: n.end, id: n.id, op: n.op, prefix: n.prefix, operand: cloneExpr(n.operand) };
+    case "binary":
+      return { kind: "binary" as const, start: n.start, end: n.end, id: n.id, op: n.op, left: cloneExpr(n.left), right: cloneExpr(n.right) };
+    case "conditional":
+      return { kind: "conditional" as const, start: n.start, end: n.end, id: n.id, cond: cloneExpr(n.cond), then: cloneExpr(n.then), else: cloneExpr(n.else) };
+    case "assign":
+      return { kind: "assign" as const, start: n.start, end: n.end, id: n.id, op: n.op, target: cloneExpr(n.target), value: cloneExpr(n.value) };
+    case "pipe":
+      return { kind: "pipe" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value), body: cloneExpr(n.body) };
+    case "topic":
+      return { kind: "topic" as const, start: n.start, end: n.end, id: n.id };
+    case "match":
+      return { kind: "match" as const, start: n.start, end: n.end, id: n.id, subject: cloneExpr(n.subject), arms: n.arms.map((x1) => cloneMatchArm(x1)) };
+    case "comptime":
+      return { kind: "comptime" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr) };
+    case "unsafe":
+      return { kind: "unsafe" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr) };
+    case "destructure":
+      return { kind: "destructure" as const, start: n.start, end: n.end, id: n.id, pattern: clonePattern(n.pattern), value: cloneExpr(n.value) };
+    case "sequence":
+      return { kind: "sequence" as const, start: n.start, end: n.end, id: n.id, exprs: n.exprs.map((x1) => cloneExpr(x1)) };
+    case "yield":
+      return { kind: "yield" as const, start: n.start, end: n.end, id: n.id, value: n.value !== undefined ? cloneExpr(n.value!) : undefined, delegate: n.delegate };
+    case "as":
+      return { kind: "as" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr), type: cloneTypeNode(n.type) };
+    case "satisfies":
+      return { kind: "satisfies" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr), type: cloneTypeNode(n.type) };
+    case "assertion":
+      return { kind: "assertion" as const, start: n.start, end: n.end, id: n.id, type: cloneTypeNode(n.type), expr: cloneExpr(n.expr) };
+    default:
+      return cloneExpr(n);
+  }
+}
+
+export function cloneStmt(n: Ref<Stmt>): Stmt {
+  switch (n.kind) {
+    case "expr":
+      return { kind: "expr" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr) };
+    case "let":
+      return { kind: "let" as const, start: n.start, end: n.end, id: n.id, keyword: n.keyword, declarations: n.declarations.map((x1) => cloneDeclarator(x1)) };
+    case "return":
+      return { kind: "return" as const, start: n.start, end: n.end, id: n.id, value: n.value !== undefined ? cloneExpr(n.value!) : undefined };
+    case "if":
+      return { kind: "if" as const, start: n.start, end: n.end, id: n.id, cond: cloneExpr(n.cond), then: cloneStmts(n.then), else: n.else !== undefined ? cloneStmts(n.else!) : undefined };
+    case "while":
+      return { kind: "while" as const, start: n.start, end: n.end, id: n.id, cond: cloneExpr(n.cond), body: cloneStmts(n.body) };
+    case "doWhile":
+      return { kind: "doWhile" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body), cond: cloneExpr(n.cond) };
+    case "switch":
+      return { kind: "switch" as const, start: n.start, end: n.end, id: n.id, discriminant: cloneExpr(n.discriminant), cases: n.cases.map((x1) => cloneSwitchCase(x1)) };
+    case "labeled":
+      return { kind: "labeled" as const, start: n.start, end: n.end, id: n.id, label: n.label, body: cloneStmt(n.body) };
+    case "break":
+      return { kind: "break" as const, start: n.start, end: n.end, id: n.id, label: n.label };
+    case "continue":
+      return { kind: "continue" as const, start: n.start, end: n.end, id: n.id, label: n.label };
+    case "throw":
+      return { kind: "throw" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "try":
+      return { kind: "try" as const, start: n.start, end: n.end, id: n.id, block: cloneStmts(n.block), param: n.param !== undefined ? clonePattern(n.param!) : undefined, paramType: n.paramType !== undefined ? cloneTypeNode(n.paramType!) : undefined, handler: n.handler !== undefined ? cloneStmts(n.handler!) : undefined, finalizer: n.finalizer !== undefined ? cloneStmts(n.finalizer!) : undefined };
+    case "for":
+      return { kind: "for" as const, start: n.start, end: n.end, id: n.id, init: n.init !== undefined ? cloneStmt(n.init!) : undefined, test: n.test !== undefined ? cloneExpr(n.test!) : undefined, update: n.update !== undefined ? cloneExpr(n.update!) : undefined, body: cloneStmts(n.body) };
+    case "forIn":
+      return { kind: "forIn" as const, start: n.start, end: n.end, id: n.id, await: n.await, left: cloneOneOf1(n.left), right: cloneExpr(n.right), body: cloneStmts(n.body) };
+    case "forOf":
+      return { kind: "forOf" as const, start: n.start, end: n.end, id: n.id, await: n.await, left: cloneOneOf1(n.left), right: cloneExpr(n.right), body: cloneStmts(n.body) };
+    case "block":
+      return { kind: "block" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body) };
+    case "empty":
+      return { kind: "empty" as const, start: n.start, end: n.end, id: n.id };
+    case "debugger":
+      return { kind: "debugger" as const, start: n.start, end: n.end, id: n.id };
+    case "enum":
+      return { kind: "enum" as const, start: n.start, end: n.end, id: n.id, name: n.name, const: n.const, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), members: n.members.map((x1) => cloneEnumMember(x1)), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, derives: n.derives !== undefined ? [...n.derives!] : undefined };
+    case "namespace":
+      return { kind: "namespace" as const, start: n.start, end: n.end, id: n.id, name: n.name, quoted: n.quoted, global: n.global, body: n.body !== undefined ? cloneStmts(n.body!) : undefined };
+    case "declare":
+      return { kind: "declare" as const, start: n.start, end: n.end, id: n.id, body: cloneStmt(n.body) };
+    case "comptime":
+      return { kind: "comptime" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body) };
+    case "unsafe":
+      return { kind: "unsafe" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body) };
+    case "import":
+      return { kind: "import" as const, start: n.start, end: n.end, id: n.id, typeOnly: n.typeOnly, defer: n.defer, default: n.default, namespace: n.namespace, named: n.named !== undefined ? n.named!.map((x1) => cloneSpecifier(x1)) : undefined, module: n.module, attributes: n.attributes !== undefined ? cloneExpr(n.attributes!) : undefined };
+    case "importEquals":
+      return { kind: "importEquals" as const, start: n.start, end: n.end, id: n.id, typeOnly: n.typeOnly, name: n.name, require: n.require, entity: n.entity };
+    case "export":
+      return { kind: "export" as const, start: n.start, end: n.end, id: n.id, body: cloneStmt(n.body) };
+    case "exportDefault":
+      return { kind: "exportDefault" as const, start: n.start, end: n.end, id: n.id, declaration: n.declaration !== undefined ? cloneStmt(n.declaration!) : undefined, value: n.value !== undefined ? cloneExpr(n.value!) : undefined };
+    case "exportNamed":
+      return { kind: "exportNamed" as const, start: n.start, end: n.end, id: n.id, typeOnly: n.typeOnly, specifiers: n.specifiers.map((x1) => cloneSpecifier(x1)), module: n.module };
+    case "exportAll":
+      return { kind: "exportAll" as const, start: n.start, end: n.end, id: n.id, typeOnly: n.typeOnly, alias: n.alias, module: n.module };
+    case "exportAssign":
+      return { kind: "exportAssign" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "exportAsNamespace":
+      return { kind: "exportAsNamespace" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "typeAlias":
+      return { kind: "typeAlias" as const, start: n.start, end: n.end, id: n.id, name: n.name, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), type: cloneTypeNode(n.type), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, shown: n.shown };
+    case "interface":
+      return { kind: "interface" as const, start: n.start, end: n.end, id: n.id, name: n.name, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneTypeMember(x1)), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, jsClass: n.jsClass !== undefined ? { constructors: n.jsClass!.constructors.map((x1) => x1.map((x2) => cloneParam(x2))), statics: n.jsClass!.statics.map((x1) => cloneTypeMember(x1)) } : undefined, jsSource: n.jsSource !== undefined ? cloneStmt(n.jsSource!) : undefined };
+    case "function":
+      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature };
+    case "class":
+      return { kind: "class" as const, start: n.start, end: n.end, id: n.id, name: n.name, abstract: n.abstract, decorators: n.decorators.map((x1) => cloneExpr(x1)), typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends !== undefined ? cloneExpr(n.extends!) : undefined, implements: n.implements.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneClassMember(x1)), derives: n.derives !== undefined ? [...n.derives!] : undefined };
+    default:
+      return cloneStmt(n);
+  }
+}
+
+export function cloneTupleElement(n: Ref<TupleElement>): TupleElement {
+  return { start: n.start, end: n.end, id: n.id, name: n.name, optional: n.optional, rest: n.rest, type: cloneTypeNode(n.type) };
+}
+
+export function cloneTypeMember(n: Ref<TypeMember>): TypeMember {
+  switch (n.kind) {
+    case "property":
+      return { kind: "property" as const, start: n.start, end: n.end, id: n.id, name: cloneOneOf2(n.name), optional: n.optional, readonly: n.readonly, type: n.type !== undefined ? cloneTypeNode(n.type!) : undefined };
+    case "method":
+      return { kind: "method" as const, start: n.start, end: n.end, id: n.id, name: cloneOneOf2(n.name), optional: n.optional, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returns: n.returns !== undefined ? cloneTypeNode(n.returns!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined };
+    case "call":
+      return { kind: "call" as const, start: n.start, end: n.end, id: n.id, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returns: n.returns !== undefined ? cloneTypeNode(n.returns!) : undefined };
+    case "construct":
+      return { kind: "construct" as const, start: n.start, end: n.end, id: n.id, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returns: n.returns !== undefined ? cloneTypeNode(n.returns!) : undefined };
+    case "index":
+      return { kind: "index" as const, start: n.start, end: n.end, id: n.id, readonly: n.readonly, params: n.params.map((x1) => cloneParam(x1)), type: cloneTypeNode(n.type) };
+    case "get":
+      return { kind: "get" as const, start: n.start, end: n.end, id: n.id, name: cloneOneOf2(n.name), params: n.params.map((x1) => cloneParam(x1)), returns: n.returns !== undefined ? cloneTypeNode(n.returns!) : undefined };
+    case "set":
+      return { kind: "set" as const, start: n.start, end: n.end, id: n.id, name: cloneOneOf2(n.name), params: n.params.map((x1) => cloneParam(x1)), returns: n.returns !== undefined ? cloneTypeNode(n.returns!) : undefined };
+    default:
+      return cloneTypeMember(n);
+  }
+}
+
+export function cloneObjectProp(n: Ref<ObjectProp>): ObjectProp {
+  switch (n.kind) {
+    case "property":
+      return { kind: "property" as const, start: n.start, end: n.end, id: n.id, key: cloneOneOf2(n.key), value: cloneExpr(n.value) };
+    case "shorthand":
+      return { kind: "shorthand" as const, start: n.start, end: n.end, id: n.id, name: n.name, default: n.default !== undefined ? cloneExpr(n.default!) : undefined };
+    case "spread":
+      return { kind: "spread" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "method":
+      return { kind: "method" as const, start: n.start, end: n.end, id: n.id, key: cloneOneOf2(n.key), async: n.async, generator: n.generator, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, body: cloneStmts(n.body) };
+    case "get":
+      return { kind: "get" as const, start: n.start, end: n.end, id: n.id, key: cloneOneOf2(n.key), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, body: cloneStmts(n.body) };
+    case "set":
+      return { kind: "set" as const, start: n.start, end: n.end, id: n.id, key: cloneOneOf2(n.key), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, body: cloneStmts(n.body) };
+    default:
+      return cloneObjectProp(n);
+  }
+}
+
+export function cloneClassNode(n: Ref<ClassNode>): ClassNode {
+  return { start: n.start, end: n.end, id: n.id, name: n.name, abstract: n.abstract, decorators: n.decorators.map((x1) => cloneExpr(x1)), typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends !== undefined ? cloneExpr(n.extends!) : undefined, implements: n.implements.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneClassMember(x1)), derives: n.derives !== undefined ? [...n.derives!] : undefined };
+}
+
+export function cloneClassMember(n: Ref<ClassMember>): ClassMember {
+  switch (n.kind) {
+    case "field":
+      return { kind: "field" as const, start: n.start, end: n.end, id: n.id, modifiers: [...n.modifiers], decorators: n.decorators.map((x1) => cloneExpr(x1)), name: cloneOneOf2(n.name), optional: n.optional, definite: n.definite, type: n.type !== undefined ? cloneTypeNode(n.type!) : undefined, init: n.init !== undefined ? cloneExpr(n.init!) : undefined };
+    case "method":
+      return { kind: "method" as const, start: n.start, end: n.end, id: n.id, modifiers: [...n.modifiers], decorators: n.decorators.map((x1) => cloneExpr(x1)), name: cloneOneOf2(n.name), optional: n.optional, generator: n.generator, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature };
+    case "constructor":
+      return { kind: "constructor" as const, start: n.start, end: n.end, id: n.id, modifiers: [...n.modifiers], decorators: n.decorators.map((x1) => cloneExpr(x1)), params: n.params.map((x1) => cloneParam(x1)), throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined };
+    case "get":
+      return { kind: "get" as const, start: n.start, end: n.end, id: n.id, modifiers: [...n.modifiers], decorators: n.decorators.map((x1) => cloneExpr(x1)), name: cloneOneOf2(n.name), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined };
+    case "set":
+      return { kind: "set" as const, start: n.start, end: n.end, id: n.id, modifiers: [...n.modifiers], decorators: n.decorators.map((x1) => cloneExpr(x1)), name: cloneOneOf2(n.name), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined };
+    case "index":
+      return { kind: "index" as const, start: n.start, end: n.end, id: n.id, modifiers: [...n.modifiers], decorators: n.decorators.map((x1) => cloneExpr(x1)), params: n.params.map((x1) => cloneParam(x1)), type: cloneTypeNode(n.type) };
+    case "staticBlock":
+      return { kind: "staticBlock" as const, start: n.start, end: n.end, id: n.id, modifiers: [...n.modifiers], decorators: n.decorators.map((x1) => cloneExpr(x1)), body: cloneStmts(n.body) };
+    default:
+      return cloneClassMember(n);
+  }
+}
+
+export function cloneParam(n: Ref<Param>): Param {
+  return { start: n.start, end: n.end, id: n.id, pattern: clonePattern(n.pattern), type: n.type !== undefined ? cloneTypeNode(n.type!) : undefined, optional: n.optional, rest: n.rest, default: n.default !== undefined ? cloneExpr(n.default!) : undefined, modifiers: [...n.modifiers], decorators: n.decorators.map((x1) => cloneExpr(x1)), comptime: n.comptime };
+}
+
+export function clonePattern(n: Ref<Pattern>): Pattern {
+  switch (n.kind) {
+    case "ident":
+      return { kind: "ident" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "object":
+      return { kind: "object" as const, start: n.start, end: n.end, id: n.id, props: n.props.map((x1) => clonePatternProp(x1)), rest: n.rest !== undefined ? clonePattern(n.rest!) : undefined };
+    case "array":
+      return { kind: "array" as const, start: n.start, end: n.end, id: n.id, elements: n.elements.map((x1): Extract<Pattern, { kind: "array" }>["elements"][usize] => (x1 !== undefined ? clonePattern(x1!) : undefined)), rest: n.rest !== undefined ? clonePattern(n.rest!) : undefined };
+    case "default":
+      return { kind: "default" as const, start: n.start, end: n.end, id: n.id, target: clonePattern(n.target), value: cloneExpr(n.value) };
+    case "expr":
+      return { kind: "expr" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr) };
+    case "wildcard":
+      return { kind: "wildcard" as const, start: n.start, end: n.end, id: n.id };
+    case "literal":
+      return { kind: "literal" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "variant":
+      return { kind: "variant" as const, start: n.start, end: n.end, id: n.id, name: n.name, args: n.args !== undefined ? n.args!.map((x1) => clonePattern(x1)) : undefined };
+    case "or":
+      return { kind: "or" as const, start: n.start, end: n.end, id: n.id, patterns: n.patterns.map((x1) => clonePattern(x1)) };
+    default:
+      return clonePattern(n);
+  }
+}
+
+export function cloneMatchArm(n: Ref<MatchArm>): MatchArm {
+  return { start: n.start, end: n.end, id: n.id, pattern: clonePattern(n.pattern), guard: n.guard !== undefined ? cloneExpr(n.guard!) : undefined, body: cloneOneOf3(n.body) };
+}
+
+export function clonePatternProp(n: Ref<PatternProp>): PatternProp {
+  return { start: n.start, end: n.end, id: n.id, key: cloneOneOf2(n.key), value: clonePattern(n.value) };
+}
+
+export function cloneSpecifier(n: Ref<Specifier>): Specifier {
+  return { start: n.start, end: n.end, id: n.id, name: n.name, alias: n.alias, typeOnly: n.typeOnly };
+}
+
+export function cloneEnumMember(n: Ref<EnumMember>): EnumMember {
+  return { start: n.start, end: n.end, id: n.id, name: n.name, init: n.init !== undefined ? cloneExpr(n.init!) : undefined, payload: n.payload !== undefined ? n.payload!.map((x1) => cloneTypeNode(x1)) : undefined };
+}
+
+export function cloneSwitchCase(n: Ref<SwitchCase>): SwitchCase {
+  return { start: n.start, end: n.end, id: n.id, test: n.test !== undefined ? cloneExpr(n.test!) : undefined, body: cloneStmts(n.body) };
+}
+
+export function cloneDeclarator(n: Ref<Declarator>): Declarator {
+  return { start: n.start, end: n.end, id: n.id, target: clonePattern(n.target), type: n.type !== undefined ? cloneTypeNode(n.type!) : undefined, init: n.init !== undefined ? cloneExpr(n.init!) : undefined };
+}
+
+export function cloneTypeParam(n: Ref<TypeParam>): TypeParam {
+  return { start: n.start, end: n.end, id: n.id, name: n.name, constraint: n.constraint !== undefined ? cloneTypeNode(n.constraint!) : undefined, default: n.default !== undefined ? cloneTypeNode(n.default!) : undefined, modifiers: [...n.modifiers] };
+}
+
+export function cloneTypeAlias(n: Ref<TypeAlias>): TypeAlias {
+  return { kind: "typeAlias" as const, start: n.start, end: n.end, id: n.id, name: n.name, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), type: cloneTypeNode(n.type), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, shown: n.shown };
+}
+
+export function cloneInterface(n: Ref<Interface>): Interface {
+  return { kind: "interface" as const, start: n.start, end: n.end, id: n.id, name: n.name, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneTypeMember(x1)), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, jsClass: n.jsClass !== undefined ? { constructors: n.jsClass!.constructors.map((x1) => x1.map((x2) => cloneParam(x2))), statics: n.jsClass!.statics.map((x1) => cloneTypeMember(x1)) } : undefined, jsSource: n.jsSource !== undefined ? cloneStmt(n.jsSource!) : undefined };
+}
+
+export function cloneJsName(n: Ref<JsName>): JsName {
+  return { module: n.module, package: n.package, name: n.name, const: n.const, overloads: n.overloads !== undefined ? n.overloads!.map((x1) => cloneFunc(x1)) : undefined };
+}
+
+export function cloneFunc(n: Ref<Func>): Func {
+  return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature };
+}
+
+export function cloneStmts(n: Ref<Stmt[]>): Stmt[] {
+  return n.map((s) => cloneStmt(s));
+}
+
+// Expr | Stmt[]
+export function cloneOneOf0(n: Ref<Expr | Stmt[]>): Expr | Stmt[] {
+  if (Array.isArray(n)) return cloneStmts(n);
+  return cloneExpr(n) as Expr | Stmt[];
+}
+
+// Stmt | Pattern
+export function cloneOneOf1(n: Ref<Stmt | Pattern>): Stmt | Pattern {
+  switch (n.kind) {
+    case "expr":
+      return { kind: "expr" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr) };
+    case "let":
+      return { kind: "let" as const, start: n.start, end: n.end, id: n.id, keyword: n.keyword, declarations: n.declarations.map((x1) => cloneDeclarator(x1)) };
+    case "return":
+      return { kind: "return" as const, start: n.start, end: n.end, id: n.id, value: n.value !== undefined ? cloneExpr(n.value!) : undefined };
+    case "if":
+      return { kind: "if" as const, start: n.start, end: n.end, id: n.id, cond: cloneExpr(n.cond), then: cloneStmts(n.then), else: n.else !== undefined ? cloneStmts(n.else!) : undefined };
+    case "while":
+      return { kind: "while" as const, start: n.start, end: n.end, id: n.id, cond: cloneExpr(n.cond), body: cloneStmts(n.body) };
+    case "doWhile":
+      return { kind: "doWhile" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body), cond: cloneExpr(n.cond) };
+    case "switch":
+      return { kind: "switch" as const, start: n.start, end: n.end, id: n.id, discriminant: cloneExpr(n.discriminant), cases: n.cases.map((x1) => cloneSwitchCase(x1)) };
+    case "labeled":
+      return { kind: "labeled" as const, start: n.start, end: n.end, id: n.id, label: n.label, body: cloneStmt(n.body) };
+    case "break":
+      return { kind: "break" as const, start: n.start, end: n.end, id: n.id, label: n.label };
+    case "continue":
+      return { kind: "continue" as const, start: n.start, end: n.end, id: n.id, label: n.label };
+    case "throw":
+      return { kind: "throw" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "try":
+      return { kind: "try" as const, start: n.start, end: n.end, id: n.id, block: cloneStmts(n.block), param: n.param !== undefined ? clonePattern(n.param!) : undefined, paramType: n.paramType !== undefined ? cloneTypeNode(n.paramType!) : undefined, handler: n.handler !== undefined ? cloneStmts(n.handler!) : undefined, finalizer: n.finalizer !== undefined ? cloneStmts(n.finalizer!) : undefined };
+    case "for":
+      return { kind: "for" as const, start: n.start, end: n.end, id: n.id, init: n.init !== undefined ? cloneStmt(n.init!) : undefined, test: n.test !== undefined ? cloneExpr(n.test!) : undefined, update: n.update !== undefined ? cloneExpr(n.update!) : undefined, body: cloneStmts(n.body) };
+    case "forIn":
+      return { kind: "forIn" as const, start: n.start, end: n.end, id: n.id, await: n.await, left: cloneOneOf1(n.left), right: cloneExpr(n.right), body: cloneStmts(n.body) };
+    case "forOf":
+      return { kind: "forOf" as const, start: n.start, end: n.end, id: n.id, await: n.await, left: cloneOneOf1(n.left), right: cloneExpr(n.right), body: cloneStmts(n.body) };
+    case "block":
+      return { kind: "block" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body) };
+    case "empty":
+      return { kind: "empty" as const, start: n.start, end: n.end, id: n.id };
+    case "debugger":
+      return { kind: "debugger" as const, start: n.start, end: n.end, id: n.id };
+    case "enum":
+      return { kind: "enum" as const, start: n.start, end: n.end, id: n.id, name: n.name, const: n.const, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), members: n.members.map((x1) => cloneEnumMember(x1)), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, derives: n.derives !== undefined ? [...n.derives!] : undefined };
+    case "namespace":
+      return { kind: "namespace" as const, start: n.start, end: n.end, id: n.id, name: n.name, quoted: n.quoted, global: n.global, body: n.body !== undefined ? cloneStmts(n.body!) : undefined };
+    case "declare":
+      return { kind: "declare" as const, start: n.start, end: n.end, id: n.id, body: cloneStmt(n.body) };
+    case "comptime":
+      return { kind: "comptime" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body) };
+    case "unsafe":
+      return { kind: "unsafe" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body) };
+    case "import":
+      return { kind: "import" as const, start: n.start, end: n.end, id: n.id, typeOnly: n.typeOnly, defer: n.defer, default: n.default, namespace: n.namespace, named: n.named !== undefined ? n.named!.map((x1) => cloneSpecifier(x1)) : undefined, module: n.module, attributes: n.attributes !== undefined ? cloneExpr(n.attributes!) : undefined };
+    case "importEquals":
+      return { kind: "importEquals" as const, start: n.start, end: n.end, id: n.id, typeOnly: n.typeOnly, name: n.name, require: n.require, entity: n.entity };
+    case "export":
+      return { kind: "export" as const, start: n.start, end: n.end, id: n.id, body: cloneStmt(n.body) };
+    case "exportDefault":
+      return { kind: "exportDefault" as const, start: n.start, end: n.end, id: n.id, declaration: n.declaration !== undefined ? cloneStmt(n.declaration!) : undefined, value: n.value !== undefined ? cloneExpr(n.value!) : undefined };
+    case "exportNamed":
+      return { kind: "exportNamed" as const, start: n.start, end: n.end, id: n.id, typeOnly: n.typeOnly, specifiers: n.specifiers.map((x1) => cloneSpecifier(x1)), module: n.module };
+    case "exportAll":
+      return { kind: "exportAll" as const, start: n.start, end: n.end, id: n.id, typeOnly: n.typeOnly, alias: n.alias, module: n.module };
+    case "exportAssign":
+      return { kind: "exportAssign" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "exportAsNamespace":
+      return { kind: "exportAsNamespace" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "typeAlias":
+      return { kind: "typeAlias" as const, start: n.start, end: n.end, id: n.id, name: n.name, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), type: cloneTypeNode(n.type), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, shown: n.shown };
+    case "interface":
+      return { kind: "interface" as const, start: n.start, end: n.end, id: n.id, name: n.name, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneTypeMember(x1)), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, jsClass: n.jsClass !== undefined ? { constructors: n.jsClass!.constructors.map((x1) => x1.map((x2) => cloneParam(x2))), statics: n.jsClass!.statics.map((x1) => cloneTypeMember(x1)) } : undefined, jsSource: n.jsSource !== undefined ? cloneStmt(n.jsSource!) : undefined };
+    case "function":
+      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature };
+    case "class":
+      return { kind: "class" as const, start: n.start, end: n.end, id: n.id, name: n.name, abstract: n.abstract, decorators: n.decorators.map((x1) => cloneExpr(x1)), typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends !== undefined ? cloneExpr(n.extends!) : undefined, implements: n.implements.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneClassMember(x1)), derives: n.derives !== undefined ? [...n.derives!] : undefined };
+    case "ident":
+      return { kind: "ident" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "object":
+      return { kind: "object" as const, start: n.start, end: n.end, id: n.id, props: n.props.map((x1) => clonePatternProp(x1)), rest: n.rest !== undefined ? clonePattern(n.rest!) : undefined };
+    case "array":
+      return { kind: "array" as const, start: n.start, end: n.end, id: n.id, elements: n.elements.map((x1): Extract<Pattern, { kind: "array" }>["elements"][usize] => (x1 !== undefined ? clonePattern(x1!) : undefined)), rest: n.rest !== undefined ? clonePattern(n.rest!) : undefined };
+    case "default":
+      return { kind: "default" as const, start: n.start, end: n.end, id: n.id, target: clonePattern(n.target), value: cloneExpr(n.value) };
+    case "wildcard":
+      return { kind: "wildcard" as const, start: n.start, end: n.end, id: n.id };
+    case "literal":
+      return { kind: "literal" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "variant":
+      return { kind: "variant" as const, start: n.start, end: n.end, id: n.id, name: n.name, args: n.args !== undefined ? n.args!.map((x1) => clonePattern(x1)) : undefined };
+    case "or":
+      return { kind: "or" as const, start: n.start, end: n.end, id: n.id, patterns: n.patterns.map((x1) => clonePattern(x1)) };
+    default:
+      return cloneOneOf1(n);
+  }
+}
+
+// PropertyName
+export function cloneOneOf2(n: Ref<PropertyName>): PropertyName {
+  if (typeof n === "string") return n;
+  return cloneExpr(n) as PropertyName;
+}
+
+// Expr | Extract<Stmt, { kind: "block" }>
+export function cloneOneOf3(n: Ref<Expr | Extract<Stmt, { kind: "block" }>>): Expr | Extract<Stmt, { kind: "block" }> {
+  switch (n.kind) {
+    case "int":
+      return { kind: "int" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "float":
+      return { kind: "float" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "bigint":
+      return { kind: "bigint" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "null":
+      return { kind: "null" as const, start: n.start, end: n.end, id: n.id };
+    case "this":
+      return { kind: "this" as const, start: n.start, end: n.end, id: n.id };
+    case "super":
+      return { kind: "super" as const, start: n.start, end: n.end, id: n.id };
+    case "regex":
+      return { kind: "regex" as const, start: n.start, end: n.end, id: n.id, pattern: n.pattern, flags: n.flags };
+    case "template":
+      return { kind: "template" as const, start: n.start, end: n.end, id: n.id, quasis: [...n.quasis], raw: [...n.raw], exprs: n.exprs.map((x1) => cloneExpr(x1)) };
+    case "tagged":
+      return { kind: "tagged" as const, start: n.start, end: n.end, id: n.id, tag: cloneExpr(n.tag), typeArgs: n.typeArgs.map((x1) => cloneTypeNode(x1)), template: cloneExpr(n.template) };
+    case "bool":
+      return { kind: "bool" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "string":
+      return { kind: "string" as const, start: n.start, end: n.end, id: n.id, value: n.value };
+    case "ident":
+      return { kind: "ident" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "spread":
+      return { kind: "spread" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "array":
+      return { kind: "array" as const, start: n.start, end: n.end, id: n.id, elements: n.elements.map((x1): Extract<Expr, { kind: "array" }>["elements"][usize] => (x1 !== undefined ? cloneExpr(x1!) : undefined)) };
+    case "object":
+      return { kind: "object" as const, start: n.start, end: n.end, id: n.id, props: n.props.map((x1) => cloneObjectProp(x1)) };
+    case "function":
+      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, body: cloneStmts(n.body) };
+    case "arrow":
+      return { kind: "arrow" as const, start: n.start, end: n.end, id: n.id, move: n.move, async: n.async, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: cloneOneOf0(n.body) };
+    case "member":
+      return { kind: "member" as const, start: n.start, end: n.end, id: n.id, object: cloneExpr(n.object), name: n.name, optional: n.optional };
+    case "index":
+      return { kind: "index" as const, start: n.start, end: n.end, id: n.id, object: cloneExpr(n.object), index: cloneExpr(n.index), optional: n.optional };
+    case "call":
+      return { kind: "call" as const, start: n.start, end: n.end, id: n.id, callee: cloneExpr(n.callee), typeArgs: n.typeArgs.map((x1) => cloneTypeNode(x1)), args: n.args.map((x1) => cloneExpr(x1)), optional: n.optional, implementation: n.implementation, shown: n.shown };
+    case "new":
+      return { kind: "new" as const, start: n.start, end: n.end, id: n.id, callee: cloneExpr(n.callee), typeArgs: n.typeArgs.map((x1) => cloneTypeNode(x1)), args: n.args !== undefined ? n.args!.map((x1) => cloneExpr(x1)) : undefined };
+    case "instantiation":
+      return { kind: "instantiation" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr), typeArgs: n.typeArgs.map((x1) => cloneTypeNode(x1)) };
+    case "meta":
+      return { kind: "meta" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "import":
+      return { kind: "import" as const, start: n.start, end: n.end, id: n.id, args: n.args.map((x1) => cloneExpr(x1)) };
+    case "nonNull":
+      return { kind: "nonNull" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr), narrows: n.narrows !== undefined ? cloneTypeNode(n.narrows!) : undefined, reason: n.reason, redundant: n.redundant };
+    case "throw":
+      return { kind: "throw" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value) };
+    case "class":
+      return { kind: "class" as const, start: n.start, end: n.end, id: n.id, name: n.name, abstract: n.abstract, decorators: n.decorators.map((x1) => cloneExpr(x1)), typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends !== undefined ? cloneExpr(n.extends!) : undefined, implements: n.implements.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneClassMember(x1)), derives: n.derives !== undefined ? [...n.derives!] : undefined };
+    case "privateName":
+      return { kind: "privateName" as const, start: n.start, end: n.end, id: n.id, name: n.name };
+    case "unary":
+      return { kind: "unary" as const, start: n.start, end: n.end, id: n.id, op: n.op, operand: cloneExpr(n.operand) };
+    case "update":
+      return { kind: "update" as const, start: n.start, end: n.end, id: n.id, op: n.op, prefix: n.prefix, operand: cloneExpr(n.operand) };
+    case "binary":
+      return { kind: "binary" as const, start: n.start, end: n.end, id: n.id, op: n.op, left: cloneExpr(n.left), right: cloneExpr(n.right) };
+    case "conditional":
+      return { kind: "conditional" as const, start: n.start, end: n.end, id: n.id, cond: cloneExpr(n.cond), then: cloneExpr(n.then), else: cloneExpr(n.else) };
+    case "assign":
+      return { kind: "assign" as const, start: n.start, end: n.end, id: n.id, op: n.op, target: cloneExpr(n.target), value: cloneExpr(n.value) };
+    case "pipe":
+      return { kind: "pipe" as const, start: n.start, end: n.end, id: n.id, value: cloneExpr(n.value), body: cloneExpr(n.body) };
+    case "topic":
+      return { kind: "topic" as const, start: n.start, end: n.end, id: n.id };
+    case "match":
+      return { kind: "match" as const, start: n.start, end: n.end, id: n.id, subject: cloneExpr(n.subject), arms: n.arms.map((x1) => cloneMatchArm(x1)) };
+    case "comptime":
+      return { kind: "comptime" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr) };
+    case "unsafe":
+      return { kind: "unsafe" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr) };
+    case "destructure":
+      return { kind: "destructure" as const, start: n.start, end: n.end, id: n.id, pattern: clonePattern(n.pattern), value: cloneExpr(n.value) };
+    case "sequence":
+      return { kind: "sequence" as const, start: n.start, end: n.end, id: n.id, exprs: n.exprs.map((x1) => cloneExpr(x1)) };
+    case "yield":
+      return { kind: "yield" as const, start: n.start, end: n.end, id: n.id, value: n.value !== undefined ? cloneExpr(n.value!) : undefined, delegate: n.delegate };
+    case "as":
+      return { kind: "as" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr), type: cloneTypeNode(n.type) };
+    case "satisfies":
+      return { kind: "satisfies" as const, start: n.start, end: n.end, id: n.id, expr: cloneExpr(n.expr), type: cloneTypeNode(n.type) };
+    case "assertion":
+      return { kind: "assertion" as const, start: n.start, end: n.end, id: n.id, type: cloneTypeNode(n.type), expr: cloneExpr(n.expr) };
+    case "block":
+      return { kind: "block" as const, start: n.start, end: n.end, id: n.id, body: cloneStmts(n.body) };
+    default:
+      return cloneOneOf3(n);
+  }
 }

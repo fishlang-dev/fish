@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync,
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAsync, compile, ENGINE, runtimeLinks, runtimeUnits } from "../src/main.ts";
-import { cachedObject, cachedObjectAsync, files, mathObjectsAsync } from "../src/mathlib.ts";
+import { buildSession, cachedObject, cachedObjectAsync, files, mathObjectsAsync } from "../src/mathlib.ts";
 import { STD_SOURCE } from "../src/std.ts";
 import { newSession } from "../src/compilation.ts";
 import { HOST_TARGET } from "../src/target.ts";
@@ -361,9 +361,9 @@ test("a session that parses std each check gives the cached session's IR", () =>
   const programs = sampled();
   const plain = newSession();
   const cached = cachedSession();
-  const load = cached.std.load!;
+  const read = Object.getOwnPropertyDescriptor(cached.std, "tree")!.get!;
   let loads = 0;
-  cached.std.load = () => (loads++, load());
+  Object.defineProperty(cached.std, "tree", { get: () => (loads++, read()) });
   for (const p of programs) expect({ file: p.file, ir: compile(plain, p.src, p.file) }).toEqual({ file: p.file, ir: compile(cached, p.src, p.file) });
   expect(plain.std.parses).toBeGreaterThanOrEqual(programs.length);
   expect(plain.std.parses).toBe(loads);
@@ -396,4 +396,10 @@ test("split and one-module dev builds of sampled test programs behave alike", as
       }
     }
   });
+});
+
+test("giving a session the build caches again keeps the ones it has", () => {
+  const session = buildSession(newSession());
+  session.digests.set("a.c:1:1", "digest");
+  expect(buildSession(session).digests.get("a.c:1:1")).toBe("digest");
 });
