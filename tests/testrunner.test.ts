@@ -175,14 +175,14 @@ const SYSTEM = "declare function system(command: Ptr<u8>): i32;\nfunction main()
 
 test("a child a test leaves running neither holds up its verdict nor outlives it", () => {
   const dir = pkg("children", {
-    "src/main.fsh": `${SYSTEM}test("leaves a child behind", () => {\n  unsafe { system(cString("sleep 30 &")); }\n});\ntest("waits on a child past the limit", () => {\n  unsafe { system(cString("sleep 25")); }\n});\n`,
+    "src/main.fsh": `${SYSTEM}test("leaves a child behind", () => {\n  unsafe { system(cString("sleep 37 &")); }\n});\ntest("waits on a child past the limit", () => {\n  unsafe { system(cString("sleep 26")); }\n});\n`,
   });
   const started = Date.now();
   const { code, out } = fishc(dir);
   expect(Date.now() - started).toBeLessThan(20_000);
   expect(out).toBe("ok src/main.fsh > leaves a child behind\nFAIL src/main.fsh > waits on a child past the limit\ntimed out after 10s\n1 passed, 1 failed\n");
   expect(code).toBe(1);
-  expect(Bun.spawnSync(["pgrep", "-f", "sleep (30|25)$"]).stdout.toString()).toBe("");
+  expect(Bun.spawnSync(["pgrep", "-f", "sleep (37|26)$"]).stdout.toString()).toBe("");
 }, 30_000);
 
 test("stopped by SIGTERM, fishc test ends its tests and removes its build", async () => {

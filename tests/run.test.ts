@@ -58,9 +58,9 @@ async function pooled<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-// A server program may run for 30 seconds, since some wait on real time, like closing an idle
-// connection; any other program that runs past 10 seconds has hung, and is killed.
-const limit = (name: string) => (name.startsWith("http_") ? 30_000 : 10_000);
+// A server or TCP program may run for 30 seconds, since some wait on real time, like closing an idle
+// connection, or on a name lookup that slows under load; any other program that runs past 10 seconds has hung, and is killed.
+const limit = (name: string) => (/^(http|tcp)_/.test(name) ? 30_000 : 10_000);
 
 async function outcome(name: string, file: string, src: string): Promise<Outcome> {
   const empty = { warnings: [], stdout: "", stderr: "", exitCode: 0, signal: null, timedOut: false };

@@ -6,7 +6,7 @@
     "fishc": "src/main.ts"
   },
   "scripts": {
-    "test": "bun test",
+    "test": "bun test --parallel=6 --timings=tests/timings.json",
     "typecheck": "bun check"
   },
   "devDependencies": {
