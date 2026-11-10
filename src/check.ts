@@ -4360,7 +4360,8 @@ class BodyChecker implements Context, GuardHost {
   // `for` head's go in a block around the loop, which scopes them as the head does.
   /** @throws {CompileError} */
   separate(this: Mut<this>, list: Mut<Stmt[]>) {
-    for (let i = list.length - 1; i >= 0; i--) {
+    for (let k = list.length; k > 0; k--) {
+      const i = k - 1;
       const peeked = this.cx.tables.rewrites.getStmt(list[i]!.id);
       // What replaces the statement is worked out first, and the list changed once that is done.
       const s: Ref<Stmt> = peeked !== undefined ? peeked : list[i]!;
@@ -5793,7 +5794,8 @@ class BodyChecker implements Context, GuardHost {
   }
 
   lookup(this: Mut<this>, name: string, at: Ref<Expr | ObjectProp> | undefined): LocalId | undefined {
-    for (let i = this.scopeList().length - 1; i >= (this.state.hidden ? 1 : 0); i--) {
+    for (let k = this.scopeList().length; k > (this.state.hidden ? 1 : 0); k--) {
+      const i = k - 1;
       const local = this.scopeList()[i]!.get(name);
       if (local !== undefined) return local;
     }
@@ -5815,7 +5817,8 @@ class BodyChecker implements Context, GuardHost {
   }
 
   peek(this: Mut<this>, name: string): LocalId | undefined {
-    for (let i = this.scopeList().length - 1; i >= (this.state.hidden ? 1 : 0); i--) {
+    for (let k = this.scopeList().length; k > (this.state.hidden ? 1 : 0); k--) {
+      const i = k - 1;
       const local = this.scopeList()[i]!.get(name);
       if (local !== undefined) return local;
     }
