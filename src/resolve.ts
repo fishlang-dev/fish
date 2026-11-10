@@ -1395,6 +1395,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     let byArgs = this.host.resolverState.traits.get(owner)!;
     byArgs.set(key, t);
+    this.host.resolverState.traits.set(owner, byArgs);
     const isInline = this.host.resolverState.inline.has(i.name);
     if (args.length > 0 && !isInline) this.host.tables.typing.noteInterfaceInstance(i.name, key, t);
     // Its members are written where it is declared, with its parameters standing for the arguments.
@@ -1470,13 +1471,16 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         if (!this.host.tables.typing.jsUntyped.has(t)) this.host.tables.typing.jsUntyped.set(t, new Map<string, CompileError>());
         let untyped = this.host.tables.typing.jsUntyped.get(t)!;
         untyped.set(key, e);
+        this.host.tables.typing.jsUntyped.set(t, untyped);
         if ("optional" in m && m.optional) {
           if (!this.host.tables.typing.jsOptional.has(t)) this.host.tables.typing.jsOptional.set(t, new Set<string>());
           let optional = this.host.tables.typing.jsOptional.get(t)!;
           optional.add(key);
+          this.host.tables.typing.jsOptional.set(t, optional);
         } else if (this.host.tables.typing.jsOptional.has(t)) {
           let optional = this.host.tables.typing.jsOptional.get(t)!;
           optional.delete(key);
+          this.host.tables.typing.jsOptional.set(t, optional);
         }
       }
     }

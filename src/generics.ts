@@ -784,6 +784,7 @@ export class Instancing<H extends InstancingHost> {
       ...emptyTables(),
     });
     byKey.set(key, found.id);
+    this.host.instancingState.instances.set(f.bodyId, byKey);
     this.host.instancingState.pending.push(found.id);
     return found;
   }
@@ -1449,10 +1450,12 @@ export class GenericClasses<H extends GenericClassesHost> {
     const id = declareClass(this.host.tables, template, `${template.name}<${shown.join(", ")}>`, scope);
     let byKey = this.host.genericClassesState.instancesOf.get(template.id)!;
     byKey.set(key, id);
+    this.host.genericClassesState.instancesOf.set(template.id, byKey);
     const type = this.host.tables.arenas.classOf(id).type;
     this.host.tables.typing.noteClassInstance(template.name, key, type);
     let shapeSet = this.host.genericClassesState.shapesOf.get(template.id)!;
     shapeSet.add(shape);
+    this.host.genericClassesState.shapesOf.set(template.id, shapeSet);
     this.host.register(id);
     this.host.genericClassesState.uses.set(type, { c: id, at: { start: at.start, end: at.end }, derived });
     let lowered: Type[] = [];
