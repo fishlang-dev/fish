@@ -2311,6 +2311,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         const lowered = this.tables.typing.lower(instance.caught.getById(k)!);
         instance.caught.setValueById(k, lowered);
       }
+      let narrowedFields: [usize, Type][] = [];
+      if (instance.narrowedFields !== undefined) {
+        for (const k of instance.narrowedFields.ids()) narrowedFields.push([k, this.tables.typing.lower(instance.narrowedFields.getById(k)!)]);
+      }
+      while (narrowedFields.length > 0) {
+        const [k, t] = narrowedFields.shift()!;
+        instance.narrowedFields?.setValueById(k, t);
+      }
       let predicates: [usize, { index: usize; type: Type; yes: boolean; no: boolean }][] = [];
       if (instance.predicates !== undefined) {
         for (const k of instance.predicates.ids()) {
