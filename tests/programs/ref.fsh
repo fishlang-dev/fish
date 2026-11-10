@@ -1125,3 +1125,45 @@ async function main() {
   console.log(v.src.name)
 }
 // error: doesn't live long enough
+// case: ref_method_assumption_from_a_check_that_failed
+// A method checked out of turn whose check fails leaves no answer for its next caller to trust.
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  x(this: Mut<this>, o: Ref<P>, n: i64) {
+    if (n > 0) this.b(o, 1)
+  }
+  b(this: Mut<this>, o: Ref<P>, n: i64): void {
+    if (n > 0) this.b(o, n - 1)
+    if (n > 5) {
+      const loc = new P("l")
+      this.t(loc)
+    }
+    this.src = o
+  }
+  t(this: Mut<this>, l: Ref<P>): void {
+    this.x(l, 0)
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  let v = new View(p)
+  {
+    const arr = [new P("gone")]
+    v.x(arr[0]!, 1)
+  }
+  console.log(v.src.name)
+}
+// errors: 2
+// error: E0209
+// error: E0204

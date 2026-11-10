@@ -2843,6 +2843,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           }
         } catch (e) {
           this.inProgress.delete(id);
+          // An assumption made by a check that failed is no result, for whoever reads it next.
+          let stopped = this.tables.arenas.instanceMut(id);
+          if (stopped.keeps === false) stopped.keeps = undefined;
           const body = this.tables.arenas.instanceOf(id).body;
           if (!(e instanceof CompileError)) throw e;
           if (this.demanded === 0) {
