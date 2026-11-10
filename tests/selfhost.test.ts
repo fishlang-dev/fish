@@ -124,7 +124,7 @@ test("the native checker accepts and rejects the test programs exactly as Bun's 
   try {
     const { compared, unreached, differing } = await differences(buildChecker(dir));
     expect(differing.map((r) => `${r.name}: ${r.bun} / ${r.native} ${r.detail}`)).toEqual([]);
-    expect(compared).toBeGreaterThan(3000);
+    expect(compared).toBeGreaterThan(3600);
     expect(unreached.length).toBeLessThanOrEqual(UNREACHED);
   } finally {
     rmSync(dir, { recursive: true, force: true });

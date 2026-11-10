@@ -611,7 +611,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         // What calling it gives and takes, which every instance sharing the code must agree on: as
         // types, since one IR shape can hold values that are dropped or dispatched differently.
         const target = calledThrough(i, p.pattern.kind === "ident" ? p.pattern.name : "");
-        parts.push(target === undefined ? "*" : `*${typing.keyOf(target.returns)}(${bodyOf(arenas, target).params.map((q) => typing.keyOf(localOf(target.locals.get(q)!).type)).join(",")})`);
+        parts.push(target === undefined ? "*" : `*${target.throws === undefined ? "" : typing.keyOf(target.throws)}*${typing.keyOf(target.returns)}(${bodyOf(arenas, target).params.map((q) => typing.keyOf(localOf(target.locals.get(q)!).type)).join(",")})`);
       });
       for (const [name, t] of [...i.bindings].sort(([a], [b]) => (a < b ? -1 : 1))) {
         const k = name.startsWith("#") ? Number(name.slice(1)) : -1;
@@ -7704,7 +7704,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   function argValues(args: Expr[], target: Instance, taken: usize = args.length): string[] {
     // A comptime parameter's argument was computed while compiling, and isn't passed.
     const passed = (i: usize) => !bodyOf(noted.arenas, target).params[i]?.comptime;
-    const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${hand(owned(a), valueType(a))}`] : (value(a), []))));
+    const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${pairOf(a) !== undefined ? owned(a) : hand(owned(a), valueType(a))}`] : (value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
     for (const p of bodyOf(noted.arenas, target).params.slice(args.length)) {
       const type = localOf(target.locals.get(p)!).type;

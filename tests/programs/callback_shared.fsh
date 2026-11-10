@@ -87,3 +87,45 @@ function main() {
   console.log(both(id, 1, "s"));
   console.log(both(same, 2, "t"));
 }
+// case: callback_shared_one_throwing_and_one_quiet
+// expect: 1
+// expect: bad
+function walk(n: i64, each: (x: i64) => i64 throws Error): i64 throws Error {
+  if (n === 0) return 0;
+  return each(n) + walk(n - 1, each);
+}
+function main() {
+  const quiet = (x: i64) => x;
+  const loud = (_x: i64): i64 throws Error => { throw new Error("bad"); };
+  try {
+    console.log(walk(1, quiet));
+    console.log(walk(1, loud));
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+// case: callback_shared_handed_on_before_a_call
+// expect: aa 1
+// expect: bb 1
+function next(n: i64): i64 { return n - 1; }
+function walk(each: (x: i64) => void, n: i64): void {
+  if (n > 0) {
+    each(n);
+    walk(each, next(n));
+  }
+}
+function main() {
+  const s = "a".repeat(2);
+  const t = "b".repeat(2);
+  walk(move (x: i64) => console.log(s, x), 1);
+  walk(move (x: i64) => console.log(t, x), 1);
+}
+// case: callback_shared_async_closures_called_for_a_future
+// expect: end
+async function wait(p: Promise<void>): Promise<void> { await p; }
+function fire(f: () => Promise<void>): void { const _p = wait(f()); }
+function main() {
+  fire(async () => { console.log("a"); });
+  fire(async () => { console.log("b"); });
+  console.log("end");
+}
