@@ -1,8 +1,10 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, type Expr, type Param, type Stmt } from "../src/parser.ts";
 import { BASELINE, survey, type Baseline } from "../scripts/selfhost.ts";
+import { buildChecker, differences } from "../scripts/nativediff.ts";
 
 // Checking every source file takes about half an hour now that the checker's files get far into
 // their bodies.
@@ -93,4 +95,15 @@ test("the compiler keeps no module state", () => {
     found.push(...tableChanges(program, reached).map((c) => `${f}: ${c} changes a module's table`));
   }
   expect(found).toEqual([]);
+});
+
+// The checker compiled by Fish gives every test program the verdict Bun's checker gives it.
+test("the native checker accepts and rejects the test programs exactly as Bun's does", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fish-native-checker-"));
+  try {
+    const differing = await differences(buildChecker(dir));
+    expect(differing.map((r) => `${r.name}: ${r.bun} / ${r.native} ${r.detail}`)).toEqual([]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
