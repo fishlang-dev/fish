@@ -9971,11 +9971,21 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         });
       case "conditional": {
         const cond = value(e.cond);
+        const lent = isRef(types.get(e)!);
+        const kept: { slot: string; type: Type }[] = [];
         // Each side gives a value of its own when the result owns memory.
         const side = (x: Expr) => {
           const mark = pending.length;
           const v = needsDrop(types.get(e)) ? owned(x) : value(x);
-          settle(mark);
+          // A side lent out of the conditional lends what it made, which lasts the statement.
+          if (lent) {
+            for (const made of pending.splice(mark)) {
+              const slot = alloca(llvm(made.type));
+              allocas.push(`  store ${llvm(made.type)} zeroinitializer, ptr ${slot}`);
+              emit(`store ${llvm(made.type)} ${made.v}, ptr ${slot}`);
+              kept.push({ slot, type: made.type });
+            }
+          } else settle(mark);
           return v;
         };
         if (!types.has(e.then)) return side(e.else);
@@ -9993,6 +10003,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         startBlock(end);
         const result = temp();
         emit(`${result} = phi ${llvm(types.get(e)!)} [ ${a}, %${thenEnd} ], [ ${b}, %${otherwiseEnd} ]`);
+        // Only the side that ran filled its slot; the other's reads as nothing to drop.
+        for (const { slot, type } of kept) {
+          const v = temp();
+          emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
+          emit(`store ${llvm(type)} zeroinitializer, ptr ${slot}`);
+          pending.push({ v, type });
+        }
         return result;
       }
       case "binary": {
