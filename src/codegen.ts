@@ -6912,7 +6912,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     if ((whole || rust) && fresh(e)) return value(e, true);
     if (!rust && !needsDrop(types.get(e)!) && holdsRust(valueType(e))) return value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
-    if (to && !needsDrop(types.get(e)!) && typing.holdsPart(to, (t) => recOf(t)?.kind === "recursive")) return value(e, true);
+    if (to && !needsDrop(referent(types.get(e)!)) && typing.holdsPart(to, (t) => recOf(t)?.kind === "recursive")) return value(e, true);
     const v = value(e);
     if ((whole || rust) && current.consumes.has(e.id) && lendable(e)) {
       take(e);
@@ -6986,7 +6986,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const r = recOf(t);
       return r?.kind === "union" ? r.members : [t];
     };
-    return from !== to && members(to).some((m) => recOf(m)?.kind === "recursive") && members(from).some((m) => !members(to).includes(m));
+    return from !== to && members(to).some((m) => recOf(m)?.kind === "recursive") && members(referent(from)).some((m) => !members(to).includes(m));
   }
 
   // Whether converting a value from one type to another keeps all it owns: putting it in a

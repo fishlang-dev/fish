@@ -710,3 +710,31 @@ function main() {
   const r = f("x", 2);
   if (typeof r !== "string") console.log(r.kind);
 }
+
+// case: recursive_string_member_read_through_a_reference_is_retained
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: heapheapheap
+type Expr = { kind: "id"; name: string } | { kind: "list"; items: Expr[] } | { kind: "prop"; key: Name };
+type Name = string | Expr;
+function cloneExpr(n: Ref<Expr>): Expr {
+  if (n.kind === "id") return { kind: "id" as const, name: n.name };
+  if (n.kind === "list") return { kind: "list" as const, items: n.items.map((x) => cloneExpr(x)) };
+  return { kind: "prop" as const, key: cloneName(n.key) };
+}
+function cloneName(n: Ref<Name>): Name {
+  if (typeof n === "string") return n;
+  return cloneExpr(n) as Name;
+}
+type M = { name: Name };
+function main() {
+  const text = "heap".repeat(3);
+  const m: M = { name: text };
+  for (let i = 0; i < 4; i++) {
+    const c: M = { name: cloneName(m.name) };
+    console.log(typeof c.name === "string");
+  }
+  console.log(text);
+}
