@@ -1013,3 +1013,115 @@ function main() {
   console.log(v.src.name)
 }
 // error: doesn't live long enough
+// case: ref_method_read_while_assumed_by_a_second_caller
+// A method settled on another's assumption can't keep calling it once the assumption fails.
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  touch(this: Mut<this>, o: Ref<P>) {
+    this.a(o, 0)
+  }
+  a(this: Mut<this>, o: Ref<P>, n: i64): void {
+    if (n > 0) {
+      this.a(o, n - 1)
+      this.b(o, n - 1)
+    }
+    this.src = o
+  }
+  b(this: Mut<this>, o: Ref<P>, n: i64): void {
+    this.a(o, n)
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  const q = new P("q")
+  let v = new View(p)
+  v.touch(q)
+  {
+    const arr = [new P("gone")]
+    v.b(arr[0]!, 1)
+  }
+  console.log(v.src.name)
+}
+// error: keeps what it is lent in 'this'
+// case: ref_generator_held_keeps_its_receiver_holding
+// Giving a call's generator to a variable leaves the receiver holding what it was lent.
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  touch(this: Mut<this>, o: Ref<P>) {
+    this.src = o
+  }
+  *point(this: Mut<this>, other: Ref<P>): Generator<i64> {
+    this.src = other
+    yield 1
+  }
+}
+
+function main() {
+  const p = new P("keep")
+  const q = new P("q")
+  let v = new View(p)
+  v.touch(q)
+  {
+    const arr = [new P("gone")]
+    const g = v.point(arr[0]!)
+    for (const _ of g) {
+    }
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough
+// case: ref_future_held_keeps_its_receiver_holding
+class P {
+  name: string
+  constructor(n: string) {
+    this.name = n
+  }
+}
+
+class View {
+  src: Ref<P>
+  constructor(s: Ref<P>) {
+    this.src = s
+  }
+  touch(this: Mut<this>, o: Ref<P>) {
+    this.src = o
+  }
+  async point(this: Mut<this>, other: Ref<P>): Promise<void> {
+    this.src = other
+  }
+}
+
+async function main() {
+  const p = new P("keep")
+  const q = new P("q")
+  let v = new View(p)
+  v.touch(q)
+  {
+    const arr = [new P("gone")]
+    const fut = v.point(arr[0]!)
+    await fut
+  }
+  console.log(v.src.name)
+}
+// error: doesn't live long enough

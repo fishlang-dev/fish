@@ -1463,6 +1463,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (this.state === null) return;
     let holders = new Set<LocalId>();
     if (holder !== undefined) holders.add(holder);
+    // A call's receiver and the variable given its result hold one loan between them.
+    const had = this.state.loans.get(key);
+    if (had !== undefined && had.place === place) for (const h of had.holders) holders.add(h);
     this.state.loans.set(key, { place, mutable, start: use.start, end: use.end, holders, call, callAt });
   }
 
