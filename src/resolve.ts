@@ -163,32 +163,35 @@ function aliasRoots(aliases: Ref<Map<string, TypeAlias>>): Map<string, string> {
   }
   return roots;
 }
-// The literal `kind` a written object type, or an intersection holding one, declares.
-function writtenKind(node: Ref<TypeNode>): string | undefined {
+// The literal string a written object type, or an intersection holding one, declares for `name`.
+function writtenLiteral(node: Ref<TypeNode>, name: string): string | undefined {
   if (node.kind === "object") {
     for (const m of node.members) {
-      if (m.kind === "property" && m.name === "kind" && m.type !== undefined && m.type.kind === "literal" && m.type.value.kind === "string") return m.type.value.value;
+      if (m.kind === "property" && m.name === name && m.type !== undefined && m.type.kind === "literal" && m.type.value.kind === "string") return m.type.value.value;
     }
     return undefined;
   }
   if (node.kind === "intersection") {
     for (const t of node.types) {
-      const k = writtenKind(t);
+      const k = writtenLiteral(t, name);
       if (k !== undefined) return k;
     }
   }
   return undefined;
 }
 
-// The literal string an object type's `kind` field holds, as in `{ kind: "block" }`.
-function literalKind(typing: Ref<Typing>, t: Type): string | undefined {
-  if (typeof t === "string") return undefined;
+// The fields of an object type that hold a literal string, as `kind` in `{ kind: "block" }`.
+function literalFields(typing: Ref<Typing>, t: Type): { name: string; value: string }[] {
+  if (typeof t === "string") return [];
   const r = typing.rec(t);
-  if (r.kind !== "object") return undefined;
-  const field = r.fields.find((f) => f.name === "kind");
-  if (field === undefined || typeof field.type === "string") return undefined;
-  const k = typing.rec(field.type);
-  return k.kind === "literal" && typeof k.value === "string" ? k.value : undefined;
+  if (r.kind !== "object") return [];
+  let found: { name: string; value: string }[] = [];
+  for (const f of r.fields) {
+    if (typeof f.type === "string") continue;
+    const k = typing.rec(f.type);
+    if (k.kind === "literal" && typeof k.value === "string") found.push({ name: f.name, value: k.value });
+  }
+  return found;
 }
 
 
@@ -263,20 +266,28 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   /** @throws {CompileError} */
   conforms(this: Mut<this>, from: Type, to: Type, at: Ref<Span>): boolean {
     // An alias met again while it is still being made has no shape yet, as when `Extract<Stmt, ...>`
-    // is read inside a member `Stmt` holds; a member of a discriminated union says its kind where
-    // it is declared, which decides it.
-    const pending = this.pendingKind(from);
-    const wanted = pending !== undefined ? literalKind(this.host.tables.typing, to) : undefined;
-    if (pending !== undefined && wanted !== undefined) return pending === wanted;
+    // is read inside a member `Stmt` holds; a member of a discriminated union says its
+    // discriminant where it is declared, which decides it.
+    const decided = this.decidedWhilePending(from, to);
+    if (decided !== undefined) return decided;
     return this.host.conforms(from, to, { start: at.start, end: at.end });
   }
-  // The literal `kind` an alias still being made declares, read from where it is written.
-  private pendingKind(this: Mut<this>, t: Type): string | undefined {
-    if (typeof t === "string") return undefined;
-    const r = this.host.tables.typing.rec(t);
+  // Whether an alias still being made fits `to`, by the literal fields written where it's declared;
+  // undefined when they don't settle it.
+  private decidedWhilePending(this: Mut<this>, from: Type, to: Type): boolean | undefined {
+    if (typeof from === "string") return undefined;
+    const r = this.host.tables.typing.rec(from);
     if (r.kind !== "recursive" || r.of !== "never") return undefined;
     const alias = this.host.decls.aliases.get(r.name);
-    return alias !== undefined ? writtenKind(alias.type) : undefined;
+    if (alias === undefined) return undefined;
+    const wanted = literalFields(this.host.tables.typing, to);
+    let settled = wanted.length > 0;
+    for (const { name, value } of wanted) {
+      const written = writtenLiteral(alias.type, name);
+      if (written === undefined) settled = false;
+      else if (written !== value) return false;
+    }
+    return settled ? true : undefined;
   }
   typingOf(this: Mut<this>): Mut<Typing> {
     return this.host.tables.typing;

@@ -2724,7 +2724,14 @@ export class Typing {
         r.fields = r.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
         this.setRec(t, r);
       } else if (r.kind === "union" && r.unknown !== true) {
-        r.members = r.members.map((m) => { const b = this.recOf(m); return b?.kind === "brand" ? b.base : m; });
+        // Objects stay the records they are. Two brands of one base become one member.
+        let members: Type[] = [];
+        for (const m of r.members) {
+          const b = this.recOf(m);
+          const low = b?.kind === "object" && b.tuple !== true ? m : this.lower(m);
+          if (!members.includes(low)) members.push(low);
+        }
+        r.members = members;
         this.setRec(t, r);
       }
     }

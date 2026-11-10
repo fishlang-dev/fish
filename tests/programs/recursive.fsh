@@ -738,3 +738,54 @@ function main() {
   }
   console.log(text);
 }
+
+// case: recursive_array_of_a_brand_as_a_member
+// expect: 2
+// expect: 1
+type Id = Brand<usize, "id">;
+type V = Id[] | { kind: "n"; v: V[] };
+function size(v: Ref<V>): usize { return Array.isArray(v) ? v.length : v.v.length; }
+function main() {
+  const a: V = [1 as Id, 2 as Id];
+  console.log(size(a));
+  const b: V = { kind: "n", v: [a] };
+  console.log(size(b));
+}
+
+// case: recursive_map_of_a_brand_as_a_member
+// expect: 1
+type Id = Brand<usize, "id">;
+type V = Map<string, Id> | { kind: "n"; v: V[] };
+function main() {
+  let m = new Map<string, Id>();
+  m.set("a", 1 as Id);
+  const a: V = m;
+  const b: V = { kind: "n", v: [a] };
+  console.log(typeof b === "object" && !(b instanceof Map) ? b.v.length : 0);
+}
+
+// case: recursive_two_brands_of_one_base
+// expect: n
+type Id = Brand<usize, "id">;
+type Kin = Brand<usize, "kin">;
+type V = Id | Kin | string | V[];
+function show(v: Ref<V>): string {
+  if (typeof v === "string") return "s";
+  if (Array.isArray(v)) return "a";
+  return "n";
+}
+function main() {
+  const x: V = 2 as Kin;
+  console.log(show(x));
+}
+
+// case: recursive_extract_by_a_field_not_named_kind
+// expect: 5
+type Blk = { tag: "blk"; n: i64 };
+type Oth = { tag: "oth"; b: Extract<S, { tag: "blk" }> | null; kids: S[] };
+type S = Blk | Oth;
+function f(s: Ref<S>): i64 { return s.tag === "oth" && s.b !== null ? s.b.n : 0; }
+function main() {
+  const a: S = { tag: "oth", b: { tag: "blk", n: 5 }, kids: [] };
+  console.log(f(a));
+}
