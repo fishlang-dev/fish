@@ -1334,7 +1334,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // Reads or hands over a place, which must still hold its value and not be lent so as to
   // forbid it.
   /** @throws {CompileError} */
-  use(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Named>, consume?: Consumer, type: Type = e.kind === "shorthand" ? cx.tables.arenas.localOf(this.localAt(cx, e)!).type : cx.instance.types.get(e)!): void {
+  use(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Named>, consume?: Consumer, type: Type = e.kind === "shorthand" ? cx.tables.arenas.localOf(this.localAt(cx, e)!).type : (cx.instance.types.get(e) ?? "void")): void {
     const place = this.key(cx, e)!;
     const at12 = this.spot(cx, e);
     this.usable(cx, at12, place);

@@ -3718,7 +3718,7 @@ export class Expressions<C extends Context> implements Union<C> {
       throw new CompileError("E0508", "a regex is compiled while compiling, so 'new RegExp' takes its pattern and flags as string literals; for a pattern known only when the program runs, Fish has no regex", e.start, e.end);
     }
     this.ctx.tables().regexNews.add(cloneExpr(e));
-    return this.regexLiteral(known[0]!, known[1] ?? "", e, this.shownSource(known[0]!));
+    return this.regexLiteral(known[0]!, (known.length > 1 ? known[1] : undefined) ?? "", e, this.shownSource(known[0]!));
   }
 
   // `re.test(s)` and `re.exec(s)`. A regex keeps no `lastIndex`, so on a `g` or `y` regex they

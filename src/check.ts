@@ -5064,7 +5064,7 @@ class BodyChecker implements Context, GuardHost {
   // A closure's parameter types, each from what it writes or the function type it is given to.
   /** @throws {CompileError} */
   closureParams(this: Mut<this>): Type[] {
-    const expected = this.f().closure!.expected!;
+    const expected = this.f().closure!.expected;
     const count = this.f().params.length;
     let types: Type[] = [];
     for (let i: usize = 0; i < count; i++) {
