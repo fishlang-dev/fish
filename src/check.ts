@@ -3571,11 +3571,11 @@ class BodyChecker implements Context, GuardHost {
     return this.capturesHas(lId);
   }
   private capturesHas(l: LocalId): boolean {
-    return this.held().captures?.has(l) === true;
+    return this.held().captures !== undefined && this.held().captures!.has(l);
   }
   // The binding outside a closure that one of its locals captures.
   private outsideOf(l: LocalId): LocalId | "this" | undefined {
-    return this.held().captures?.get(l);
+    return this.held().captures !== undefined ? this.held().captures!.get(l) : undefined;
   }
 
   enterComptime(this: Mut<this>): void {
@@ -6075,7 +6075,7 @@ class BodyChecker implements Context, GuardHost {
     if (this.held().captures === undefined || [...this.held().captures!.values()].includes("this")) return;
     const alias = this.cx.tables.arenas.addLocal({ name: "this", type: this.st.self!.type, mutable: false, param: false, id: this.cx.nextLocal++ }).localId;
     let inst = this.instance();
-    inst.captures!.set(alias, "this");
+    if (inst.captures !== undefined) inst.captures.set(alias, "this");
     if (inst.captureUses !== undefined) inst.captureUses.set(alias, cloneExpr(e));
     if (this.state.outer !== undefined) this.outerChecker().noteThis(e);
   }
