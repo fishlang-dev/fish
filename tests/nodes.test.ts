@@ -40,11 +40,15 @@ const REPLACERS: [keyof Rewrites, keyof Rewrites][] = [
 type Spanned = { kind?: unknown; start?: unknown; end?: unknown };
 const spansMatch = (a: Spanned, b: Spanned) => typeof a.start === "number" && a.start === b.start && a.end === b.end;
 // A copy of a node, made as it was at some point, keeps its span and its kind; two different nodes
-// under one id would have to have been made at the same place as the same kind of node. One with no
-// kind is a view of a node, as a class statement's ClassNode or a call's `{ id, start, end }` is.
-const sameSpan = (a: Spanned, b: Spanned) => spansMatch(a, b) && (a.kind === undefined || b.kind === undefined || a.kind === b.kind);
-// A jump target's stand-in, which the checker makes with the statement's id and span.
-const standsIn = (a: object) => (a as Spanned).kind === "empty" && Object.keys(a).length === 4;
+// under one id would have to have been made at the same place as the same kind of node. A node with
+// no kind stands for a kinded one only as a table key, `{ id, start, end }`, or as a class
+// statement's ClassNode: a Param or a Declarator at its pattern's span is another node.
+const viewOf = (a: Spanned, b: Spanned) => a.kind === undefined && (Object.keys(a).length === 3 || (b.kind === "class" && "members" in a));
+const sameSpan = (a: Spanned, b: Spanned) => spansMatch(a, b) && (a.kind === b.kind || viewOf(a, b) || viewOf(b, a));
+// A jump target's stand-in, which the checker makes with the statement's id and span. A real empty
+// statement has the same shape, so it counts only against a statement a jump can name.
+const TARGETS = new Set(["while", "doWhile", "for", "forIn", "forOf", "switch", "labeled"]);
+const standsIn = (a: Spanned, b: Spanned) => a.kind === "empty" && Object.keys(a).length === 4 && TARGETS.has(b.kind as string);
 // Every object a replacement replaced or made, by node id: a table may hold a copy of any of them.
 // Ids start again with each compilation, so each program clears it.
 const versions = new Map<number, object[]>();
@@ -59,10 +63,10 @@ const replacedIn = new WeakMap<object, number>();
 const madeForStub = new WeakSet<object>();
 // The ids of those, cleared with `versions`: what they replaced has another kind at the same span.
 const stubbed = new Set<number>();
-// Whether two objects under `id` are one node: copies, versions of it, or a node and what stands for
-// or replaced it at its span.
-const oneNode = (id: number, a: object, b: object) =>
-  sameSpan(a, b) || (isVersion(id, a) && isVersion(id, b)) || (spansMatch(a, b) && (stubbed.has(id) || standsIn(a) || standsIn(b)));
+// Whether two objects under `id` are one node: copies, versions of it, or a node and what replaced it
+// at its span. Only a table holds a stand-in; in a tree an empty statement is a node of its own.
+const oneNode = (id: number, a: object, b: object, table = false) =>
+  sameSpan(a, b) || (isVersion(id, a) && isVersion(id, b)) || (spansMatch(a, b) && (stubbed.has(id) || (table && (standsIn(a, b) || standsIn(b, a)))));
 function noteReplaced(was: object, out: object): void {
   if (was === out) return;
   if (Object.keys(was).length === 1) {
@@ -339,7 +343,7 @@ const clashes: string[] = [];
 function noting<F extends (this: object, node: Id, ...rest: never[]) => unknown>(method: F, held: (table: object, id: number) => object | undefined): F {
   return function (this: object, node: Id, ...rest: never[]) {
     const was = held(this, node.id);
-    if (was !== undefined && was !== node && Object.keys(was).length > 1 && Object.keys(node).length > 1 && latest(was) !== latest(node) && !oneNode(node.id, was, node)) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
+    if (was !== undefined && was !== node && Object.keys(was).length > 1 && Object.keys(node).length > 1 && latest(was) !== latest(node) && !oneNode(node.id, was, node, true)) clashes.push(`two nodes share id ${node.id}: a ${(was as { kind?: string }).kind} and a ${(node as { kind?: string }).kind}`);
     return method.call(this, node, ...rest);
   } as F;
 }
@@ -367,11 +371,16 @@ test("no node table meets two different nodes under one id", () => {
   const sample = corpus().filter((p) => /^(macro|comptime|generic|derive|class|std|json)/.test(p.name) && !p.src.includes("// mode: parse"));
   expect(sample.length).toBeGreaterThan(50);
   clashes.length = 0;
+  versions.clear();
+  stubbed.clear();
   const a = { id: 1, kind: "a", start: 0, end: 1 };
   noted(() => new NodeMap<{ id: number; kind: string; start: number; end: number }, string>().set(a, "a").get({ ...a, kind: "b", start: 4, end: 5 }));
   // Another kind of node at the same span is another node too.
   noted(() => new NodeMap<{ id: number; kind: string; start: number; end: number }, string>().set(a, "a").get({ ...a, kind: "b" }));
-  expect(clashes).toEqual(["two nodes share id 1: a a and a b", "two nodes share id 1: a a and a b"]);
+  // So is a node with no kind that isn't a key, and an empty statement that isn't a jump's target.
+  noted(() => new NodeMap<{ id: number; start: number; end: number; kind?: string; pattern?: object }, string>().set(a, "a").get({ id: 1, pattern: a, start: 0, end: 1 }));
+  noted(() => new NodeMap<{ id: number; start: number; end: number; kind?: string; pattern?: object }, string>().set(a, "a").get({ id: 1, kind: "empty", start: 0, end: 1 }));
+  expect(clashes).toEqual(["two nodes share id 1: a a and a b", "two nodes share id 1: a a and a b", "two nodes share id 1: a a and a undefined", "two nodes share id 1: a a and a empty"]);
   clashes.length = 0;
   noted(() => {
     for (const p of sample) {
