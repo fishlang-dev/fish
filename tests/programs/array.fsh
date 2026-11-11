@@ -307,7 +307,7 @@ function* gen(): Generator<string> { yield "a" + 1; }
 function rep<T>(x: T): T[] { return new Array(2).fill(x); }
 function main() { console.log(rep(gen()).length); }
 // case: array_constructor_fill_ref
-// error: 'new Array(n).fill(x)' can't be made from this value: arrays of references are not supported yet
+// error: arrays filled with references are not supported yet
 function f(s: Ref<string>): string[] { return new Array(2).fill(s); }
 function main() { console.log(f("a" + 1).join()); }
 // case: array_constructor_generic
@@ -804,8 +804,9 @@ class B { s: string; constructor(s: string) { this.s = s; } }
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
+  console.log(rs[0].s, rs.length);
 }
-// error: arrays of references are not supported yet
+// expect: a 1
 // case: array_of_typed_function
 // expect: 1 k1!
 // Array.of with a function element type stores callables as an annotated literal does.
@@ -815,9 +816,9 @@ function main() {
   console.log(fs.length, fs[0]());
 }
 // case: array_of_typed_ref
-// error: arrays of references are not supported yet
+// expect: 1
 class P { n: i64; constructor(n: i64) { this.n = n; } }
-function keep(p: Ref<P>): i64 { const rs = Array.of<Ref<P>>(p); return 1; }
+function keep(p: Ref<P>): i64 { const rs = Array.of<Ref<P>>(p); return rs[0].n; }
 function main() { console.log(keep(new P(1))); }
 // case: array_optional_literal
 function main() {

@@ -180,6 +180,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
 
   // The variable at the root of a place.
   rootLocal(cx: Mut<MoveCx<T, B, I>>, e: Ref<Named>): LocalId | undefined {
+    // What `pop` took out of an array of references is rooted where the array is.
+    if (e.kind === "nonNull" && e.expr.kind === "call" && e.expr.callee.kind === "member" && this.popsRef(cx, e.expr)) return this.rootLocal(cx, e.expr.callee.object);
+    if (e.kind === "call" && e.callee.kind === "member" && this.popsRef(cx, e)) return this.rootLocal(cx, e.callee.object);
     if (projection(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) return this.rootLocal(cx, e.expr);
     if (e.kind === "member" || e.kind === "index") return this.rootLocal(cx, e.object);
     return cx.instance.locals.getById(e.id);
@@ -521,12 +524,22 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
           const holder = this.loopHolder(cx, s);
           this.holdProjected(cx, holder, s.right);
           if (eachRef) this.holdProjected(cx, each, s.right);
+        } else if (this.state !== null && !text && place === undefined && cx.tables.typing.holdsRef(cx.instance.types.get(s.right) ?? "void")) {
+          // Over a temporary holding references, the loop and its variable hold what it did.
+          const holder = this.loopHolder(cx, s);
+          this.hold(cx, holder, s.right);
+          if (eachRef) this.hold(cx, each, s.right);
         }
         // Each pass may end the loop, like a condition that may be false. Each pass gives a
         // string's variable a new string, and a Channel's the value it received, which it owns.
         const revived = owning ? String(cx.tables.arenas.localOf(each).id) : undefined;
         this.loop(cx, s, revived);
-        if (this.state !== null) this.state.loans.delete(s.right.start as f64);
+        // Only the loop's own loan ends with it: a receiver's loan sits at the same offset, and
+        // stays for whatever the body kept once the loop and its variable let go of it.
+        if (this.state !== null && this.state.loans.get(s.right.start as f64)?.loop === true) this.state.loans.delete(s.right.start as f64);
+        const done = this.loopHolders.get(s.id);
+        if (done !== undefined) this.release(cx, done);
+        this.release(cx, each);
         return;
       }
       case "labeled": {
@@ -1057,6 +1070,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       for (const p of e.props) if (p.kind === "property") this.lentInto(cx, p.value, out);
       return;
     }
+    if (e.kind === "array") {
+      for (const x of e.elements) if (x !== undefined && x.kind !== "spread") this.lentInto(cx, x, out);
+      return;
+    }
     // A closure made for a call lends what it captures for the call.
     if (e.kind === "arrow" || (cx.instance.envs !== undefined && cx.instance.envs.has(e))) {
       for (const c of this.captured(cx, e)) if (!c.held || this.reborrows(cx, c.from!)) out.push({ place: c.place, at: copySpot(c.at), mutable: c.mutable || c.held });
@@ -1281,6 +1298,11 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     }
     // A method that changes its object, or a base's constructor, may keep what is lent,
     // when the object has somewhere to keep a reference.
+    // An array of references keeps the reference pushed onto it.
+    if (object !== undefined && changes && method === "push" && this.array(cx, object)) {
+      const pushedTo = cx.instance.types.get(object);
+      return pushedTo !== undefined && cx.tables.typing.holdsRef(this.deref(cx, pushedTo));
+    }
     const keeper = object ?? (e.callee.kind === "super" ? e.callee : undefined);
     if (keeper === undefined) return false;
     const keeperType = cx.instance.types.get(keeper);
@@ -1485,6 +1507,11 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       this.holdFrom(cx, holder, outer, e.expr, heldAs);
       return;
     }
+    // An assignment's value is the value it stored.
+    if (e.kind === "assign" && e.op === "=") {
+      this.hold(cx, holder, e.value);
+      return;
+    }
     if (e.kind === "conditional") {
       if (cx.instance.types.has(e.then)) this.hold(cx, holder, e.then);
       if (cx.instance.types.has(e.else)) this.hold(cx, holder, e.else);
@@ -1496,6 +1523,12 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       return;
     }
     if (this.lentTemporary(cx, outer)) throw this.outlived(cx, e, `'${cx.tables.arenas.localOf(holder).name}'`);
+    // What `pop` takes out of an array of references borrows what the array did, not the array.
+    const popped: Ref<Expr> = e.kind === "nonNull" ? e.expr : e;
+    if (popped.kind === "call" && popped.callee.kind === "member" && this.pops(cx, popped)) {
+      this.inherit(cx, holder, popped.callee.object);
+      return;
+    }
     // A call's returned reference holds what its sources do: a receiver where it lives.
     const instance = cx.instance;
     const from = instance.borrowsFrom.get(e);
@@ -1554,6 +1587,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
             }
           }
         }
+      } else if (e.kind === "array") {
+        for (const x of e.elements) if (x !== undefined && x.kind !== "spread") this.hold(cx, holder, x);
       } else {
         this.lendTo(cx, holder, outer);
         this.inherit(cx, holder, e);
@@ -1609,9 +1644,26 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   // Through a reference, or a value holding references, what it holds stays held.
+  /** @throws {CompileError} */
   inherit(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>): void {
     const root = this.rootLocal(cx, e);
     if (root !== undefined && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(root).type)) this.inheritFrom(cx, holder, root);
+    else if (root === undefined) this.inheritTemporary(cx, holder, e, false);
+  }
+
+  // A value read out of a temporary, anything that isn't a place, holds what the temporary did.
+  /** @throws {CompileError} */
+  inheritTemporary(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, holder: LocalId, e: Ref<Expr>, inside: boolean): void {
+    if ((e.kind === "member" && !cx.instance.calls.has(e)) || e.kind === "index") this.inheritTemporary(cx, holder, e.object, true);
+    else if (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe") this.inheritTemporary(cx, holder, e.expr, true);
+    else if (inside && e.kind !== "ident" && e.kind !== "this" && e.kind !== "super" && cx.tables.typing.holdsRef(cx.instance.types.get(e) ?? "void")) this.hold(cx, holder, e);
+  }
+
+  // Where a value read out of a temporary points: wherever the temporary did.
+  pointsTemporary(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, inside: boolean): string[] {
+    if ((e.kind === "member" && !cx.instance.calls.has(e)) || e.kind === "index") return this.pointsTemporary(cx, e.object, true);
+    if (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe") return this.pointsTemporary(cx, e.expr, true);
+    return inside && e.kind !== "ident" && e.kind !== "this" && e.kind !== "super" && cx.tables.typing.holdsRef(cx.instance.types.get(e) ?? "void") ? this.pointsInto(cx, e) : [];
   }
 
   inheritFrom(this: Mut<this>, cx: Ref<MoveCx<T, B, I>>, holder: LocalId, root: LocalId): void {
@@ -1811,6 +1863,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // `pointsInto` of a value taken out of its wrappers, which `pointsAs` was met as.
   pointsFrom(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, pointsAs: Type | undefined): string[] {
     if (unwraps(cx.tables.typing, cx.instance, this.coercions, e) && (e.kind === "nonNull" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe")) return this.pointsFrom(cx, e.expr, pointsAs);
+    if (e.kind === "assign" && e.op === "=") return this.pointsInto(cx, e.value);
     if (e.kind === "conditional") {
       let out: string[] = [];
       if (cx.instance.types.has(e.then)) for (const p of this.pointsInto(cx, e.then)) out.push(p);
@@ -1830,6 +1883,11 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         else if (c.from !== undefined && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(c.from).type)) for (const p of this.heldBy(cx, c.from)) out.push(p);
       }
       return out;
+    }
+    const popped: Ref<Expr> = e.kind === "nonNull" ? e.expr : e;
+    if (popped.kind === "call" && popped.callee.kind === "member" && this.pops(cx, popped)) {
+      const root = this.rootLocal(cx, popped.callee.object);
+      return root !== undefined && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(root).type) ? this.heldBy(cx, root) : [];
     }
     const instance = cx.instance;
     const from = instance.borrowsFrom.get(e);
@@ -1867,8 +1925,14 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         }
         return out;
       }
+      if (e.kind === "array") {
+        let out: string[] = [];
+        for (const x of e.elements) if (x !== undefined && x.kind !== "spread") for (const q of this.pointsInto(cx, x)) out.push(q);
+        return out;
+      }
       const root = this.rootLocal(cx, e);
-      return root !== undefined && cx.tables.typing.holdsRef(cx.tables.arenas.localOf(root).type) ? this.heldBy(cx, root) : [];
+      if (root === undefined) return this.pointsTemporary(cx, e, false);
+      return cx.tables.typing.holdsRef(cx.tables.arenas.localOf(root).type) ? this.heldBy(cx, root) : [];
     }
     if (!this.inPlace(cx, e, to)) {
       const returned = this.throughReturned(cx, e, to);
@@ -1912,7 +1976,13 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // reference read out of a value holding references points where that value's loans are.
   within(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): string[] {
     const root = this.rootLocal(cx, e);
-    if (root === undefined) return [this.key(cx, e)!];
+    if (root === undefined) {
+      const key = this.key(cx, e);
+      if (key !== undefined) return [key];
+      // Read out of a temporary, it points where the temporary did, or at the temporary itself.
+      const through = this.pointsTemporary(cx, e, false);
+      return through.length > 0 ? through : [TEMPORARY];
+    }
     const type = cx.tables.arenas.localOf(root).type;
     if (!(this.isRef(cx, type) || cx.tables.typing.optionRef(type) !== undefined || (this.isRef(cx, cx.instance.types.get(e)!) && cx.tables.typing.holdsRef(type)))) return [this.key(cx, e)!];
     return this.heldBy(cx, root);
@@ -2028,6 +2098,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     // A value given a reference to keep, through a field or a setter, holds it; `this` may
     // only be given what outlives the call.
     if (target.kind === "member" && cx.tables.typing.holdsRef(this.coercions.get(e.value.id) ?? cx.instance.types.get(e.value)!)) this.keepOne(cx, target.object, e.value);
+    // So does an array given an element to keep, when its elements hold references.
+    if (target.kind === "index" && cx.tables.typing.holdsRef(cx.instance.types.get(target)!)) this.keepOne(cx, target.object, e.value);
     // An assignment used as a value hands over what it just stored. A setter keeps what it
     // was given, with nothing left to read or hand on.
     if (!discarded && this.state !== null && !cx.tables.typing.isCopy(cx.instance.types.get(e)!) && cx.instance.setters.has(target)) {
@@ -2362,6 +2434,16 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     const t = cx.instance.types.get(e);
     const kind = t !== undefined ? this.record(cx, this.deref(cx, t))?.kind : undefined;
     return kind === "array" || kind === "fixed";
+  }
+
+  // Whether a call pops a value holding references out of an array.
+  popsRef(cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): boolean {
+    return this.pops(cx, e) && cx.tables.typing.holdsRef(cx.instance.types.get(e) ?? "void");
+  }
+
+  // Whether a call is an array's own `pop`.
+  pops(cx: Ref<MoveCx<T, B, I>>, e: Ref<Expr>): boolean {
+    return e.kind === "call" && e.callee.kind === "member" && e.callee.name === "pop" && cx.instance.calls.get(e) === undefined && this.array(cx, e.callee.object);
   }
 
   // Moving a value out of an array by index would leave a hole in it, as in Rust.

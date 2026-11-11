@@ -5628,6 +5628,9 @@ class BodyChecker implements Context, GuardHost {
           if (this.f().comptime === "const") throw new CompileError("E0801", "a top-level const holding a function is supported when its value is an arrow written in place, as in 'const f = (x: i64) => ...'; declare the function with 'function', or call it by its own name", s.value!.start, s.value!.end);
           throw unsupported("functions returned without a function return type", s.value!);
         }
+        // A top-level const lives for the whole program, with no holder for the borrow checker
+        // to follow what it borrows through.
+        if (this.f().comptime === "const" && s.value !== undefined && r?.kind !== "ref" && this.cx.tables.typing.holdsRef(type)) throw unsupported("top-level consts holding references", s.value);
         // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
         if (this.state.declared === undefined && this.cx.recOf(this.state.inferred)?.kind === "regex" && r?.kind === "regex" && this.state.inferred !== type) this.state.inferred = ANY_REGEX;
         const expected = this.state.declared ?? this.state.inferred;

@@ -211,6 +211,49 @@ function main() {
   expect([code, out]).toEqual([0, "hello\nhello!\nline 9\n9\n"]);
 });
 
+// An array of references holds pointers it never frees through: pushed, read, written, popped
+// and looped over, with the buffer freed once and nothing its elements point at freed with it.
+test.skipIf(noAddress !== undefined)("arrays of references run clean under the address sanitizer", () => {
+  const src = `class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+type AnyNode = { of: "expr"; node: Ref<Expr> } | { of: "none" }
+class Stack {
+  items: Ref<Expr>[] = []
+  add(this: Mut<this>, e: Ref<Expr>) {
+    this.items.push(e)
+  }
+}
+function main() {
+  const a = new Expr("a" + 1)
+  const b = new Expr("b" + 2)
+  let st: Ref<Expr>[] = [a]
+  for (let i = 0; i < 40; i++) st.push(i % 2 === 0 ? a : b)
+  st[0] = b
+  let total = 0
+  for (const e of st) total += e.text.length
+  while (st.length > 3) st.pop()
+  const top = st.pop()!
+  console.log(total, st.length, top.text)
+  let nodes: AnyNode[] = [{ of: "expr", node: a }, { of: "none" }]
+  nodes.push({ of: "expr", node: b })
+  for (const n of nodes) console.log(n.of === "expr" ? n.node.text : n.of)
+  const last = nodes.pop()!
+  if (last.of === "expr") console.log(last.node.text)
+  let held = new Stack()
+  held.add(a)
+  held.add(b)
+  console.log(held.items[1].text, held.items.length)
+}
+`;
+  const { code, out, err } = run("ref-arrays", src, ["--sanitize", "address"]);
+  expect(err).toBe("");
+  expect([code, out]).toEqual([0, "82 2 b2\na1\nnone\nb2\nb2\nb2 2\n"]);
+});
+
 // Clang's -O0 code for AArch64 misread large aggregates passed to address-sanitized functions,
 // so fetch's init arrived empty and the request went out as a bare GET.
 test.skipIf(noAddress !== undefined)("an address-sanitized fetch sends the method, headers and body it was given", async () => {

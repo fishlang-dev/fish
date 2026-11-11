@@ -3453,7 +3453,8 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         const at = temp();
         emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
         emit(`${at} = getelementptr ${llvm(typing.rec(type).element)}, ptr ${data}, i64 ${i}`);
-        if (isRef(local.type)) emit(`store ptr ${at}, ptr ${slot(local)}`);
+        // A reference element is itself the loop's value; any other reference borrows the slot.
+        if (isRef(local.type) && !isRef(typing.rec(type).element)) emit(`store ptr ${at}, ptr ${slot(local)}`);
         else {
           const v = temp();
           emit(`${v} = load ${llvm(typing.rec(type).element)}, ptr ${at}`);

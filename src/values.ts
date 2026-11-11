@@ -524,6 +524,10 @@ export class Expressions<C extends Context> implements Union<C> {
   private isArray(t: Type): t is ArrayType {
     return this.recOf(t)?.kind === "array";
   }
+  // Whether a value holds an array of references, which only a few operations are checked for.
+  private holdsRefArray(t: Type): boolean {
+    return this.ctx.typing().holdsPart(t, (u) => this.isArray(u) && this.ctx.typing().holdsRef(this.ctx.typing().rec(u).element), true);
+  }
   private isFixed(t: Type): t is FixedType {
     return this.recOf(t)?.kind === "fixed";
   }
@@ -1785,6 +1789,8 @@ export class Expressions<C extends Context> implements Union<C> {
       } finally {
         this.ctx.tables().filling.delete(e);
       }
+      // Every slot would hold a clone, and a clone of a reference is another reference.
+      if (result !== undefined && this.holdsRefArray(result.type)) throw unsupported("arrays filled with references", x);
       const given = this.ctx.held().types.get(x)!;
       const t = this.ctx.tables().typing.lower(given);
       if (typeof t !== "string" && this.ctx.typing().rec(t).kind === "generator") throw new CompileError("E0213", "'new Array(n).fill(x)' puts a clone of x in every slot, and a generator can't be cloned: it runs once", x.start, x.end);
@@ -3053,6 +3059,7 @@ export class Expressions<C extends Context> implements Union<C> {
       return this.callMade(made);
     }
     if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, [...ARRAY_METHODS])}`, callee.start, callee.end);
+    if (callee.name !== "push" && callee.name !== "pop" && this.ctx.typing().holdsRef(this.ctx.typing().rec(array).element)) throw unsupported(`calls to '${callee.name}' on arrays of references`, callee);
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
@@ -4335,6 +4342,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private spreadFrom(this: Mut<this>, x: Ref<Extract<Expr, { kind: "spread" }>>, source: Ref<Expr>): Type {
     const t = this.value(source);
     const held = this.heldBy(t)!;
+    if (this.holdsRefArray(held)) throw unsupported("spreads of arrays of references", source);
     const at = { start: source.start, end: source.end };
     let from: Expr | undefined = undefined;
     if ((this.dictOf(held) !== undefined)) throw this.notIterable(at);
@@ -6788,6 +6796,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const stored = this.ctx.tables().typing.lower(receiver);
     // A generator runs once, through its frame, so there is no second one to make.
     if (this.recOf(stored)?.kind === "generator") throw new CompileError("E0213", "a generator can't be cloned: it runs once, and a copy would share its place in the run", e.start, e.end);
+    if (this.holdsRefArray(receiver)) throw unsupported("clones of arrays of references", e);
     // A copy of a value holding references borrows what it does.
     if (this.ctx.typing().holdsRef(receiver)) this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(callee.object)]);
     if (stored !== receiver && this.isClassType(stored) && this.cls(stored).methods.has("clone")) {
@@ -8292,7 +8301,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const callable = typeof want !== "string" && this.recOf(want)?.kind === "dyn" && this.ctx.typing().callableOf.has(this.ctx.typing().rec(want as DynType).of) ? want : undefined;
     const promise = typeof want !== "string" && this.recOf(want)?.kind === "dyn" && this.ctx.typing().promiseElement(this.ctx.typing().rec(want as DynType).of) !== undefined ? want : undefined;
     let given: Type[] = [];
-    for (const x of e.elements) if (x !== undefined) given.push(this.elementValue(x, spreads, callable, promise));
+    for (const x of e.elements) if (x !== undefined) given.push(this.elementValue(x, spreads, callable, promise, want));
     const fromSpreads = spreads.size > 0 && !this.ctx.exprsState.wanted.has(e);
     const element = given.length === 0 ? "never" : fromSpreads ? this.ctx.tables().typing.unionType(spreadTypes.slice()) : this.ctx.tables().typing.unionType(given.slice());
     let i: usize = 0;
@@ -8315,7 +8324,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // An array literal's element's type: a spread's elements, a closure or future boxed into the
   // callable or Promise the literal is wanted as, or the element's type widened as a `let` widens.
   /** @throws {CompileError} */
-  private elementValue(this: Mut<this>, x: Ref<Expr>, spreads: Ref<NodeMap<Expr, Type>>, callable: Type | undefined, promise: Type | undefined): Type {
+  private elementValue(this: Mut<this>, x: Ref<Expr>, spreads: Ref<NodeMap<Expr, Type>>, callable: Type | undefined, promise: Type | undefined, want: Type | undefined): Type {
     const spread = spreads.get(x);
     if (spread !== undefined) return spread;
     const t = this.value(x);
@@ -8327,7 +8336,12 @@ export class Expressions<C extends Context> implements Union<C> {
       return into;
     }
     if (typeof t !== "string" && this.ctx.typing().rec(t).kind === "closure") throw unsupported("arrays of functions", x);
-    if (this.ctx.typing().holdsRef(t)) throw unsupported("arrays of references", x);
+    if (this.ctx.typing().holdsMut(t)) throw unsupported("arrays of mutable references", x);
+    // A borrow where an owned element is wanted is read through, as one assigned to a variable is.
+    if (want !== undefined && this.isRefType(t) && !this.ctx.typing().holdsRef(want)) {
+      this.coerce(x, t, want, `type '${this.ctx.typing().show(t)}' is not assignable to type '${this.ctx.typing().show(want)}'`);
+      return want;
+    }
     const widened = this.ctx.typing().widenLet(t);
     if (widened !== t) this.coerce(x, t, widened, "");
     return widened;
@@ -8772,6 +8786,7 @@ export class Expressions<C extends Context> implements Union<C> {
     this.ctx.exprsState.once.add(cloneExpr(e.right));
     const l = this.unfoldedThrough(left);
     const r = this.unfoldedThrough(right);
+    if (l !== "null" && r !== "null" && (this.holdsRefArray(l) || this.holdsRefArray(r))) throw unsupported("comparisons of arrays of references", e);
     if (!objectsMeet(this.ctx.tables().typing, l, r)) return undefined;
     this.ctx.exprsState.once.delete(e.left);
     this.ctx.exprsState.once.delete(e.right);
@@ -8902,6 +8917,7 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const a of args) {
       const type = a.kind === "string" ? "void" : this.read(a);
       if (this.ctx.typing().holdsPart(type, (u) => rustClassOf(this.ctx.typing(), u) !== undefined, true)) throw new CompileError("E1004", `printing a '${this.ctx.typing().show(type)}' isn't supported, since it holds a Rust value; print what its methods give`, a.start, a.end);
+      if (this.holdsRefArray(type)) throw unsupported("prints of arrays of references", a);
       if (this.printable(type)) continue;
       this.ctx.tables().printed.add(cloneExpr(a));
       const part = this.ctx.typing().uninspectable(type);
@@ -9437,11 +9453,27 @@ export class Expressions<C extends Context> implements Union<C> {
       for (const s of from) this.rebind(target, s);
       return;
     }
+    if (this.elementOutlives(target, e) && this.inPlace(e, to)) return;
     const root = this.rootLocal(e);
     const lives = root === "this" || (root !== undefined && this.ctx.depthOf(root) <= this.ctx.depthOf(target.localId));
     if (!lives || !this.place(e) || !this.inPlace(e, to)) {
       throw new CompileError("E0204", `'${target.name}' can only be pointed at a variable, or a field of one, declared in its own scope or an enclosing one, so that it lives as long as '${target.name}'`, e.start, e.end);
     }
+  }
+
+  // Whether `e` reads or pops an element of an array of references declared in the target's
+  // scope or an enclosing one: the element lives as long as what the array borrows.
+  private elementOutlives(this: Mut<this>, target: Ref<Local>, e: Ref<Expr>): boolean {
+    if (e.kind === "nonNull") return this.elementOutlives(target, e.expr);
+    if (e.kind === "index") return this.arrayOutlives(target, e.object);
+    if (e.kind === "call" && e.callee.kind === "member" && e.callee.name === "pop") return this.arrayOutlives(target, e.callee.object);
+    return false;
+  }
+
+  private arrayOutlives(this: Mut<this>, target: Ref<Local>, elements: Ref<Expr>): boolean {
+    if (!this.holdsRefArray(this.ctx.held().types.get(elements)!)) return false;
+    const held = this.rootLocal(elements);
+    return held === "this" || (held !== undefined && this.ctx.depthOf(held) <= this.ctx.depthOf(target.localId));
   }
 
   // The binding a place is a field of, through member reads that aren't getters, or `this`.
