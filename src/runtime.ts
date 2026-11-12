@@ -1,5 +1,4 @@
-import { layoutOf, type Slots } from "./layout.ts";
-import type { Expr } from "./parser.ts";
+import { llvmOf, type Slots } from "./layout.ts";
 import { INTEGERS, type Integer, type Type } from "./typing.ts";
 
 // What compiled programs call into: libc's printf, and the C runtime. A panic is the runtime's
@@ -339,126 +338,133 @@ export const RUNTIME = [
 // literals and literal values are folded into the printf format at compile time. A union is
 // printed by branching on its tag, so the format is flushed before it and each branch prints
 // its member.
-export function print(args: Expr[], b: Slots, value: (e: Expr) => string, typeOf: (e: Expr) => Type, convert: Convert, stream: 1 | 2 = 1) {
-  // Every argument runs before anything prints, as in JavaScript.
-  const evaluated = args.map((a) => (a.kind === "string" ? "" : value(a)));
-  write(stream, args.map((a, i) => (a.kind === "string" ? a.value : [evaluated[i]!, typeOf(a)])), b, convert);
+
+// What printing needs from the function being emitted, besides its slots.
+export interface PrintHost extends Slots {
+  convert(this: Mut<this>, v: string, from: Type, to: Type): string;
 }
 
 // Writes text and values, joined by spaces and ending in a newline, to stdout (1) or stderr (2).
 // A value of a type with no printed form, like an object, prints as its type's name.
-export function write(stream: 1 | 2, parts: (string | [string, Type])[], b: Slots, convert: Convert) {
-  const { emit, temp, label, startBlock, cString, typing } = b;
-  const llvm = layoutOf(typing);
-  let format = "";
-  let values: string[] = [];
-  emit(`call void @fsh_rt_print_begin(i32 ${stream})`);
-  parts.forEach((part, i) => {
-    if (i > 0) format += " ";
-    if (typeof part === "string") literal(part);
-    else piece(...part);
-  });
-  format += "\n";
-  flush();
-  emit(`call void @fsh_rt_print_end(i32 ${stream})`);
+export class Printer<H extends PrintHost> {
+  host: Mut<H>;
+  stream: 1 | 2;
+  format = "";
+  values: string[] = [];
 
-  function piece(v: string, type: Type) {
+  constructor(host: Mut<H>, stream: 1 | 2) {
+    this.host = host;
+    this.stream = stream;
+  }
+
+  write(this: Mut<this>, parts: (string | [string, Type])[]): void {
+    this.host.emit(`call void @fsh_rt_print_begin(i32 ${this.stream})`);
+    parts.forEach((part, i) => {
+      if (i > 0) this.format += " ";
+      if (typeof part === "string") this.literal(part);
+      else this.piece(...part);
+    });
+    this.format += "\n";
+    this.flush();
+    this.host.emit(`call void @fsh_rt_print_end(i32 ${this.stream})`);
+  }
+
+  piece(this: Mut<this>, v: string, type: Type) {
     // Objects, arrays, Maps, Sets and unions holding them print as Node's util.inspect would.
     const plain = (t: Type): boolean => {
       if (typeof t === "string") return true;
-      const r = typing.rec(t);
+      const r = this.host.typing.rec(t);
       return r.kind === "literal" || r.kind === "pattern" || (r.kind === "union" && r.members.every(plain));
     };
-    const r = typeof type === "string" ? undefined : typing.rec(type);
-    if (!plain(type) && b.inspect) {
-      flush();
-      const text = b.inspect(v, type);
-      emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${text})`);
-      emit(`call void @fsh_rt_str_release(ptr ${text})`);
+    const r = typeof type === "string" ? undefined : this.host.typing.rec(type);
+    if (!plain(type)) {
+      this.flush();
+      const text = this.host.inspect(v, type);
+      this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${text})`);
+      this.host.emit(`call void @fsh_rt_str_release(ptr ${text})`);
     } else if (r?.kind === "literal") {
-      literal(String(r.value));
+      this.literal(String(r.value));
     } else if (type === "string") {
       // Written by the runtime, since its bytes may hold anything printf would read as format.
-      flush();
-      emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${v})`);
+      this.flush();
+      this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${v})`);
     } else if (type === "bigint") {
       // Written as console.log writes one, with its 'n'.
-      flush();
-      const digits = temp();
-      emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
-      emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${digits})`);
-      emit(`call void @fsh_rt_str_release(ptr ${digits})`);
-      format += "n";
+      this.flush();
+      const digits = this.host.temp();
+      this.host.emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${digits})`);
+      this.host.emit(`call void @fsh_rt_str_release(ptr ${digits})`);
+      this.format += "n";
     } else if (type === "never") {
       // Printing never happens: the value's throw has left already.
     } else if (type === "null") {
-      format += "null";
+      this.format += "null";
     } else if (r !== undefined && r.kind !== "union") {
-      format += escape(typing.show(type));
+      this.format += escape(this.host.typing.show(type));
     } else if (type === "boolean") {
-      const text = temp();
-      emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);
-      format += "%s";
-      values.push(`, ptr ${text}`);
+      const text = this.host.temp();
+      this.host.emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);
+      this.format += "%s";
+      this.values.push(`, ptr ${text}`);
     } else if (r?.kind === "union") {
-      flush();
-      const tag = temp();
-      emit(`${tag} = extractvalue ${llvm(type)} ${v}, 0`);
-      const cases = r.members.map(() => label());
-      const end = label();
-      emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      this.flush();
+      const tag = this.host.temp();
+      this.host.emit(`${tag} = extractvalue ${llvmOf(this.host.typing, type)} ${v}, 0`);
+      const cases = r.members.map(() => this.host.label());
+      const end = this.host.label();
+      this.host.emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
       r.members.forEach((member, i) => {
-        startBlock(cases[i]!);
-        piece(convert(v, type, member), member);
-        flush();
-        emit(`br label %${end}`);
+        this.host.startBlock(cases[i]!);
+        this.piece(this.host.convert(v, type, member), member);
+        this.flush();
+        this.host.emit(`br label %${end}`);
       });
-      startBlock(end);
+      this.host.startBlock(end);
     } else if (type === "f32" || type === "f64") {
       // A float is written out by the runtime, as JavaScript would.
-      const text = temp();
-      emit(`${text} = call ptr @fsh_rt_format_${type}(${llvm(type)} ${v}, ptr ${b.alloca("[32 x i8]")})`);
-      format += "%s";
-      values.push(`, ptr ${text}`);
+      const text = this.host.temp();
+      this.host.emit(`${text} = call ptr @fsh_rt_format_${type}(${llvmOf(this.host.typing, type)} ${v}, ptr ${this.host.alloca("[32 x i8]")})`);
+      this.format += "%s";
+      this.values.push(`, ptr ${text}`);
     } else {
       // Every integer prints as a 64-bit one, extended by its signedness, but for the 128-bit
       // ones, which the runtime writes.
       const { bits, signed } = INTEGERS[type as Integer];
       if (bits === 128) {
-        const text = temp();
-        emit(`${text} = call ptr @fsh_rt_format_${signed ? "i" : "u"}128(i128 ${v}, ptr ${b.alloca("[41 x i8]")})`);
-        format += "%s";
-        values.push(`, ptr ${text}`);
+        const text = this.host.temp();
+        this.host.emit(`${text} = call ptr @fsh_rt_format_${signed ? "i" : "u"}128(i128 ${v}, ptr ${this.host.alloca("[41 x i8]")})`);
+        this.format += "%s";
+        this.values.push(`, ptr ${text}`);
         return;
       }
       let wide = v;
       if (bits < 64) {
-        wide = temp();
-        emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+        wide = this.host.temp();
+        this.host.emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
       }
-      format += signed ? "%lld" : "%llu";
-      values.push(`, i64 ${wide}`);
+      this.format += signed ? "%lld" : "%llu";
+      this.values.push(`, i64 ${wide}`);
     }
   }
 
   // Text holding a NUL would end printf's format early, so the runtime writes it.
-  function literal(text: string) {
+  literal(this: Mut<this>, text: string) {
     if (!text.includes("\0")) {
-      format += escape(text);
+      this.format += escape(text);
       return;
     }
-    flush();
-    emit(`call void @fsh_rt_str_print(i32 ${stream}, ptr ${b.text(text)})`);
+    this.flush();
+    this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${this.host.text(text)})`);
   }
 
-  function flush() {
-    if (format === "") return;
-    emit(stream === 1 ? `call i32 (ptr, ...) @printf(ptr ${cString(format)}${values.join("")})` : `call i32 (i32, ptr, ...) @dprintf(i32 2, ptr ${cString(format)}${values.join("")})`);
-    format = "";
-    values = [];
+  flush(this: Mut<this>) {
+    if (this.format === "") return;
+    this.host.emit(this.stream === 1 ? `call i32 (ptr, ...) @printf(ptr ${this.host.cString(this.format)}${this.values.join("")})` : `call i32 (i32, ptr, ...) @dprintf(i32 2, ptr ${this.host.cString(this.format)}${this.values.join("")})`);
+    this.format = "";
+    this.values = [];
   }
 }
 
 const escape = (text: string) => text.replaceAll("%", "%%");
 
-type Convert = (v: string, from: Type, to: Type) => string;

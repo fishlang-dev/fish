@@ -5,16 +5,21 @@ import { INTEGERS, range, type Integer } from "./typing.ts";
 // as Rust's do.
 
 // What the operator lowering needs from the function being emitted.
-export type Builder = {
-  emit(line: string): void;
-  temp(): string;
-  label(): string;
-  startBlock(name: string): void;
-  cString(s: string): string;
-  alloca(type: string): string;
+export interface Builder {
+  emit(this: Mut<this>, line: string): void;
+  temp(this: Mut<this>): string;
+  label(this: Mut<this>): string;
+  startBlock(this: Mut<this>, name: string): void;
+  cString(this: Mut<this>, s: string): string;
+  alloca(this: Mut<this>, type: string): string;
   // Emits a call that may panic, so a panic unwinding through it drops what is live here.
-  mayPanic(call: string): void;
-};
+  mayPanic(this: Mut<this>, call: string): void;
+  // An expression's `file:line:col`, for panic messages.
+  where(at: Span): string;
+  release: boolean;
+  // Each overflow-checking intrinsic the lowered code calls, which the module declares.
+  intrinsics: Set<string>;
+}
 
 // The wrapping instruction, the checked intrinsic without its signedness, and the verb for
 // each panic message.
@@ -38,117 +43,133 @@ const SHIFTS: Record<"<<" | ">>" | ">>>", string> = { "<<": "left", ">>": "right
 
 const BITWISE: Partial<Record<BinaryOp, string>> = { "&": "and", "|": "or", "^": "xor" };
 
-// Each overflow-checking intrinsic the lowered code calls, which the module declares.
-export type Intrinsics = Set<string>;
+// The integer operators lowered into the function `host` is emitting.
+export class Lowering<H extends Builder> {
+  host: Mut<H>;
 
-// `where` gives an expression's `file:line:col`, for panic messages.
-export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPanic }: Builder, where: (at: Span) => string, release: boolean, intrinsics: Intrinsics) {
-  return { operate, arithmetic, panicIf, method };
+  constructor(host: Mut<H>) {
+    this.host = host;
+  }
 
-  function operate(op: BinaryOp, a: string, b: string, at: Span, type: Integer): string {
-    if (op === "<<" || op === ">>" || op === ">>>") return shift(op, a, b, at, type);
-    if (op === "**") return power(a, b, type, (x, y) => arithmetic("*", x, y, at, type));
+  operate(this: Mut<this>, op: BinaryOp, a: string, b: string, at: Span, type: Integer): string {
+    if (op === "<<" || op === ">>" || op === ">>>") return this.shift(op, a, b, at, type);
+    if (op === "**") return this.power(a, b, type, at, undefined);
     const bitwise = BITWISE[op];
-    if (!bitwise) return arithmetic(op as ArithmeticOp, a, b, at, type);
-    const result = temp();
-    emit(`${result} = ${bitwise} i${INTEGERS[type].bits} ${a}, ${b}`);
+    if (!bitwise) return this.arithmetic(op as ArithmeticOp, a, b, at, type);
+    const result = this.host.temp();
+    this.host.emit(`${result} = ${bitwise} i${INTEGERS[type].bits} ${a}, ${b}`);
     return result;
   }
 
-  function shift(op: keyof typeof SHIFTS, a: string, b: string, at: Span, type: Integer): string {
+  shift(this: Mut<this>, op: keyof typeof SHIFTS, a: string, b: string, at: Span, type: Integer): string {
     const { bits, signed } = INTEGERS[type];
     const ty = `i${bits}`;
     let amount = b;
-    if (release) {
-      amount = temp();
-      emit(`${amount} = and ${ty} ${b}, ${bits - 1}`);
+    if (this.host.release) {
+      amount = this.host.temp();
+      this.host.emit(`${amount} = and ${ty} ${b}, ${bits - 1}`);
     } else {
-      const overflow = temp();
-      emit(`${overflow} = icmp ugt ${ty} ${b}, ${bits - 1}`);
-      panicIf(overflow, `attempt to shift ${SHIFTS[op]} with overflow`, at);
+      const overflow = this.host.temp();
+      this.host.emit(`${overflow} = icmp ugt ${ty} ${b}, ${bits - 1}`);
+      this.panicIf(overflow, `attempt to shift ${SHIFTS[op]} with overflow`, at);
     }
-    const result = temp();
+    const result = this.host.temp();
     const instruction = op === "<<" ? "shl" : op === ">>" && signed ? "ashr" : "lshr";
-    emit(`${result} = ${instruction} ${ty} ${a}, ${amount}`);
+    this.host.emit(`${result} = ${instruction} ${ty} ${a}, ${amount}`);
     return result;
   }
 
-  function arithmetic(op: ArithmeticOp, a: string, b: string, at: Span, type: Integer, verb?: string): string {
-    if (op === "/" || op === "%") return division(op, a, b, at, type);
+  arithmetic(this: Mut<this>, op: ArithmeticOp, a: string, b: string, at: Span, type: Integer, verb?: string): string {
+    if (op === "/" || op === "%") return this.division(op, a, b, at, type);
     const [wrapping, checked, opVerb] = ARITHMETIC[op];
-    if (release) {
-      const result = temp();
-      emit(`${result} = ${wrapping} i${INTEGERS[type].bits} ${a}, ${b}`);
+    if (this.host.release) {
+      const result = this.host.temp();
+      this.host.emit(`${result} = ${wrapping} i${INTEGERS[type].bits} ${a}, ${b}`);
       return result;
     }
-    const [result, overflow] = overflowing(checked, a, b, type);
-    panicIf(overflow, `attempt to ${verb ?? opVerb} with overflow`, at);
+    const [result, overflow] = this.overflowing(checked, a, b, type);
+    this.panicIf(overflow, `attempt to ${verb ?? opVerb} with overflow`, at);
     return result;
   }
 
-  // Exponentiation by squaring, multiplying with `multiply`: as `*` does for `**`, so an
-  // overflowing power panics with the same message in debug builds and wraps in release. The base
-  // squares only while bits of the exponent remain, so a power that fits never overflows on the
-  // way, as Rust's `checked_pow` relies on.
-  function power(a: string, b: string, type: Integer, multiply: (x: string, y: string) => string): string {
+  // Exponentiation by squaring. With no `flag` it multiplies as `*` does, so an overflowing
+  // power panics with the same message in debug builds and wraps in release; with one, each
+  // product's overflow is or-ed into that `i1` slot. The base squares only while bits of the
+  // exponent remain, so a power that fits never overflows on the way, as Rust's `checked_pow`
+  // relies on.
+  power(this: Mut<this>, a: string, b: string, type: Integer, at: Span, flag: string | undefined): string {
     const ty = `i${INTEGERS[type].bits}`;
-    const [result, base, exponent] = [alloca(ty), alloca(ty), alloca("i32")];
-    emit(`store ${ty} 1, ptr ${result}`);
-    emit(`store ${ty} ${a}, ptr ${base}`);
-    emit(`store i32 ${b}, ptr ${exponent}`);
-    const [loop, odd, next, square, done] = [label(), label(), label(), label(), label()];
+    const [result, base, exponent] = [this.host.alloca(ty), this.host.alloca(ty), this.host.alloca("i32")];
+    this.host.emit(`store ${ty} 1, ptr ${result}`);
+    this.host.emit(`store ${ty} ${a}, ptr ${base}`);
+    this.host.emit(`store i32 ${b}, ptr ${exponent}`);
+    const [loop, odd, next, square, done] = [this.host.label(), this.host.label(), this.host.label(), this.host.label(), this.host.label()];
     const load = (ty: string, slot: string) => {
-      const v = temp();
-      emit(`${v} = load ${ty}, ptr ${slot}`);
+      const v = this.host.temp();
+      this.host.emit(`${v} = load ${ty}, ptr ${slot}`);
       return v;
     };
-    emit(`br label %${loop}`);
-    startBlock(loop);
+    this.host.emit(`br label %${loop}`);
+    this.host.startBlock(loop);
     const e = load("i32", exponent);
-    const more = temp();
-    emit(`${more} = icmp ne i32 ${e}, 0`);
-    emit(`br i1 ${more}, label %${odd}, label %${done}`);
-    startBlock(odd);
-    const bit = temp();
-    emit(`${bit} = and i32 ${e}, 1`);
-    const set = temp();
-    emit(`${set} = icmp ne i32 ${bit}, 0`);
-    const times = label();
-    emit(`br i1 ${set}, label %${times}, label %${next}`);
-    startBlock(times);
-    emit(`store ${ty} ${multiply(load(ty, result), load(ty, base))}, ptr ${result}`);
-    emit(`br label %${next}`);
-    startBlock(next);
-    const rest = temp();
-    emit(`${rest} = lshr i32 ${e}, 1`);
-    emit(`store i32 ${rest}, ptr ${exponent}`);
-    const left = temp();
-    emit(`${left} = icmp ne i32 ${rest}, 0`);
-    emit(`br i1 ${left}, label %${square}, label %${done}`);
-    startBlock(square);
+    const more = this.host.temp();
+    this.host.emit(`${more} = icmp ne i32 ${e}, 0`);
+    this.host.emit(`br i1 ${more}, label %${odd}, label %${done}`);
+    this.host.startBlock(odd);
+    const bit = this.host.temp();
+    this.host.emit(`${bit} = and i32 ${e}, 1`);
+    const set = this.host.temp();
+    this.host.emit(`${set} = icmp ne i32 ${bit}, 0`);
+    const times = this.host.label();
+    this.host.emit(`br i1 ${set}, label %${times}, label %${next}`);
+    this.host.startBlock(times);
+    const product = this.times(load(ty, result), load(ty, base), type, at, flag);
+    this.host.emit(`store ${ty} ${product}, ptr ${result}`);
+    this.host.emit(`br label %${next}`);
+    this.host.startBlock(next);
+    const rest = this.host.temp();
+    this.host.emit(`${rest} = lshr i32 ${e}, 1`);
+    this.host.emit(`store i32 ${rest}, ptr ${exponent}`);
+    const left = this.host.temp();
+    this.host.emit(`${left} = icmp ne i32 ${rest}, 0`);
+    this.host.emit(`br i1 ${left}, label %${square}, label %${done}`);
+    this.host.startBlock(square);
     const b2 = load(ty, base);
-    emit(`store ${ty} ${multiply(b2, b2)}, ptr ${base}`);
-    emit(`br label %${loop}`);
-    startBlock(done);
+    const squared = this.times(b2, b2, type, at, flag);
+    this.host.emit(`store ${ty} ${squared}, ptr ${base}`);
+    this.host.emit(`br label %${loop}`);
+    this.host.startBlock(done);
     return load(ty, result);
   }
 
-  function division(op: "/" | "%", a: string, b: string, at: Span, type: Integer): string {
+  // One product inside a power: checked as `*` is, or wrapping with its overflow kept in `flag`.
+  times(this: Mut<this>, x: string, y: string, type: Integer, at: Span, flag: string | undefined): string {
+    if (flag === undefined) return this.arithmetic("*", x, y, at, type);
+    const [product, over] = this.overflowing("mul", x, y, type);
+    const was = this.host.temp();
+    this.host.emit(`${was} = load i1, ptr ${flag}`);
+    const either = this.host.temp();
+    this.host.emit(`${either} = or i1 ${was}, ${over}`);
+    this.host.emit(`store i1 ${either}, ptr ${flag}`);
+    return product;
+  }
+
+  division(this: Mut<this>, op: "/" | "%", a: string, b: string, at: Span, type: Integer): string {
     const { bits, signed } = INTEGERS[type];
     const ty = `i${bits}`;
     const [instruction, byZero, overflow] = DIVISION[op];
-    const zero = temp();
-    emit(`${zero} = icmp eq ${ty} ${b}, 0`);
-    panicIf(zero, byZero, at);
+    const zero = this.host.temp();
+    this.host.emit(`${zero} = icmp eq ${ty} ${b}, 0`);
+    this.panicIf(zero, byZero, at);
     if (signed) {
-      const [min, minusOne, both] = [temp(), temp(), temp()];
-      emit(`${min} = icmp eq ${ty} ${a}, ${range(type)[0]}`);
-      emit(`${minusOne} = icmp eq ${ty} ${b}, -1`);
-      emit(`${both} = and i1 ${min}, ${minusOne}`);
-      panicIf(both, overflow, at);
+      const [min, minusOne, both] = [this.host.temp(), this.host.temp(), this.host.temp()];
+      this.host.emit(`${min} = icmp eq ${ty} ${a}, ${range(type)[0]}`);
+      this.host.emit(`${minusOne} = icmp eq ${ty} ${b}, -1`);
+      this.host.emit(`${both} = and i1 ${min}, ${minusOne}`);
+      this.panicIf(both, overflow, at);
     }
-    const result = temp();
-    emit(`${result} = ${signed ? "s" : "u"}${instruction} ${ty} ${a}, ${b}`);
+    const result = this.host.temp();
+    this.host.emit(`${result} = ${signed ? "s" : "u"}${instruction} ${ty} ${a}, ${b}`);
     return result;
   }
 
@@ -156,18 +177,18 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPa
   // overflowing methods whether the operation overflowed, which is when checked gives null. Only
   // wrapping and saturating division by zero panics, as Rust's do. `b` is a `u32` for shifts and
   // powers.
-  function method(family: string, operation: string, a: string, b: string, at: Span, type: Integer): [string, string?] {
+  method(this: Mut<this>, family: string, operation: string, a: string, b: string, at: Span, type: Integer): [string, string?] {
     const { bits, signed } = INTEGERS[type];
     const ty = `i${bits}`;
     const [min, max] = range(type);
     const op = (line: string) => {
-      const v = temp();
-      emit(`${v} = ${line}`);
+      const v = this.host.temp();
+      this.host.emit(`${v} = ${line}`);
       return v;
     };
     const saturated = (name: string, x: string, y: string) => {
       const intrinsic = `@llvm.${signed ? "s" : "u"}${name}.sat.${ty}`;
-      intrinsics.add(`declare ${ty} ${intrinsic}(${ty}, ${ty})`);
+      this.host.intrinsics.add(`declare ${ty} ${intrinsic}(${ty}, ${ty})`);
       return op(`call ${ty} ${intrinsic}(${ty} ${x}, ${ty} ${y})`);
     };
     switch (operation) {
@@ -176,7 +197,7 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPa
       case "Mul": {
         const name = operation.toLowerCase();
         if (family === "saturating" && name !== "mul") return [saturated(name, a, b)];
-        const [v, over] = overflowing(name, a, b, type);
+        const [v, over] = this.overflowing(name, a, b, type);
         if (family !== "saturating") return [v, over];
         // An overflowing product is past MIN when exactly one operand is negative.
         const bound = signed ? op(`select i1 ${op(`icmp slt ${ty} ${op(`xor ${ty} ${a}, ${b}`)}, 0`)}, ${ty} ${min}, ${ty} ${max}`) : String(max);
@@ -189,7 +210,7 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPa
       case "Rem": {
         const [instruction, byZero] = DIVISION[operation === "Div" ? "/" : "%"];
         const zero = op(`icmp eq ${ty} ${b}, 0`);
-        if (family !== "checked") panicIf(zero, byZero, at);
+        if (family !== "checked") this.panicIf(zero, byZero, at);
         const overflow = signed ? op(`and i1 ${op(`icmp eq ${ty} ${a}, ${min}`)}, ${op(`icmp eq ${ty} ${b}, -1`)}`) : "false";
         const bad = family === "checked" ? op(`or i1 ${zero}, ${overflow}`) : overflow;
         // Dividing by 1 instead keeps LLVM's undefined cases out: MIN / 1 is wrapping's MIN, and
@@ -206,14 +227,9 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPa
         return [op(`${instruction} ${ty} ${a}, ${amount}`), op(`icmp uge i32 ${b}, ${bits}`)];
       }
     }
-    const flag = alloca("i1");
-    emit(`store i1 false, ptr ${flag}`);
-    const v = power(a, b, type, (x, y) => {
-      const [product, over] = overflowing("mul", x, y, type);
-      const was = op(`load i1, ptr ${flag}`);
-      emit(`store i1 ${op(`or i1 ${was}, ${over}`)}, ptr ${flag}`);
-      return product;
-    });
+    const flag = this.host.alloca("i1");
+    this.host.emit(`store i1 false, ptr ${flag}`);
+    const v = this.power(a, b, type, at, flag);
     const over = op(`load i1, ptr ${flag}`);
     if (family !== "saturating") return [v, over];
     // A negative base to an odd power is past MIN.
@@ -222,25 +238,25 @@ export function lowering({ emit, temp, label, startBlock, cString, alloca, mayPa
   }
 
   // The wrapped result of `add`, `sub` or `mul` and whether it overflowed.
-  function overflowing(name: string, a: string, b: string, type: Integer): [string, string] {
+  overflowing(this: Mut<this>, name: string, a: string, b: string, type: Integer): [string, string] {
     const { bits, signed } = INTEGERS[type];
     const ty = `i${bits}`;
     const intrinsic = `@llvm.${signed ? "s" : "u"}${name}.with.overflow.${ty}`;
-    intrinsics.add(`declare { ${ty}, i1 } ${intrinsic}(${ty}, ${ty})`);
-    const [pair, v, over] = [temp(), temp(), temp()];
-    emit(`${pair} = call { ${ty}, i1 } ${intrinsic}(${ty} ${a}, ${ty} ${b})`);
-    emit(`${v} = extractvalue { ${ty}, i1 } ${pair}, 0`);
-    emit(`${over} = extractvalue { ${ty}, i1 } ${pair}, 1`);
+    this.host.intrinsics.add(`declare { ${ty}, i1 } ${intrinsic}(${ty}, ${ty})`);
+    const [pair, v, over] = [this.host.temp(), this.host.temp(), this.host.temp()];
+    this.host.emit(`${pair} = call { ${ty}, i1 } ${intrinsic}(${ty} ${a}, ${ty} ${b})`);
+    this.host.emit(`${v} = extractvalue { ${ty}, i1 } ${pair}, 0`);
+    this.host.emit(`${over} = extractvalue { ${ty}, i1 } ${pair}, 1`);
     return [v, over];
   }
 
-  function panicIf(condition: string, reason: string, at: Span) {
-    const fail = label();
-    const ok = label();
-    emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
-    startBlock(fail);
-    mayPanic(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(at)}:\n${reason}\n`)})`);
-    emit("unreachable");
-    startBlock(ok);
+  panicIf(this: Mut<this>, condition: string, reason: string, at: Span) {
+    const fail = this.host.label();
+    const ok = this.host.label();
+    this.host.emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
+    this.host.startBlock(fail);
+    this.host.mayPanic(`call void @fsh_rt_panic(ptr ${this.host.cString(`panicked at ${this.host.where(at)}:\n${reason}\n`)})`);
+    this.host.emit("unreachable");
+    this.host.startBlock(ok);
   }
 }

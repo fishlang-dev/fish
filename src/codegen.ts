@@ -4,12 +4,12 @@ import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossin
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern, type RegexTables } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
-import { lowering } from "./arithmetic.ts";
+import { Lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { CheckedHost, comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
-import { print, RUNTIME, write } from "./runtime.ts";
+import { Printer, RUNTIME, type PrintHost } from "./runtime.ts";
 import type { ArithmeticOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
+import { ARRAY, DYN, compound, Conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { EMBEDDED, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
@@ -201,7 +201,7 @@ type Region = { label: string; chosen: string; exits: { key: string; resume: () 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-class Codegen {
+class Codegen implements PrintHost {
   checked: Checked;
   src: string;
   file: string;
@@ -335,22 +335,10 @@ class Codegen {
   jsSite: Expr | undefined;
   vtables: Map<string, string>;
   orders: Map<string, string>;
-  builder: { typing: Typing; emit: (line: string) => void; temp: () => string; label: () => string; startBlock: (name: string) => void; cString: (s: string) => string; alloca: (type: string) => string; text: (value: string) => string; mayPanic: (call: string) => void; deep: (a: string, b: string, type: Type) => string; inspect: (v: string, type: Type) => string; };
   intrinsics: Set<string>;
   foreign: Set<string>;
   declaredRust: Set<string>;
   rustDrops: Set<string>;
-  operate: (op: BinaryOp, a: string, b: string, at: Span, type: Integer) => string;
-  arithmetic: (op: ArithmeticOp, a: string, b: string, at: Span, type: Integer, verb?: string) => string;
-  panicIf: (condition: string, reason: string, at: Span) => void;
-  integerLowering: (family: string, operation: string, a: string, b: string, at: Span, type: Integer) => [string, string?];
-  convert: (v: string, from: Type, to: Type) => string;
-  test: (e: Expr, value: (e: Expr) => string, typeOf: (e: Expr) => Type) => string | undefined;
-  equals: (a: string, aType: Type, b: string, bType: Type) => string;
-  unionField: (v: string, union: UnionType, name: string, to: Type) => string;
-  holds: (v: string, union: UnionType, members: Type[]) => string;
-  holdsWhere: (v: string, type: Type, wanted: (m: Type) => boolean) => string;
-  eachMember: (v: string, union: UnionType, to: Type, make: (part: string, member: Type) => string) => string;
   generatorOf: TypeMap<GeneratorType, Instance>;
   futureOf: TypeMap<FutureType, Instance>;
   taken: Map<string, unknown>;
@@ -583,8 +571,6 @@ class Codegen {
     // default order.
     this.orders = new Map<string, string>();
 
-    this.builder = { typing: this.typing, emit: (line) => this.emit(line), temp: () => this.temp(), label: () => this.label(), startBlock: (name) => this.startBlock(name), cString: (s) => this.cString(s), alloca: (type) => this.alloca(type), text: (value) => this.text(value), mayPanic: (call: string) => this.unwinding(call), deep: (a: string, b: string, type: Type) => this.deepEquals(a, b, type), inspect: (v: string, type: Type) => this.inspected(v, type) };
-
     this.intrinsics = new Set<string>();
 
     // The C functions the program declares itself, which the libm functions Math uses may be.
@@ -595,10 +581,6 @@ class Codegen {
     this.declaredRust = new Set<string>();
 
     this.rustDrops = new Set<string>();
-
-    ({ operate: this.operate, arithmetic: this.arithmetic, panicIf: this.panicIf, method: this.integerLowering } = lowering(this.builder, ((at) => this.where(at)), this.release, this.intrinsics));
-
-    ({ convert: this.convert, test: this.test, equals: this.equals, unionField: this.unionField, holds: this.holds, holdsWhere: this.holdsWhere, eachMember: this.eachMember } = conversions(this.builder, this.kindTests, this.keyTests));
 
 
     // The instance each generator type resumes, and each future type polls.
@@ -829,6 +811,35 @@ class Codegen {
   ].join("\n");
   }
 
+  // The integer operators, lowered into the function being emitted.
+  lowering(this: Mut<this>): Lowering<Codegen> {
+    return new Lowering(this);
+  }
+
+  mayPanic(this: Mut<this>, call: string): void {
+    this.unwinding(call);
+  }
+
+  // Conversions between the ways two types hold one value, and tests of which a union holds.
+  conversions(this: Mut<this>): Conversions<Codegen> {
+    return new Conversions(this);
+  }
+
+  printer(this: Mut<this>, stream: 1 | 2): Printer<Codegen> {
+    return new Printer(this, stream);
+  }
+
+  convert(this: Mut<this>, v: string, from: Type, to: Type): string {
+    return this.conversions().convert(v, from, to);
+  }
+
+  deep(this: Mut<this>, a: string, b: string, type: Type): string {
+    return this.deepEquals(a, b, type);
+  }
+
+  inspect(this: Mut<this>, v: string, type: Type): string {
+    return this.inspected(v, type);
+  }
 
   // A framed function's entry pushes its frame: a generator or future's on each resume, since it
   // pops at every suspend, so an `await` chain or a generator's resumer is the stack below it.
@@ -1114,7 +1125,7 @@ class Codegen {
   // A binary operator on numbers: floats never overflow, and integers are checked as Rust's are.
   numeric(this: Mut<this>, op: BinaryOp, a: string, b: string, at: Expr, type: Type): string {
     if (type === "bigint") return this.bigOperate(op, a, b, at);
-    if (!isFloat(type)) return this.operate(op, a, b, at, type as Integer);
+    if (!isFloat(type)) return this.lowering().operate(op, a, b, at, type as Integer);
     const result = this.temp();
     // `**` is `Math.pow`; an f32 one is worked in f64 and rounded back.
     if (op === "**") {
@@ -1225,7 +1236,7 @@ class Codegen {
       const [neg, done, start] = [this.label(), this.label(), this.block];
       this.emit(`br i1 ${negative}, label %${neg}, label %${done}`);
       this.startBlock(neg);
-      const negated = this.arithmetic("-", "0", x, e, type as Integer, "negate");
+      const negated = this.lowering().arithmetic("-", "0", x, e, type as Integer, "negate");
       const from = this.block;
       this.emit(`br label %${done}`);
       this.startBlock(done);
@@ -1260,7 +1271,7 @@ class Codegen {
     const type = this.typing.lower(this.valueType(object)) as Numeric;
     const x = this.value(object);
     const digits = e.args[0] ? this.value(e.args[0]) : "0";
-    if (e.args[0]) this.panicIf(op(`icmp ugt i64 ${digits}, 100`), "toFixed() digits argument must be between 0 and 100", e.args[0]);
+    if (e.args[0]) this.lowering().panicIf(op(`icmp ugt i64 ${digits}, 100`), "toFixed() digits argument must be between 0 and 100", e.args[0]);
     const result = this.temp();
     if (isFloat(type)) {
       const wide = type === "f32" ? op(`fpext float ${x} to double`) : x;
@@ -1282,7 +1293,7 @@ class Codegen {
     const type = this.typing.lower(this.valueType(callee.object)) as Integer;
     const [family, operation] = integerMethod(callee.name)!;
     const a = this.value(callee.object);
-    const [v, over] = this.integerLowering(family, operation, a, e.args[0] ? this.value(e.args[0]) : "", e, type);
+    const [v, over] = this.lowering().method(family, operation, a, e.args[0] ? this.value(e.args[0]) : "", e, type);
     const t = this.llvm(type);
     const result = this.temp();
     if (family === "checked") {
@@ -1403,7 +1414,7 @@ class Codegen {
     const [made, old, refused] = [this.temp(), this.temp(), this.temp()];
     this.unwinding(`call ptr @fsh_rt_str_cstring(ptr ${s})`, made);
     this.emit(`${refused} = icmp eq ptr ${made}, null`);
-    this.panicIf(refused, "a string holding NUL can't cross to C, which would read only up to it", at);
+    this.lowering().panicIf(refused, "a string holding NUL can't cross to C, which would read only up to it", at);
     let held = this.reserved.get(at);
     if (!held) {
       held = this.alloca(ARRAY);
@@ -1523,9 +1534,9 @@ class Codegen {
     this.emit(`${taken} = call i32 @${take}(ptr ${word})`);
     this.emit(`${held} = icmp eq i32 ${taken}, 1`);
     const holder = take === "fsh_rt_lock" ? "an `update`" : "a `read` or an `update`";
-    this.panicIf(held, `this lock is already held by ${holder} running here; use the value its callback is given`, at);
+    this.lowering().panicIf(held, `this lock is already held by ${holder} running here; use the value its callback is given`, at);
     this.emit(`${poisoned} = icmp eq i32 ${taken}, 2`);
-    this.panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
+    this.lowering().panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
   }
 
 
@@ -1534,10 +1545,10 @@ class Codegen {
     const [taken, changing, read] = [this.temp(), this.temp(), this.temp()];
     this.emit(`${taken} = call i32 @fsh_rt_rc_${reading ? "read" : "write"}(ptr ${word})`);
     this.emit(`${changing} = icmp eq i32 ${taken}, 1`);
-    this.panicIf(changing, reading ? "this Rc's value is being changed by an `update` running here, so it can't be read until that returns" : "this Rc's value is already being changed by an `update` running here; use the value its callback is given", at);
+    this.lowering().panicIf(changing, reading ? "this Rc's value is being changed by an `update` running here, so it can't be read until that returns" : "this Rc's value is already being changed by an `update` running here; use the value its callback is given", at);
     if (reading) return;
     this.emit(`${read} = icmp eq i32 ${taken}, 2`);
-    this.panicIf(read, "this Rc's value is being read by a `read` or a method running here, so `update` can't change it until that returns", at);
+    this.lowering().panicIf(read, "this Rc's value is being read by a `read` or a method running here, so `update` can't change it until that returns", at);
   }
 
 
@@ -1610,13 +1621,13 @@ class Codegen {
     if (this.typing.rec(t).which === "Semaphore") {
       const negative = this.temp();
       this.emit(`${negative} = icmp slt i64 ${n}, 0`);
-      this.panicIf(negative, "a semaphore's number of slots can't be negative", e);
+      this.lowering().panicIf(negative, "a semaphore's number of slots can't be negative", e);
       this.emit(`${made} = call ptr @fsh_rt_semaphore_new(i64 ${n})`);
       return made;
     }
     const small = this.temp();
     this.emit(`${small} = icmp slt i64 ${n}, 1`);
-    this.panicIf(small, "a channel's capacity must be at least 1", e);
+    this.lowering().panicIf(small, "a channel's capacity must be at least 1", e);
     // The ring is allocated whole, so its size in bytes must fit.
     // ponytail: the ring is allocated up front, grow it on demand if large capacities matter
     const [end, size, wide, most, large] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
@@ -1627,7 +1638,7 @@ class Codegen {
     const limit = this.temp();
     this.emit(`${limit} = udiv i64 ${(1n << 47n).toString()}, ${most}`);
     this.emit(`${large} = icmp sgt i64 ${n}, ${limit}`);
-    this.panicIf(large, "a channel's capacity is too large to allocate", e);
+    this.lowering().panicIf(large, "a channel's capacity is too large to allocate", e);
     this.emit(`${made} = call ptr @fsh_rt_channel_new(i64 ${n}, i64 ${size}, ptr ${this.elementDrop(this.typing.rec(t).of)})`);
     return made;
   }
@@ -2324,7 +2335,7 @@ class Codegen {
       this.emit(`call void @fsh_rt_block_retain(ptr ${v})`);
       return v;
     }
-    if (r?.kind === "union") return this.eachMember(v, type as UnionType, this.typing.blockType("JsValue"), (part, m) => this.toJs(part, m, empty, declared));
+    if (r?.kind === "union") return this.conversions().eachMember(v, type as UnionType, this.typing.blockType("JsValue"), (part, m) => this.toJs(part, m, empty, declared));
     // A Fish future as a JS promise, settled by a task that awaits it, spawned now.
     if (this.isPromised(type)) {
       const [settleAt, frame] = [this.alloca("ptr"), this.alloca(`{ ${DYN}, ptr }`)];
@@ -3180,7 +3191,7 @@ class Codegen {
     this.emit(`${at} = getelementptr ptr, ptr ${table}, i64 2`);
     this.emit(`${fn} = load ptr, ptr ${at}`);
     this.emit(`${none} = icmp eq ptr ${fn}, null`);
-    this.panicIf(none, "this Dyn's value can't be cloned: its type holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place", e);
+    this.lowering().panicIf(none, "this Dyn's value can't be cloned: its type holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place", e);
     // A class's own clone may panic.
     this.unwinding(`call ptr ${fn}(ptr ${data})`, made);
     this.emit(`${copy} = insertvalue ${DYN} ${dyn}, ptr ${made}, 0`);
@@ -3522,7 +3533,7 @@ class Codegen {
     }
     const result = this.resume(generator, at, right);
     const [finished, more] = this.nextShapes(this.typing.rec(generator).yields);
-    this.emit(`br i1 ${this.holds(result, this.typing.nextResult(this.typing.rec(generator).yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
+    this.emit(`br i1 ${this.conversions().holds(result, this.typing.nextResult(this.typing.rec(generator).yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
     this.startBlock(loop);
     this.exits.set(s, { exit: end, next: test, depth: this.scopes.length });
     this.scopes.push([]);
@@ -3597,12 +3608,12 @@ class Codegen {
     const gives = (boxed ? this.typing.promiseElement(this.typing.rec(boxed as DynType).of)! : this.typing.rec(future).gives) as UnionType;
     let v: string;
     if (channel) {
-      this.emit(`br i1 ${this.holds(result, gives, ["null"])}, label %${end}, label %${loop}`);
+      this.emit(`br i1 ${this.conversions().holds(result, gives, ["null"])}, label %${end}, label %${loop}`);
       this.startBlock(loop);
       v = this.convert(result, gives, local.type);
     } else {
       const [finished, more] = this.nextShapes(local.type);
-      this.emit(`br i1 ${this.holds(result, gives, [finished])}, label %${end}, label %${loop}`);
+      this.emit(`br i1 ${this.conversions().holds(result, gives, [finished])}, label %${end}, label %${loop}`);
       this.startBlock(loop);
       v = this.temp();
       this.emit(`${v} = extractvalue ${this.llvm(more)} ${this.convert(result, gives, more)}, 1`);
@@ -3914,7 +3925,7 @@ class Codegen {
           // compares by value.
           const testType = this.valueType(c.test);
           const primitive = typeof subjectType === "string" && testType === subjectType && subjectType !== "string" && subjectType !== "bigint";
-          const equal = primitive ? this.compare(type, subject, test) : this.equals(subject, subjectType, test, testType);
+          const equal = primitive ? this.compare(type, subject, test) : this.conversions().equals(subject, subjectType, test, testType);
           this.settle(this.floor + held.length);
           const next = this.label();
           this.emit(`br i1 ${equal}, label %${enter(bodies[i]!)}, label %${next}`);
@@ -4193,17 +4204,17 @@ class Codegen {
       case "any":
         return;
       case "literal":
-        return pass(info.member ? this.equals(v, info.type, "zeroinitializer", info.member) : this.equals(v, info.type, this.value((p as Extract<Pattern, { kind: "literal" }>).value), this.valueType((p as Extract<Pattern, { kind: "literal" }>).value)));
+        return pass(info.member ? this.conversions().equals(v, info.type, "zeroinitializer", info.member) : this.conversions().equals(v, info.type, this.value((p as Extract<Pattern, { kind: "literal" }>).value), this.valueType((p as Extract<Pattern, { kind: "literal" }>).value)));
       case "none":
-        return pass(union ? this.holds(v, union, ["null"]) : "true");
+        return pass(union ? this.conversions().holds(v, union, ["null"]) : "true");
       case "some": {
         const empty = this.temp();
-        this.emit(`${empty} = xor i1 ${this.holds(v, union!, ["null"])}, true`);
+        this.emit(`${empty} = xor i1 ${this.conversions().holds(v, union!, ["null"])}, true`);
         pass(empty);
         return this.tested(info.arg, this.convert(v, info.type, info.inner), no);
       }
       case "variant": {
-        if (union) pass(this.holds(v, union, [info.variant]));
+        if (union) pass(this.conversions().holds(v, union, [info.variant]));
         const payload = union ? this.convert(v, info.type, info.variant) : v;
         info.args.forEach((arg, i) => {
           const field = this.temp();
@@ -4213,7 +4224,7 @@ class Codegen {
         return;
       }
       case "object": {
-        if (union) pass(this.holds(v, union, info.shapes));
+        if (union) pass(this.conversions().holds(v, union, info.shapes));
         const holder = this.shapeOf(info);
         const held = union ? this.convert(v, info.type, holder) : v;
         for (const [key, sub, type] of info.fields) this.tested(sub, this.fieldOf(held, holder, key, type), no);
@@ -4324,7 +4335,7 @@ class Codegen {
   // A field of a value, read as `type`: from an object or instance, or a union's members.
   fieldOf(this: Mut<this>, v: string, holder: Type, key: string, type: Type): string {
     const held = this.typing.rec(holder as Exclude<Type, string>);
-    if (held.kind === "union") return this.unionField(v, holder as Exclude<Type, string> as UnionType, key, type);
+    if (held.kind === "union") return this.conversions().unionField(v, holder as Exclude<Type, string> as UnionType, key, type);
     if (held.kind === "recursive") {
       const loaded = this.temp();
       this.emit(`${loaded} = load ${this.llvm(held.of)}, ptr ${v}`);
@@ -4596,7 +4607,7 @@ class Codegen {
   // Whether every part of two values of a compound type is equal.
   compareParts(this: Mut<this>, a: string, b: string, type: Exclude<Type, string>): string {
     const r = this.typing.rec(type);
-    const both = (x: string, y: string, t: Type) => this.equals(x, t, y, t);
+    const both = (x: string, y: string, t: Type) => this.conversions().equals(x, t, y, t);
     const all = (results: string[]) => results.reduce((acc, r) => {
       if (acc === "true") return r;
       const next = this.temp();
@@ -4882,7 +4893,7 @@ class Codegen {
       this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
       const after = this.label();
       if (f.omit) {
-        const [present, write] = [this.holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null")), this.label()];
+        const [present, write] = [this.conversions().holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null")), this.label()];
         this.emit(`br i1 ${present}, label %${write}, label %${after}`);
         this.startBlock(write);
       }
@@ -5425,7 +5436,7 @@ class Codegen {
       this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
       const after = this.label();
       if (f.omit) {
-        const present = this.holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
+        const present = this.conversions().holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
         const write = this.label();
         this.emit(`br i1 ${present}, label %${write}, label %${after}`);
         this.startBlock(write);
@@ -5471,7 +5482,7 @@ class Codegen {
       this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
       const after = this.label();
       if (f.omit) {
-        const present = this.holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
+        const present = this.conversions().holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
         const write = this.label();
         this.emit(`br i1 ${present}, label %${write}, label %${after}`);
         this.startBlock(write);
@@ -5487,7 +5498,7 @@ class Codegen {
     const option = this.typing.lower(held) as UnionType;
     const dyn = this.typing.rec(option).members.find((m) => m !== "null") as DynType;
     const [yes, after] = [this.label(), this.label()];
-    this.emit(`br i1 ${this.holds(cause, option, [dyn])}, label %${yes}, label %${after}`);
+    this.emit(`br i1 ${this.conversions().holds(cause, option, [dyn])}, label %${yes}, label %${after}`);
     this.startBlock(yes);
     let inner: string;
     if (shell) inner = blank();
@@ -5550,7 +5561,7 @@ class Codegen {
       if (f.omit) {
         const x = this.temp();
         this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
-        const present = this.holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
+        const present = this.conversions().holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
         const write = this.label();
         this.emit(`br i1 ${present}, label %${write}, label %${after}`);
         this.startBlock(write);
@@ -7070,7 +7081,7 @@ class Codegen {
     this.emit(`${v} = load ${t}, ptr ${slot}`);
     if (searching) {
       const hit = this.label();
-      let same = this.equals(v, element, args[0]!, this.valueType(e.args[0]!));
+      let same = this.conversions().equals(v, element, args[0]!, this.valueType(e.args[0]!));
       // `includes` finds NaN, as JavaScript's SameValueZero does; `indexOf` never does.
       if (method === "includes" && isFloat(this.typing.lower(element)) && isFloat(this.typing.lower(this.valueType(e.args[0]!)))) {
         const [here, there, both, either] = [this.temp(), this.temp(), this.temp(), this.temp()];
@@ -7857,11 +7868,13 @@ class Codegen {
       if (this.printCalls.has(e) && this.formats(e.args)) {
         const line = this.formatted(e);
         // The statement releases the line, as it does a format call's value it drops.
-        write(printStream(e.callee), [[line, "string"]], this.builder, this.convert);
+        this.printer(printStream(e.callee)).write([[line, "string"]]);
         return undefined;
       }
       if (this.printCalls.has(e)) {
-        print(e.args, this.builder, (a) => this.operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => this.current.spelled?.get(a) ?? this.valueType(a), this.convert, printStream(e.callee));
+        // Every argument runs before anything prints, as in JavaScript.
+        const evaluated = e.args.map((a) => (a.kind === "string" ? "" : this.operand(a, e.args.slice(e.args.indexOf(a) + 1))));
+        this.printer(printStream(e.callee)).write(e.args.map((a, i) => (a.kind === "string" ? a.value : [evaluated[i]!, this.current.spelled?.get(a) ?? this.valueType(a)])));
         return undefined;
       }
       // `Shape.Circle(1.5)`: a variant built from its payload, each value handed to it. Used as a
@@ -7882,7 +7895,7 @@ class Codegen {
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return this.value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (this.maths.has(e)) return this.mathCall(e);
-      if (this.kindTests.has(e)) return this.test(e, ((e) => this.value(e)), ((e) => this.valueType(e)))!;
+      if (this.kindTests.has(e)) return this.conversions().test(e, ((e) => this.value(e)), ((e) => this.valueType(e)))!;
       if (this.syncFileCalls.has(e)) return this.syncFile(e, this.syncFileCalls.get(e)!);
       // `Promise.all` and `Promise.race`: their futures moved into the combined one's frame.
       if (this.combinedCalls.has(e)) {
@@ -8380,7 +8393,7 @@ class Codegen {
     if (union?.kind !== "union") return;
     // An `unknown` holding any number holds JavaScript's `number`, read as an f64.
     const gives = (m: Type) => (union.unknown ? this.typing.unknownGives(m, type) : this.typing.fits(m, type));
-    const [held, wrong, bad] = [this.holdsWhere(v, whole as UnionType, gives), this.temp(), this.temp()];
+    const [held, wrong, bad] = [this.conversions().holdsWhere(v, whole as UnionType, gives), this.temp(), this.temp()];
     this.emit(`${wrong} = xor i1 ${answer}, ${held}`);
     this.emit(`${bad} = select i1 ${answer}, i1 ${yes ? wrong : "false"}, i1 ${no ? wrong : "false"}`);
     const [fail, ok] = [this.label(), this.label()];
@@ -8539,7 +8552,7 @@ class Codegen {
       this.emit(`${length} = extractvalue ${ARRAY} ${whole()}, ${e.name === "capacity" ? 2 : 1}`);
       return this.convert(length, "usize", this.types.get(e)!);
     }
-    if (sharedRec?.kind === "union") return this.unionField(whole(), shared as UnionType, e.name, this.types.get(e)!);
+    if (sharedRec?.kind === "union") return this.conversions().unionField(whole(), shared as UnionType, e.name, this.types.get(e)!);
     if (this.typing.isTuple(shared) && e.name === "length") return this.convert(this.tupleLength(whole(), shared as ObjectType), "usize", this.types.get(e)!);
     const object = shared as ObjectType | ClassType;
     const result = this.temp();
@@ -8612,7 +8625,7 @@ class Codegen {
       const [x, next] = [this.temp(), this.temp()];
       this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${this.typing.fieldPath(t, String(i)).join(", ")}`);
       const union = this.typing.field(t, String(i))!.type as UnionType;
-      this.emit(`${next} = select i1 ${this.holds(x, union, this.typing.rec(union).members.filter((m) => m !== "null"))}, i64 ${i + 1}, i64 ${length}`);
+      this.emit(`${next} = select i1 ${this.conversions().holds(x, union, this.typing.rec(union).members.filter((m) => m !== "null"))}, i64 ${i + 1}, i64 ${length}`);
       length = next;
     }
     if (this.typing.rec(t).rest !== undefined) {
@@ -8689,7 +8702,7 @@ class Codegen {
     if (this.fresh(object)) this.pending.push({ v: raw, type: option });
     this.known.set(object, raw);
     const [some, none, end] = [this.label(), this.label(), this.label()];
-    this.emit(`br i1 ${this.holds(raw, option, ["null"])}, label %${none}, label %${some}`);
+    this.emit(`br i1 ${this.conversions().holds(raw, option, ["null"])}, label %${none}, label %${some}`);
     this.startBlock(some);
     const mark = this.pending.length;
     const got = compute();
@@ -8811,7 +8824,7 @@ class Codegen {
           return [`ptr ${part(whole, 0)}`, `i64 ${part(whole, 1)}`];
         }
         case "option": {
-          const none = this.holds(v, t as UnionType, ["null"]);
+          const none = this.conversions().holds(v, t as UnionType, ["null"]);
           const inner = this.convert(v, t, c.inner);
           if (c.of.kind === "string") given.push(() => this.dispose(v, t));
           if (c.of.kind === "array" && !c.of.lent) {
@@ -9790,7 +9803,7 @@ class Codegen {
         this.emit(`${moving} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 2`);
         this.emit(`${outcome} = call i32 @fsh_rt_channel_send(ptr ${handle}, ptr ${moving}, ptr %cx, ptr ${at})`);
         this.emit(`${closed} = icmp eq i32 ${outcome}, 3`);
-        this.panicIf(closed, "send on a closed channel", e);
+        this.lowering().panicIf(closed, "send on a closed channel", e);
       } else {
         const buffer = this.alloca(this.llvm(leaf.of));
         this.emit(`${outcome} = call i32 @fsh_rt_channel_receive(ptr ${handle}, ptr ${buffer}, ptr %cx, ptr ${at})`);
@@ -9964,7 +9977,7 @@ class Codegen {
     this.emit(`${error} = extractvalue ${type} ${result}, 2`);
     // Output printed before the error stays ahead of it, as a panic's does.
     this.emit("call i32 @fflush(ptr null)");
-    write(2, ["Error:", [error, this.main.throws]], this.builder, this.convert);
+    this.printer(2).write(["Error:", [error, this.main.throws]]);
     this.dispose(error, this.main.throws);
     this.emit("ret i32 1");
     return [`define i32 @main(i32 %argc, ptr %argv) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}"];
@@ -9993,7 +10006,7 @@ class Codegen {
       const error = this.temp();
       this.emit(`${error} = extractvalue ${type} ${result}, 2`);
       this.emit("call i32 @fflush(ptr null)");
-      write(2, ["Error:", [error, this.typing.rec(future).throws!]], this.builder, this.convert);
+      this.printer(2).write(["Error:", [error, this.typing.rec(future).throws!]]);
       this.dispose(error, this.typing.rec(future).throws!);
       this.emit("ret i32 1");
     } else this.emit("unreachable");
@@ -10298,7 +10311,7 @@ class Codegen {
           const kept = declared?.kind === "union" ? declared.members : [to];
           const union = from as UnionType;
           const rejected = this.typing.rec(union).members.filter((m) => !kept.includes(m) && !kept.includes(this.typing.unfold(m)));
-          this.panicIf(this.holds(v, union, rejected), `'as ${this.typing.show(to)}' failed: union held another member`, e);
+          this.lowering().panicIf(this.conversions().holds(v, union, rejected), `'as ${this.typing.show(to)}' failed: union held another member`, e);
           return this.convert(v, union, to);
         }
         if (from === "bigint") return this.bigTo(this.value(e.expr), to);
@@ -10398,21 +10411,21 @@ class Codegen {
           const declared = this.recOf(to);
           const kept = declared?.kind === "union" ? declared.members : [to];
           const union = from as UnionType;
-          this.panicIf(this.holds(v, union, this.typing.rec(union).members.filter((m) => !kept.includes(m))), "the implementation returned a value this overload signature doesn't declare", e);
+          this.lowering().panicIf(this.conversions().holds(v, union, this.typing.rec(union).members.filter((m) => !kept.includes(m))), "the implementation returned a value this overload signature doesn't declare", e);
           return this.convert(v, union, to);
         }
         if (redundantBang(e)) return this.value(e.expr);
         // An optional interface parameter a call left out is only ever empty.
         if (this.valueType(e.expr) === "null") {
           this.value(e.expr);
-          this.panicIf("true", (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
+          this.lowering().panicIf("true", (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
           return "undef";
         }
         // Through a reference, the Option it points to.
         const option = this.valueType(e.expr) as UnionType;
         const v = this.value(e.expr);
         // The checker's own unwraps, as of an iterator helper's count, say why they panic.
-        this.panicIf(this.holds(v, option, ["null"]), (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
+        this.lowering().panicIf(this.conversions().holds(v, option, ["null"]), (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
         return this.convert(v, option, this.types.get(e)!);
       }
       case "ident": {
@@ -10534,7 +10547,7 @@ class Codegen {
           this.emit(`${result} = fneg ${this.llvm(type)} ${operand}`);
           return result;
         }
-        if (e.op === "-") return this.arithmetic("-", "0", operand, e, type as Integer, "negate");
+        if (e.op === "-") return this.lowering().arithmetic("-", "0", operand, e, type as Integer, "negate");
         const result = this.temp();
         this.emit(`${result} = xor ${this.llvm(type)} ${operand}, ${e.op === "~" ? -1 : "true"}`);
         return result;
@@ -10632,7 +10645,7 @@ class Codegen {
           return same;
         }
         const first = (x: Expr) => (x === e.left ? this.operand(x, [e.right]) : this.value(x));
-        const tested = this.test(e, first, ((e) => this.valueType(e)));
+        const tested = this.conversions().test(e, first, ((e) => this.valueType(e)));
         if (tested) return tested;
         const condition = COMPARISON[e.op];
         const [a, b] = [first(e.left), this.value(e.right)];
@@ -10640,7 +10653,7 @@ class Codegen {
         // bases, as an instance's argument and a value of its bound may have, are never equal.
         const [lt, rt] = [this.typing.lower(this.valueType(e.left)), this.typing.lower(this.valueType(e.right))];
         if ((e.op === "===" || e.op === "!==") && (lt !== rt || this.recOf(lt)?.kind === "literal")) {
-          const same = this.mixedNumbers(a, lt, b, rt) ?? this.equals(a, lt, b, rt);
+          const same = this.mixedNumbers(a, lt, b, rt) ?? this.conversions().equals(a, lt, b, rt);
           if (e.op === "===") return same;
           const differ = this.temp();
           this.emit(`${differ} = xor i1 ${same}, true`);
@@ -10953,7 +10966,7 @@ class Codegen {
       this.take(e.left);
     }
     const [some, none, end] = [this.label(), this.label(), this.label()];
-    this.emit(`br i1 ${this.holds(v, option, ["null"])}, label %${none}, label %${some}`);
+    this.emit(`br i1 ${this.conversions().holds(v, option, ["null"])}, label %${none}, label %${some}`);
     this.startBlock(some);
     // The result is a value of its own, like a conditional's.
     const kept = rust ? this.convert(v, option, type) : this.copied(this.convert(v, option, type), type);
